@@ -247,12 +247,20 @@ def normalize_frontend_ingress_envelope(value: Any) -> dict[str, Any]:
     relay_raw = raw.get("relay_chain", [])
     if not isinstance(relay_raw, (list, tuple)) or len(relay_raw) > 8:
         raise ValueError("relay_chain must contain at most 8 hops")
-    relay_chain = [
-        _string(item, "relay_chain item", maximum=32).upper()
-        for item in relay_raw
-    ]
-    if any(not _INSTANCE.fullmatch(item) for item in relay_chain):
-        raise ValueError("relay_chain contains an invalid instance")
+    if network_authentication == "exchange_wss" and assurance == "exchange_verified":
+        # Exchange relay hops are public Agent addresses, not local HASHI
+        # instance names.  This validates presentation facts only; it does not
+        # confer the exchange_verified assurance on an untrusted caller.
+        from remote.internet_address import PublicAddress
+
+        relay_chain = [PublicAddress.parse(item).canonical for item in relay_raw]
+    else:
+        relay_chain = [
+            _string(item, "relay_chain item", maximum=32).upper()
+            for item in relay_raw
+        ]
+        if any(not _INSTANCE.fullmatch(item) for item in relay_chain):
+            raise ValueError("relay_chain contains an invalid instance")
     return {
         "type": FRONTEND_INGRESS_TYPE,
         "version": FRONTEND_INGRESS_VERSION,
@@ -692,9 +700,9 @@ def normalize_command_invocation(value: Any) -> dict[str, Any]:
 def normalize_relay_envelope(value: Any) -> dict[str, Any]:
     raw = _object(value, "relay envelope")
     _version(raw, RELAY_ENVELOPE_TYPE, RELAY_ENVELOPE_VERSION)
-    origin = _string(raw.get("origin_instance"), "origin_instance", maximum=32).upper()
+    payload_raw = _object(raw.get("payload_ref"), "payload_ref")
     target = _string(raw.get("target_instance"), "target_instance", maximum=32).upper()
-    if not _INSTANCE.fullmatch(origin) or not _INSTANCE.fullmatch(target):
+    if not _INSTANCE.fullmatch(target):
         raise ValueError("relay instance id is invalid")
     hops = raw.get("hop_limit")
     if not isinstance(hops, int) or isinstance(hops, bool) or not 1 <= hops <= 8:
@@ -702,10 +710,20 @@ def normalize_relay_envelope(value: Any) -> dict[str, Any]:
     chain_raw = raw.get("relay_chain")
     if not isinstance(chain_raw, (list, tuple)) or len(chain_raw) > hops:
         raise ValueError("relay chain exceeds hop limit")
-    chain = [_string(item, "relay hop", maximum=32).upper() for item in chain_raw]
-    if any(not _INSTANCE.fullmatch(item) for item in chain) or len(set(chain)) != len(chain):
+    if payload_raw.get("type") == "exchange-message":
+        # Exchange registered IDs belong to an opaque, case-sensitive
+        # namespace; they are not local instance names.
+        from remote.internet_address import exchange_identifier
+
+        origin = exchange_identifier(raw.get("origin_instance"), field="origin_instance")
+        chain = [exchange_identifier(item, field="relay hop") for item in chain_raw]
+    else:
+        origin = _string(raw.get("origin_instance"), "origin_instance", maximum=32).upper()
+        chain = [_string(item, "relay hop", maximum=32).upper() for item in chain_raw]
+        if not _INSTANCE.fullmatch(origin) or any(not _INSTANCE.fullmatch(item) for item in chain):
+            raise ValueError("relay instance id is invalid")
+    if len(set(chain)) != len(chain):
         raise ValueError("relay chain is invalid or contains a loop")
-    payload_raw = _object(raw.get("payload_ref"), "payload_ref")
     return {
         "type": RELAY_ENVELOPE_TYPE,
         "version": RELAY_ENVELOPE_VERSION,

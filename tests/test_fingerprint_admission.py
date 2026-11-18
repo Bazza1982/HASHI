@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -51,6 +50,19 @@ async def test_actual_admission_ignores_supplied_policy_and_replay_keeps_origina
     assert runtime.queue.empty()
     reopened = SessionStore(tmp_path / "sessions.sqlite3", instance_id="TEST")
     assert reopened.get_run(item.run_id)["fingerprint_policy"] == original["fingerprint_policy"]
+
+
+@pytest.mark.asyncio
+async def test_required_policy_is_frozen_with_admission_and_recovered_after_config_change(tmp_path):
+    runtime = runtime_at(tmp_path, True)
+    runtime.global_config.fingerprint = FingerprintPolicy(enabled=True, required=True)
+    request = await runtime.enqueue_request(7, "write", "api", "test", idempotency_key="required")
+    item = runtime.queue.get_nowait()
+    assert item.request_metadata["fingerprint_policy"]["required"] is True
+    runtime.global_config.fingerprint = FingerprintPolicy(enabled=True)
+    assert await runtime.enqueue_request(7, "write", "api", "test", idempotency_key="required") == request
+    reopened = SessionStore(tmp_path / "sessions.sqlite3", instance_id="TEST")
+    assert reopened.get_run(item.run_id)["fingerprint_policy"]["required"] is True
 
 
 def test_direct_session_admission_uses_trusted_config_not_metadata(tmp_path):

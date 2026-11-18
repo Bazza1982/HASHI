@@ -81,11 +81,18 @@ def test_fixed_cli_gateway_context_matches_registry_workzone_and_permissions(tmp
     try:
         context = load_gateway_context(Path(descriptor["context_path"]))
 
-        assert context.allowed_tools == ["file_read", "memory_search"]
+        # Result paging and catalog are read-only auxiliaries attached to an
+        # already granted tool set; they do not grant a new resource root.
+        assert set(context.allowed_tools) == {
+            "file_read", "memory_search", "tool_catalog", "tool_output_read"
+        }
         assert Path(context.workspace_dir) == registry.workspace_dir.resolve()
         assert Path(context.access_root) == registry.access_root.resolve()
         assert context.enforce_legacy_limits is False
-        assert set(descriptor["exposed_tools"]) == {"hashi_file_read", "memory_search"}
+        # Result paging is visible only when this invocation has a Run binding.
+        assert set(descriptor["exposed_tools"]) == {
+            "hashi_file_read", "memory_search", "tool_catalog"
+        }
     finally:
         descriptor.close()
 
@@ -412,6 +419,10 @@ async def test_fixed_manager_keeps_descriptor_request_scoped_across_await(tmp_pa
             await both_entered.wait()
             invocation = current_hashi_mcp_invocation(self)
             context = load_gateway_context(Path(invocation["context_path"]))
+            assert "tool_output_read" in invocation["exposed_tools"]
+            assert set(invocation["exposed_tools"]) == {
+                item["name"] for item in ToolGateway(context).tool_definitions()
+            }
             observed[request_id] = (context.audit["request_id"], Path(invocation["context_path"]))
             return request_id
 
@@ -439,3 +450,268 @@ async def test_fixed_manager_keeps_descriptor_request_scoped_across_await(tmp_pa
     assert observed["req-b"][0] == "req-b"
     assert observed["req-a"][1] != observed["req-b"][1]
     assert all(not path.exists() for _request, path in observed.values())
+
+
+@pytest.mark.asyncio
+async def test_fixed_manager_queues_in_order_and_cancelled_waiter_never_dispatches(
+    tmp_path, monkeypatch
+):
+    global_config = _global(tmp_path)
+    registry = _registry(tmp_path, global_config)
+    monkeypatch.setattr(hashi_mcp, "MAX_ACTIVE_INVOCATIONS_PER_ADAPTER", 1)
+    hold = asyncio.Event()
+    entered = asyncio.Event()
+    dispatched = []
+
+    class Backend:
+        _hashi_mcp_enabled = True
+
+        def __init__(self):
+            self.tool_registry = registry
+            self.config = SimpleNamespace(workspace_dir=tmp_path)
+            self.global_config = global_config
+
+        async def generate_response(self, _prompt, request_id, **_kwargs):
+            invocation = current_hashi_mcp_invocation(self)
+            assert invocation is not None
+            context = load_gateway_context(Path(invocation["context_path"]))
+            assert context.audit["request_id"] == request_id
+            dispatched.append(request_id)
+            if request_id == "req-a":
+                entered.set()
+                await hold.wait()
+            return request_id
+
+    backend = Backend()
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = SimpleNamespace(active_backend="codex-cli")
+    manager.current_backend = backend
+    manager.runtime = SimpleNamespace(
+        name="rika", session_store=None,
+        _request_meta_by_id={
+            name: {"request_id": name, "request_metadata": {}}
+            for name in ("req-a", "req-b", "req-c", "req-d")
+        },
+        current_request_meta=None,
+    )
+    tasks = []
+    try:
+        first = asyncio.create_task(manager.generate_response("A", "req-a"))
+        tasks.append(first)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        for request_id in ("req-b", "req-c", "req-d"):
+            tasks.append(asyncio.create_task(manager.generate_response(request_id, request_id)))
+            await asyncio.sleep(0)
+        assert not any(task.done() for task in tasks[1:])
+        tasks[2].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[2]
+        hold.set()
+        assert await asyncio.gather(tasks[0], tasks[1], tasks[3]) == [
+            "req-a", "req-b", "req-d"
+        ]
+        assert dispatched == ["req-a", "req-b", "req-d"]
+        assert backend._active_hashi_mcp_invocations == {}
+        assert not list((tmp_path / "backend_state").glob("*-hashi-mcp-*.json"))
+    finally:
+        hold.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_fixed_manager_reports_bounded_queue_pressure_and_resumes(tmp_path, monkeypatch):
+    global_config = _global(tmp_path)
+    registry = _registry(tmp_path, global_config)
+    monkeypatch.setenv("HASHI_MCP_MAX_ACTIVE_INVOCATIONS", "2")
+    monkeypatch.setenv("HASHI_MCP_MAX_QUEUED_INVOCATIONS", "1")
+    release = asyncio.Event()
+    both_entered = asyncio.Event()
+    dispatched = []
+
+    class Backend:
+        _hashi_mcp_enabled = True
+
+        def __init__(self):
+            self.tool_registry = registry
+            self.config = SimpleNamespace(workspace_dir=tmp_path)
+            self.global_config = global_config
+
+        async def generate_response(self, _prompt, request_id, **_kwargs):
+            dispatched.append(request_id)
+            if len(dispatched) == 2:
+                both_entered.set()
+            if request_id in {"req-a", "req-b"}:
+                await release.wait()
+            return request_id
+
+    backend = Backend()
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = SimpleNamespace(active_backend="codex-cli")
+    manager.current_backend = backend
+    manager.runtime = SimpleNamespace(
+        name="rika", session_store=None,
+        _request_meta_by_id={
+            name: {"request_id": name, "request_metadata": {}}
+            for name in ("req-a", "req-b", "req-c", "req-d")
+        },
+        current_request_meta=None,
+    )
+    tasks = []
+    try:
+        for name in ("req-a", "req-b"):
+            tasks.append(asyncio.create_task(manager.generate_response(name, name)))
+        await asyncio.wait_for(both_entered.wait(), 2)
+        queued = asyncio.create_task(manager.generate_response("C", "req-c"))
+        tasks.append(queued)
+        await asyncio.sleep(0)
+        pressure = await manager.generate_response("D", "req-d")
+        assert pressure.is_success is False
+        assert pressure.error_code == "MCP_CAPACITY_BUSY"
+        assert pressure.error_retryable is True
+        assert pressure.stream_metadata["mcp_capacity"] == {
+            "active": 2, "reserved": 0, "waiting": 1, "active_limit": 2, "queue_limit": 1
+        }
+        assert dispatched == ["req-a", "req-b"]
+        release.set()
+        assert await asyncio.gather(*tasks) == ["req-a", "req-b", "req-c"]
+        assert dispatched == ["req-a", "req-b", "req-c"]
+        assert backend._active_hashi_mcp_invocations == {}
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_fixed_manager_does_not_dispatch_waiter_after_backend_switch(tmp_path, monkeypatch):
+    global_config = _global(tmp_path)
+    registry = _registry(tmp_path, global_config)
+    monkeypatch.setattr(hashi_mcp, "MAX_ACTIVE_INVOCATIONS_PER_ADAPTER", 1)
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    dispatched = []
+
+    class Backend:
+        _hashi_mcp_enabled = True
+
+        def __init__(self):
+            self.tool_registry = registry
+            self.config = SimpleNamespace(workspace_dir=tmp_path)
+            self.global_config = global_config
+
+        async def generate_response(self, _prompt, request_id, **_kwargs):
+            dispatched.append(request_id)
+            entered.set()
+            await release.wait()
+            return request_id
+
+    backend = Backend()
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = SimpleNamespace(active_backend="codex-cli")
+    manager.current_backend = backend
+    manager.runtime = SimpleNamespace(
+        name="rika", session_store=None,
+        _request_meta_by_id={
+            name: {"request_id": name, "request_metadata": {}}
+            for name in ("req-a", "req-b")
+        },
+        current_request_meta=None,
+    )
+    first = asyncio.create_task(manager.generate_response("A", "req-a"))
+    queued = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        queued = asyncio.create_task(manager.generate_response("B", "req-b"))
+        await asyncio.sleep(0)
+        manager.current_backend = Backend()
+        release.set()
+        assert await first == "req-a"
+        result = await queued
+        assert result.is_success is False
+        assert result.error_code == "MCP_BACKEND_CHANGED"
+        assert result.error_retryable is True
+        assert dispatched == ["req-a"]
+        assert backend._active_hashi_mcp_invocations == {}
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (first, queued) if task), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_seventeenth_fixed_cli_waits_and_then_dispatches_once(tmp_path, monkeypatch):
+    monkeypatch.delenv("HASHI_MCP_MAX_ACTIVE_INVOCATIONS", raising=False)
+    monkeypatch.delenv("HASHI_MCP_MAX_QUEUED_INVOCATIONS", raising=False)
+    global_config = _global(tmp_path)
+    registry = _registry(tmp_path, global_config)
+    release = asyncio.Event()
+    saturated = asyncio.Event()
+    seen = []
+
+    class Backend:
+        _hashi_mcp_enabled = True
+
+        def __init__(self):
+            self.tool_registry = registry
+            self.config = SimpleNamespace(workspace_dir=tmp_path)
+            self.global_config = global_config
+
+        async def generate_response(self, _prompt, request_id, **_kwargs):
+            invocation = current_hashi_mcp_invocation(self)
+            assert invocation is not None
+            assert load_gateway_context(Path(invocation["context_path"])).audit["request_id"] == request_id
+            seen.append(request_id)
+            if len(seen) == 16:
+                saturated.set()
+            await release.wait()
+            return request_id
+
+    backend = Backend()
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = SimpleNamespace(active_backend="codex-cli")
+    manager.current_backend = backend
+    manager.runtime = SimpleNamespace(
+        name="rika", session_store=None,
+        _request_meta_by_id={
+            f"req-{index}": {"request_id": f"req-{index}", "request_metadata": {}}
+            for index in range(17)
+        },
+        current_request_meta=None,
+    )
+    tasks = []
+    try:
+        tasks = [
+            asyncio.create_task(manager.generate_response(str(index), f"req-{index}"))
+            for index in range(16)
+        ]
+        await asyncio.wait_for(saturated.wait(), 5)
+        seventeenth = asyncio.create_task(manager.generate_response("16", "req-16"))
+        tasks.append(seventeenth)
+        await asyncio.sleep(0)
+        assert not seventeenth.done()
+        assert len(seen) == 16
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        assert results == [f"req-{index}" for index in range(17)]
+        assert seen.count("req-16") == 1
+        assert backend._active_hashi_mcp_invocations == {}
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_queue_slot_grant_returns_capacity(monkeypatch):
+    monkeypatch.setattr(hashi_mcp, "MAX_ACTIVE_INVOCATIONS_PER_ADAPTER", 1)
+    owner = SimpleNamespace()
+    first = await hashi_mcp.reserve_hashi_mcp_capacity(owner)
+    waiter = asyncio.create_task(hashi_mcp.reserve_hashi_mcp_capacity(owner))
+    await asyncio.sleep(0)
+    assert first.snapshot()["waiting"] == 1
+    first.release_reservation()
+    # Cancel after the future received its slot but before its coroutine runs.
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert first.snapshot()["reserved"] == 0
+    assert first.snapshot()["waiting"] == 0
+    next_slot = await asyncio.wait_for(hashi_mcp.reserve_hashi_mcp_capacity(owner), 1)
+    next_slot.release_reservation()

@@ -10,8 +10,10 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -49,6 +51,7 @@ _IGNORED_COPY_DIRS = frozenset(
     }
 )
 _MAX_OUTPUT_CHARS = 80_000
+# Historical compatibility constant; it is not a snapshot or search ceiling.
 _MAX_ARTIFACT_HASH_BYTES = 512 * 1024 * 1024
 _MAX_PYTHON_SEARCH_FILE_BYTES = 32 * 1024 * 1024
 _HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
@@ -81,27 +84,76 @@ def _workspace_path(workspace_dir: Path, raw_path: Any = ".") -> Path:
     return candidate
 
 
-def _run_read_only(
+async def _run_read_only(
     argv: Sequence[str], *, cwd: Path
 ) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        [str(item) for item in argv],
-        cwd=str(cwd),
-        capture_output=True,
-        check=False,
+    """Run one inspection child with cancellable process-tree cleanup."""
+    from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
+
+    arguments = [str(item) for item in argv]
+    proc = await asyncio.create_subprocess_exec(
+        *arguments, cwd=str(cwd), stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **process_group_kwargs(),
     )
+    group = _bash_process_group_id(proc)
+    task = asyncio.create_task(proc.communicate())
+    try:
+        stdout, stderr = await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+        cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, task, pgid=group))
+        setattr(exc, "hashi_tool_details", {
+            "foreground_cleanup": cleanup, "coverage_complete": False,
+        })
+        raise
+    return subprocess.CompletedProcess(arguments, proc.returncode, stdout, stderr)
 
 
-def _sha256_file(path: Path) -> str:
+class _WorkspaceInspectionCancelled(Exception):
+    pass
+
+
+def _check_inspection_cancelled(cancelled: threading.Event | None) -> None:
+    if cancelled is not None and cancelled.is_set():
+        raise _WorkspaceInspectionCancelled()
+
+
+def _sha256_file(path: Path, *, cancelled: threading.Event | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        while True:
+            _check_inspection_cancelled(cancelled)
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
-    top = _run_read_only(["git", "rev-parse", "--show-toplevel"], cwd=root)
+def _hash_git_untracked(digest, names: bytes, git_root: Path, root: Path, *, cancelled=None) -> int:
+    count = 0
+    for raw_name in names.split(b"\0"):
+        _check_inspection_cancelled(cancelled)
+        if not raw_name:
+            continue
+        count += 1
+        relative = Path(raw_name.decode("utf-8", errors="surrogateescape"))
+        path = (git_root / relative).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        digest.update(b"untracked\0" + raw_name + b"\0")
+        if path.is_file():
+            digest.update(_sha256_file(path, cancelled=cancelled).encode("ascii"))
+    return count
+
+
+async def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
+    try:
+        top = await _run_read_only(["git", "rev-parse", "--show-toplevel"], cwd=root)
+    except FileNotFoundError:
+        return None
     if top.returncode != 0:
         return None
     git_root = Path(top.stdout.decode("utf-8", errors="replace").strip()).resolve()
@@ -112,32 +164,28 @@ def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
 
     relative_root_text = relative_root.as_posix()
     if relative_root_text != ".":
-        ignored = _run_read_only(
+        ignored = await _run_read_only(
             ["git", "check-ignore", "--quiet", "--", relative_root_text],
             cwd=git_root,
         )
-        if ignored.returncode == 0:
-            # Git deliberately omits an ignored workspace from status, diff,
-            # and untracked-file output. Let the bounded filesystem snapshot
-            # hash the review root instead so content drift remains visible.
-            return None
         if ignored.returncode != 1:
+            # An ignored workspace cannot be represented by Git status/diff.
             return None
 
     pathspec = ["--", relative_root_text] if relative_root_text != "." else []
-    head = _run_read_only(["git", "rev-parse", "HEAD"], cwd=git_root)
-    status = _run_read_only(
+    head = await _run_read_only(["git", "rev-parse", "HEAD"], cwd=git_root)
+    status = await _run_read_only(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", *pathspec],
         cwd=git_root,
     )
-    unstaged = _run_read_only(
+    unstaged = await _run_read_only(
         ["git", "diff", "--no-ext-diff", "--binary", *pathspec], cwd=git_root
     )
-    staged = _run_read_only(
+    staged = await _run_read_only(
         ["git", "diff", "--cached", "--no-ext-diff", "--binary", *pathspec],
         cwd=git_root,
     )
-    untracked = _run_read_only(
+    untracked = await _run_read_only(
         ["git", "ls-files", "--others", "--exclude-standard", "-z", *pathspec],
         cwd=git_root,
     )
@@ -153,63 +201,113 @@ def _git_snapshot(root: Path) -> tuple[str, dict[str, Any]] | None:
         (b"staged", staged.stdout),
     ):
         digest.update(label + b"\0" + payload + b"\0")
-    untracked_count = 0
-    for raw_name in untracked.stdout.split(b"\0"):
-        if not raw_name:
-            continue
-        untracked_count += 1
-        relative = Path(raw_name.decode("utf-8", errors="surrogateescape"))
-        path = (git_root / relative).resolve()
-        try:
-            path.relative_to(root)
-        except ValueError:
-            continue
-        digest.update(b"untracked\0" + raw_name + b"\0")
-        if path.is_file():
-            digest.update(_sha256_file(path).encode("ascii"))
+    untracked_count = await _run_inspection_thread(
+        _hash_git_untracked, digest, untracked.stdout, git_root, root)
     return digest.hexdigest(), {
         "vcs": "git",
         "head": head.stdout.decode("utf-8", errors="replace").strip(),
         "dirty": bool(status.stdout),
         "untracked_files": untracked_count,
+        "coverage_complete": False,
+        "coverage_scope": "git_tracked_and_nonignored",
+        "coverage_limitations": ["git_ignored_paths", "external_symlink_targets"],
     }
 
 
-def _filesystem_snapshot(root: Path) -> tuple[str, dict[str, Any]]:
+def _filesystem_snapshot(
+    root: Path, *, cancelled: threading.Event | None = None, collect_all: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    if not root.is_dir():
+        raise ValueError("workspace snapshot root is not a directory")
     digest = hashlib.sha256()
     file_count = 0
     byte_count = 0
-    for current, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = sorted(name for name in dirs if name not in _IGNORED_COPY_DIRS)
+    excluded_count = 0
+    excluded_paths: list[str] = []
+
+    def excluded(path):
+        nonlocal excluded_count
+        excluded_count += 1
+        if collect_all or len(excluded_paths) < 20:
+            excluded_paths.append(path.relative_to(root).as_posix())
+
+    def walk_error(error):
+        raise error
+
+    for current, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+        _check_inspection_cancelled(cancelled)
         current_path = Path(current)
+        descend = []
+        for name in sorted(dirs):
+            path = current_path / name
+            if name in _IGNORED_COPY_DIRS:
+                excluded(path)
+            elif path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+                relative = path.relative_to(root).as_posix()
+                digest.update(os.fsencode(f"link\0{relative}\0{os.readlink(path)}\0"))
+            else:
+                descend.append(name)
+        dirs[:] = descend
         for name in sorted(files):
+            _check_inspection_cancelled(cancelled)
             path = current_path / name
             relative = path.relative_to(root).as_posix()
-            if path.is_symlink():
-                digest.update(f"link\0{relative}\0{os.readlink(path)}\0".encode())
+            entry = path.lstat()
+            if stat.S_ISLNK(entry.st_mode):
+                digest.update(os.fsencode(f"link\0{relative}\0{os.readlink(path)}\0"))
                 continue
-            if not path.is_file():
+            if not stat.S_ISREG(entry.st_mode):
+                excluded(path)
                 continue
-            stat = path.stat()
+            before = path.stat()
+            digest.update(os.fsencode(f"file\0{relative}\0{before.st_size}\0"))
+            digest.update(_sha256_file(path, cancelled=cancelled).encode("ascii"))
+            after = path.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+            ):
+                raise ValueError(f"file changed during snapshot: {relative}")
             file_count += 1
-            byte_count += stat.st_size
-            if file_count > 50_000 or byte_count > _MAX_ARTIFACT_HASH_BYTES:
-                raise ValueError("workspace is too large for a bounded review snapshot")
-            digest.update(f"file\0{relative}\0{stat.st_size}\0".encode())
-            digest.update(_sha256_file(path).encode("ascii"))
+            byte_count += before.st_size
     return digest.hexdigest(), {
         "vcs": "filesystem",
         "dirty": None,
         "file_count": file_count,
         "bytes_hashed": byte_count,
+        "coverage_complete": excluded_count == 0,
+        "coverage_scope": "filesystem_without_reported_exclusions",
+        "excluded_count": excluded_count,
+        "excluded_paths": excluded_paths,
+        "excluded_paths_truncated": excluded_count > len(excluded_paths),
+        "symlink_targets_followed": False,
     }
 
 
-def _workspace_snapshot(root: Path) -> tuple[str, dict[str, Any]]:
-    git_value = _git_snapshot(root)
-    if git_value is not None:
-        return git_value
-    return _filesystem_snapshot(root)
+async def _run_inspection_thread(function, *args, **kwargs):
+    cancelled = threading.Event()
+    task = asyncio.create_task(asyncio.to_thread(
+        function, *args, cancelled=cancelled, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+        cancelled.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except (Exception, asyncio.CancelledError):
+            pass
+        setattr(exc, "hashi_tool_details", {
+            "foreground_cleanup": {"status": "stopped" if task.done() else "unverified"},
+            "coverage_complete": False,
+        })
+        raise
+
+
+async def _run_workspace_snapshot(root: Path, *, filesystem_only: bool = False, collect_all: bool = False):
+    if not filesystem_only:
+        git_value = await _git_snapshot(root)
+        if git_value is not None:
+            return git_value
+    return await _run_inspection_thread(_filesystem_snapshot, root, collect_all=collect_all)
 
 
 def _bounded_text(raw: bytes) -> str:
@@ -219,66 +317,262 @@ def _bounded_text(raw: bytes) -> str:
     return text
 
 
+class _WorkspaceSearchCancelled(Exception):
+    pass
+
+
 def _python_workspace_search(
     target: Path,
     *,
     query: str,
     regex: bool,
-) -> tuple[str, int]:
-    """Portable bounded search used when rg/grep are unavailable."""
+    cancelled: threading.Event | None = None,
+    collect_all: bool = False,
+) -> tuple[str, int, dict[str, Any]]:
+    """Portable search with streaming for large literal files and truthful gaps."""
+
+    from tools.literal_search import scan_literal
 
     matcher = re.compile(query).search if regex else lambda line: query in line
     if target.is_file():
-        paths = [target]
+        paths = iter((target,))
         include_path = False
         root = target.parent
     elif target.is_dir():
-        paths = []
         root = target
-        for current, dirs, files in os.walk(target, followlinks=False):
-            dirs[:] = sorted(name for name in dirs if name not in _IGNORED_COPY_DIRS)
-            current_path = Path(current)
-            paths.extend(current_path / name for name in sorted(files))
         include_path = True
+        def iter_paths():
+            for current, dirs, files in os.walk(target, followlinks=False, onerror=walk_error):
+                current_path = Path(current)
+                retained = []
+                for name in sorted(dirs):
+                    path = current_path / name
+                    if name in _IGNORED_COPY_DIRS:
+                        omit(path, "directory_excluded")
+                    elif path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+                        omit(path, "symlink_not_followed")
+                    else:
+                        retained.append(name)
+                dirs[:] = retained
+                for name in sorted(files):
+                    yield current_path / name
+        paths = iter_paths()
     else:
-        return "", 0
+        return "", 0, {"coverage_complete": False, "omitted_count": 1,
+                       "omitted": [{"path": str(target), "reason": "path_unavailable"}],
+                       "omitted_paths_truncated": False, "large_files_scanned": 0,
+                       "excerpt_count": 0, "output_limited": False}
 
     rows: list[str] = []
     output_chars = 0
-    searched_bytes = 0
+    omitted = []
+    omitted_count = 0
+    large_file_count = 0
+    excerpt_count = 0
+    output_limited = False
+
+    def check_cancel(*_args):
+        if cancelled is not None and cancelled.is_set():
+            raise _WorkspaceSearchCancelled()
+
+    def omit(path, reason):
+        nonlocal omitted_count
+        omitted_count += 1
+        if collect_all or len(omitted) < 20:
+            omitted.append({"path": str(path), "reason": reason})
+
+    def walk_error(exc):
+        omit(getattr(exc, "filename", target), type(exc).__name__)
+
+    def add(row):
+        nonlocal output_chars, output_limited
+        if output_chars + len(row) + 1 > _MAX_OUTPUT_CHARS:
+            output_limited = True
+            return False
+        rows.append(row)
+        output_chars += len(row) + 1
+        return True
+
     for path in paths:
-        if path.is_symlink() or not path.is_file():
-            continue
+        check_cancel()
         try:
-            file_size = path.stat().st_size
-            if file_size > _MAX_PYTHON_SEARCH_FILE_BYTES:
+            entry = path.lstat()
+            if stat.S_ISLNK(entry.st_mode):
+                omit(path, "symlink_not_followed")
                 continue
-            searched_bytes += file_size
-            if searched_bytes > _MAX_ARTIFACT_HASH_BYTES:
-                break
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        if b"\0" in raw[:8192]:
-            continue
-        text = raw.decode("utf-8", errors="replace")
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if not matcher(line):
+            if not stat.S_ISREG(entry.st_mode):
+                omit(path, "non_regular_file")
+                continue
+            before = path.stat()
+            with path.open("rb") as probe:
+                binary = b"\0" in probe.read(8192)
+            if binary:
                 continue
             prefix = f"{path.relative_to(root).as_posix()}:" if include_path else ""
-            row = f"{prefix}{line_number}:{line}"
-            if output_chars + len(row) + 1 > _MAX_OUTPUT_CHARS:
-                rows.append("...[truncated]")
-                return "\n".join(rows) + "\n", len(rows) - 1
-            rows.append(row)
-            output_chars += len(row) + 1
-    return ("\n".join(rows) + "\n" if rows else ""), len(rows)
+            if before.st_size > _MAX_PYTHON_SEARCH_FILE_BYTES:
+                if regex:
+                    omit(path, "large_regex_requires_file_search")
+                    continue
+                large_file_count += 1
+                # The old line-oriented search never matched a literal newline.
+                if "\n" in query or "\r" in query:
+                    continue
+                state = None
+                previous_line = None
+                encoding_warned = False
+                while True:
+                    check_cancel()
+                    page = scan_literal(
+                        path, terms=(query,), case_sensitive=True, max_results=100,
+                        context_chars=160, state=state, character_budget=8 * 1024 * 1024,
+                        progress=check_cancel,
+                    )
+                    for match in page["matches"]:
+                        if match["line"] == previous_line:
+                            continue
+                        previous_line = match["line"]
+                        excerpt = match["excerpt"][:400].replace("\r", "\\r").replace("\n", "\\n")
+                        if not add(f"{prefix}{match['line']}:[excerpt] {excerpt}"):
+                            break
+                        excerpt_count += 1
+                    if page["encoding_warning"] and not encoding_warned:
+                        omit(path, "invalid_utf8_replaced")
+                        encoding_warned = True
+                    state = page["continuation"]
+                    if output_limited or state is None:
+                        break
+            else:
+                raw = path.read_bytes()
+                try:
+                    text = raw.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    text = raw.decode("utf-8", errors="replace")
+                    omit(path, "invalid_utf8_replaced")
+                for line_number, line in enumerate(text.splitlines(), start=1):
+                    if line_number % 1024 == 0:
+                        check_cancel()
+                    if matcher(line) and not add(f"{prefix}{line_number}:{line}"):
+                        break
+            after = path.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+            ):
+                omit(path, "file_changed_during_search")
+        except OSError as exc:
+            omit(path, type(exc).__name__)
+        if output_limited:
+            break
+
+    coverage = {
+        "coverage_complete": not omitted_count and not output_limited,
+        "omitted_count": omitted_count,
+        "omitted": omitted,
+        "omitted_paths_truncated": omitted_count > len(omitted),
+        "large_files_scanned": large_file_count,
+        "excerpt_count": excerpt_count,
+        "output_limited": output_limited,
+    }
+    if output_limited:
+        rows.append("...[truncated; use file_search for paged results]")
+    return ("\n".join(rows) + "\n" if rows else ""), len(rows) - int(output_limited), coverage
+
+
+async def _run_python_workspace_regex(target: Path, *, query: str, collect_all: bool):
+    from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-B", str(Path(__file__).with_name("workspace_search_process.py")),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, **process_group_kwargs(),
+    )
+    group = _bash_process_group_id(proc)
+    request = json.dumps({"path": str(target), "query": query, "collect_all": collect_all},
+                         ensure_ascii=True).encode("utf-8")
+    task = asyncio.create_task(proc.communicate(request))
+    try:
+        stdout, stderr = await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+        cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, task, pgid=group))
+        setattr(exc, "hashi_tool_details", {
+            "foreground_cleanup": cleanup, "coverage_complete": False,
+        })
+        raise
+    if proc.returncode != 0:
+        raise ValueError("workspace regex worker failed: " + stderr.decode("utf-8", "replace")[-1000:])
+    try:
+        response = json.loads(stdout)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("workspace regex worker returned invalid data") from exc
+    if not isinstance(response, dict):
+        raise ValueError("workspace regex worker returned invalid data")
+    if response.get("error") == "invalid_regex":
+        raise re.error(str(response.get("message") or "invalid regex"))
+    if response.get("error"):
+        raise ValueError("workspace regex worker failed: " + str(response.get("message") or "unknown error"))
+    coverage = response.get("coverage")
+    if (not isinstance(response.get("output"), str) or type(response.get("matches")) is not int
+            or response["matches"] < 0 or not isinstance(coverage, dict)
+            or type(coverage.get("coverage_complete")) is not bool
+            or not isinstance(coverage.get("omitted"), list)
+            or any(type(coverage.get(key)) is not int or coverage[key] < 0
+                   for key in ("omitted_count", "large_files_scanned", "excerpt_count"))
+            or type(coverage.get("output_limited")) is not bool):
+        raise ValueError("workspace regex worker returned invalid data")
+    return response["output"], response["matches"], coverage
+
+
+async def _run_python_workspace_search(
+    target: Path, *, query: str, regex: bool, collect_all: bool = False,
+):
+    if regex:
+        return await _run_python_workspace_regex(target, query=query, collect_all=collect_all)
+    cancelled = threading.Event()
+    task = asyncio.create_task(asyncio.to_thread(
+        _python_workspace_search, target, query=query, regex=regex, cancelled=cancelled,
+        collect_all=collect_all,
+    ))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+        cancelled.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except (Exception, asyncio.CancelledError):
+            pass
+        setattr(exc, "hashi_tool_details", {
+            "foreground_cleanup": {"status": "stopped" if task.done() else "unverified"},
+            "coverage_complete": False,
+        })
+        raise
+
+
+def _page_coverage_details(
+    metadata: dict[str, Any], *, key: str, truncated_key: str, retain_coverage,
+) -> None:
+    details = metadata.get(key)
+    if not isinstance(details, list) or len(details) <= 20:
+        return
+    encoded = json.dumps({"version": 1, key: details}, ensure_ascii=True, separators=(",", ":"))
+    try:
+        reference = retain_coverage(encoded) if retain_coverage is not None else None
+    except Exception:
+        reference = None
+    metadata[key] = details[:20]
+    metadata[truncated_key] = True
+    if reference:
+        metadata[key + "_reference"] = {
+            "reference": reference, "read_tool": "tool_output_read",
+            "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(), "format": "json",
+        }
+    else:
+        metadata[key + "_reference_unavailable"] = True
 
 
 async def execute_workspace_inspect(
     arguments: Mapping[str, Any],
     *,
     workspace_dir: Path,
+    retain_coverage=None,
 ) -> BuiltinExecutionResult:
     """Perform one fixed read-only inspection operation inside the workzone."""
 
@@ -286,13 +580,17 @@ async def execute_workspace_inspect(
     root = Path(workspace_dir).resolve()
     if operation == "snapshot":
         try:
-            digest, metadata = await asyncio.to_thread(_workspace_snapshot, root)
+            digest, metadata = await _run_workspace_snapshot(
+                root, collect_all=retain_coverage is not None)
         except Exception as exc:
             return _result(
                 f"Error: workspace snapshot unavailable: {exc}",
                 operation=operation,
                 unavailable=True,
             )
+        _page_coverage_details(
+            metadata, key="excluded_paths", truncated_key="excluded_paths_truncated",
+            retain_coverage=retain_coverage)
         payload = {"snapshot_sha256": digest, **metadata}
         return _result(
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -307,8 +605,7 @@ async def execute_workspace_inspect(
         return _result(f"Error: {exc}", operation=operation)
 
     if operation == "status":
-        completed = await asyncio.to_thread(
-            _run_read_only,
+        completed = await _run_read_only(
             ["git", "status", "--short", "--branch", "--", str(target)],
             cwd=root,
         )
@@ -333,7 +630,7 @@ async def execute_workspace_inspect(
         if cached:
             argv.append("--cached")
         argv.extend(["--", str(target)])
-        completed = await asyncio.to_thread(_run_read_only, argv, cwd=root)
+        completed = await _run_read_only(argv, cwd=root)
         if completed.returncode != 0:
             return _result(
                 "Error: workspace diff is unavailable: "
@@ -372,11 +669,8 @@ async def execute_workspace_inspect(
             executable = shutil.which("grep")
             if not executable:
                 try:
-                    output, matches = await asyncio.to_thread(
-                        _python_workspace_search,
-                        target,
-                        query=query,
-                        regex=regex,
+                    output, matches, coverage = await _run_python_workspace_search(
+                        target, query=query, regex=regex, collect_all=retain_coverage is not None,
                     )
                 except re.error as exc:
                     return _result(
@@ -385,12 +679,37 @@ async def execute_workspace_inspect(
                         exit_code=2,
                         search_backend="python",
                     )
+                except (OSError, ValueError) as exc:
+                    return _result(
+                        f"Error: workspace search failed: {exc}",
+                        operation=operation,
+                        exit_code=2,
+                        search_backend="python",
+                    )
+                _page_coverage_details(
+                    coverage, key="omitted", truncated_key="omitted_paths_truncated",
+                    retain_coverage=retain_coverage)
+                extra = {}
+                if not coverage["coverage_complete"] or coverage["large_files_scanned"]:
+                    extra = {**coverage, "complete_content": coverage["coverage_complete"] and
+                             not coverage["excerpt_count"]}
+                if not coverage["coverage_complete"]:
+                    extra["recovery"] = "Use file_search for paged results or large regex files"
+                empty = ("No matches." if coverage["coverage_complete"] else
+                         "No matches in inspected files; search coverage is incomplete.")
+                rendered = output or empty
+                if not coverage["coverage_complete"] and output:
+                    rendered += "[search incomplete; use file_search for recovery]\n"
+                if coverage.get("omitted_reference"):
+                    reference = coverage["omitted_reference"]["reference"]
+                    rendered += f"\n[Complete omitted paths: tool_output_read reference={reference} offset=0]"
                 return _result(
-                    output or "No matches.",
+                    rendered,
                     operation=operation,
-                    exit_code=0 if matches else 1,
+                    exit_code=(2 if not coverage["coverage_complete"] else 0 if matches else 1),
                     matches=matches,
                     search_backend="python",
+                    **extra,
                 )
             argv = [
                 executable,
@@ -400,7 +719,7 @@ async def execute_workspace_inspect(
                 "--extended-regexp" if regex else "--fixed-strings",
             ]
         argv.extend(["--", query, str(target)])
-        completed = await asyncio.to_thread(_run_read_only, argv, cwd=root)
+        completed = await _run_read_only(argv, cwd=root)
         if completed.returncode not in {0, 1}:
             return _result(
                 "Error: workspace search failed: " + _bounded_text(completed.stderr),
@@ -420,7 +739,7 @@ async def execute_workspace_inspect(
         if not target.exists():
             return _result(f"Error: path not found: {target}", operation=operation)
         if target.is_file():
-            digest = await asyncio.to_thread(_sha256_file, target)
+            digest = await _run_inspection_thread(_sha256_file, target)
             stat = target.stat()
             payload = {
                 "path": str(target.relative_to(root)),
@@ -429,7 +748,11 @@ async def execute_workspace_inspect(
                 "sha256": digest,
             }
         elif target.is_dir():
-            digest, metadata = await asyncio.to_thread(_filesystem_snapshot, target)
+            digest, metadata = await _run_workspace_snapshot(
+                target, filesystem_only=True, collect_all=retain_coverage is not None)
+            _page_coverage_details(
+                metadata, key="excluded_paths", truncated_key="excluded_paths_truncated",
+                retain_coverage=retain_coverage)
             payload = {
                 "path": str(target.relative_to(root)),
                 "kind": "directory",

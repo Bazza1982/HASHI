@@ -396,3 +396,19 @@ def test_v3_rejects_malformed_or_out_of_scope_provider_policy(policies, message)
 
     with pytest.raises(ValueError, match=message):
         normalise_v3_config(raw)
+
+
+def test_v3_model_switch_keeps_capacity_estimate_advisory(tmp_path):
+    manager = _manager(tmp_path)
+    grant = next(row for row in manager.config.allowed_backends if row.get("engine") == "deepseek-api")
+    grant.update(context_window_tokens=8192, response_headroom_tokens=1024)
+    manager.runtime = SimpleNamespace(backend_manager=manager, global_config=manager.global_config,
+                                      workspace_dir=manager.config.workspace_dir, _last_full_prompt_tokens=999_000)
+    target = HERv3ModelTarget("deepseek-api", "deepseek-flash")
+    manager.apply_her_v3_target(target)
+    assert manager.get_her_v3_target() == target
+    persisted = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    preflight = persisted["her_v3_last_model_preflight"]
+    assert preflight["status"] == "estimated_over_budget"
+    assert preflight["estimated_over_budget_targets"][0]["count_source"] == "hashi_estimate"
+    assert preflight["insufficient_targets"] == []

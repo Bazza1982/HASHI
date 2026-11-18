@@ -19,6 +19,8 @@ from orchestrator.pathing import resolve_bridge_home
 class AttachmentSizeExceeded(ValueError):
     """Trusted byte-budget facts for ingress and safe failure presentation."""
 
+    error_code = "attachment_size_exceeded"
+
     def __init__(
         self, actual_bytes: int | None, maximum_bytes: int, *, scope: str = "file"
     ):
@@ -83,15 +85,15 @@ def load_session_attachment_limits(
     return SessionAttachmentLimits(
         count=read(
             "max_attachments_per_message",
-            "HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE", 16, 1024,
+            "HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE", 16, 2**63 - 1,
         ),
         attachment_bytes=read(
             "max_attachment_bytes",
-            "HASHI_SESSION_MAX_ATTACHMENT_BYTES", 64 * 1024 * 1024, 1024**3,
+            "HASHI_SESSION_MAX_ATTACHMENT_BYTES", 64 * 1024 * 1024, 2**63 - 1,
         ),
         total_bytes=read(
             "max_total_attachment_bytes_per_message",
-            "HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES", 64 * 1024 * 1024, 1024**3,
+            "HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES", 64 * 1024 * 1024, 2**63 - 1,
         ),
     )
 

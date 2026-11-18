@@ -424,7 +424,7 @@ async def test_verification_run_can_write_but_never_receives_read_effect_receipt
 
 
 @pytest.mark.asyncio
-async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidance(
+async def test_large_record_grep_dispatches_with_nonblocking_guidance(
     tmp_path, monkeypatch
 ) -> None:
     log_path = tmp_path / "events.jsonl"
@@ -446,12 +446,12 @@ async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidanc
     )
     dispatched = False
 
-    async def unexpected_dispatch(_tool_name, _arguments, **_kwargs):
+    async def search_dispatch(_tool_name, _arguments, **_kwargs):
         nonlocal dispatched
         dispatched = True
-        return "unsafe command ran"
+        return BuiltinExecutionResult(output="token", details={"exit_code": 0})
 
-    monkeypatch.setattr(registry, "_dispatch", unexpected_dispatch)
+    monkeypatch.setattr(registry, "_dispatch", search_dispatch)
     result = await registry.execute(
         "shell",
         {
@@ -465,14 +465,34 @@ async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidanc
     )
 
     payload = _payload(result)
-    assert dispatched is False
-    assert result.is_error is True
-    assert payload["status"] == "needs_replan"
-    assert payload["effect"] == "no_change"
-    assert payload["error"]["code"] == "unsafe_text_search"
-    assert payload["data"]["suggested_tool"] == "log_query"
-    assert payload["data"]["record_over_limit"] is True
-    assert result.details["control_disposition"] == "needs_replan"
+    assert dispatched is True
+    assert result.is_error is False
+    assert payload["status"] == "success"
+    assert payload["data"] == "token"
+    assert payload["warning"]["code"] == "large_text_record_risk"
+    assert "log_query" in payload["warning"]["suggested_action"]
+    assert result.details["smart_search_advisory"]["record_over_limit"] is True
+
+
+@pytest.mark.asyncio
+async def test_bounded_context_search_of_small_file_dispatches_with_complete_match(tmp_path, monkeypatch):
+    (tmp_path / "tiny.txt").write_text("hello needle world\n", encoding="utf-8")
+    registry = _registry(tmp_path, "shell")
+    calls = []
+
+    async def search_dispatch(name, arguments, **_kwargs):
+        calls.append((name, arguments))
+        return BuiltinExecutionResult(output="hello needle world", details={"exit_code": 0})
+
+    monkeypatch.setattr(registry, "_dispatch", search_dispatch)
+    result = await registry.execute("shell", {
+        "command": "rg -o '.{0,10}needle.{0,10}' tiny.txt", "shell": "bash",
+    }, "small-context")
+    payload = _payload(result)
+    assert len(calls) == 1
+    assert not result.is_error and payload["status"] == "success"
+    assert payload["data"] == "hello needle world"
+    assert payload["warning"] is None
 
 
 @pytest.mark.asyncio

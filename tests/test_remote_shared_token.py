@@ -519,6 +519,13 @@ def test_protocol_reply_forces_agent_reply_message_type(tmp_path):
     assert response.status_code == 202
     assert protocol.messages[0]["message_type"] == "agent_reply"
     assert protocol.messages[0]["in_reply_to"] == "m-original"
+    body = response.json()
+    proof = body.pop("response_auth")
+    assert body["responder_instance"] == "HASHI_LOCAL"
+    assert body["response_status"] == 202
+    assert verify_response_auth(
+        shared_token=token, request_nonce="reply-1", payload=body, response_auth=proof,
+    )
 
 
 def test_protocol_outbound_accepts_valid_shared_token(tmp_path, monkeypatch):
@@ -1003,3 +1010,124 @@ def test_protocol_manager_rejects_unsigned_handshake_accept(tmp_path, monkeypatc
             {"from_instance": "HASHI_LOCAL"},
             timeout=1,
         )
+
+
+@pytest.mark.parametrize("mode", ["valid", "wrong_token", "wrong_peer"])
+def test_actual_protocol_sender_verifies_real_receiver_receipt(tmp_path, monkeypatch, mode):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from orchestrator.hchat_submit_result import capture_hchat_submission
+    from tools import protocol_send
+
+    _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path)
+    requests = []
+
+    class Response:
+        def __init__(self, response):
+            self.status = response.status_code
+            self.content = response.content
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return self.content
+
+    def route_to_fixture(req, timeout=0):
+        requests.append(req.full_url)
+        from urllib.parse import urlsplit
+        response = client.post(
+            urlsplit(req.full_url).path, content=req.data, headers=dict(req.header_items())
+        )
+        if response.status_code >= 400:
+            raise HTTPError(
+                req.full_url, response.status_code, "fixture response", {},
+                BytesIO(response.content),
+            )
+        return Response(response)
+
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", route_to_fixture)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: {"global": {"instance_id": "HASHI2"}})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(protocol_send, "_find_remote_instance", lambda *a, **k: {"remote_host": "127.0.0.1", "remote_port": 9999})
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda *a: True)
+    monkeypatch.setattr(protocol_send, "_local_sidecar_base_url", lambda *a: None)
+    monkeypatch.setattr(protocol_send, "_record_outbound_correlation", lambda *a, **k: None)
+
+    target = "HASHI9" if mode == "wrong_peer" else "HASHI_LOCAL"
+    token = "wrong-token" if mode == "wrong_token" else "shared-secret"
+    with client:
+        result = capture_hchat_submission(
+            protocol_send.send_protocol_message, f"lily@{target}", "rika", "hello",
+            shared_token=token,
+        )
+
+    assert requests[0] == "http://127.0.0.1:9999/protocol/handshake"
+    if mode == "valid":
+        assert requests[1:] == ["http://127.0.0.1:9999/protocol/message"]
+        assert result.handled is True and result.accepted is True
+        assert len(protocol.messages) == 1
+        assert protocol.messages[0]["body"]["text"] == "hello"
+        assert protocol.messages[0]["_network_authenticated_instance"] == "HASHI2"
+    else:
+        assert requests == ["http://127.0.0.1:9999/protocol/handshake"]
+        assert not result.handled and result.accepted is False
+        assert protocol.messages == []
+
+
+@pytest.mark.parametrize("mode", ["valid", "wrong_token", "wrong_peer", "tampered"])
+def test_remote_active_group_uses_authenticated_target_directory(tmp_path, monkeypatch, mode):
+    from tools import hchat_send
+    from orchestrator.hchat_submit_result import record_hchat_response
+
+    _write_shared_token(tmp_path)
+    client, _protocol = _client(tmp_path)
+    cfg = {
+        "global": {"instance_id": "HASHI2", "workbench_port": 18800},
+        "agents": [], "groups": {"reviewers": {"members": "@active"}},
+    }
+    target = "HASHI9" if mode == "wrong_peer" else "HASHI_LOCAL"
+    calls = []
+    class Response:
+        def __init__(self, response):
+            self.status = response.status_code
+            self.body = response.content
+            if mode == "tampered":
+                payload = response.json()
+                payload["agents"].append({"id": "forged"})
+                self.body = json.dumps(payload).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return self.body
+
+    def open_directory(req, timeout=0):
+        assert req.full_url == "http://127.0.0.1:9999/protocol/directory"
+        response = client.get("/protocol/directory", headers=dict(req.header_items()))
+        return Response(response)
+
+    def send(target_agent, target_instance, sender, text, **kwargs):
+        calls.append((target_agent, target_instance, text))
+        record_hchat_response({"ok": True, "state": "accepted"})
+        return True
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_load_instances", lambda: {
+        target.lower(): {"instance_id": target, "remote_host": "127.0.0.1", "host": "127.0.0.1", "remote_port": 9999}
+    })
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "wrong-token" if mode == "wrong_token" else "shared-secret")
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda *a: None)
+    monkeypatch.setattr(hchat_send, "_register_hchat_outbound_correlation", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_hchat_channel_egress_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_send_via_protocol_transport", send)
+    monkeypatch.setattr(hchat_send.urllib_request, "urlopen", open_directory)
+    with client:
+        result = hchat_send.send_hchat_result(
+            "@reviewers", "zelda", "hello", target_instance=target, message_id="group-dynamic",
+        )
+    if mode == "valid":
+        assert result.handled
+        assert calls == [("local-agent", target, "hello")]
+        assert result.recipients[0].recipient == f"local-agent@{target}"
+    else:
+        assert not result.handled and calls == []

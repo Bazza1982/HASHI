@@ -1,5 +1,17 @@
 # Phone and Call interaction decision
 
+## 2026-11-17 configured PCM speech codecs
+
+An OpenAI-compatible Call TTS target can return PCM through its direct endpoint
+or a configured proxy when it declares `pcm_sample_rate_hz`,
+`pcm_sample_width_bytes`, `pcm_channels`, and `pcm_encoding`. The current
+decoder accepts signed little-endian 16-bit PCM, 8 to 96 kHz, and one or two
+channels. A missing or unsupported declaration is rejected before dispatch.
+A response that advertises conflicting codec parameters or incomplete frames is
+rejected instead of being played with guessed settings. Existing built-in
+OpenRouter Gemini targets without these fields retain their historical 24 kHz,
+16-bit, mono interpretation. The same privacy/location checks still apply.
+
 ## 2026-10-17 current-turn raw live-frame bridge experiment
 
 The user approved an immediate HASHI3 experiment that keeps VoiceLAN MiniCPM-V
@@ -35,7 +47,23 @@ the complete latest Call candidate to GitHub `main`. That publication decision
 does not convert source validation into a physical acceptance claim for raw
 live-frame delivery; those evidence classes remain separate.
 
+## 2026-11-17 configured LAN hostnames
+
+Call accepts an explicitly configured LAN hostname as well as private address
+literals. Configuration may be saved without a live DNS lookup. At each actual
+request, the adapter resolves the hostname and connects only to a returned RFC
+1918, shared-address VPN, or IPv6 unique-local address; known metadata
+addresses, public, loopback and link-local addresses are excluded. The
+connector uses those checked addresses for the connection while retaining the
+configured hostname for HTTP Host and TLS verification. Proxy environment
+settings and redirects remain disabled. No result is attributed to the local
+network when resolution yields no permitted address. Source tests, adoption and
+physical Call acceptance remain separate.
+
 ## 2026-10-16 explicitly allow-listed private-LAN media targets
+
+The literal-only part of this historical decision is superseded by the
+2026-11-17 hostname behavior above.
 
 The instance-owned Call target registry may now declare a target with
 `location: lan`. A LAN target uses the existing OpenAI-compatible media
@@ -922,3 +950,184 @@ The following operational constraints were relocated intact from the prior boots
   IPv4 without redirects; preview is not vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
   Tool screenshots use native images, not Base64; Ollama/public Provider IDs
   follow [HERV3](HERV3_UPGRADE.md).
+
+
+## Call catalogue capacity
+
+Call profiles, routes, agent defaults, target lists, target voices, option schemas
+and model identities have no fixed count or length ceiling when no instance policy
+is selected. Instance operators may set positive integers for
+`HASHI_CALL_MAX_TARGETS`, `HASHI_CALL_MAX_ROUTES`,
+`HASHI_CALL_MAX_PROFILES`, `HASHI_CALL_MAX_AGENT_DEFAULTS`,
+`HASHI_CALL_MAX_VOICES`, `HASHI_CALL_MAX_OPTIONS` and
+`HASHI_MEDIA_MAX_MODEL_CHARS`. The shared voice catalog may separately set
+`HASHI_VOICE_CATALOG_MAX_ROWS` for rows in each catalogue source.
+Unset settings impose no extra limit; invalid settings fail clearly.
+The authenticated Call context projects active Call capacities and explicit
+capacity failures identify the selected setting and limit. The Call settings menu
+pages targets, voices and option choices. Labels may be shortened for display;
+the exact selected model and voice identities are retained for dispatch.
+Schema, duplicate identifier, revision and configured privacy checks remain in force.
+
+
+## Negotiated Call input capacity
+
+The Call context publishes selected input and transport budgets. The current
+default accepts up to 180 seconds of 16-bit PCM WAV within the advertised body
+and byte budgets; 8-96 kHz mono or stereo WAV is normalized to 16 kHz mono.
+Unsupported or malformed formats remain explicit errors. The qualified runtime
+uses Python 3.12's standard-library PCM conversion; later Python versions need a
+separately qualified replacement. JPEG frames are checked against the selected
+pixel, dimension and byte budgets; Workbench captures within those budgets and
+reduces an image when required. The actual Workbench parser budget is reflected
+in its projected capability.
+
+The instance may set positive integer `HASHI_CALL_MAX_BODY_BYTES`,
+`HASHI_CALL_MAX_AUDIO_BYTES`, `HASHI_CALL_MAX_AUDIO_SECONDS`,
+`HASHI_CALL_MAX_AUDIO_DECODED_BYTES`, `HASHI_CALL_MAX_IMAGE_BYTES`,
+`HASHI_CALL_MAX_IMAGE_DIMENSION`, `HASHI_CALL_MAX_IMAGE_PIXELS`, and
+`HASHI_CALL_STT_SEGMENT_SECONDS`. Workbench separately supports
+`HASHI_WORKBENCH_CALL_MAX_BODY_BYTES`. Target `stt_segment_seconds`
+overrides the instance segment setting. If neither selects a segment size,
+Call sends the complete valid recording to the selected STT provider once.
+When segmentation is selected, parts run in order, receive separate billing
+records, and produce one Agent turn only after all parts succeed. A fixed split
+can divide a spoken word at a boundary; actual provider/device acceptance remains
+a separate check. Explicit local-only privacy is rechecked across parts.
+
+
+## Call turn queue and device capacity
+
+Only active Calls consume the Call capacity; a recently ended Call receipt stays
+available briefly for idempotency without consuming an active slot. Each Call
+accepts a bounded queue of recorded turns. Speech recognition may run in
+parallel, but submission to the bound Session follows the accepted sequence.
+A replay with the same turn identity and content does not submit a second
+effect. A full queue returns `call_turn_capacity` with a retryable result;
+Workbench retains the rejected recording in memory and retries the same turn
+identity and content when asked.
+
+The device can choose positive integer `HASHI_CALL_MAX_ACTIVE_CALLS` (default
+16), `HASHI_CALL_CONCURRENT_TURNS` (default 4), and
+`HASHI_CALL_MAX_PENDING_TURNS` (default 8). The concurrent value must not
+exceed the pending value. Context advertises these values, and a Call freezes
+its queue values when started. Queue audio remains in the Call process memory,
+not a durable Session Run: explicit hangup, lease expiry or service shutdown
+can cancel turns that have not yet been submitted. Once admission returns, the
+existing Run lifecycle and end rules apply. A browser-kept rejected recording
+also lasts only while that Call/page remains open.
+
+## Call ownership lease and duration
+
+A Call freezes its instance-selected policy when it starts. The context and
+Call responses advertise `lease_policy`: `lease_seconds` is a positive
+integer selected by `HASHI_CALL_LEASE_SECONDS` (default 180), and
+`max_duration_seconds` is selected by `HASHI_CALL_MAX_DURATION_SECONDS`
+(default 0, meaning no duration cap and advertised as null). Set a positive
+value to impose a total duration. Invalid settings produce
+`call_lease_policy_invalid` rather than silently substituting another limit.
+
+The bound device renews the lease with a valid Call operation. The Workbench
+polling interval uses at most one third of the advertised lease and applies
+the same rule while backgrounded. A different client, Agent, Session or
+generation cannot renew it. The periodic reaper ends a Call whose selected
+lease has expired, or whose selected total duration is reached. Expiry releases
+the Call and does not cancel an already accepted Session Run.
+
+Browser suspension and network outages can still outlast the selected lease;
+the current implementation then reports the ended Call instead of resuming it.
+Users can select a longer lease for their devices. Reattaching an expired Call
+and a real mobile/background device journey remain separate work and validation.
+
+
+## Camera timing policy in the remediation candidate
+
+The instance's existing Call configuration can select positive integer
+video_policy.interval_ms, freshness_seconds, responsive_seconds,
+startup_timeout_seconds and max_observations_per_minute values beyond the
+former fixed ranges. responsive_seconds must not exceed the selected
+freshness; an omitted responsive value retains the legacy derived default.
+The context advertises the effective policy and each Call freezes its choice.
+An observation carries its actual capture time and is omitted from the
+current-input projection once it exceeds that frozen freshness. Selected
+turn frames are checked at capture selection and again before Session
+admission so a slow STT or admission queue does not pass expired frames as
+current. Loss of the visual frame does not end the voice Call.
+
+The optional positive integer video_policy.sample_window_seconds selects the
+recent-frame window (default 10 seconds); the effective window cannot exceed
+the frozen freshness budget. max_frames_per_turn and max_buffer_frames are
+selected positive integers, defaulting to 10 and 32 respectively. They can
+exceed those legacy defaults; max_buffer_bytes can select a byte budget, with
+0 meaning no separate byte cap. The Call freezes these settings. The selected
+turn count is sealed into the Call evidence and validated at Worker admission,
+rather than accepted from arbitrary request metadata. The frame buffer and
+turn selection use the same effective window. After a turn is accepted, its
+public camera_sample reports
+the number of buffered candidates and selected/submitted snapshots, the chosen
+window, the span between submitted snapshots, and snapshots discarded for
+expiry before admission. Workbench displays the submitted count and span as
+sampled images, not continuous video. The count describes admission to the
+Run, not proof of model processing: unsupported models, selected model media
+capacity or later expiry can reduce what the provider actually receives.
+
+At the OpenAI-compatible adapter boundary, valid live snapshots are sampled
+to fit the selected model's image count, per-item and aggregate byte limits,
+after reserving space for native input attachments. The model receives an
+explicit statement when fewer snapshots fit, including zero; the spoken
+request can continue. Malformed image data is still rejected. This does not
+claim that the external provider actually processed the snapshots.
+
+When an Agent uses the Function-worker IPC, the Call port measures the actual
+serialized request against the protected Core's current frame limit before
+admission. It removes camera samples as needed and seals the facts for the
+remaining samples; it does not resend an accepted request. The Call response
+and Workbench identify how many samples were omitted for transport. If even
+the request without camera samples exceeds the actual IPC limit, admission
+fails before sending with call_ipc_text_too_large.
+
+Only a verified current Call context supplies the frozen freshness budget for
+transient frames. The adapter filters these frames again at each provider
+invocation, so a Run that waited after admission does not present expired
+frames as current. Workbench records capture time before drawing/encoding a
+frame so encoding delay is included in its age.
+
+For a Workbench Call, the server supplies a UTC wall-clock sample on successful
+responses. The browser brackets that sample with its request send/receive
+times, translates each camera capture into a conservative earliest possible
+server time, and supplies the original client time and uncertainty. That
+lower bound is used for freshness; it is not presented as an exact capture
+time. A detected browser clock jump invalidates the calibration, takes a new
+sample on the same Call and recaptures the frame. A legacy server without a
+clock sample continues with the legacy timestamp path. Timing metadata is
+never authentication or authorization.
+
+This is partial R21 remediation. A legacy client without clock negotiation
+still has a three-second future timestamp tolerance. The Core Function-worker
+IPC has a 16 MiB serialized-frame limit; it is handled by reducing the camera
+sample rather than streaming a larger snapshot set. The actual selected model
+may impose lower count and byte limits. Clock
+jumps on the server and multiple clock jumps between samples are not
+independently detected, and very high round-trip uncertainty can cause a
+genuinely fresh frame to be treated as stale.
+There is no complete-video coverage. The provider adapter check does not prove
+an eventual external provider processed each snapshot. Generic compatible
+provider and HASHI API tool continuations recheck snapshot expiry before a
+later request; xAI authentication refresh also rechecks. Source tests use
+synthetic frames and do not establish physical camera or real provider behavior.
+
+Provider continuation checkpoints omit tagged live camera image bytes and
+state explicitly that those snapshots are unavailable after recovery. Ordinary
+attachments and pending/completed Tool records remain. Compatible provider wire
+records, HTTP failure diagnostics, and the HASHI API client transport record
+omit tagged live camera image bytes, mark the retained body as incomplete, and
+retain the original request digest. This does not change bytes sent to the
+provider or erase historical records.
+
+Known open boundary: the protected Core API Gateway independently records the
+complete incoming HTTP request. When a live Call goes through that Gateway, its
+record can still contain the camera data, contrary to the earlier Call
+input-only audit statement. The Gateway's full-wire evidence policy and the
+Call exception need a coordinated owner-approved design; no Core change or
+production-data inspection is claimed here. A slower configured policy does
+not itself prove a camera/device or provider can meet that policy.

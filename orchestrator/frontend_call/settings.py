@@ -20,8 +20,22 @@ from .voice_catalog import voice_label
 from .voice_previews import get_call_preview, preview_caption
 
 
+def _error_text(error):
+    capacity = getattr(error, "capacity", None)
+    if isinstance(capacity, dict):
+        return f"{error} ({capacity['setting']}={capacity['limit']})"
+    return str(error)
+
+
+def _display_label(value, limit=80):
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 1] + "\u2026"
+
+
 class CallSettings:
     VOICE_PAGE_SIZE = 12
+    TARGET_PAGE_SIZE = 12
+    OPTION_PAGE_SIZE = 12
 
     @staticmethod
     def choice(values, index):
@@ -73,7 +87,7 @@ class CallSettings:
 
         current = "/call" if ctx["call_ready"] else tr("call.off")
         facts = [
-            f"<b>{escape(tr('call.' + kind))}</b> · {escape(str((selected(kind) or {}).get('label') or (selected(kind) or {}).get('model') or tr('call.off')))}"
+            f"<b>{escape(tr('call.' + kind))}</b> · {escape(_display_label((selected(kind) or {}).get('label') or (selected(kind) or {}).get('model') or tr('call.off')))}"
             for kind in ("stt", "tts", "vision")
         ]
         rows = []
@@ -103,37 +117,35 @@ class CallSettings:
             ]
             if not ctx["call_ready"]:
                 rows = []
-        elif page in ("stt", "tts", "vision"):
-            title = tr("call." + page)
-            choices = [t for t in targets if t["kind"] == page]
-            for index, target in enumerate(choices):
-                label = str(target.get("label") or target["model"])
-                rows.append(
-                    [
-                        button(
-                            selected_label(
-                                label,
-                                bool(
-                                    profile[page]
-                                    and profile[page]["target_id"] == target["id"]
-                                ),
-                            ),
-                            "target",
-                            f"{page}.{index}",
-                        )
-                    ]
-                )
-            if page == "vision":
-                rows.append(
-                    [
-                        button(
-                            selected_label(tr("call.off"), profile[page] is None),
-                            "target",
-                            "vision.off",
-                        )
-                    ]
-                )
-            if page == "tts":
+        elif page.split(".", 1)[0] in ("stt", "tts", "vision"):
+            kind, dot, requested = page.partition(".")
+            if dot and (not requested.isascii() or not requested.isdecimal()):
+                raise CallError("call_menu_invalid")
+            title = tr("call." + kind)
+            choices = [target for target in targets if target["kind"] == kind]
+            total_pages = max(1, (len(choices) + self.TARGET_PAGE_SIZE - 1) // self.TARGET_PAGE_SIZE)
+            target_page = min(int(requested or "0"), total_pages - 1)
+            start = target_page * self.TARGET_PAGE_SIZE
+            for index, target in enumerate(choices[start:start + self.TARGET_PAGE_SIZE], start=start):
+                label = _display_label(target.get("label") or target["model"])
+                rows.append([
+                    button(selected_label(label, bool(profile[kind] and
+                           profile[kind]["target_id"] == target["id"])),
+                           "target", f"{kind}.{index}")
+                ])
+            navigation = []
+            if target_page:
+                previous = target_page - 1
+                navigation.append(button(tr("voice.tts.previous"), "view",
+                                         kind if not previous else f"{kind}.{previous}"))
+            if target_page + 1 < total_pages:
+                navigation.append(button(tr("voice.tts.next"), "view", f"{kind}.{target_page + 1}"))
+            if navigation:
+                rows.append(navigation)
+            if kind == "vision":
+                rows.append([button(selected_label(tr("call.off"), profile[kind] is None),
+                                    "target", "vision.off")])
+            if kind == "tts":
                 rows.append([button(tr("call.voice"), "view", "voice")])
         elif page == "voice" or page.startswith("voice."):
             title = tr("call.voice")
@@ -201,30 +213,43 @@ class CallSettings:
                 if selected(kind) and selected(kind).get("options"):
                     rows.append([button(tr("call." + kind), "view", "options." + kind)])
             rows.append([button(tr("call.reset"), "reset")])
-        elif page.startswith("options.") and page[8:] in ("stt", "tts", "vision"):
-            kind = page[8:]
+        elif page.startswith("options."):
+            parts = page.split(".")
+            if (len(parts) not in (2, 3) or parts[1] not in ("stt", "tts", "vision")
+                or len(parts) == 3 and (not parts[2].isascii() or not parts[2].isdecimal())):
+                raise CallError("call_menu_invalid")
+            kind = parts[1]
             target = selected(kind)
             facts = []
-            for key_index, (key, spec) in enumerate(
-                (target or {}).get("options", {}).items()
-            ):
+            entries = []
+            for key_index, (key, spec) in enumerate((target or {}).get("options", {}).items()):
+                choices = spec.get("enum", [True, False] if spec["type"] == "boolean" else [])
+                if not choices:
+                    entries.append((key_index, key, None, None))
+                else:
+                    entries.extend((key_index, key, index, item) for index, item in enumerate(choices))
+            total_pages = max(1, (len(entries) + self.OPTION_PAGE_SIZE - 1) // self.OPTION_PAGE_SIZE)
+            option_page = min(int(parts[2]) if len(parts) == 3 else 0, total_pages - 1)
+            start = option_page * self.OPTION_PAGE_SIZE
+            visible_keys = set()
+            for key_index, key, index, item in entries[start:start + self.OPTION_PAGE_SIZE]:
                 value = profile[kind]["options"].get(key, tr("call.default"))
-                facts.append(f"<b>{escape(key)}</b> · {escape(str(value))}")
-                # Free values are entered through the normal slash command.
-                choices = spec.get(
-                    "enum", [True, False] if spec["type"] == "boolean" else []
-                )
-                for index, item in enumerate(choices):
-                    rows.append(
-                        [
-                            button(
-                                selected_label(f"{key}: {item}", value == item),
-                                "option",
-                                f"{kind}.{key_index}.{index}",
-                            )
-                        ]
-                    )
-                facts.append(f"<code>/call option {kind} {escape(key)} VALUE</code>")
+                if key not in visible_keys:
+                    facts.append(f"<b>{escape(key)}</b> - {escape(_display_label(value, limit=120))}")
+                    facts.append(f"<code>/call option {kind} {escape(key)} VALUE</code>")
+                    visible_keys.add(key)
+                if index is not None:
+                    rows.append([button(selected_label(_display_label(f"{key}: {item}"), value == item),
+                                        "option", f"{kind}.{key_index}.{index}")])
+            navigation = []
+            if option_page:
+                previous = option_page - 1
+                navigation.append(button(tr("voice.tts.previous"), "view",
+                    f"options.{kind}" if not previous else f"options.{kind}.{previous}"))
+            if option_page + 1 < total_pages:
+                navigation.append(button(tr("voice.tts.next"), "view", f"options.{kind}.{option_page + 1}"))
+            if navigation:
+                rows.append(navigation)
         else:
             raise CallError("call_menu_invalid")
         rows.append([button(refresh_label(), "view", page)])
@@ -291,7 +316,11 @@ class CallSettings:
                 profile[kind] = {"target_id": target["id"], "options": {}}
                 if kind == "tts":
                     profile[kind]["voice_id"] = target["voices"][0]
-            page = kind
+            if kind != "vision" or index != "off":
+                page_number = int(index) // self.TARGET_PAGE_SIZE
+                page = kind if page_number == 0 else f"{kind}.{page_number}"
+            else:
+                page = kind
         elif action == "voice":
             target = next(
                 t for t in ctx["targets"] if t["id"] == profile["tts"]["target_id"]
@@ -402,7 +431,7 @@ async def command(runtime, update, context):
         )
     except (CallError, ValueError, IndexError, KeyError, StopIteration) as exc:
         await runtime._reply_text(
-            update, ui_language.tr("call.error") + " · " + escape(str(exc))
+            update, ui_language.tr("call.error") + " · " + escape(_error_text(exc))
         )
 
 
@@ -462,5 +491,5 @@ async def callback(runtime, update, context):
                 text, reply_markup=keyboard, parse_mode="HTML"
             )
         await query.answer(
-            ui_language.tr("call.error") + " · " + str(exc), show_alert=True
+            ui_language.tr("call.error") + " · " + _error_text(exc), show_alert=True
         )

@@ -105,7 +105,8 @@ Run the **<name>** Nagare workflow.
 1. Collect the following inputs from the user if not already provided:
 <list each pre_flight field as: - **<label>**: <description>>
 
-2. Confirm the inputs with the user, then launch:
+2. Reuse inputs already supplied or confirmed. Ask only for a missing required
+   input or material ambiguity, then launch the authorized run:
    ```
    python flow/flow_trigger.py start <name> \
      --input "<field_key>=<value>" \
@@ -127,7 +128,10 @@ If a step fails, check:
 1. `flow/runs/<run_id>/logs/flow_runner.log` for step errors
 2. `flow/runs/<run_id>/workers/<agent_id>/logs/` for agent-level errors
 
-Report the error and ask the user whether to retry or abort.
+Inspect the actual effects and run state before retrying or resuming; do not
+repeat a step with an uncertain or completed effect. Correct recoverable causes
+and continue within the authorized task, using an appropriate bounded policy.
+Ask the user only when recovery needs a material choice or exceeds that scope.
 
 ```
 
@@ -158,7 +162,7 @@ For each, display:
 
 ## Action: run <name>
 
-Collect any required pre-flight inputs from the user (check the workflow YAML's `pre_flight.fields`), then launch:
+Reuse supplied pre-flight inputs and ask only for missing required inputs or material ambiguities (check the workflow YAML's `pre_flight.fields`), then launch:
 
 ```
 python flow/flow_trigger.py start <name> [--input key=value ...]

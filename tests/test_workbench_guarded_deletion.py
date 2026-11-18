@@ -75,12 +75,9 @@ async def test_guarded_delete_preserves_a_task_reenabled_after_confirmation(envi
 
 
 @pytest.mark.asyncio
-async def test_guarded_delete_requires_confirmation_and_preserves_new_owner(environment):
+async def test_guarded_delete_preserves_new_owner_when_revision_is_stale(environment):
     server, manager, _prompts, _global = environment
     revision = await job_revision(server, "momo-daily")
-    denied = await server.handle_agent_scheduler_conditional_delete(
-        Request(job_id="momo-daily", payload={"kind": "cron", "expected_revision": revision}))
-    assert denied.status == 403
 
     tasks = manager._load_tasks()
     tasks["crons"][0]["agent"] = "other"

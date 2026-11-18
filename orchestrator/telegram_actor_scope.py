@@ -8,13 +8,15 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from orchestrator.config_json import read_config_json
 from orchestrator.telegram_access import (
-    POLICY_VERSION_KEY, TelegramAccessSnapshot, access_snapshot,
+    POLICY_VERSION_KEY, TelegramAccessSnapshot, actor_snapshot, ingress_user_ids,
 )
 
 
@@ -30,6 +32,75 @@ class TelegramActorScope:
 _current_actor: ContextVar[TelegramActorScope | None] = ContextVar(
     "hashi_telegram_actor_scope", default=None
 )
+
+
+class TelegramTransferContextError(ValueError):
+    """An observed Telegram command can no longer select a history owner."""
+
+
+@dataclass
+class _TransferActor:
+    runtime: Any
+    user_id: int
+    owner_id: str
+    active: bool = True
+
+
+_current_transfer_actor: ContextVar[_TransferActor | None] = ContextVar(
+    "hashi_telegram_transfer_actor", default=None
+)
+
+
+@contextmanager
+def _bind_transfer_actor(runtime: Any, user_id: int, owner_id: str):
+    actor = _TransferActor(runtime, user_id, owner_id)
+    token = _current_transfer_actor.set(actor)
+    try:
+        yield
+    finally:
+        # Contexts copied to a cancelled thread must not outlive the command.
+        actor.active = False
+        _current_transfer_actor.reset(token)
+
+
+def transfer_owner_for_instance(root: Path, *, allow_expired: bool = False) -> str | None:
+    """Select the established owner of a live real Telegram management command.
+
+    Absence means this is not a Telegram command; an expired or revoked binding
+    must not silently fall back to a different owner's history. A committed
+    transaction may instead resume from its previously authenticated journal.
+    """
+    actor = _current_transfer_actor.get()
+    if actor is None:
+        return None
+    if not actor.active:
+        if allow_expired:
+            return None
+        raise TelegramTransferContextError("Telegram command context has expired")
+    config = getattr(actor.runtime, "global_config", None)
+    home = getattr(config, "bridge_home", None)
+    config_path = getattr(config, "config_path", None)
+    instance_root = home or (Path(config_path).parent if config_path else getattr(config, "project_root", None))
+    if instance_root is None or Path(instance_root).resolve() != Path(root).resolve():
+        raise TelegramTransferContextError("Telegram command belongs to a different instance")
+    try:
+        snapshot = runtime_snapshot(actor.runtime)
+        is_primary = actor.user_id == snapshot.primary_user_id
+        is_legacy = not is_primary and actor.user_id in snapshot.legacy_user_ids
+        if (
+            actor.user_id not in snapshot.effective_user_ids
+            or (not is_primary and not is_legacy and actor.user_id not in snapshot.global_user_ids)
+        ):
+            raise TelegramTransferContextError("Telegram command grant is no longer valid")
+        current_owner = (snapshot.owner_scope_id if is_primary or is_legacy
+                         else _delegated_owner(snapshot, actor.user_id))
+        if actor.owner_id != current_owner:
+            raise TelegramTransferContextError("Telegram command history owner has changed")
+        return current_owner
+    except TelegramTransferContextError:
+        raise
+    except (OSError, ValueError, TypeError, AttributeError, LookupError) as exc:
+        raise TelegramTransferContextError("Telegram command grant could not be verified") from exc
 
 
 def current_actor(runtime: Any) -> TelegramActorScope | None:
@@ -91,7 +162,63 @@ def runtime_snapshot(runtime: Any) -> TelegramAccessSnapshot:
         secrets_doc = read_config_json(secrets_path)
     else:
         secrets_doc = getattr(runtime, "secrets", None) or {}
-    return access_snapshot(config_doc, secrets_doc, str(getattr(runtime, "name", "")))
+    from orchestrator.personal_data_owner import read_personal_data_owner_for_config
+
+    global_doc = config_doc.get("global")
+    if not isinstance(global_doc, Mapping):
+        raise ValueError("invalid Telegram access configuration")
+    root = getattr(config, "bridge_home", None) or Path(config_path).parent
+    bound_owner = read_personal_data_owner_for_config(root, global_doc)
+    return actor_snapshot(
+        config_doc, secrets_doc, str(getattr(runtime, "name", "")),
+        bound_data_owner=bound_owner,
+    )
+
+
+def runtime_ingress_user_ids(runtime: Any) -> frozenset[int]:
+    """Read current Telegram grants without consulting the local owner scope."""
+    config = getattr(runtime, "global_config", None)
+    config_path = getattr(config, "config_path", None)
+    if not config_path:
+        raise ValueError("Telegram access configuration unavailable")
+    config_doc = read_config_json(config_path)
+    secrets_path = getattr(config, "secrets_path", None)
+    if secrets_path:
+        secrets_doc = read_config_json(secrets_path)
+    else:
+        secrets_doc = getattr(runtime, "secrets", None) or {}
+    return ingress_user_ids(config_doc, secrets_doc, str(getattr(runtime, "name", "")))
+
+
+def runtime_legacy_ingress_user_ids(runtime: Any) -> frozenset[int]:
+    """Revalidate an old Agent allowlist after an invalid startup is repaired."""
+    from orchestrator.runtime_common import resolve_authorized_telegram_ids
+    from orchestrator.telegram_identity import resolve_telegram_owner_id
+
+    config = getattr(runtime, "global_config", None)
+    config_path = getattr(config, "config_path", None)
+    if not config_path:
+        raise ValueError("Telegram access configuration unavailable")
+    document = read_config_json(config_path)
+    secrets_path = getattr(config, "secrets_path", None)
+    secrets = read_config_json(secrets_path) if secrets_path else (getattr(runtime, "secrets", None) or {})
+    global_config = document.get("global")
+    rows = document.get("agents")
+    requested = str(getattr(runtime, "name", "") or "").strip().casefold()
+    if not isinstance(global_config, Mapping) or not isinstance(rows, list) or not requested:
+        raise ValueError("invalid Telegram access configuration")
+    matches = [
+        row for row in rows
+        if isinstance(row, Mapping) and str(row.get("name") or "").strip().casefold() == requested
+    ]
+    if len(matches) != 1:
+        raise LookupError("Agent is missing or ambiguous")
+    nested = matches[0].get("extra")
+    if nested is not None and not isinstance(nested, Mapping):
+        raise ValueError("invalid Agent configuration")
+    extra = nested if nested else matches[0]
+    primary = resolve_telegram_owner_id(global_config, secrets) or 0
+    return frozenset(resolve_authorized_telegram_ids(dict(extra), primary))
 
 
 def refresh_primary_user(runtime: Any) -> int | None:
@@ -123,7 +250,30 @@ def delivery_allowed(
     """Check the current grant for a delegated Session at delivery time."""
     owner = str(owner_id or "")
     if not owner.startswith("telegram-user:"):
-        return True
+        if not owner or explicit_recipient or not scoped_access_enabled(runtime):
+            return True
+        try:
+            snapshot = runtime_snapshot(runtime)
+            if owner != snapshot.owner_scope_id:
+                return True
+            if (snapshot.primary_user_id is not None
+                    and int(chat_id) == snapshot.primary_user_id
+                    and snapshot.primary_user_id in snapshot.effective_user_ids):
+                return True
+            # A retired primary's queued owner-Session replies must not leak
+            # into its now-independent Telegram conversation. Other valid
+            # owner and legacy routes must be bound to their actual actor.
+            from orchestrator.runtime_session import ensure_store
+
+            binding = ensure_store(runtime).latest_channel_binding(
+                owner_id=owner, agent_id=runtime.name, surface="telegram", channel_key=chat_id,
+            )
+            actor = int(binding.get("actor_id")) if binding else 0
+            return actor in snapshot.effective_user_ids and (
+                actor == snapshot.primary_user_id or actor in snapshot.legacy_user_ids
+            )
+        except (OSError, ValueError, TypeError, AttributeError, LookupError):
+            return False
     try:
         _, actor_text, _fingerprint = owner.split(":")
         actor = int(actor_text)
@@ -249,11 +399,12 @@ async def process_telegram_update(
         if is_legacy:
             # Existing Agent allowlists used the owner's Session and command
             # authority. Preserve those grants until explicitly removed.
-            token = _current_actor.set(None)
-            try:
-                await runtime.app.process_update(update)
-            finally:
-                _current_actor.reset(token)
+            with _bind_transfer_actor(runtime, actor, owner):
+                token = _current_actor.set(None)
+                try:
+                    await runtime.app.process_update(update)
+                finally:
+                    _current_actor.reset(token)
             return True
         scope = TelegramActorScope(
             runtime=runtime,
@@ -264,11 +415,12 @@ async def process_telegram_update(
         )
     except (OSError, ValueError, TypeError, AttributeError, LookupError):
         return False
-    token = _current_actor.set(scope)
-    try:
-        if await _handle_scoped_interaction(runtime, update, scope, chat_id):
-            return True
-        await runtime.app.process_update(update)
-    finally:
-        _current_actor.reset(token)
+    with _bind_transfer_actor(runtime, actor, owner):
+        token = _current_actor.set(scope)
+        try:
+            if await _handle_scoped_interaction(runtime, update, scope, chat_id):
+                return True
+            await runtime.app.process_update(update)
+        finally:
+            _current_actor.reset(token)
     return True

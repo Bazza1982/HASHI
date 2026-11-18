@@ -528,3 +528,310 @@ def test_extension_source_routes_session_and_scroll_to_real_implementations() ->
     assert 'if (action === "media_play") {\n    return actionMediaPlay(args);' in source
     assert "media playback did not satisfy the advancing-time postcondition" in source
     assert 'state: "maximized"' in source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["text", "html", "evaluate"])
+async def test_standalone_browser_uses_selected_timeout_and_returns_full_result(monkeypatch, kind):
+    payload = "visible-" * 5000 + "-complete-tail"
+    calls = []
+
+    class Page:
+        async def goto(self, url, *, wait_until, timeout):
+            calls.append((url, wait_until, timeout))
+            if wait_until == "networkidle":
+                raise TimeoutError("continuous traffic never became idle")
+
+        async def evaluate(self, _script):
+            return payload
+
+        async def content(self):
+            return payload
+
+    class Closed:
+        async def close(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def no_bridge(_action, _args):
+        return None
+
+    async def get_page(**_kwargs):
+        return Closed(), Closed(), object(), Page()
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", no_bridge)
+    monkeypatch.setattr(browser, "_get_page", get_page)
+    args = {"url": "https://example.invalid", "wait_ms": 0, "timeout_ms": 90_000}
+    if kind == "evaluate":
+        args["script"] = "() => document.body.innerText"
+    result = await {
+        "text": browser.execute_browser_get_text,
+        "html": browser.execute_browser_get_html,
+        "evaluate": browser.execute_browser_evaluate,
+    }[kind](args)
+    assert calls == [("https://example.invalid", "domcontentloaded", 90_000)]
+    assert result == payload
+
+
+@pytest.mark.asyncio
+async def test_standalone_browser_selected_readiness_timeout_and_cancel(monkeypatch):
+    import asyncio
+    calls = []
+    closed = []
+    blocked = asyncio.Event()
+
+    class Page:
+        async def goto(self, url, *, wait_until, timeout):
+            calls.append((wait_until, timeout))
+            if timeout == 1:
+                raise TimeoutError("selected deadline")
+            if timeout == 99_000:
+                blocked.set()
+                await asyncio.Event().wait()
+
+        async def evaluate(self, _script):
+            return "ready"
+
+    class Pw:
+        async def stop(self):
+            closed.append("playwright")
+
+    class Browser:
+        async def close(self):
+            closed.append("browser")
+
+    async def no_bridge(_action, _args):
+        return None
+
+    async def get_page(**_kwargs):
+        return Pw(), Browser(), object(), Page()
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", no_bridge)
+    monkeypatch.setattr(browser, "_get_page", get_page)
+    ready = await browser.execute_browser_get_text({
+        "url": "https://example.invalid", "wait_ms": 0,
+        "wait_until": "networkidle", "timeout_ms": 61_000,
+    })
+    assert ready == "ready" and calls[-1] == ("networkidle", 61_000)
+    timed_out = await browser.execute_browser_get_text({
+        "url": "https://example.invalid", "wait_ms": 0, "timeout_ms": 1,
+    })
+    assert timed_out.startswith("Error:") and "selected deadline" in timed_out
+    task = asyncio.create_task(browser.execute_browser_get_text({
+        "url": "https://example.invalid", "wait_ms": 0, "timeout_ms": 99_000,
+    }))
+    await blocked.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed[-2:] == ["browser", "playwright"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_browser_session_does_not_silently_cut_text(monkeypatch):
+    payload = "session-" * 3000 + "-complete-tail"
+
+    class Page:
+        async def evaluate(self, _script):
+            return payload
+
+    class Closed:
+        async def close(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def no_bridge(_action, _args):
+        return None
+
+    async def get_page(**_kwargs):
+        return Closed(), Closed(), object(), Page()
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", no_bridge)
+    monkeypatch.setattr(browser, "_get_page", get_page)
+    result = await browser.execute_browser_session({"steps": [{"action": "get_text"}]})
+    assert result == "[get_text] " + payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["browser_get_text", "browser_get_html", "browser_session"])
+async def test_standalone_browser_long_output_is_recoverable_in_owning_run(tmp_path, monkeypatch, tool_name):
+    from tools.registry import ToolRegistry
+
+    payload = "long-page-" * 5000 + "unique-page-tail"
+    registry = ToolRegistry([tool_name], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+                            audit_context={"hashi_run_id": "run-one", "request_id": "request-one"})
+
+    class Page:
+        async def goto(self, _url, *, wait_until, timeout):
+            pass
+
+        async def evaluate(self, _script):
+            return payload
+
+        async def content(self):
+            return payload
+
+    class Closed:
+        async def close(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def no_bridge(_action, _args):
+        return None
+
+    async def get_page(**_kwargs):
+        return Closed(), Closed(), object(), Page()
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", no_bridge)
+    monkeypatch.setattr(browser, "_get_page", get_page)
+    args = ({"steps": [{"action": "get_text"}]} if tool_name == "browser_session"
+            else {"url": "https://example.invalid", "wait_ms": 0})
+    first = await registry.execute(tool_name, args)
+    assert not first.is_error, first.output
+    reference = first.details["output_continuation"]
+    pages, offset = [], 0
+    while offset is not None:
+        result = await registry.execute("tool_output_read", {"reference": reference, "offset": offset})
+        assert not result.is_error, result.output
+        body = json.loads(result.output)
+        pages.append(body["text"])
+        offset = body["next_offset"]
+    expected = "[get_text] " + payload if tool_name == "browser_session" else payload
+    assert "".join(pages) == expected
+
+
+@pytest.mark.asyncio
+async def test_extension_navigation_timeout_is_forwarded_and_unsupported_readiness_is_explicit(monkeypatch):
+    from tools import browser_extension_bridge as bridge
+    captured = []
+
+    monkeypatch.setattr(bridge, "bridge_available", lambda **_kwargs: True)
+    sessions = []
+
+    def ensure_session(**kwargs):
+        sessions.append(kwargs)
+        return {"session": {"session_id": "fixture"}, "extension_meta": {"actions": ["get_text"]}}
+
+    monkeypatch.setattr(bridge, "ensure_bridge_session", ensure_session)
+
+    def send(action, args, **kwargs):
+        captured.append((action, args, kwargs))
+        return {"ok": True, "output": "complete"}
+
+    monkeypatch.setattr(bridge, "send_bridge_command", send)
+    result = await browser._maybe_execute_extension_bridge(
+        "get_text", {"url": "https://example.invalid", "timeout_ms": 90_000, "wait_ms": 500},
+    )
+    assert result == "complete"
+    assert captured[0][2]["timeout_s"] == 95.5
+    assert sessions[0]["timeout_s"] == 95.5
+    result = await browser._maybe_execute_extension_bridge(
+        "get_text", {"url": "https://example.invalid", "wait_until": "networkidle"},
+    )
+    assert result.startswith("Error:") and "supports only load readiness" in result
+    assert len(captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_real_standalone_browser_delayed_navigation_and_full_text(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import time
+    from urllib.parse import urlsplit
+    from aiohttp import web
+    from tools.registry import ToolRegistry
+
+    if os.environ.get("HASHI_HX036_REAL_BROWSER") != "1":
+        pytest.skip("opt-in disposable local browser qualification")
+    playwright = pytest.importorskip("playwright.async_api")
+    stopping = asyncio.Event()
+    hang_started = asyncio.Event()
+    payload = "local-page-" * 3000 + "LOCAL-UNIQUE-TAIL"
+
+    async def delayed(request):
+        seconds = float(request.query.get("seconds", "0"))
+        if seconds:
+            try:
+                await asyncio.wait_for(stopping.wait(), timeout=seconds)
+            except asyncio.TimeoutError:
+                pass
+        html = f"<html><body>{payload}<script>fetch('/hang')</script></body></html>"
+        return web.Response(text=html, content_type="text/html")
+
+    async def hang(_request):
+        hang_started.set()
+        await stopping.wait()
+        return web.Response(text="done")
+
+    app = web.Application()
+    app.router.add_get("/delay", delayed)
+    app.router.add_get("/hang", hang)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    async def no_bridge(_action, _args):
+        return None
+
+    async def disposable_page(**_kwargs):
+        pw = await playwright.async_playwright().start()
+        try:
+            browser_instance = await pw.chromium.launch(headless=True, args=[
+                "--disable-background-networking", "--disable-component-update", "--no-first-run",
+                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
+            ])
+            context = await browser_instance.new_context()
+
+            async def only_fixture(route):
+                url = urlsplit(route.request.url)
+                if url.hostname == "127.0.0.1" and url.port == port:
+                    await route.continue_()
+                else:
+                    await route.abort()
+
+            await context.route("**/*", only_fixture)
+            page = await context.new_page()
+            return pw, browser_instance, context, page
+        except BaseException:
+            await pw.stop()
+            raise
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", no_bridge)
+    monkeypatch.setattr(browser, "_get_page", disposable_page)
+    registry = ToolRegistry(["browser_get_text"], access_root=tmp_path, workspace_dir=tmp_path,
+                            secrets={}, audit_context={"hashi_run_id": "real-run", "request_id": "real-request"})
+    try:
+        started = time.monotonic()
+        first = await registry.execute("browser_get_text", {
+            "url": f"http://127.0.0.1:{port}/delay?seconds=30.2",
+            "timeout_ms": 40_000, "wait_ms": 0,
+        })
+        assert not first.is_error, first.output
+        assert time.monotonic() - started >= 30
+        assert hang_started.is_set()
+        reference = first.details["output_continuation"]
+        offset, parts = 0, []
+        while offset is not None:
+            page = await registry.execute("tool_output_read", {"reference": reference, "offset": offset})
+            assert not page.is_error, page.output
+            data = json.loads(page.output)
+            parts.append(data["text"])
+            offset = data["next_offset"]
+        assert "".join(parts) == payload
+
+        short = await browser.execute_browser_get_text({
+            "url": f"http://127.0.0.1:{port}/delay?seconds=5",
+            "timeout_ms": 150, "wait_ms": 0,
+        })
+        assert short.startswith("Error:") and "Timeout" in short
+    finally:
+        stopping.set()
+        await runner.cleanup()

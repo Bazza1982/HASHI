@@ -121,6 +121,7 @@ class HerBackendSessionCoordinator:
             boundary=str(checkpoint.get("boundary") or ""),
             messages=tuple(checkpoint.get("messages") or ()),
             reasoning=tuple(checkpoint.get("reasoning") or ()),
+            ephemeral_media_omitted=checkpoint.get("ephemeral_media_omitted") is True,
             provider_request_id=str(
                 checkpoint.get("provider_request_id") or ""
             ),

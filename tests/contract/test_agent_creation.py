@@ -547,3 +547,25 @@ def test_herv3_creation_preserves_provider_policy_without_granting_its_engine(
     )["her-v3"]["providers"]["ollama"]
     assert descendants["models"] == view["models"]
     assert descendants["model_efforts"] == view["model_efforts"]
+
+
+def test_long_unicode_display_is_independent_of_stable_storage_id(tmp_path, installed_cli_backends):
+    paths = _paths(tmp_path)
+    service = AgentCreationService(paths, global_config={})
+    display = "".join(map(chr, (0x8D75, 0x7075, 0x513F, 0x1F338))) * 70 + " ../ text"
+    result = service.create(AgentCreationSpec(
+        name="safe-agent", display_name=display, backend="codex-cli",
+    ))
+    stored = json.loads(paths.config_path.read_text(encoding="utf-8"))["agents"][0]
+    assert result.name == "safe-agent" and result.display_name == display
+    assert stored["display_name"] == display
+    assert stored["workspace_dir"] == "workspaces/safe-agent"
+    assert (paths.workspaces_root / "safe-agent" / "agent.md").is_file()
+    for unsafe in ("../escape", "agent/name"):
+        with pytest.raises(InvalidAgentNameError):
+            service.create(AgentCreationSpec(name=unsafe, display_name=display,
+                                             backend="codex-cli"))
+    with pytest.raises(AgentExistsError):
+        service.create(AgentCreationSpec(name="SAFE-AGENT", display_name="another",
+                                         backend="codex-cli"))
+    assert json.loads(paths.config_path.read_text(encoding="utf-8"))["agents"][0] == stored

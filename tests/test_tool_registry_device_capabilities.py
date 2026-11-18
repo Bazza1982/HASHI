@@ -104,10 +104,26 @@ def _computer_registration(*, expires_at=None, actions=("click",)):
 
 
 def _definition_names(registry):
+    # Device assertions compare the actual device catalogue; the auxiliary
+    # result reader and request-scoped tool discovery are covered separately.
     return {
         item["function"]["name"]
         for item in registry.get_tool_definitions()
+        if item["function"]["name"] not in {"tool_output_read", "tool_catalog"}
     }
+
+
+def test_result_reader_is_only_advertised_for_a_run_with_available_source(tmp_path):
+    facade = _CapabilityFacade(capabilities=[_browser_registration()])
+    registry = _registry(tmp_path, "browser_get_text", facade)
+    names = {item["function"]["name"] for item in registry.get_tool_definitions()}
+    assert {"browser_get_text", "tool_output_read", "tool_catalog"} <= names
+
+    facade.capabilities["capabilities"] = []
+    names = {item["function"]["name"] for item in registry.get_tool_definitions()}
+    assert "browser_get_text" not in names
+    assert "tool_output_read" not in names
+    assert "tool_catalog" not in names
 
 
 @pytest.mark.asyncio
@@ -168,8 +184,9 @@ def test_catalogue_hides_unregistered_browser_and_explains_web_replacement(tmp_p
 
     definitions = registry.get_tool_definitions()
 
-    assert {item["function"]["name"] for item in definitions} == {"web_fetch"}
-    assert "Browser control is currently unavailable" in definitions[0]["function"]["description"]
+    assert {item["function"]["name"] for item in definitions} == {"web_fetch", "tool_catalog"}
+    web_fetch = next(item for item in definitions if item["function"]["name"] == "web_fetch")
+    assert "Browser control is currently unavailable" in web_fetch["function"]["description"]
 
 
 def test_catalogue_tracks_browser_registration_expiry_and_recovery(tmp_path):
@@ -256,7 +273,24 @@ async def test_capability_disappearing_after_catalogue_preflight_stays_typed(tmp
     assert result.is_error is True
     assert result.details["code"] == "capability_unavailable"
     assert result.details["reason"] == "disappeared_before_execution"
+    assert result.details["retryable"] is False
     assert "unexpected failure" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_status_failure_after_broker_dispatch_never_invents_a_safe_retry(tmp_path):
+    class DisappearingFacade(_CapabilityFacade):
+        async def invoke_capability(self, kind, action, args, **kwargs):
+            self.calls.append((kind, action, args, kwargs))
+            self.capabilities = {}
+            raise CapabilityUnavailableError("browser_control", action="get_text", reason="unavailable")
+
+    facade = DisappearingFacade(capabilities=[_browser_registration()])
+    registry = _registry(tmp_path, "browser_get_text", facade)
+    result = await registry.execute("browser_get_text", {}, "disappeared")
+    assert result.is_error and result.details["reason"] == "disappeared_before_execution"
+    assert result.details["retryable"] is False
+    assert len(facade.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -309,15 +343,73 @@ def test_cross_instance_capability_never_enters_local_catalogue(tmp_path):
     )
 
 
-def test_unreadable_capability_snapshot_fails_closed_with_accurate_reason(tmp_path):
+def test_unreadable_capability_snapshot_keeps_granted_schema_but_does_not_claim_execution(tmp_path):
     facade = _CapabilityFacade()
     facade.capabilities = {}
     registry = _registry(tmp_path, "browser_get_text", facade)
 
-    assert _definition_names(registry) == set()
+    assert _definition_names(registry) == {"browser_get_text"}
     assert registry.tool_availability("browser_get_text")["reason"] == (
         "capability_status_unavailable"
     )
+    assert registry.tool_availability("browser_get_text")["retryable"] is True
+    assert "temporarily unknown" in registry.get_tool_definitions()[0]["function"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_transient_capability_status_failure_recovers_without_changing_the_grant(tmp_path):
+    class FlakyFacade(_CapabilityFacade):
+        failing = True
+
+        def capability_status(self):
+            if self.failing:
+                raise OSError("private transient status failure")
+            return super().capability_status()
+
+    facade = FlakyFacade(capabilities=[_browser_registration()])
+    registry = _registry(tmp_path, "browser_get_text", facade)
+    assert _definition_names(registry) == {"browser_get_text"}
+    unavailable = await registry.execute("browser_get_text", {"url": "https://example.test"}, "failed-probe")
+    assert unavailable.is_error and unavailable.details["reason"] == "capability_status_unavailable"
+    assert unavailable.details["retryable"] is True
+    assert "private transient" not in unavailable.output
+    assert facade.calls == []
+    facade.failing = False
+    recovered = await registry.execute("browser_get_text", {"url": "https://example.test"}, "recovered")
+    assert not recovered.is_error and recovered.output == "ok"
+    assert len(facade.calls) == 1
+
+
+def test_gateway_status_probe_recovers_after_transient_transport_failure(tmp_path, monkeypatch):
+    from tools import registry as registry_module
+
+    state = {"failed": True}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _maximum):
+            return json.dumps({"instance_id": "HASHI1", "capabilities": [_browser_registration()]}).encode()
+
+    def urlopen(*_args, **_kwargs):
+        if state["failed"]:
+            raise OSError("synthetic transient network issue")
+        return Response()
+
+    monkeypatch.setattr(registry_module.urllib_request, "urlopen", urlopen)
+    registry = ToolRegistry(["browser_get_text"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+                            audit_context={"workbench_api_base_url": "http://127.0.0.1:9999",
+                                           "browser_gateway_proxy": {},
+                                           "global_config": SimpleNamespace(instance_id="HASHI1")})
+    assert _definition_names(registry) == {"browser_get_text"}
+    assert registry.tool_availability("browser_get_text")["retryable"] is True
+    state["failed"] = False
+    registry._http_capability_cache = None
+    assert registry.tool_availability("browser_get_text")["available"] is True
 
 
 @pytest.mark.asyncio

@@ -160,6 +160,98 @@ async def test_cmd_workzone_status_set_and_off(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_frontend_owner_can_cancel_path_entry_without_telegram(tmp_path):
+    from types import MethodType
+
+    from orchestrator.admin_local_testing import execute_local_command
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = _runtime(tmp_path)
+    runtime._authorized_telegram_ids = ()
+    runtime._is_authorized_user = MethodType(FlexibleAgentRuntime._is_authorized_user, runtime)
+    runtime.cmd_workzone = MethodType(runtime_workzone.cmd_workzone, runtime)
+    session = runtime_session.ensure_store(runtime).resolve_primary_session(
+        owner_id="local:alice", agent_id="agent", establish=True
+    )
+    result = await execute_local_command(
+        runtime, "/workzone cancel", source_channel="workbench_api",
+        session_metadata={"_hashi_owner_id": "local:alice", "session_surface": "workbench",
+                          "session_channel_key": "default", "session_id": session["session_id"]},
+    )
+    assert result["ok"] is True, result
+    assert runtime.replies
+
+
+@pytest.mark.asyncio
+async def test_frontend_workzone_menu_accepts_path_without_telegram_force_reply(tmp_path):
+    from types import MethodType
+
+    from orchestrator.command_interaction_bridge import dispatch_command_interaction
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config.authorized_id = 0
+    runtime._authorized_telegram_ids = ()
+    runtime._is_authorized_user = MethodType(FlexibleAgentRuntime._is_authorized_user, runtime)
+    runtime._is_command_allowed = lambda command: command == "workzone"
+    runtime.cmd_workzone = MethodType(runtime_workzone.cmd_workzone, runtime)
+    runtime.callback_workzone = MethodType(runtime_workzone.callback_workzone, runtime)
+
+    async def reply(update, text, **kwargs):
+        return await update.message.reply_text(text, **kwargs)
+
+    runtime._reply_text = reply
+    store = runtime_session.ensure_store(runtime)
+    session = store.resolve_primary_session(owner_id="local:alice", agent_id="agent", establish=True)
+    metadata = {
+        "actor_id": "local:alice", "_hashi_owner_id": "local:alice", "owner_id": "local:alice",
+        "instance_id": "HASHI1", "session_id": session["session_id"], "context_generation": 1,
+        "session_surface": "workbench", "session_channel_key": "default",
+        "connection_binding": "bindingabcdefghijkl",
+    }
+    operation = {
+        "version": 1, "op": "open", "command": "/workzone 1", "ui_locale": "en",
+        "client_id": "clientabcdefghijkl", "request_id": "requestabcdefghijkl",
+    }
+    opened = await dispatch_command_interaction(runtime, operation, metadata)
+    assert opened["ok"], opened
+    menu = runtime._command_interaction_store.menus[opened["messages"][-1]["command_ui"]["menu_id"]]
+    button = next(key for key, (data, _) in menu.actions.items() if data.startswith("wz:p:"))
+    field = next(item["text_input"] for row in menu.rows for item in row
+                 if item.get("button_id") == button)
+    assert field["max_length"] >= len(str(runtime.zone))
+    action = {
+        **operation, "op": "act", "command": "", "request_id": "actionabcdefghijkl",
+        "menu_id": menu.id, "revision": menu.revision, "button_id": button,
+        "input_text": str(runtime.zone),
+    }
+    result = await dispatch_command_interaction(runtime, action, metadata)
+    assert result["ok"], result
+    state = store.get_agent_workzone_set(owner_id="local:alice", agent_id="agent")
+    assert next(item for item in state["slots"] if item["slot_id"] == "1")["path"] == str(runtime.zone.resolve())
+    assert not getattr(runtime, "_pending_workzone_paths", {})
+
+    # Another change to the Agent profile invalidates an otherwise current
+    # menu action. The stale path must not overwrite the newer profile.
+    opened = await dispatch_command_interaction(
+        runtime, {**operation, "request_id": "requestabcdefghijl"}, metadata
+    )
+    menu = runtime._command_interaction_store.menus[opened["messages"][-1]["command_ui"]["menu_id"]]
+    button = next(key for key, (data, _) in menu.actions.items() if data.startswith("wz:p:"))
+    store.set_agent_workzone_slot(
+        owner_id="local:alice", agent_id="agent", slot_id="2", path=str(runtime.workspace_dir),
+        enabled=True, expected_revision=state["revision"], source="test",
+    )
+    before = store.get_agent_workzone_set(owner_id="local:alice", agent_id="agent")
+    stale = await dispatch_command_interaction(runtime, {
+        **action, "request_id": "actionabcdefghijl", "menu_id": menu.id,
+        "revision": menu.revision, "button_id": button, "input_text": str(runtime.workspace_dir),
+    }, metadata)
+    assert stale["ok"], stale
+    assert store.get_agent_workzone_set(owner_id="local:alice", agent_id="agent") == before
+
+
+@pytest.mark.asyncio
 async def test_numbered_workzones_are_attached_without_changing_main_cwd(tmp_path):
     runtime = _runtime(tmp_path)
     attached = runtime.global_config.project_root / "shared"

@@ -717,3 +717,207 @@ async def test_health_after_local_clone_removal_keeps_unrelated_failures(tmp_pat
     assert startup["ready_agents"] == 1
     assert startup["local_agents"] == 1
 # HASHI-Fingerprint: hfp_69f2e2d4d7ed4ad3b26bc89af0558695
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["personal", "enterprise"])
+async def test_draining_health_is_read_only_and_does_not_admit_new_work(tmp_path, monkeypatch, profile):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    server = _server(tmp_path, profile=profile)
+    owner = SimpleNamespace(
+        _handoff_draining=True,
+        shared_generation_id="retiring",
+        kernel_pid=12345,
+        runtimes=[
+            SimpleNamespace(name="ready-agent", startup_success=True),
+            SimpleNamespace(name="not-started", startup_success=False),
+        ],
+    )
+    server.orchestrator = owner
+    called = []
+
+    async def effect(request):
+        called.append(True)
+        return web.json_response({"ok": True})
+
+    def forbidden_health():
+        pytest.fail("draining health must not initialize enterprise storage")
+
+    server.app.router.add_post("/test-new-effect", effect)
+    monkeypatch.setattr(server, "_enterprise_health_payload", forbidden_health)
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.get("/api/health")
+        assert response.status == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        health = await response.json()
+        assert health["ok"] is True and health["ready"] is False
+        assert health["status"] == "draining"
+        assert health["kernel_pid"] == 12345
+        assert health["agents"] == ["ready-agent"]
+        assert health["shared_functions"]["generation_id"] == "retiring"
+        assert health["shared_functions"]["draining"] is True
+        assert (await client.get("/api/version")).status == 503
+        assert (await client.post("/test-new-effect")).status == 503
+        assert called == []
+        owner._handoff_draining = False
+        assert (await client.post("/test-new-effect")).status == 200
+        assert called == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["sessions", "consumer", "primary", "projection", "feed"])
+async def test_handoff_tracks_get_requests_that_can_write(tmp_path, monkeypatch, operation):
+    from threading import Event
+
+    from aiohttp.test_utils import TestClient, TestServer
+    from orchestrator.session_store import SessionStore
+    from tests.test_workbench_scheduler_api import _server as scheduler_server
+    from tests.test_scheduler_run_authorization import setup_personal
+
+    server, runtime = scheduler_server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    owner_id = SessionStore.owner_id_for(server.global_config)
+    session = server.session_store.ensure_default_session(owner_id=owner_id, agent_id="momo")
+    consumer = server.session_store.create_event_consumer(
+        session_id=session["session_id"], owner_id=owner_id,
+    )
+    entered, release = Event(), Event()
+    if operation == "feed":
+        import orchestrator.frontend_projection as frontend_projection
+
+        original_feed = frontend_projection.poll_frontend_feed
+
+        def slow_feed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release pending feed")
+            return original_feed(*args, **kwargs)
+
+        monkeypatch.setattr(frontend_projection, "poll_frontend_feed", slow_feed)
+    method = {"sessions": "list_sessions", "consumer": "poll_event_consumer"}.get(operation, "resolve_primary_session")
+    original = getattr(server.session_store, method)
+
+    def slow(*args, **kwargs):
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("test did not release pending read")
+        return original(*args, **kwargs)
+
+    if operation != "feed":
+        monkeypatch.setattr(server.session_store, method, slow)
+    idle = asyncio.Event()
+    idle.set()
+    owner = SimpleNamespace(
+        _handoff_draining=False, _shared_committed=True,
+        _handoff_requests_idle=idle, runtimes=[runtime],
+    )
+    server.orchestrator = owner
+    headers = {"X-Workbench-Token": server.admin_token}
+    path = {
+        "sessions": "/api/v1/sessions",
+        "consumer": f"/api/v1/sessions/{session['session_id']}/events?consumer_id={consumer['consumer_id']}",
+        "primary": "/api/v1/agents/momo/primary-session",
+        "projection": "/api/chat-projection/momo",
+        "feed": f"/api/v2/frontend/sessions/{session['session_id']}/feed",
+    }[operation]
+    async with TestClient(TestServer(server.app)) as client:
+        pending = asyncio.create_task(client.get(path, headers=headers))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            assert owner._handoff_requests == 1
+            assert not idle.is_set()
+            owner._handoff_draining = True
+            assert (await client.post("/api/v1/sessions", headers=headers, json={})).status == 503
+        finally:
+            release.set()
+        assert (await pending).status == 200
+        assert owner._handoff_requests == 0
+        assert idle.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["personal", "enterprise"])
+async def test_committed_drain_allows_owner_run_status_only_without_new_work(tmp_path, profile):
+    from aiohttp.test_utils import TestClient, TestServer
+    from orchestrator.enterprise import IdentityService
+    from orchestrator.session_store import SessionStore
+    from tests.test_workbench_scheduler_api import _server as scheduler_server
+    from tests.test_scheduler_run_authorization import setup_personal
+
+    server, runtime = scheduler_server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    headers = {"X-Workbench-Token": server.admin_token}
+    foreign_headers = None
+    if profile == "enterprise":
+        identity = IdentityService.from_path(tmp_path / "test-enterprise.sqlite")
+        identity.create_organization(org_id="ORG-001", name="Fixture")
+        for name in ("alice", "bob"):
+            identity.create_user(org_id="ORG-001", email=f"{name}@example.invalid",
+                                 display_name=name, password="fixture-only-password", user_id=name)
+        headers = {"Authorization": "Bearer " + identity.create_session(user_id="alice").token}
+        foreign_headers = {"Authorization": "Bearer " + identity.create_session(user_id="bob").token}
+        server.identity_service = identity
+        server.global_config.deployment_profile = "enterprise"
+        server.global_config.organization_id = "ORG-001"
+        owner_id = "enterprise:alice"
+    else:
+        owner_id = SessionStore.owner_id_for(server.global_config)
+    store = server.session_store
+    session = store.ensure_default_session(owner_id=owner_id, agent_id="momo")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id=owner_id, agent_id="momo",
+        request_id="read-only-drain-fixture", text="fixture", source="test",
+        idempotency_key="read-only-drain-fixture",
+    )
+    store.mark_request_running("read-only-drain-fixture", worker_id="test-worker")
+    # Listing this legacy placeholder normally repairs its title; drain must not.
+    with store._connection() as connection:
+        connection.execute(
+            "UPDATE sessions SET title='New session', title_source='system' WHERE session_id=?",
+            (session["session_id"],),
+        )
+    before = store.get_run(accepted.run_id, owner_id=owner_id)
+    before_session = store.get_session(session["session_id"], owner_id=owner_id)
+    before_events = store.events(session["session_id"], owner_id=owner_id)
+    owner = SimpleNamespace(_handoff_draining=True, _shared_committed=True, runtimes=[runtime])
+    server.orchestrator = owner
+    base = f"/api/v1/sessions/{session['session_id']}"
+    route = f"{base}/runs/{accepted.run_id}"
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.get(route, headers=headers)
+        assert response.status == 200, await response.text()
+        assert (await response.json())["run"]["run_id"] == accepted.run_id
+        for path in ("/api/v1/sessions", base, base + "/snapshot", base + "/messages", base + "/events"):
+            response = await client.get(path, headers=headers)
+            assert response.status == 200, (path, await response.text())
+            assert response.headers["Cache-Control"] == "no-store"
+            assert (await client.get(path)).status == 401
+            if foreign_headers:
+                foreign = await client.get(path, headers=foreign_headers)
+                if path == "/api/v1/sessions":
+                    assert foreign.status == 200
+                    assert (await foreign.json())["sessions"] == []
+                else:
+                    assert foreign.status == 404
+        wrong_session = f"/api/v1/sessions/other/runs/{accepted.run_id}"
+        assert (await client.get(wrong_session, headers=headers)).status == 404
+        assert (await client.get(route)).status == 401
+        if foreign_headers:
+            assert (await client.get(route, headers=foreign_headers)).status == 404
+        # Consumer polling mutates its cursor even though it is a GET.
+        assert (await client.get(base + "/events?consumer_id=fixture", headers=headers)).status == 503
+        assert (await client.post(route + "/cancel", headers=headers, json={})).status == 503
+        assert (await client.post(base + "/runs", headers=headers, json={})).status == 503
+        assert store.get_run(accepted.run_id, owner_id=owner_id) == before
+        assert store.get_session(session["session_id"], owner_id=owner_id) == before_session
+        assert store.events(session["session_id"], owner_id=owner_id) == before_events
+        owner._shared_committed = False
+        assert (await client.get(route, headers=headers)).status == 503
+        assert (await client.get(base + "/snapshot", headers=headers)).status == 503
+        assert (await client.get("/api/v1/sessions", headers=headers)).status == 503
+        owner._handoff_draining = False
+        assert (await client.get("/api/v1/sessions", headers=headers)).status == 200
+        assert store.get_session(session["session_id"], owner_id=owner_id)["title_source"] == "maintenance"

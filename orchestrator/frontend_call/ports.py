@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from orchestrator.session_store import SESSION_KIND_CONVERSATION
 from .contract import CallError
@@ -220,50 +221,143 @@ class HashiPorts:
             live_frame_facts,
         )
 
-        media = {
-            "version": 2,
-            "call_id": binding["call_id"],
-            "turn_id": turn_id,
-            **binding.get("call_context", {}),
-            "captured_at": captured_at,
-            "observation": observation,
-            "recent_frames": live_frame_facts(frames),
-        }
-        evidence = seal_connector_evidence(
-            Path(self.api.config_path).parent,
-            claims={"call_media": media},
-            prompt=execution_text,
-        )
-        if evidence is None:
-            raise CallError("call_context_unqualified", 503)
-        content = [{"type": "text", "text": execution_text}]
-        request_metadata = {
-            "session_id": binding["session_id"],
-            "owner_id": owner,
-            "session_surface": "workbench",
-            "session_channel_key": binding["client_id"],
-            "session_message_text": execution_text,
-            "session_message_display_text": text,
-            "session_message_content": content,
-            "frontend_client": {
-                "kind": "session_api",
-                "client_id": binding["client_id"],
-            },
-            "session_context_generation": binding["context_generation"],
-            CONNECTOR_EVIDENCE_METADATA_KEY: evidence,
-        }
-        if frames:
-            request_metadata[TRANSIENT_LIVE_FRAMES_METADATA_KEY] = encode_live_frames(
-                frames
+        selected_frames = list(frames)
+        frame_limit = binding.get("call_context", {}).get("max_frames_per_turn", 10)
+        chat_id = runtime._primary_chat_id()
+        idempotency_key = f"call:{binding['call_id']}:{turn_id}"
+
+        def metadata_for(current_frames, *, empty_frame_envelope=False):
+            media = {
+                "version": 2,
+                "call_id": binding["call_id"],
+                "turn_id": turn_id,
+                **binding.get("call_context", {}),
+                "captured_at": captured_at,
+                "observation": observation,
+                "recent_frames": live_frame_facts(
+                    current_frames,
+                    window_seconds=binding.get("call_context", {}).get("sample_window_seconds", 10),
+                ),
+            }
+            evidence = seal_connector_evidence(
+                Path(self.api.config_path).parent,
+                claims={"call_media": media},
+                prompt=execution_text,
             )
+            if evidence is None:
+                raise CallError("call_context_unqualified", 503)
+            request_metadata = {
+                "session_id": binding["session_id"],
+                "owner_id": owner,
+                "session_surface": "workbench",
+                "session_channel_key": binding["client_id"],
+                "session_message_text": execution_text,
+                "session_message_display_text": text,
+                "session_message_content": [{"type": "text", "text": execution_text}],
+                "frontend_client": {"kind": "session_api", "client_id": binding["client_id"]},
+                "session_context_generation": binding["context_generation"],
+                CONNECTOR_EVIDENCE_METADATA_KEY: evidence,
+            }
+            if current_frames:
+                request_metadata[TRANSIENT_LIVE_FRAMES_METADATA_KEY] = encode_live_frames(
+                    () if empty_frame_envelope else current_frames, max_frames=frame_limit
+                )
+            return request_metadata
+
+        # Older Workers need the original single-frame fallback. A Worker that
+        # advertises bounded logical requests can receive all selected samples
+        # without treating the physical frame size as a content limit.
+        from orchestrator import function_worker_protocol as ipc
+        from orchestrator.function_worker_large_request import LARGE_REQUEST_VERSION
+        from orchestrator.function_worker_supervisor import AgentRuntimeHandle
+
+        def worker_envelope(metadata):
+            # Keep this in step with AgentRuntimeHandle.enqueue_request. The
+            # real protocol uses a 32-character UUID hex request identifier.
+            params = {
+                "chat_id": int(chat_id), "prompt": str(execution_text), "source": "session-api",
+                "summary": str(text[:160]), "silent": False, "is_retry": False,
+                "deliver_to_telegram": True, "skip_memory_injection": False,
+                "habit_learning_eligible": True, "skill_id": None, "scheduler_context": {},
+                "request_metadata": metadata, "request_content": None,
+                "idempotency_key": idempotency_key, "replay_only": False,
+            }
+            return {
+                "version": ipc.FUNCTION_WORKER_PROTOCOL_VERSION, "kind": ipc.REQUEST,
+                "id": "0" * 32, "method": "runtime.enqueue_request", "params": params,
+            }
+
+        advertised = (
+            runtime.metadata.get("worker_large_request")
+            if isinstance(runtime, AgentRuntimeHandle) else None
+        )
+        supports_large = (
+            isinstance(advertised, dict)
+            and type(advertised.get("version")) is int
+            and advertised["version"] == LARGE_REQUEST_VERSION
+        )
+        if isinstance(runtime, AgentRuntimeHandle) and not supports_large:
+            def row_wire_size(frame):
+                placeholder = {**frame, "image": b"x"}
+                row = encode_live_frames((placeholder,), max_frames=frame_limit)["frames"][0]
+                base = len(json.dumps(row, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode("utf-8"))
+                return base - 4 + 4 * ((len(frame["image"]) + 2) // 3)
+
+            wire_costs = {id(frame): row_wire_size(frame) for frame in selected_frames}
+            while True:
+                empty = metadata_for(selected_frames, empty_frame_envelope=True)
+                try:
+                    base_size = len(ipc.encode_envelope(worker_envelope(empty)))
+                except ipc.FunctionWorkerProtocolError as exc:
+                    if not str(exc).startswith("IPC frame exceeds"):
+                        raise
+                    if not selected_frames:
+                        raise CallError("call_ipc_text_too_large", 413) from exc
+                    base_size = ipc.MAX_FRAME_BYTES + 1
+                frame_bytes = sum(wire_costs[id(frame)] for frame in selected_frames)
+                frame_bytes += max(0, len(selected_frames) - 1)
+                if base_size + frame_bytes <= ipc.MAX_FRAME_BYTES:
+                    request_metadata = metadata_for(selected_frames)
+                    try:
+                        ipc.encode_envelope(worker_envelope(request_metadata))
+                        break
+                    except ipc.FunctionWorkerProtocolError as exc:
+                        if not str(exc).startswith("IPC frame exceeds") or not selected_frames:
+                            raise
+                        # The complete serialized check remains authoritative.
+                        frame_bytes = ipc.MAX_FRAME_BYTES - base_size + 1
+                if not selected_frames:
+                    raise CallError("call_ipc_text_too_large", 413)
+                # Batch removals avoid quadratic work for explicitly selected
+                # larger sample counts. For equal sizes, retain wider coverage.
+                middle = (len(selected_frames) - 1) / 2
+                ranked = sorted(range(len(selected_frames)), key=lambda index: (
+                    wire_costs[id(selected_frames[index])], -abs(index - middle)
+                ), reverse=True)
+                removed = set()
+                remaining_count = len(selected_frames)
+                for index in ranked:
+                    if frame_bytes <= ipc.MAX_FRAME_BYTES - base_size:
+                        break
+                    frame_bytes -= wire_costs[id(selected_frames[index])]
+                    if remaining_count > 1:
+                        frame_bytes -= 1
+                    remaining_count -= 1
+                    removed.add(index)
+                selected_frames = [
+                    frame for index, frame in enumerate(selected_frames) if index not in removed
+                ]
+        else:
+            request_metadata = metadata_for(selected_frames)
         try:
             request_id = await runtime.enqueue_request(
-                runtime._primary_chat_id(),
+                chat_id,
                 execution_text,
                 "session-api",
                 text[:160],
                 deliver_to_telegram=True,
-                idempotency_key=f"call:{binding['call_id']}:{turn_id}",
+                idempotency_key=idempotency_key,
                 request_metadata=request_metadata,
             )
             if not request_id:
@@ -282,6 +376,8 @@ class HashiPorts:
             "request_id": str(request_id),
             "run_id": run["run_id"],
             "message_id": run["user_message_id"],
+            "_admitted_frame_sequences": [frame["frame_sequence"] for frame in selected_frames],
+            "_omitted_frames_for_transport": len(frames) - len(selected_frames),
         }
 
     async def cancel(self, owner, binding, *, request_id, run_id, reason):

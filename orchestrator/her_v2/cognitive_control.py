@@ -1,11 +1,8 @@
 """Provider-neutral cognitive control for tool-enabled HER v2 stages.
 
-The controller stores observable decisions and evidence-linked task progress,
-never hidden chain-of-thought. A repeated semantic tool/result cycle is strong
-enough to expose one typed decision boundary. A structurally unchanged
-TaskState is retained only as a low-confidence advisory signal: models can omit
-or misuse deltas while doing real work, so that signal alone never withholds
-ordinary tools.
+The controller stores observable diagnostics and evidence-linked task progress,
+never hidden chain-of-thought. Repeated semantic tool/result cycles and an
+unchanged TaskState are advisory; they do not change the authorized tool grant.
 """
 
 from __future__ import annotations
@@ -292,22 +289,20 @@ class StageCognitiveController:
         if detected is not None:
             period, block = detected
             signature = self._cycle_signature(block)
-            repeated = bool(
-                signature in self._seen_cycle_signatures and self._recovery_epoch
-            )
-            self._seen_cycle_signatures.add(signature)
-            return self._raise_interrupt(
-                code=(
-                    "NO_MEANINGFUL_PROGRESS" if repeated else "NO_NEW_INFORMATION_CYCLE"
-                ),
-                detection_kind="semantic_cycle",
-                cycle_period=period,
-                cycle_tools=tuple(item.tool_name for item in block),
-                cycle_signature=signature,
-                repeated_after_intervention=repeated,
-                progress_signature=observation.progress_signature,
-                stall_count=0,
-            )
+            if signature not in self._seen_cycle_signatures:
+                # One observation is enough; persistent repeats do not become
+                # a stream of mandatory decisions or tool denials.
+                self._seen_cycle_signatures.add(signature)
+                return self._raise_interrupt(
+                    code="NO_NEW_INFORMATION_CYCLE",
+                    detection_kind="semantic_cycle",
+                    cycle_period=period,
+                    cycle_tools=tuple(item.tool_name for item in block),
+                    cycle_signature=signature,
+                    repeated_after_intervention=False,
+                    progress_signature=observation.progress_signature,
+                    stall_count=0,
+                )
         self._observe_progress(
             observation,
             armed=bool(progress_tracking_armed),
@@ -346,11 +341,8 @@ class StageCognitiveController:
             stall_count=stall_count,
         )
         self._interrupt = interrupt
-        self._mode = (
-            "terminal_decision_required"
-            if repeated_after_intervention
-            else "decision_required"
-        )
+        # A semantic repeat is evidence to consider, not a change to the
+        # authenticated owner's tool grant or a reason to terminate a turn.
         return interrupt
 
     def _observe_progress(
@@ -399,7 +391,7 @@ class StageCognitiveController:
             return
         # Missing/no-op model deltas are not proof that execution itself is
         # stalled.  Saturate one advisory signal and keep the tools available;
-        # the independent semantic-cycle detector remains the hard safety net.
+        # semantic-cycle observations are advisory for the same reason.
         if signature != self._last_stagnation_signal_signature:
             self._stagnation_signal_count += 1
             self._last_stagnation_signal_signature = signature
@@ -443,14 +435,8 @@ class StageCognitiveController:
     def interrupt_payload(self) -> dict[str, Any]:
         if self._interrupt is None:
             return {}
-        terminal = self._interrupt.repeated_after_intervention
-        decisions = (
-            ["FINALIZE", "BLOCKED"]
-            if terminal
-            else ["FINALIZE", "REVISE_DIRECTION", "BLOCKED"]
-        )
         return {
-            "type": "HASHI_COGNITIVE_INTERRUPT",
+            "type": "HASHI_COGNITIVE_ADVISORY",
             "version": COGNITIVE_CONTROL_VERSION,
             "interrupt": self._interrupt.as_dict(),
             "cognitive_state": {
@@ -468,17 +454,12 @@ class StageCognitiveController:
                     if self.task_state is not None
                     else None
                 ),
-                "tools_withheld": True,
+                "tools_withheld": False,
             },
-            "required_next_action": {
-                "tool": COGNITIVE_DECISION_TOOL,
-                "allowed_decisions": decisions,
-                "instruction": (
-                    "Do not continue the stalled direction. Call the only "
-                    "available cognitive decision tool. This requests a typed "
-                    "decision conclusion, not hidden chain-of-thought."
-                ),
-            },
+            "instruction": (
+                "Repeated actions and results were observed. Consider whether "
+                "another approach would help; the authorized tools remain available."
+            ),
         }
 
     def decision_schema(self) -> dict[str, Any]:
@@ -606,7 +587,9 @@ class StageCognitiveController:
             self._revised_direction = required["revised_direction"]
             self._expected_change = required["expected_change"]
             self._stop_condition = required["stop_condition"]
-            self._active_tool_allowlist = frozenset(requested)
+            # A proposed direction is guidance; it cannot reduce the owner's
+            # existing grant after the suggested step.
+            self._active_tool_allowlist = None
             if self.task_state is not None:
                 self.task_state.revise_direction(
                     target_id=self._focus_target,
@@ -626,8 +609,8 @@ class StageCognitiveController:
             self._mode = "observing"
             self._interrupt = None
             instruction = (
-                "The structurally distinct direction was recorded and only the "
-                "requested tools are reopened. Seek the stated evidence change. "
+                "The direction was recorded. The owner's authorized tools remain "
+                "available. Seek the stated evidence change. "
                 "If the stop condition is reached, return the normal stage response."
             )
         else:
@@ -650,7 +633,7 @@ class StageCognitiveController:
                 "stage": self.stage,
                 "legacy_alias_used": legacy_revision,
                 "tools_reopened": (
-                    sorted(self._active_tool_allowlist)
+                    sorted(available)
                     if decision == "REVISE_DIRECTION"
                     else []
                 ),
@@ -712,26 +695,15 @@ class StageCognitiveController:
 
 
 def cognitive_system_contract() -> str:
-    """Return the mandatory contract installed for every HER v2 tool stage."""
+    """Return the advisory contract installed for every HER v2 tool stage."""
 
     return """## HASHI tool-boundary cognitive control
 
-Treat every tool result as evidence, not as permission to keep acting. At each
-tool boundary, decide whether the result changed relevant state, answered the
-current question, falsified the current direction, or satisfied the stage's
-completion criteria. Do not repeat actions that cannot change the task model.
-
-HASHI treats a structurally unchanged TaskState as an advisory signal because
-missing model-authored deltas do not prove that real work stopped. That signal
-alone never withholds tools. HASHI may temporarily replace the ordinary tools
-with `hashi_cognitive_decision` only after detecting a repeated semantic
-tool/result sequence. When that happens, do not continue the old direction.
-Record exactly one typed decision: FINALIZE, REVISE_DIRECTION, or BLOCKED.
-REVISE_DIRECTION must name a
-new focus, the changed direction, the evidence change that would make it useful,
-an explicit stop condition, and only the tools required to test it. This is a
-decision-state contract; never expose hidden chain-of-thought. After FINALIZE or
-BLOCKED, return the normal response required by the current stage."""
+Consider whether a tool result changed relevant state or answered the current
+question. Repeated actions and an unchanged TaskState are advisory signals, not
+proof that work has stopped. They do not withhold authorized tools or require a
+decision. Continue the user's task using the existing owner and delegated grants.
+Do not expose hidden chain-of-thought."""
 
 
 __all__ = [

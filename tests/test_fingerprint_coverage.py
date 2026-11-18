@@ -50,6 +50,7 @@ async def test_shell_no_declared_targets_never_scans_worktree(tmp_path, monkeypa
 @pytest.mark.asyncio
 async def test_shell_does_not_execute_when_required_start_audit_is_not_durable(tmp_path, monkeypatch):
     registry, store, work = registry_at(tmp_path)
+    registry.audit_context["fingerprint_policy"] = FingerprintPolicy(enabled=True, required=True).snapshot()
     real_record = store.record
     dispatched = False
 
@@ -71,6 +72,26 @@ async def test_shell_does_not_execute_when_required_start_audit_is_not_durable(t
     assert result.is_error
     assert dispatched is False
     assert not (work / "must-not-exist.txt").exists()
+    assert not events(store, "fingerprint_execution_started")
+
+
+@pytest.mark.asyncio
+async def test_optional_shell_audit_failure_reports_gap_and_dispatches_once(tmp_path, monkeypatch):
+    registry, store, work = registry_at(tmp_path)
+    real_record = store.record
+    calls = []
+    def fail_start(kind, *args, **kwargs):
+        if kind == "fingerprint_execution_started":
+            raise OSError("audit storage full")
+        return real_record(kind, *args, **kwargs)
+    async def read_only(*args, **kwargs):
+        calls.append("read")
+        return "OK"
+    monkeypatch.setattr(store, "record", fail_start)
+    monkeypatch.setattr(registry, "_dispatch_observed", read_only)
+    result = await registry.execute("shell", {"command": "read fixture"}, tool_call_id="shell")
+    assert not result.is_error and calls == ["read"]
+    assert result.details["fingerprint"]["evidence_status"] == "unavailable"
     assert not events(store, "fingerprint_execution_started")
 
 

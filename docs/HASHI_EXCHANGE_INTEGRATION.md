@@ -61,9 +61,14 @@ This projection is not merged with Direct/LAN identities and never makes an
 ungranted Exchange member visible.
 
 The local `hchat_send` and `/remote` status hops reach HASHI Remote on loopback
-and require the existing shared-token HMAC. They expose only Exchange status
-and HChat message submission. They cannot proxy terminal, files, rescue, TUI,
-Workbench, or arbitrary HTTP operations.
+and require the existing shared-token HMAC. The `/exchange/message` adapter
+also verifies that the signed source is this local instance; it is not a
+network-facing peer endpoint. It submits through the configured Exchange
+WebSocket, whose service routes the public address. Direct HASHI peers use the
+separate authenticated `/protocol/message` and `/protocol/reply` endpoints.
+TUI peers use `/protocol/tui` through the local `/tui/proxy` adapter. These
+adapters expose only their respective operations; they do not proxy arbitrary
+terminal, files, rescue, Workbench, or HTTP requests.
 
 ## Configuration and publication
 
@@ -110,6 +115,21 @@ The ACK means that the PAO inbox commit is durable; it does not claim model
 execution has started. If ACK or scheduling is interrupted, replay uses the
 same sender identity and message ID. SessionStore idempotency ensures a crash
 between queueing and inbox finalisation still resolves to the original Run.
+Recovery does not re-enqueue a Run already owned by a live queue or executor.
+
+For a new ordinary request to a personal instance, the verified Exchange actor
+determines the local data partition at acceptance. The same actor as the local
+Exchange identity uses the instance's current personal owner; a different
+actor uses that actor's separate Exchange partition. This internal routing
+choice is persisted with the accepted request and reused after recovery or
+configuration changes. Existing inbox entries without such a choice retain
+their legacy route; no old owner is inferred or migrated. Governed identity
+mapping and legacy unbound reply routing remain separate work.
+
+Freshness handling is an endpoint policy, not a required Exchange capability.
+A new outbound message without an explicit creation time gets one generated
+when its exact wire frame is first stored. An exact retry reuses that frame.
+Exchange authentication, message identity, deadlines and receipt checks remain.
 
 Cancellation after an inbox claim waits for the storage worker to settle, then
 releases only that invocation's still-matching scheduling lease. An unsuccessful

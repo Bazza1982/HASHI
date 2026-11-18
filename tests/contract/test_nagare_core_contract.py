@@ -752,7 +752,7 @@ steps:
     assert "step.started" not in {event["event"] for event in events}
 
 
-def test_debug_recovery_contract_rejects_an_exact_repeated_action() -> None:
+def test_debug_recovery_contract_accepts_an_exact_repeated_description() -> None:
     recovery = {
         "status": "recovered",
         "diagnosis": "Output format mismatch",
@@ -770,7 +770,7 @@ def test_debug_recovery_contract_rejects_an_exact_repeated_action() -> None:
     ]
 
     assert FlowRunner._validate_recovery_result(recovery, []) is None
-    assert "repeated" in FlowRunner._validate_recovery_result(recovery, history)
+    assert FlowRunner._validate_recovery_result(recovery, history) is None
 
 
 def test_completed_step_fails_closed_when_declared_artifact_is_missing(tmp_path) -> None:
@@ -1117,3 +1117,227 @@ steps:
     ]
     assert "run.cancelled" in events
     assert "run.failed" not in events
+
+
+
+def test_retired_controls_migrate_without_rejecting_business_data(tmp_path) -> None:
+    business = {
+        "max_retries": 12,
+        "timeout_seconds": 13,
+        "auto_apply": True,
+        "nested": {"max_attempts": 14, "retry_strategy": "business value"},
+    }
+    workflow = {
+        "workflow": {"id": "migration-test", "name": "Migration", "version": "1.0.0"},
+        "pre_flight": {"defaults": business, "collect_from_human": []},
+        "agents": {
+            "orchestrator": {"id": "orchestrator"},
+            "workers": [{"id": "worker", "role": "Worker", "backend": "callable",
+                         "max_retries": 3}],
+        },
+        "steps": [{
+            "id": "work", "name": "Work", "agent": "worker", "prompt": "Handle input",
+            "timeout_seconds": 1,
+            "wait_for_human_timeout_seconds": 2,
+            "input": {"params": {"business": business}},
+        }],
+        "error_handling": {
+            "max_attempts": 1,
+            "retry_strategy": {"attempt_1": "legacy"},
+            "retry_policy": {"max_attempts": 1, "backoff_multiplier": 1.5},
+            "recovery": {"max_attempts": 2},
+        },
+        "evaluation": {"enabled": False, "auto_apply": True, "improvement_threshold": 4},
+    }
+    path = tmp_path / "migration.yaml"
+    original = json.dumps(workflow, ensure_ascii=False).encode()
+    path.write_bytes(original)
+    class Handler:
+        def __init__(self):
+            self.params = None
+        def execute(self, agent_id, task_message, agent_md_path, backend="callable", model=""):
+            self.params = task_message["payload"]["params"]
+            return {"status": "completed", "artifacts_produced": {}}
+    handler = Handler()
+    runner = FlowRunner(str(path), run_id="migration-run", runs_root=tmp_path / "runs",
+                        repo_root=tmp_path, step_handler=handler)
+    assert runner.start()["success"] is True
+    assert handler.params["business"] == business
+    assert runner.workflow["pre_flight"]["defaults"] == business
+    assert "timeout_seconds" not in runner.workflow["steps"][0]
+    assert "max_attempts" not in runner.workflow["error_handling"]
+    assert runner.workflow["error_handling"]["recovery"]["max_attempts"] == 2
+    assert runner.workflow["error_handling"]["retry_policy"]["backoff_multiplier"] == 1.5
+    assert path.read_bytes() == original
+    records = [json.loads(line) for line in
+               (tmp_path / "runs" / "migration-run" / "events.jsonl").read_text(
+                   encoding="utf-8").splitlines()]
+    migration = next(row for row in records if row["event"] == "workflow.migration.retired_controls")
+    assert set(migration["data"]["fields"]) == {
+        "agents.workers[0].max_retries", "steps[0].timeout_seconds",
+        "steps[0].wait_for_human_timeout_seconds", "error_handling.max_attempts",
+        "error_handling.retry_strategy", "error_handling.retry_policy.max_attempts",
+        "evaluation.auto_apply", "evaluation.improvement_threshold",
+    }
+
+
+def test_retired_control_alias_preserves_business_mapping():
+    shared = {"id": "worker", "role": "Worker", "backend": "callable", "max_retries": 7}
+    source = {"agents": {"workers": [shared]}, "business": shared}
+    migrated, report = FlowRunner._migrate_retired_workflow_controls(source)
+    assert source["agents"]["workers"][0]["max_retries"] == 7
+    assert migrated["business"]["max_retries"] == 7
+    assert "max_retries" not in migrated["agents"]["workers"][0]
+    assert report == ["agents.workers[0].max_retries"]
+
+
+@pytest.mark.parametrize("strategy", ["sequential", "parallel"])
+def test_repeated_recovery_description_is_advisory(tmp_path, strategy) -> None:
+    workflow = {
+        "workflow": {"id": "repeat-test", "name": "Repeat", "version": "1.0.0"},
+        "pre_flight": {"collect_from_human": []},
+        "agents": {"orchestrator": {"id": "orchestrator"}, "workers": [
+            {"id": "worker", "role": "Worker", "backend": "callable"},
+            {"id": "debug", "role": "Debug", "backend": "callable"},
+        ]},
+        "steps": [{"id": "work", "name": "Work", "agent": "worker",
+                   "strategy": strategy, "prompt": "Work"}],
+        "error_handling": {"debug_agent": "debug"},
+        "evaluation": {"enabled": False},
+    }
+    path = tmp_path / "repeat.yaml"
+    path.write_text(json.dumps(workflow), encoding="utf-8")
+    class Handler:
+        def __init__(self):
+            self.worker_calls = 0
+            self.debug_calls = 0
+        def execute(self, agent_id, task_message, agent_md_path, backend="callable", model=""):
+            if agent_id == "debug":
+                self.debug_calls += 1
+                return {"status": "recovered", "diagnosis": "Transient failure",
+                        "evidence": ["Observed reconnect"], "fix_applied": "Reconnect",
+                        "changes_made": ["Reconnected"]}
+            self.worker_calls += 1
+            if self.worker_calls <= 2:
+                return {"status": "failed", "error_type": "task_error",
+                        "error_message": f"transient-{self.worker_calls}"}
+            return {"status": "completed", "artifacts_produced": {}}
+    handler = Handler()
+    runner = FlowRunner(str(path), run_id=f"repeat-{strategy}", runs_root=tmp_path / "runs",
+                        repo_root=tmp_path, step_handler=handler)
+    assert runner.start()["success"] is True
+    assert (handler.worker_calls, handler.debug_calls) == (3, 2)
+    records = [json.loads(line) for line in
+               (tmp_path / "runs" / runner.run_id / "events.jsonl").read_text(
+                   encoding="utf-8").splitlines()]
+    assert sum(row["event"] == "handler.recovery.repeated_description" for row in records) == 1
+    assert FlowRunner._validate_recovery_result({"status": "recovered"}, []) is not None
+
+
+def test_selected_debug_recovery_budget_is_honored(tmp_path):
+    workflow = {
+        "workflow": {"id": "budget-test", "name": "Budget", "version": "1.0.0"},
+        "pre_flight": {"collect_from_human": []},
+        "agents": {"orchestrator": {"id": "orchestrator"}, "workers": [
+            {"id": "worker", "role": "Worker", "backend": "callable"},
+            {"id": "debug", "role": "Debug", "backend": "callable"},
+        ]},
+        "steps": [{"id": "work", "name": "Work", "agent": "worker", "prompt": "Work"}],
+        "error_handling": {"debug_agent": "debug", "recovery": {"max_attempts": 1}},
+        "evaluation": {"enabled": False},
+    }
+    path = tmp_path / "budget.yaml"
+    path.write_text(json.dumps(workflow), encoding="utf-8")
+    class Handler:
+        def __init__(self):
+            self.debug_calls = 0
+        def execute(self, agent_id, task_message, agent_md_path, backend="callable", model=""):
+            if agent_id == "debug":
+                self.debug_calls += 1
+                return {"status": "recovered", "diagnosis": "Transient failure",
+                        "evidence": ["Observed reconnect"], "fix_applied": "Reconnect"}
+            return {"status": "failed", "error_type": "task_error", "error_message": "again"}
+    handler = Handler()
+    runner = FlowRunner(str(path), run_id="budget-run", runs_root=tmp_path / "runs",
+                        repo_root=tmp_path, step_handler=handler)
+    assert runner.start()["success"] is False
+    assert handler.debug_calls == 1
+
+
+
+def test_candidate_with_legacy_controls_promotes_original_bytes(tmp_path):
+    path = tmp_path / "sample.yaml"
+    candidate = tmp_path / "sample_candidate.yaml"
+    _write_candidate_fixture(path, version="1.0.0")
+    _write_candidate_fixture(candidate, version="1.1.0")
+    with candidate.open("a", encoding="utf-8") as handle:
+        handle.write("error_handling:\n  max_attempts: 2\n")
+    original_candidate = candidate.read_bytes()
+    runner = FlowRunner(str(path), run_id="candidate-migration", runs_root=tmp_path / "runs",
+                        repo_root=tmp_path)
+    assert runner._using_candidate is True
+    assert "error_handling.max_attempts" in runner._workflow_migration_report
+    assert "max_attempts" not in runner.workflow["error_handling"]
+    runner._handle_candidate_result(True)
+    assert path.read_bytes() == original_candidate
+
+
+@pytest.mark.parametrize("mode", ["malformed", "stop"])
+def test_recovery_does_not_retry_after_malformed_report_or_stop(tmp_path, mode):
+    workflow = {
+        "workflow": {"id": "control-test", "name": "Control", "version": "1.0.0"},
+        "pre_flight": {"collect_from_human": []},
+        "agents": {"orchestrator": {"id": "orchestrator"}, "workers": [
+            {"id": "worker", "role": "Worker", "backend": "callable"},
+            {"id": "debug", "role": "Debug", "backend": "callable"},
+        ]},
+        "steps": [{"id": "work", "name": "Work", "agent": "worker", "prompt": "Work"}],
+        "error_handling": {"debug_agent": "debug"},
+        "evaluation": {"enabled": False},
+    }
+    path = tmp_path / "control.yaml"
+    path.write_text(json.dumps(workflow), encoding="utf-8")
+    class Handler:
+        def __init__(self):
+            self.worker_calls = 0
+            self.runner = None
+        def execute(self, agent_id, task_message, agent_md_path, backend="callable", model=""):
+            if agent_id == "debug":
+                if mode == "stop":
+                    self.runner._stop_signal.write_text("stop", encoding="utf-8")
+                    return {"status": "recovered", "diagnosis": "Transient",
+                            "evidence": ["reconnected"], "fix_applied": "Reconnect"}
+                return {"status": "recovered", "diagnosis": "Incomplete"}
+            self.worker_calls += 1
+            return {"status": "failed", "error_type": "task_error", "error_message": "failed"}
+    handler = Handler()
+    runner = FlowRunner(str(path), run_id=f"control-{mode}", runs_root=tmp_path / "runs",
+                        repo_root=tmp_path, step_handler=handler)
+    handler.runner = runner
+    result = runner.start()
+    assert result["success"] is False
+    assert handler.worker_calls == 1
+    if mode == "stop":
+        assert result["error_type"] == "cancelled"
+    else:
+        events = [json.loads(line) for line in
+                  (tmp_path / "runs" / runner.run_id / "events.jsonl").read_text(
+                      encoding="utf-8").splitlines()]
+        failed = [row for row in events if row["event"] == "handler.invoke.failed"]
+        assert failed[-1]["error_code"] == "invalid_recovery_output"
+
+
+def test_migration_does_not_accept_dangling_dependencies(tmp_path):
+    workflow = {
+        "workflow": {"id": "dangling", "name": "Dangling", "version": "1.0.0"},
+        "agents": {"orchestrator": {"id": "orchestrator"}, "workers": [
+            {"id": "worker", "role": "Worker", "backend": "callable"},
+        ]},
+        "steps": [{"id": "work", "name": "Work", "agent": "worker", "prompt": "Work",
+                   "depends": ["missing"], "timeout_seconds": 1}],
+    }
+    path = tmp_path / "dangling.yaml"
+    path.write_text(json.dumps(workflow), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid DAG"):
+        FlowRunner(str(path), run_id="dangling-run", runs_root=tmp_path / "runs",
+                   repo_root=tmp_path)

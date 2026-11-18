@@ -27,9 +27,9 @@ REQUIRED_CAPABILITIES = (
     "receipt_v1",
     "agent_reply_v1",
     "public_address_v1",
-    "message_freshness_v1",
 )
-CAPABILITIES = REQUIRED_CAPABILITIES + (AUTHORIZED_ROUTES_CAPABILITY,)
+# Message age handling is an endpoint policy, not a relay requirement.
+CAPABILITIES = REQUIRED_CAPABILITIES + ("message_freshness_v1", AUTHORIZED_ROUTES_CAPABILITY)
 MESSAGE_KINDS = frozenset({"agent_message", "agent_reply"})
 MAX_FRAME_BYTES = 65536
 MAX_JSON_DEPTH = 8

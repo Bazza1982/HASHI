@@ -644,7 +644,9 @@ class TuiApiClient:
             if canonical_attachment_ready:
                 filename = str(attachment.get("filename") or "")
                 media_type = str(attachment.get("media_type") or "")
-                encoded = str(attachment.get("content_b64") or "")
+                encoded = attachment.get("content_b64")
+                if not isinstance(encoded, str):
+                    return {"ok": False, "code": "invalid_attachment", "error": "Invalid attachment"}
                 if (
                     not filename
                     or filename in {".", ".."}
@@ -660,8 +662,7 @@ class TuiApiClient:
                 except (ValueError, TypeError, OverflowError, binascii.Error):
                     return {"ok": False, "code": "invalid_attachment", "error": "Invalid attachment"}
                 if (
-                    not content
-                    or len(content) > 25 * 1024 * 1024
+                    len(content) > 25 * 1024 * 1024
                     or len(content) != declared_size
                     or hashlib.sha256(content).hexdigest()
                     != str(attachment.get("sha256") or "").lower()
@@ -790,10 +791,8 @@ class TuiApiClient:
             if (
                 not reference
                 or len(reference.encode("utf-8")) > 4096
-                or reference.startswith(("/", "\\"))
-                or "\\" in reference
-                or ":" in reference
-                or any(part in {"", ".", ".."} for part in reference.split("/"))
+                or "\x00" in reference
+                or any(part == ".." for part in reference.replace("\\", "/").split("/"))
             ):
                 return {"ok": False, "code": "invalid_workzone_ref", "error": "Invalid Workzone reference"}
             capabilities = await self.capabilities_info()

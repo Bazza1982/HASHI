@@ -252,6 +252,8 @@ class StageRequest:
     checkpoint_coordinator: CompulsoryReplanCoordinator | None = field(
         default=None, compare=False, repr=False
     )
+    # Remaining ordinary same-target recoveries for this stage attempt.
+    provider_recovery_remaining: int | None = None
 
 
 @dataclass(frozen=True)

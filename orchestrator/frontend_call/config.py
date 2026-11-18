@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import re
-from ipaddress import ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urlsplit
 from orchestrator.config_json import (
@@ -16,6 +16,7 @@ from orchestrator.config_json import (
     new_config_json,
 )
 from orchestrator.voice_catalog import VoiceCatalog, VoiceCatalogError
+from orchestrator.lan_transport import lan_host_is_admissible as _lan_host_is_admissible
 from .contract import CallError, digest, identifier
 
 RESERVED = {
@@ -38,24 +39,45 @@ OPENROUTER_GEMINI_TTS_MODELS = {
     "google/gemini-3.8-flash-lite-tts",
     "google/gemini-3.8-flash-tts",
 }
-PRIVATE_LAN_NETWORKS = tuple(
-    ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
-)
 
 
-def _is_private_lan_literal(host):
-    try:
-        address = ip_address(host)
-    except ValueError:
-        return False
-    return address.version == 4 and any(
-        address in network for network in PRIVATE_LAN_NETWORKS
-    )
+_CALL_CAPACITY_SETTINGS = {
+    "targets": "HASHI_CALL_MAX_TARGETS",
+    "routes": "HASHI_CALL_MAX_ROUTES",
+    "profiles": "HASHI_CALL_MAX_PROFILES",
+    "agent_defaults": "HASHI_CALL_MAX_AGENT_DEFAULTS",
+    "voices": "HASHI_CALL_MAX_VOICES",
+    "options": "HASHI_CALL_MAX_OPTIONS",
+    "model_chars": "HASHI_MEDIA_MAX_MODEL_CHARS",
+}
+
+
+def call_capacity():
+    """Unset capacities impose no extra fixed catalogue count or model length."""
+    result = {}
+    for key, setting in _CALL_CAPACITY_SETTINGS.items():
+        raw = os.environ.get(setting)
+        if raw is None or raw == "":
+            result[key] = None
+        elif raw.isascii() and raw.isdecimal() and int(raw) > 0:
+            result[key] = int(raw)
+        else:
+            raise CallError("call_capacity_invalid", 503)
+    return result
+
+
+def enforce_capacity(key, count, code, status=429):
+    limit = call_capacity()[key]
+    if limit is not None and count > limit:
+        error = CallError(code, status)
+        error.capacity = {"setting": _CALL_CAPACITY_SETTINGS[key], "limit": limit}
+        raise error
 
 
 def options_for(target, value):
-    if not isinstance(value, dict) or len(value) > 16:
+    if not isinstance(value, dict):
         raise CallError("call_options_invalid")
+    enforce_capacity("options", len(value), "call_options_limit")
     result = {}
     schema = target.get("options", {})
     for key, item in value.items():
@@ -64,15 +86,16 @@ def options_for(target, value):
             raise CallError("call_option_unsupported")
         kind = spec.get("type")
         if kind == "string":
-            if not isinstance(item, str) or len(item) > min(
-                int(spec.get("max_length", 300)), 1000
-            ):
+            maximum = spec.get("max_length", 300)
+            if type(maximum) is not int or maximum < 0:
+                raise CallError("call_option_schema_invalid", 503)
+            if not isinstance(item, str) or len(item) > maximum:
                 raise CallError("call_option_invalid")
         elif kind == "number":
             if (
                 type(item) not in (int, float)
                 or not math.isfinite(item)
-                or not spec.get("min", -100) <= item <= spec.get("max", 100)
+                or not spec.get("min", -math.inf) <= item <= spec.get("max", math.inf)
             ):
                 raise CallError("call_option_invalid")
         elif kind == "boolean":
@@ -84,6 +107,34 @@ def options_for(target, value):
             raise CallError("call_option_invalid")
         result[key] = item
     return result
+
+
+def pcm_settings_for(target):
+    """Validate the exact raw PCM codec; recognize existing built-in Gemini defaults."""
+    keys = ("pcm_sample_rate_hz", "pcm_sample_width_bytes", "pcm_channels", "pcm_encoding")
+    legacy = (
+        target.get("kind") == "tts"
+        and target.get("model") in OPENROUTER_GEMINI_TTS_MODELS
+        and str(target.get("base_url") or "").rstrip("/") == OPENROUTER_API_BASE
+        and not any(key in target for key in keys)
+    )
+    settings = (
+        {"pcm_sample_rate_hz": 24000, "pcm_sample_width_bytes": 2,
+         "pcm_channels": 1, "pcm_encoding": "s16le"}
+        if legacy else {key: target.get(key) for key in keys}
+    )
+    rate = settings["pcm_sample_rate_hz"]
+    width = settings["pcm_sample_width_bytes"]
+    channels = settings["pcm_channels"]
+    if (
+        target.get("kind") != "tts"
+        or type(rate) is not int or not 8000 <= rate <= 96000
+        or type(width) is not int or width != 2
+        or type(channels) is not int or channels not in (1, 2)
+        or settings["pcm_encoding"] != "s16le"
+    ):
+        raise CallError("call_audio_format_unsupported", 503)
+    return settings
 
 
 def validate_target(target):
@@ -100,6 +151,12 @@ def validate_target(target):
         "audio_chat",
     ) or ("stt_protocol" in target and target["kind"] != "stt"):
         raise CallError("call_adapter_unsupported", 503)
+    if "stt_segment_seconds" in target and (
+        target["kind"] != "stt"
+        or type(target["stt_segment_seconds"]) is not int
+        or target["stt_segment_seconds"] < 1
+    ):
+        raise CallError("call_media_capacity_invalid", 503)
     parsed = urlsplit(str(target.get("base_url", "")))
     if (
         parsed.username
@@ -118,14 +175,15 @@ def validate_target(target):
         ):
             raise CallError("call_local_target_not_loopback", 503)
     elif location == "lan":
-        if parsed.scheme not in ("http", "https") or not _is_private_lan_literal(
+        if parsed.scheme not in ("http", "https") or not _lan_host_is_admissible(
             parsed.hostname
         ):
             raise CallError("call_lan_target_not_private", 503)
     elif location != "cloud" or parsed.scheme != "https":
         raise CallError("call_target_invalid", 503)
-    if not isinstance(target.get("model"), str) or not 1 <= len(target["model"]) <= 200:
+    if not isinstance(target.get("model"), str) or not target["model"].strip():
         raise CallError("call_model_required", 503)
+    enforce_capacity("model_chars", len(target["model"]), "call_model_limit", 503)
     credential = target.get("credential_env", "")
     if credential and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,100}", credential):
         raise CallError("call_credential_reference_invalid", 503)
@@ -142,12 +200,17 @@ def validate_target(target):
     if target["kind"] == "tts" and (
         not isinstance(target.get("voices"), list)
         or not target["voices"]
-        or len(target["voices"]) > 200
     ):
         raise CallError("call_voices_required", 503)
-    for voice in target.get("voices", []):
+    voices = target.get("voices", [])
+    if not isinstance(voices, list):
+        raise CallError("call_voices_invalid", 503)
+    enforce_capacity("voices", len(voices), "call_voices_limit", 503)
+    for voice in voices:
         if not isinstance(voice, str) or not 1 <= len(voice) <= 160:
             raise CallError("call_voices_invalid", 503)
+    if len(set(voices)) != len(voices):
+        raise CallError("call_voices_invalid", 503)
     voice_styles = target.get("voice_styles", {})
     if (
         not isinstance(voice_styles, dict)
@@ -161,26 +224,40 @@ def validate_target(target):
     audio_format = target.get("audio_format", "mp3")
     if audio_format not in ("mp3", "wav", "pcm"):
         raise CallError("call_audio_format_unsupported", 503)
-    gemini_openrouter = (
-        target["kind"] == "tts"
-        and target["model"] in OPENROUTER_GEMINI_TTS_MODELS
-        and target["base_url"].rstrip("/") == OPENROUTER_API_BASE
-    )
-    if (gemini_openrouter and audio_format != "pcm") or (
-        audio_format == "pcm" and not gemini_openrouter
-    ):
-        raise CallError("call_audio_format_unsupported", 503)
+    pcm_settings = pcm_settings_for(target) if audio_format == "pcm" else {}
     schema = target.get("options", {})
-    if not isinstance(schema, dict) or len(schema) > 16 or set(schema) & RESERVED:
+    if not isinstance(schema, dict) or set(schema) & RESERVED:
         raise CallError("call_option_schema_invalid", 503)
+    enforce_capacity("options", len(schema), "call_option_schema_limit", 503)
     for key, spec in schema.items():
-        if not re.fullmatch(r"[a-z][a-z0-9_]{0,50}", key) or not isinstance(spec, dict):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,50}", key) or not isinstance(spec, dict):
             raise CallError("call_option_schema_invalid", 503)
         if set(spec) - {"type", "min", "max", "max_length", "enum"} or spec.get(
             "type"
         ) not in ("string", "number", "boolean"):
             raise CallError("call_option_schema_invalid", 503)
-    return copy.deepcopy(target)
+        if "max_length" in spec and (type(spec["max_length"]) is not int or spec["max_length"] < 0):
+            raise CallError("call_option_schema_invalid", 503)
+        for bound in ("min", "max"):
+            if bound in spec and (type(spec[bound]) not in (int, float) or not math.isfinite(spec[bound])):
+                raise CallError("call_option_schema_invalid", 503)
+        if spec.get("min", -math.inf) > spec.get("max", math.inf):
+            raise CallError("call_option_schema_invalid", 503)
+        if "enum" in spec:
+            if not isinstance(spec["enum"], list):
+                raise CallError("call_option_schema_invalid", 503)
+            kind = spec["type"]
+            for item in spec["enum"]:
+                if kind == "string":
+                    valid = isinstance(item, str) and len(item) <= spec.get("max_length", 300)
+                elif kind == "number":
+                    valid = (type(item) in (int, float) and math.isfinite(item)
+                             and spec.get("min", -math.inf) <= item <= spec.get("max", math.inf))
+                else:
+                    valid = type(item) is bool
+                if not valid:
+                    raise CallError("call_option_schema_invalid", 503)
+    return {**copy.deepcopy(target), **pcm_settings}
 
 
 class CallConfig:
@@ -209,7 +286,10 @@ class CallConfig:
                 platform=self.platform,
             )
         except VoiceCatalogError as exc:
-            raise CallError("call_tts_catalog_invalid", 503) from exc
+            error = CallError("call_tts_catalog_invalid", 503)
+            if isinstance(getattr(exc, "capacity", None), dict):
+                error.capacity = dict(exc.capacity)
+            raise error from exc
 
     @staticmethod
     def _catalog_target(catalog, service_id):
@@ -261,7 +341,7 @@ class CallConfig:
         if doc.get("version") != 1 or doc.get("enabled") is not True:
             raise CallError("call_disabled", 503)
         rows = doc.get("targets", [])
-        if not isinstance(rows, list) or not 1 <= len(rows) <= 30:
+        if not isinstance(rows, list) or not rows:
             raise CallError("call_targets_invalid", 503)
         if any(not isinstance(row, dict) for row in rows):
             raise CallError("call_configuration_invalid", 503)
@@ -283,6 +363,7 @@ class CallConfig:
                 targets[service_id] = self._catalog_target(catalog, service_id)
             if not any(row["kind"] == "tts" for row in targets.values()):
                 raise CallError("call_tts_catalog_empty", 503)
+        enforce_capacity("targets", len(targets), "call_targets_limit", 503)
         revision = (
             doc.revision
             if catalog is None
@@ -366,9 +447,11 @@ class CallConfig:
         if effective_revision != revision:
             raise CallError("call_configuration_changed", 409)
         routes = doc.setdefault("routes", {})
+        if not isinstance(routes, dict):
+            raise CallError("call_configuration_invalid", 503)
         key = digest([owner, agent])
-        if key not in routes and len(routes) >= 200:
-            raise CallError("call_profile_limit", 429)
+        if key not in routes:
+            enforce_capacity("routes", len(routes) + 1, "call_profile_limit")
         routes[key] = route
         self._write(doc)
         return self.route(owner, agent)
@@ -382,30 +465,29 @@ class CallConfig:
             "responsive_seconds": 12,
             "startup_timeout_seconds": 8,
             "max_observations_per_minute": 120,
+            "sample_window_seconds": 10,
+            "max_frames_per_turn": 10,
+            "max_buffer_frames": 32,
+            "max_buffer_bytes": 0,
         }
         supplied = doc.get("video_policy", {})
         if not isinstance(supplied, dict) or set(supplied) - set(policy):
             raise CallError("call_video_policy_invalid", 503)
         policy.update(supplied)
-        # Configurations saved before the readiness states existed may have a
-        # shorter explicit freshness window. Preserve them without making the
-        # derived responsive window invalid.
+        # These are selected resource budgets, not universal eligibility
+        # rules. Keep integer validation while allowing the instance's chosen
+        # slower device and freshness policy to reach every Call consumer.
+        if any(type(value) is not int or not 1 <= value <= 2**31 - 1
+               for key, value in policy.items() if key != "max_buffer_bytes"):
+            raise CallError("call_video_policy_invalid", 503)
+        if (type(policy["max_buffer_bytes"]) is not int
+            or not 0 <= policy["max_buffer_bytes"] <= 2**53 - 1):
+            raise CallError("call_video_policy_invalid", 503)
+        # Older configurations may omit a responsive window.
         if "responsive_seconds" not in supplied:
             policy["responsive_seconds"] = min(
                 policy["responsive_seconds"], policy["freshness_seconds"]
             )
-        bounds = {
-            "interval_ms": (500, 10000),
-            "freshness_seconds": (3, 30),
-            "responsive_seconds": (3, 30),
-            "startup_timeout_seconds": (3, 20),
-            "max_observations_per_minute": (1, 120),
-        }
-        if any(
-            type(policy[k]) is not int or not low <= policy[k] <= high
-            for k, (low, high) in bounds.items()
-        ):
-            raise CallError("call_video_policy_invalid", 503)
         if policy["responsive_seconds"] > policy["freshness_seconds"]:
             raise CallError("call_video_policy_invalid", 503)
         return policy
@@ -427,8 +509,9 @@ class CallConfig:
             doc, targets = self.read()
         key = digest([owner, agent])
         agent_defaults = doc.get("agent_defaults", {})
-        if not isinstance(agent_defaults, dict) or len(agent_defaults) > 200:
+        if not isinstance(agent_defaults, dict):
             raise CallError("call_profile_invalid")
+        enforce_capacity("agent_defaults", len(agent_defaults), "call_profile_limit")
         default = agent_defaults.get(agent, doc.get("default_profile", {}))
         value = doc.get("profiles", {}).get(key, default)
         return self.validate_profile(value, targets)
@@ -485,6 +568,7 @@ class CallConfig:
             return {
                 "revision": disabled.revision,
                 "targets": [],
+                "capacity": call_capacity(),
                 "profile": {"stt": None, "tts": None, "vision": None},
                 "video_policy": self.video_policy(disabled),
                 **self.route(owner, agent, disabled),
@@ -503,6 +587,7 @@ class CallConfig:
                     "adapter",
                     "location",
                     "model",
+                    "stt_segment_seconds",
                     "voices",
                     "voice_metadata",
                     "voice_styles",
@@ -516,6 +601,7 @@ class CallConfig:
         return {
             "revision": revision,
             "targets": public,
+            "capacity": call_capacity(),
             "profile": self.profile(owner, agent, doc, targets),
             "video_policy": self.video_policy(doc),
             **{
@@ -556,8 +642,12 @@ class CallConfig:
             raise CallError("call_configuration_changed", 409)
         profile = self.validate_profile(profile, targets)
         profiles = doc.setdefault("profiles", {})
-        if len(profiles) >= 200 and digest([owner, agent]) not in profiles:
-            raise CallError("call_profile_limit", 429)
-        profiles[digest([owner, agent])] = profile
+        if not isinstance(profiles, dict):
+            raise CallError("call_profile_invalid")
+        key = digest([owner, agent])
+        if key not in profiles:
+            enforce_capacity("profiles", len(profiles) + 1, "call_profile_limit")
+        profiles[key] = profile
         self._write(doc)
         return self.context(owner, agent)
+# HASHI-Fingerprint: hfp_e30d01328e8349c7b2bc8973641ce276

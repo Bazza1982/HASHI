@@ -153,6 +153,10 @@ and [Superloop contract](https://github.com/Bazza1982/HASHI/blob/main/docs/SUPER
 ## Media, voice, and notifications
 
 Telegram's /long … /end controls group text and attachments into one request.
+The draft stays open after an idle reminder. Use /long continue to keep it,
+/end to submit confirmed items, or /long discard to clear the draft. Pending
+voice confirmations are excluded on submission and reported. The draft is
+kept in memory while the process runs.
 Media remains ordered; native input and local inspection depend on the
 selected model's capabilities and configured routes.
 
@@ -190,9 +194,10 @@ component reports the same target commit. It refuses dirty, busy,
 non-fast-forward, packaged, or partially adopted instances. See the
 [source release decision](HASHI_SOURCE_RELEASE_CLOSURE.md).
 
-In the TUI, /to selects an agent and /instance selects an eligible trusted
-peer. Peer switching requires the Remote handshake and advertised TUI proxy
-capability. The TUI is a reference client; it does not yet implement the full
+In the TUI, /to selects an agent and /instance selects a reachable trusted
+peer. Remote verifies the actual peer when connecting; stale discovery or
+capability information alone does not block the attempt. The TUI is a
+reference client; it does not yet implement the full
 Persistent Session API multi-session experience.
 
 Presentation controls include /language, /theme, and /sidepanel. These affect

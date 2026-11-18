@@ -17,6 +17,7 @@ from orchestrator.session_store import MAX_SESSION_ATTACHMENT_BYTES
 
 MENU_TTL = 900
 TELEGRAM_MAX_BYTES = 50_000_000
+MAX_GETFILE_PATH_CHARS = 4096
 
 
 class GetFileError(ValueError):
@@ -67,7 +68,7 @@ def resolve_path(raw, roots, cwd):
     value = raw.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         value = value[1:-1]
-    if not value or len(value) > 4096 or any(ord(c) < 32 for c in value):
+    if not value or len(value) > MAX_GETFILE_PATH_CHARS or any(ord(c) < 32 for c in value):
         raise GetFileError("invalid_path")
     from tools.device_paths import wsl_to_windows_path, windows_to_wsl_path
     try:

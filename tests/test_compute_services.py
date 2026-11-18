@@ -561,7 +561,8 @@ def test_legacy_overview_accepts_complete_enriched_capability_object():
     "value",
     [
         {"location": "lan", "base_url": "http://8.8.8.8:19446"},
-        {"location": "lan", "base_url": "http://compute.local:19446"},
+        {"location": "lan", "base_url": "http://169.254.169.254"},
+        {"location": "lan", "base_url": "http://100.100.100.200"},
         {"location": "local", "base_url": "http://192.168.1.50:19446"},
         {"location": "internet", "base_url": "http://models.example.com"},
         {"location": "internet", "base_url": "https://192.168.1.50"},
@@ -579,6 +580,14 @@ def test_node_configuration_fails_closed_at_privacy_boundary(value):
     }
     with pytest.raises(ComputeServiceError, match="compute_node_invalid"):
         validate_compute_node(row)
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://compute.local:19446", "http://100.64.1.1:19446",
+    "http://[fd01::1234]:19446",
+])
+def test_lan_node_accepts_hostnames_vpn_and_private_ipv6(base_url):
+    assert _lan_node(base_url=base_url).base_url == base_url
 
 
 def test_node_uses_a_non_conflicting_well_known_manifest_default():
@@ -809,6 +818,71 @@ class _FakeSessionFactory:
 
 
 @pytest.mark.asyncio
+async def test_compute_and_video_lan_dns_pin_real_connections_and_reject_rebinding(monkeypatch):
+    import socket
+    from aiohttp import web
+    from orchestrator import lan_transport
+    from orchestrator.frontend_call.contract import CallError
+    from orchestrator.frontend_call.video_tts import VideoSpeechClient
+
+    calls, resolutions = [], []
+
+    async def respond(request):
+        calls.append((request.host, request.path))
+        if request.path == "/.well-known/hashi-compute":
+            return web.json_response(_formal_manifest())
+        if request.path == "/v1/audio/speech":
+            return web.Response(body=b"fixture-wav", content_type="audio/wav")
+        return web.json_response({"result": "ok"})
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", respond)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    class Delegate:
+        async def resolve(self, host, selected_port=0, family=socket.AF_UNSPEC):
+            resolutions.append(host)
+            address = "127.0.0.1" if len(resolutions) <= 4 else "8.8.8.8"
+            return [{"hostname": host, "host": address, "port": selected_port,
+                     "family": socket.AF_INET, "proto": 0, "flags": 0}]
+        async def close(self):
+            pass
+
+    private = lan_transport.is_private_lan_address
+    monkeypatch.setattr(lan_transport, "is_private_lan_address",
+                        lambda host: host == "127.0.0.1" or private(host))
+    monkeypatch.setattr(lan_transport.aiohttp.resolver, "DefaultResolver", Delegate)
+    node = _lan_node(base_url=f"http://compute.test:{port}")
+    client = ComputeServiceClient()
+    try:
+        snapshot = await client.fetch_manifest(node)
+        vision = snapshot.catalogue().resolve(
+            ComputeReference("studio-gpu", "vision", "minicpm-v-4.6"))
+        speech = snapshot.catalogue().resolve(
+            ComputeReference("studio-gpu", "advanced-voice", "minicpm-o-4.5-zh-female"))
+        assert await client.invoke_json(vision, "openai.chat.completions", {}) == {"result": "ok"}
+        assert await client.invoke_bytes(speech, "openai.audio.speech", {}) == (b"fixture-wav", "audio/wav")
+        video = VideoSpeechClient()
+        assert await video.request(node, "GET", node.base_url + "/video/task") == {"result": "ok"}
+        assert [path for _host, path in calls] == [
+            "/.well-known/hashi-compute", "/v1/chat/completions",
+            "/v1/audio/speech", "/video/task"]
+        assert all(host == f"compute.test:{port}" for host, _path in calls)
+        with pytest.raises(ComputeServiceError, match="compute_node_unreachable"):
+            await client.fetch_manifest(node)
+        with pytest.raises(CallError, match="call_video_service_unavailable"):
+            await video.request(node, "GET", node.base_url + "/video/task")
+        assert len(calls) == 4
+        assert resolutions == ["compute.test"] * 6
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_manifest_client_is_bounded_and_never_follows_redirects():
     factory = _FakeSessionFactory(_FakeResponse(_formal_manifest()))
     snapshot = await ComputeServiceClient(session_factory=factory).fetch_manifest(
@@ -972,8 +1046,11 @@ async def test_compute_transcription_posts_bounded_multipart_to_discovered_origi
     fields = {item[0]["name"]: item[2] for item in receipt["data"]._fields}
     assert fields == {"file": b"ogg-audio", "model": "sensevoice-small",
                       "response_format": "json", "language": "zh"}
+    oversized = b"x" * (8 * 1024 * 1024 + 1)
     with pytest.raises(ComputeServiceError, match="audio"):
-        await client.transcribe(_resolved_stt(), b"x" * (8 * 1024 * 1024 + 1))
+        await client.transcribe(_resolved_stt(), oversized)
+    assert await client.transcribe(_resolved_stt(), oversized,
+                                   max_input_bytes=len(oversized)) == {"text": "\u4f60\u597d"}
 
 
 @pytest.mark.asyncio

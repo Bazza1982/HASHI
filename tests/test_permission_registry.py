@@ -1,11 +1,12 @@
 """Explicit managed registry uses the existing policy and a supervised port."""
 import asyncio
+import json
 
 import pytest
 
 from orchestrator.permissions.authority import PermissionAuthority
 from orchestrator.permissions.models import ExecutionContext, normalize_scope
-from orchestrator.permissions.registry import ManagedToolRegistry
+from orchestrator.permissions.registry import ManagedCatalogueRegistry, ManagedToolRegistry
 from tests.test_permission_execution_gate import Issuer, TestFileSupervisor, find_pending
 from tools.registry import ToolRegistry, ToolResult
 
@@ -42,7 +43,9 @@ def test_l0_catalogue_is_unchanged_and_managed_mode_adds_only_control_tools(envi
     legacy_names = {item["function"]["name"] for item in legacy.get_tool_definitions()}
     managed_names = {item["function"]["name"] for item in managed.get_tool_definitions()}
     assert not {"request_access", "get_access_status", "release_access"} & legacy_names
-    assert managed_names == legacy_names | {"request_access", "get_access_status", "release_access"}
+    # Managed tool discovery awaits a qualified supervised execution channel.
+    assert "tool_catalog" in legacy_names and "tool_catalog" not in managed_names
+    assert managed_names == (legacy_names - {"tool_catalog"}) | {"request_access", "get_access_status", "release_access"}
 
 
 def test_managed_registry_rejects_shared_credentials(environment, tmp_path):
@@ -55,6 +58,47 @@ def test_managed_registry_rejects_shared_credentials(environment, tmp_path):
             permission_authority=authority, permission_context=context,
             permission_supervisor=supervisor, requestable_scopes=(ceiling,),
         )
+
+
+@pytest.mark.asyncio
+async def test_managed_catalogue_shows_only_qualified_tool_channels(environment, tmp_path):
+    authority, _, context, supervisor, base = environment
+    registry = ManagedToolRegistry(
+        allowed_tools=["file_write", "web_search", "hashi_scheduler_list", "desktop_screenshot"],
+        access_root=tmp_path, workspace_dir=tmp_path, secrets={}, durable_wait=True,
+        permission_authority=authority, permission_context=context, permission_supervisor=supervisor,
+        requestable_scopes=base._permission_gate._requestable,
+    )
+    definitions = {item["function"]["name"] for item in registry.get_tool_definitions()}
+    assert "file_write" in definitions
+    assert not {"web_search", "hashi_scheduler_list", "desktop_screenshot"} & definitions
+    assert registry.tool_availability("hashi_scheduler_list")["reason"] == "managed_channel_unqualified"
+    result = await registry.execute("hashi_scheduler_list", {}, "scheduler-call")
+    assert isinstance(result, ToolResult) and result.is_error
+    assert result.details["reason"] == "managed_channel_unqualified"
+    assert authority.list_requests(context) == ()
+
+
+def test_pre_run_catalogue_does_not_advertise_unimplemented_managed_tools(tmp_path):
+    registry = ManagedCatalogueRegistry(
+        allowed_tools=["file_write", "web_search", "hashi_scheduler_list", "desktop_screenshot"],
+        access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+    )
+    definitions = {item["function"]["name"] for item in registry.get_tool_definitions()}
+    assert "file_write" in definitions
+    assert not {"web_search", "hashi_scheduler_list", "desktop_screenshot"} & definitions
+    assert registry.tool_availability("hashi_scheduler_list")["reason"] == "managed_channel_unqualified"
+
+
+def test_managed_catalogue_does_not_offer_questions_without_a_question_channel(environment, tmp_path):
+    authority, _, context, supervisor, base = environment
+    registry = ManagedToolRegistry(
+        allowed_tools=["ask_user", "get_user_answer"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, durable_wait=True, permission_authority=authority, permission_context=context,
+        permission_supervisor=supervisor, requestable_scopes=base._permission_gate._requestable,
+    )
+    definitions = {item["function"]["name"] for item in registry.get_tool_definitions()}
+    assert not {"ask_user", "get_user_answer"} & definitions
 
 
 @pytest.mark.asyncio
@@ -83,6 +127,165 @@ async def test_legacy_admission_and_stable_identity_cannot_be_bypassed(environme
     assert missing_identity.state == "unavailable"
     assert authority.list_requests(context) == ()
     assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("state,disposition", [
+    ("unsupported", "unavailable"), ("denied", "denied"), ("withdrawn", "denied"),
+])
+@pytest.mark.asyncio
+async def test_durable_control_failures_are_errors_in_registry_and_mcp(environment, tmp_path, monkeypatch, state, disposition):
+    from types import SimpleNamespace
+    from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
+    from orchestrator.her_v2.models import Effort, Stage, StageRequest, ToolReceiptStatus
+    from orchestrator.permissions.execution_gate import GateResult
+    from tools.gateway.mcp_stdio import ToolGateway
+
+    _, _, _, _, registry = environment
+    registry.permission_durable_wait = True
+    calls = []
+
+    async def gate(operation_id, *args, **kwargs):
+        calls.append(operation_id)
+        return GateResult(state, operation_id)
+
+    monkeypatch.setattr(registry._permission_gate, "execute", gate)
+    request = StageRequest(turn_id="turn", request_ref="request", stage=Stage.EXECUTION,
+                           role="primary", attempt=1, goal="execute", classification=None,
+                           effort=Effort.HIGH, allow_tools=True)
+    wrapper = _EvidenceRecordingToolRegistry(registry, request)
+    result = await wrapper.execute("file_write", {"path": "not-written", "content": "x"}, "call")
+    assert isinstance(result, ToolResult) and result.is_error
+    assert wrapper.receipts[-1].status is ToolReceiptStatus.FAILED
+    assert not (tmp_path / "not-written").exists()
+    assert result.details["control_disposition"] == disposition
+    assert result.details["retryable"] is False
+    assert len(calls) == 1
+    projected = ToolGateway._result(SimpleNamespace(context=SimpleNamespace(vision_enabled=False)),
+                                    result.output, result.is_error, details=result.details)
+    assert projected["isError"] is True
+    assert projected["structuredContent"]["hashi"]["details"]["control_disposition"] == disposition
+    assert projected["structuredContent"]["hashi"]["details"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durable", [False, True])
+async def test_oversized_managed_arguments_explain_transport_limit_without_effect(
+    environment, tmp_path, durable,
+):
+    """An oversized payload is a transport limit, not an unsupported policy."""
+    authority, _, context, supervisor, registry = environment
+    registry.permission_durable_wait = durable
+    arguments = {"path": "large-result.txt", "content": "x" * (1024 * 1024) + "终"}
+    result = await registry.execute("file_write", arguments, "large-arguments")
+
+    assert isinstance(result, ToolResult) and result.is_error
+    assert result.details["error_code"] == "managed_argument_transport_limit"
+    assert result.details["limit_bytes"] == 1024 * 1024
+    encoded = json.dumps(
+        arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    assert result.details["actual_bytes"] == len(encoded) > result.details["limit_bytes"]
+    assert result.details["effect_state"] == "not_started"
+    assert result.details["tool_executed"] is False
+    assert str(len(encoded)) in result.output
+    assert str(1024 * 1024) in result.output
+    assert "transport" in result.output.lower()
+    assert "not started" in result.output.lower()
+    assert authority.list_requests(context) == ()
+    assert not supervisor.queued.is_set()
+    assert not (tmp_path / "large-result.txt").exists()
+
+    from types import SimpleNamespace
+    from tools.gateway.mcp_stdio import ToolGateway
+
+    gateway = ToolGateway(SimpleNamespace(
+        audit={}, build_registry=lambda: registry,
+        enforce_legacy_limits=False, vision_enabled=False,
+    ))
+    projected = await gateway.call("hashi_file_write", arguments, "large-through-mcp")
+    assert projected["isError"] is True
+    details = projected["structuredContent"]["hashi"]["details"]
+    assert details["error_code"] == "managed_argument_transport_limit"
+    assert details["actual_bytes"] == len(encoded)
+    assert details["effect_state"] == "not_started"
+    assert details["tool_executed"] is False
+    assert authority.list_requests(context) == ()
+    assert not supervisor.queued.is_set()
+    assert not (tmp_path / "large-result.txt").exists()
+
+
+
+@pytest.mark.asyncio
+async def test_successful_managed_receipt_remains_success(environment, monkeypatch):
+    from orchestrator.permissions.execution_gate import GateResult
+
+    _, _, _, _, registry = environment
+    registry.permission_durable_wait = True
+
+    async def successful(operation_id, *args, **kwargs):
+        return GateResult("succeeded", operation_id, payload="verified result")
+
+    monkeypatch.setattr(registry._permission_gate, "execute", successful)
+    result = await registry.execute("file_write", {"path": "file", "content": "x"}, "call")
+    assert not result.is_error and result.output == "verified result"
+    assert result.details["control_disposition"] == "allowed"
+
+
+@pytest.mark.asyncio
+async def test_unknown_durable_effect_stays_parked_without_a_retry_claim(environment, monkeypatch):
+    from orchestrator.permissions.continuation import PermissionPark
+    from orchestrator.permissions.execution_gate import GateResult
+
+    _, _, _, _, registry = environment
+    registry.permission_durable_wait = True
+
+    async def unknown(operation_id, *args, **kwargs):
+        return GateResult("unknown", operation_id)
+
+    monkeypatch.setattr(registry._permission_gate, "execute", unknown)
+    with pytest.raises(PermissionPark) as caught:
+        await registry.execute("file_write", {"path": "possibly-written", "content": "x"}, "unknown-call")
+    assert caught.value.result.state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_disabled_search_and_managed_office_return_typed_unavailability(environment, tmp_path, monkeypatch):
+    from tools.gateway.mcp_stdio import ToolGateway
+    from types import SimpleNamespace
+
+    authority, _, context, supervisor, base = environment
+    registry = ManagedToolRegistry(
+        allowed_tools=["file_search", "office_edit"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, tool_options={"file_search": {"enabled": False}},
+        permission_authority=authority, permission_context=context, permission_supervisor=supervisor,
+        requestable_scopes=base._permission_gate._requestable, durable_wait=True,
+    )
+
+    async def must_not_dispatch(*args, **kwargs):
+        pytest.fail("unavailable capabilities must not dispatch")
+
+    monkeypatch.setattr(registry._permission_gate, "execute", must_not_dispatch)
+    for name, expected_reason in [("file_search", "scoped_search_disabled"),
+                                  ("office_edit", "office_managed_channel_unqualified")]:
+        result = await registry.execute(name, {}, name + "-call")
+        assert isinstance(result, ToolResult) and result.is_error
+        assert result.details["control_disposition"] == "unavailable"
+        assert result.details["reason"] == expected_reason
+        projected = ToolGateway._result(SimpleNamespace(context=SimpleNamespace(vision_enabled=False)),
+                                        result.output, result.is_error, details=result.details)
+        assert projected["isError"] is True
+        assert projected["structuredContent"]["hashi"]["details"]["reason"] == expected_reason
+
+    note = tmp_path / "ordinary.txt"
+    note.write_text("readable", encoding="utf-8")
+    ordinary = ToolRegistry(allowed_tools=["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    success = await ordinary.execute("file_read", {"path": str(note)}, "read-call")
+    assert not success.is_error and "readable" in success.output
+
+    monkeypatch.setattr(ordinary, "tool_availability", lambda _: {"available": False, "reason": "fixture_unavailable"})
+    future = ordinary._capability_unavailable_result("file_read", tool_call_id="future")
+    assert future.is_error and future.details["reason"] == "fixture_unavailable"
+    assert "Next step:" in future.output
 
 
 @pytest.mark.asyncio
@@ -265,3 +468,30 @@ async def test_herv3_receipt_marks_recovered_output_without_repeating_file_effec
     assert supervisor.execute_calls == 1 and supervisor.recover_calls == 1
     assert (tmp_path / "once.txt").read_text(encoding="utf-8") == "later change"
     assert authority.decision_count(request.request_id) == 1
+
+def test_managed_http_catalogue_exposes_only_supported_redirect_options(environment, tmp_path):
+    _, _, _, supervisor, managed = environment
+    managed._allowed.add("http_request")
+    supervisor.supports = lambda tool: tool in {"file_write", "http_request"}
+    definitions = {item["function"]["name"]: item["function"]
+                   for item in managed.get_tool_definitions()}
+    properties = definitions["http_request"]["parameters"]["properties"]
+    assert properties["follow_redirects"]["type"] == "boolean"
+    assert properties["max_redirects"]["minimum"] == 1
+    assert properties["session_cookies"]["type"] == "boolean"
+    assert properties["response_encoding"]["enum"] == ["text", "base64"]
+    assert properties["response_file"]["type"] == "string"
+    catalogue = ManagedCatalogueRegistry(allowed_tools=["http_request"], access_root=tmp_path,
+                                        workspace_dir=tmp_path, secrets={})
+    pre_run = {item["function"]["name"]: item["function"] for item in catalogue.get_tool_definitions()}
+    assert pre_run["http_request"]["parameters"]["properties"]["session_cookies"]["type"] == "boolean"
+    assert pre_run["http_request"]["parameters"]["properties"]["response_encoding"]["enum"] == ["text", "base64"]
+    assert pre_run["http_request"]["parameters"]["properties"]["response_file"]["type"] == "string"
+    legacy = ToolRegistry(allowed_tools=["http_request"], access_root=tmp_path,
+                          workspace_dir=tmp_path, secrets={})
+    old = {item["function"]["name"]: item["function"] for item in legacy.get_tool_definitions()}
+    assert "follow_redirects" not in old["http_request"]["parameters"]["properties"]
+    assert "response_encoding" not in old["http_request"]["parameters"]["properties"]
+    assert "response_file" not in old["http_request"]["parameters"]["properties"]
+
+# HASHI-Fingerprint: hfp_b482e1c53e084b3aba83876c071f6806

@@ -744,3 +744,120 @@ def test_confirmation_owner_and_session_boundaries_are_not_cross_readable(
             owner_id="user:bob",
             execute_fn=lambda _record: pytest.fail("cross-owner execution"),
         )
+
+def _register_async_contention_case(service, test_session, suffix):
+    now = datetime.now(timezone.utc)
+    payload = {"text": "execute once"}
+    return service.register_pending(
+        session_id=test_session["session_id"], owner_id="user:alice", agent_id="kasumi",
+        connector_id="session_api", transport="workbench", source_message_id="source-" + suffix,
+        idempotency_key="key-" + suffix, payload_digest=_digest(json.dumps(payload, sort_keys=True)),
+        message_kind="frontend_message", context_generation=test_session["context_generation"],
+        originated_at=now - timedelta(seconds=40), received_at=now, threshold_seconds=30,
+        reason="stale", delay_seconds=40, expires_at=now + timedelta(minutes=15),
+        payload=payload, display_metadata={"text": payload["text"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_blocked_async_claim_releases_without_dispatch(store, test_session, monkeypatch):
+    import sqlite3
+    import time
+
+    service = IngressConfirmationService(store)
+    record = _register_async_contention_case(service, test_session, "claim")
+    started = Event()
+    original = service._claim_confirmation
+    calls = []
+
+    def observed_claim(**kwargs):
+        started.set()
+        return original(**kwargs)
+
+    async def execute(_record):
+        calls.append(1)
+
+    monkeypatch.setattr(service, "_claim_confirmation", observed_claim)
+    connection = sqlite3.connect(store.db_path, isolation_level=None)
+    task = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        task = asyncio.create_task(service.decide_async(
+            confirmation_id=record["confirmation_id"], decision="confirm",
+            owner_id="user:alice", execute_fn=execute,
+        ))
+        assert await asyncio.to_thread(started.wait, 2)
+        before = time.monotonic()
+        await asyncio.wait_for(asyncio.sleep(0), 1)
+        assert time.monotonic() - before < 1
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        connection.rollback()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        pending = service.get(record["confirmation_id"], owner_id="user:alice")
+        assert pending["state"] == "awaiting_confirmation"
+        assert calls == []
+        retried = await service.decide_async(
+            confirmation_id=record["confirmation_id"], decision="confirm",
+            owner_id="user:alice", execute_fn=execute,
+        )
+        assert retried["state"] == "confirmed"
+        assert calls == [1]
+    finally:
+        connection.rollback()
+        connection.close()
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
+@pytest.mark.asyncio
+async def test_cancel_during_blocked_async_completion_keeps_decision_once(store, test_session, monkeypatch):
+    import sqlite3
+    import time
+
+    service = IngressConfirmationService(store)
+    record = _register_async_contention_case(service, test_session, "finish")
+    started = Event()
+    original = service._finish_execution
+    calls = []
+    connection = sqlite3.connect(store.db_path, isolation_level=None)
+
+    def observed_finish(**kwargs):
+        started.set()
+        return original(**kwargs)
+
+    async def execute(_record):
+        calls.append(1)
+        connection.execute("BEGIN IMMEDIATE")
+
+    monkeypatch.setattr(service, "_finish_execution", observed_finish)
+    task = None
+    try:
+        task = asyncio.create_task(service.decide_async(
+            confirmation_id=record["confirmation_id"], decision="confirm",
+            owner_id="user:alice", execute_fn=execute,
+        ))
+        assert await asyncio.to_thread(started.wait, 2)
+        before = time.monotonic()
+        await asyncio.wait_for(asyncio.sleep(0), 1)
+        assert time.monotonic() - before < 1
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        connection.rollback()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        settled = service.get(record["confirmation_id"], owner_id="user:alice")
+        assert settled["state"] == "confirmed"
+        replay = await service.decide_async(
+            confirmation_id=record["confirmation_id"], decision="confirm",
+            owner_id="user:alice", execute_fn=execute,
+        )
+        assert replay["state"] == "confirmed"
+        assert calls == [1]
+    finally:
+        connection.rollback()
+        connection.close()
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)

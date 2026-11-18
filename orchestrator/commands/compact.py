@@ -417,15 +417,6 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         coordinator=coordinator,
         use_last_runtime_measurement=False,
     )
-    if current_tokens < policy.manual_min_tokens:
-        outcome = await coordinator.compact(
-            trigger="manual_command",
-            request_ref=f"compact-command:{getattr(update, 'update_id', 'unknown')}",
-            force=True,
-        )
-        await _send(runtime, update, _outcome_text(outcome, wip=wip))
-        return
-
     await _send(
         runtime,
         update,

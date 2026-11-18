@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import wave
 from dataclasses import dataclass
+from email.message import Message
 from typing import Any, Mapping
 
 
@@ -55,6 +56,9 @@ def validate_speech_audio(
     response_format: str,
     *,
     pcm_sample_rate_hz: int = 24000,
+    pcm_channels: int = 1,
+    pcm_sample_width_bytes: int = 2,
+    pcm_encoding: str = "s16le",
 ) -> SpeechAudio:
     if not data:
         raise SpeechProtocolError(
@@ -67,22 +71,51 @@ def validate_speech_audio(
     duration: float | None = None
 
     if selected_format == "pcm":
-        if (
-            selected_media_type not in {"audio/pcm", "application/octet-stream"}
-            or len(data) < max(2, int(pcm_sample_rate_hz) // 10 * 2)
-            or len(data) % 2
-        ):
-            raise SpeechProtocolError(
+        def invalid_pcm():
+            return SpeechProtocolError(
                 "tts_audio_format_invalid",
-                "The TTS service returned invalid PCM audio.",
+                "The TTS service returned invalid or mismatched PCM audio.",
                 retryable=True,
             )
-        duration = len(data) / (int(pcm_sample_rate_hz) * 2)
+
+        if (
+            selected_media_type not in {"audio/pcm", "application/octet-stream"}
+            or type(pcm_sample_rate_hz) is not int or not 8000 <= pcm_sample_rate_hz <= 96000
+            or type(pcm_channels) is not int or pcm_channels not in (1, 2)
+            or type(pcm_sample_width_bytes) is not int or pcm_sample_width_bytes != 2
+            or pcm_encoding != "s16le"
+        ):
+            raise invalid_pcm()
+        # Response metadata, when present, must agree with the configured codec.
+        message = Message()
+        message["content-type"] = str(media_type or "")
+        params = message.get_params()[1:]
+        seen = set()
+        expected = {
+            "rate": str(pcm_sample_rate_hz), "sample_rate": str(pcm_sample_rate_hz),
+            "sample_rate_hz": str(pcm_sample_rate_hz), "channels": str(pcm_channels),
+            "bits": "16", "bit_depth": "16", "sample_width_bytes": "2",
+            "encoding": "s16le", "endianness": "little", "signed": "true",
+        }
+        for key, value in params:
+            key = key.casefold()
+            if key in seen:
+                raise invalid_pcm()
+            seen.add(key)
+            normalized = str(value or "").strip().casefold()
+            if key in expected and normalized != expected[key]:
+                raise invalid_pcm()
+            if key in {"codec", "format"} and normalized not in {"s16le", "pcm_s16le"}:
+                raise invalid_pcm()
+        frame_bytes = pcm_channels * pcm_sample_width_bytes
+        if len(data) < frame_bytes or len(data) % frame_bytes:
+            raise invalid_pcm()
+        duration = len(data) / (pcm_sample_rate_hz * frame_bytes)
         output = io.BytesIO()
         with wave.open(output, "wb") as audio:
-            audio.setnchannels(1)
-            audio.setsampwidth(2)
-            audio.setframerate(int(pcm_sample_rate_hz))
+            audio.setnchannels(pcm_channels)
+            audio.setsampwidth(pcm_sample_width_bytes)
+            audio.setframerate(pcm_sample_rate_hz)
             audio.writeframes(data)
         return SpeechAudio(output.getvalue(), "audio/wav", "wav", duration)
 

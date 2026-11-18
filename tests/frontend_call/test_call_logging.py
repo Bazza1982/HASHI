@@ -152,7 +152,7 @@ async def test_shared_call_diagnostics_reach_existing_durable_bridge_journal(tmp
 
 
 async def test_call_termination_reports_real_reason_without_repeated_poll_logs(
-    tmp_path, caplog
+    tmp_path, caplog, monkeypatch
 ):
     caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     for end_kind in (
@@ -164,6 +164,10 @@ async def test_call_termination_reports_real_reason_without_repeated_poll_logs(
         scenario = tmp_path / end_kind
         scenario.mkdir()
         caplog.clear()
+        if end_kind == "max_duration":
+            monkeypatch.setenv("HASHI_CALL_MAX_DURATION_SECONDS", str(MAX_CALL_SECONDS))
+        else:
+            monkeypatch.delenv("HASHI_CALL_MAX_DURATION_SECONDS", raising=False)
         service, _, _, base, clock = setup(scenario)
         binding, _, _ = await start(service, base)
         before_poll = len(events(caplog))
@@ -175,7 +179,7 @@ async def test_call_termination_reports_real_reason_without_repeated_poll_logs(
         if end_kind == "explicit_end":
             await service.invoke("owner", {**binding, "operation": "end"})
         elif end_kind == "lease_expired":
-            clock[0] += 46
+            clock[0] = call.expires + 1
             service.expire()
         elif end_kind == "max_duration":
             clock[0] += MAX_CALL_SECONDS
@@ -905,7 +909,7 @@ async def test_expiry_during_rejected_turn_never_associates_unaccepted_turn_ids(
     caplog.set_level(logging.INFO, logger=diagnostics.logger.name)
     service, _, _, base, clock = setup(tmp_path)
     binding, _, _ = await start(service, base)
-    clock[0] += 46
+    clock[0] = service.calls["call-1"].expires + 1
     with pytest.raises(CallError, match="call_ended"):
         await service.invoke(
             "owner",

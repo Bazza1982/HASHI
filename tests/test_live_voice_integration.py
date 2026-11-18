@@ -644,6 +644,275 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             after = page["next_after"]
         self.assertEqual(seen, [f"page-{index}" for index in range(5)])
 
+    def test_transcript_page_recovers_full_call_across_epochs_without_duplicates(self):
+        from dataclasses import replace
+        async def scenario():
+            for index in range(3):
+                await self.manager.append_fragment_once(
+                    self.binding, Fragment(f"part-{index}", "user", str(index), index, index + 1)
+                )
+            next_binding = replace(self.binding, call_epoch=2, provider_session_id="prov-2")
+            with self.store._lock, self.store._connection() as conn:
+                conn.execute("UPDATE live_calls SET call_epoch=2, provider_session_id='prov-2' WHERE call_id=?", (self.call_id,))
+            await self.manager.append_fragment_once(next_binding, Fragment("part-0", "assistant", "three", 3, 4))
+            first = await self.manager._op_transcript_page(self.owner_id, {**self.scope, "limit": 2})
+            self.assertTrue(first["has_more"])
+            self.assertEqual([e["detail"]["text"] for e in first["events"]], ["2", "three"])
+            self.assertEqual([e["scope"]["call_epoch"] for e in first["events"]], [1, 2])
+            # Writes after the first page cannot sneak into a backward traversal.
+            await self.manager.append_fragment_once(next_binding, Fragment("later", "user", "later", 4, 5))
+            second = await self.manager._op_transcript_page(
+                self.owner_id, {**self.scope, "limit": 2, "before": first["next_before"]}
+            )
+            self.assertFalse(second["has_more"])
+            self.assertEqual([e["detail"]["text"] for e in second["events"]], ["0", "1"])
+            self.assertIsNone(second["next_before"])
+            self.assertEqual(len({e["sequence"] for e in first["events"] + second["events"]}), 4)
+        asyncio.run(scenario())
+
+    def test_transcript_page_rejects_wrong_binding_and_invalid_cursor(self):
+        for owner, patch_values, error in (
+            ("other-owner", {}, "live_not_found"),
+            (self.owner_id, {"context_generation": 2}, "live_scope_changed"),
+            (self.owner_id, {"before": -1}, "live_page_invalid"),
+            (self.owner_id, {"limit": 501}, "live_page_invalid"),
+            (self.owner_id, {"before": True}, "live_page_invalid"),
+            (self.owner_id, {"before": "9" * 5000}, "live_page_invalid"),
+        ):
+            with self.subTest(owner=owner, patch=patch_values):
+                with self.assertRaisesRegex(LiveVoiceError, error):
+                    asyncio.run(self.manager._op_transcript_page(self.owner_id if owner == self.owner_id else owner,
+                        {**self.scope, **patch_values}))
+
+    def test_transcript_page_respects_response_budget_without_losing_fragments(self):
+        async def scenario():
+            for index in range(12):
+                await self.manager.append_fragment_once(
+                    self.binding, Fragment(f"large-{index}", "user", chr(1) * 60000, index, index + 1)
+                )
+            seen = []
+            before = None
+            while True:
+                payload = {**self.scope, "limit": 200}
+                if before is not None:
+                    payload["before"] = before
+                page = await self.manager._op_transcript_page(self.owner_id, payload)
+                self.assertLess(len(json.dumps(page).encode("utf-8")), 1048576)
+                seen.extend(event["detail"]["provider_event_id"] for event in page["events"])
+                if not page["has_more"]:
+                    break
+                before = page["next_before"]
+                self.assertIsInstance(before, int)
+            self.assertEqual(set(seen), {f"large-{index}" for index in range(12)})
+            self.assertEqual(len(seen), 12)
+        asyncio.run(scenario())
+
+    def test_transcript_forward_pages_freeze_a_complete_export_boundary(self):
+        async def scenario():
+            for index in range(5):
+                await self.manager.append_fragment_once(
+                    self.binding, Fragment(f"export-{index}", "user", str(index), index, index + 1)
+                )
+            first = await self.manager._op_transcript_page(self.owner_id, {**self.scope, "after": 0, "limit": 2})
+            self.assertEqual([event["detail"]["text"] for event in first["events"]], ["0", "1"])
+            through = first["through"]
+            await self.manager.append_fragment_once(self.binding, Fragment("newer", "user", "newer", 5, 6))
+            seen = list(first["events"])
+            page = first
+            while page["has_more"]:
+                page = await self.manager._op_transcript_page(
+                    self.owner_id, {**self.scope, "after": page["next_after"], "through": through, "limit": 2}
+                )
+                self.assertEqual(page["through"], through)
+                seen.extend(page["events"])
+            self.assertEqual([event["detail"]["text"] for event in seen], ["0", "1", "2", "3", "4"])
+            self.assertEqual(len({event["sequence"] for event in seen}), 5)
+            with self.assertRaisesRegex(LiveVoiceError, "live_page_invalid"):
+                await self.manager._op_transcript_page(self.owner_id, {**self.scope, "after": 0, "before": 4})
+        asyncio.run(scenario())
+
+    def test_transcript_page_is_available_through_authenticated_http_route(self):
+        async def scenario():
+            await self.manager.append_fragment_once(self.binding, Fragment("route-1", "user", "saved", 0, 1))
+            app = web.Application()
+            async def authorize(_request, _operation, _payload):
+                return {"owner_id": self.owner_id}
+            register_live_voice_routes(app, self.manager, authorize, qualified=True)
+            query = {key: str(value) for key, value in self.scope.items() if key != "call_id"}
+            async with TestClient(TestServer(app)) as client:
+                response = await client.get(f"/api/v1/live-voice/calls/{self.call_id}/transcript", params=query)
+                self.assertEqual(response.status, 200)
+                self.assertEqual((await response.json())["events"][0]["detail"]["text"], "saved")
+        asyncio.run(scenario())
+
+    def test_reopened_store_recovers_all_33000_saved_fragments_in_bounded_pages(self):
+        import hashlib
+        total = 33000
+        now = "2026-01-01T00:00:00Z"
+        with self.store._lock, self.store._connection() as connection:
+            base = int(connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) AS seq FROM run_events WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()["seq"])
+            events = []
+            fragments = []
+            expected = hashlib.sha256()
+            for index in range(total):
+                event_id = f"bulk-event-{index}"
+                provider_id = f"bulk-provider-{index}"
+                text = f"text-{index} "
+                expected.update(text.encode("utf-8"))
+                detail = {"schema": "hashi.live_voice.event.v1", "scope": self.scope,
+                          "provider_event_id": provider_id, "speaker": "user", "text": text,
+                          "start_ms": index, "end_ms": index + 1}
+                events.append((event_id, self.session_id, base + index + 1,
+                               "voice.live.transcript.fragment", json.dumps(detail), now))
+                fragments.append((self.owner_id, provider_id, self.call_id, 1, self.session_id,
+                                  "user", index, index + 1, event_id, base + index + 1, now))
+            connection.executemany(
+                "INSERT INTO run_events(event_id, session_id, sequence, kind, detail_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", events,
+            )
+            connection.executemany(
+                "INSERT INTO live_fragments(owner_id, provider_event_id, call_id, call_epoch, session_id, "
+                "speaker, start_ms, end_ms, event_id, sequence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                fragments,
+            )
+
+        original_store = self.manager.session_store
+        self.manager.session_store = SessionStore(self.db_path, instance_id="HASHI")
+        async def recover():
+            after = 0
+            through = None
+            seen = 0
+            actual = hashlib.sha256()
+            while True:
+                query = {**self.scope, "after": after, "limit": 500}
+                if through is not None:
+                    query["through"] = through
+                page = await self.manager._op_transcript_page(self.owner_id, query)
+                if through is None:
+                    through = page["through"]
+                self.assertEqual(page["through"], through)
+                self.assertLessEqual(len(page["events"]), 500)
+                self.assertLess(len(json.dumps(page).encode("utf-8")), 1048576)
+                for event in page["events"]:
+                    self.assertGreater(event["sequence"], after)
+                    actual.update(event["detail"]["text"].encode("utf-8"))
+                    after = event["sequence"]
+                    seen += 1
+                if not page["has_more"]:
+                    break
+                self.assertEqual(page["next_after"], after)
+            self.assertEqual(seen, total)
+            self.assertEqual(actual.hexdigest(), expected.hexdigest())
+        try:
+            asyncio.run(recover())
+        finally:
+            self.manager.session_store = original_store
+
+    def test_transcript_paging_returns_more_than_64_mib_exactly_without_large_responses(self):
+        import hashlib
+        count = 1200
+        now = "2026-01-01T00:00:00Z"
+        chunk = "x" * 60000
+        with self.store._lock, self.store._connection() as connection:
+            base = int(connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) AS seq FROM run_events WHERE session_id=?",
+                (self.session_id,),
+            ).fetchone()["seq"])
+            def event_rows():
+                for index in range(count):
+                    detail = {"schema": "hashi.live_voice.event.v1", "scope": self.scope,
+                              "provider_event_id": f"large-provider-{index}", "speaker": "user",
+                              "text": chunk + str(index), "start_ms": index, "end_ms": index + 1}
+                    yield (f"large-event-{index}", self.session_id, base + index + 1,
+                           "voice.live.transcript.fragment", json.dumps(detail), now)
+            def fragment_rows():
+                for index in range(count):
+                    yield (self.owner_id, f"large-provider-{index}", self.call_id, 1, self.session_id,
+                           "user", index, index + 1, f"large-event-{index}", base + index + 1, now)
+            connection.executemany(
+                "INSERT INTO run_events(event_id, session_id, sequence, kind, detail_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", event_rows(),
+            )
+            connection.executemany(
+                "INSERT INTO live_fragments(owner_id, provider_event_id, call_id, call_epoch, session_id, "
+                "speaker, start_ms, end_ms, event_id, sequence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                fragment_rows(),
+            )
+        expected = hashlib.sha256()
+        for index in range(count):
+            expected.update((chunk + str(index)).encode("utf-8"))
+        async def recover():
+            after, through, seen, size = 0, None, 0, 0
+            actual = hashlib.sha256()
+            while True:
+                query = {**self.scope, "after": after, "limit": 200}
+                if through is not None:
+                    query["through"] = through
+                page = await self.manager._op_transcript_page(self.owner_id, query)
+                if through is None:
+                    through = page["through"]
+                self.assertLess(len(json.dumps(page).encode("utf-8")), 1048576)
+                for event in page["events"]:
+                    raw = event["detail"]["text"].encode("utf-8")
+                    actual.update(raw)
+                    size += len(raw)
+                    seen += 1
+                    after = event["sequence"]
+                if not page["has_more"]:
+                    break
+                self.assertEqual(page["next_after"], after)
+            self.assertGreater(size, 64 * 1024 * 1024)
+            self.assertEqual(seen, count)
+            self.assertEqual(actual.hexdigest(), expected.hexdigest())
+        asyncio.run(recover())
+
+    def test_retired_provider_cannot_add_a_late_fragment_to_paged_history(self):
+        class ProviderSocket:
+            closed = False
+            def __init__(self):
+                self.sent = False
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data="fixture")
+            async def close(self):
+                self.closed = True
+        class Adapter:
+            provider_id = "fixture"
+            @asynccontextmanager
+            async def http_session(self):
+                yield object()
+            async def attach(self, *_args, **_kwargs):
+                return ProviderSocket()
+            def normalize_event(self, _data):
+                return {"type": "conversation.user.delta", "event_id": "stale",
+                        "delta": "stale text", "start_ms": 10, "end_ms": 11}
+        async def scenario():
+            await self.manager.append_fragment_once(self.binding, Fragment("saved-old", "user", "valid", 0, 1))
+            with self.store._lock, self.store._connection() as connection:
+                connection.execute(
+                    "UPDATE live_calls SET call_epoch=2, provider_session_id='prov-2' WHERE call_id=?",
+                    (self.call_id,),
+                )
+            with patch.object(self.manager, "_provider_for", return_value=Adapter()):
+                await self.manager._run_sideband(self.binding, "fake", "prov-1")
+                await self.manager._drain_provider_events(self.call_id)
+                task = self.manager._provider_event_tasks.get(self.call_id)
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            page = await self.manager._op_transcript_page(self.owner_id, self.scope)
+            self.assertEqual([item["detail"]["text"] for item in page["events"]], ["valid"])
+            audit = self.manager.audit.path_for(self.binding).read_text(encoding="utf-8")
+            self.assertIn("provider.stale_epoch_event_ignored", audit)
+        asyncio.run(scenario())
+
     def test_proposal_grace_does_not_block_late_sideband_fragments(self):
         async def scenario():
             self.manager._proposal_grace_seconds = 0.05
@@ -886,9 +1155,27 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(snap["snapshot"]["provider_close_state"], "unconfirmed")
 
     def test_transport_resume_fences_old_provider_and_replays_after_lost_response(self):
+        # An accepted user action survives provider rollover without a second Run.
+        fragment = Fragment("before-rollover", "user", "check the task", 0, 500)
+        asyncio.run(self.manager.append_fragment_once(self.binding, fragment))
+        asyncio.run(self.manager.register_delegation_once(self.binding, "delegation-before-rollover", 600))
+        asyncio.run(self.manager.schedule_proposal(self.binding, "delegation-before-rollover", 600))
+        self.assertEqual(len(self.admit_calls), 1)
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
         with self.store._lock, self.store._connection() as connection:
-            connection.execute("UPDATE live_calls SET phase = 'recovering' WHERE call_id = ?", (self.call_id,))
+            connection.execute("UPDATE live_calls SET max_ends_at = ? WHERE call_id = ?", (deadline, self.call_id))
+        asyncio.run(self.manager._sweep_expiring_transports())
+        snapshot = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))["snapshot"]
+        self.assertEqual(snapshot["phase"], "recovering")
+        self.assertIsNone(snapshot["ended_at"])
         manager = self.manager
+        from dataclasses import replace
+        adapter = manager.providers["openai"]
+        adapter.capabilities = replace(adapter.capabilities, max_session_seconds=3600)
+        advertised = asyncio.run(manager._op_context(self.owner_id, {
+            "session_id": self.session_id, "agent_id": self.agent_id, "context_generation": 1,
+        }))
+        self.assertEqual(advertised["capability"]["provider_session_max_duration_seconds"], 3600)
         async def fit(_http, *, key, model, input_messages, required_message_count, history_unit_message_counts):
             return list(input_messages), {"input_tokens_exact": 123, "history_omitted_units": 0}
         provider_creates = []
@@ -941,8 +1228,18 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(replay["sdp_answer"], result["sdp_answer"])
         self.assertEqual(len(provider_creates), 1)
         self.assertEqual(result["call_id"], self.call_id)
+        self.assertEqual(result["binding"]["session_id"], self.session_id)
         self.assertEqual(result["binding"]["call_epoch"], 2)
         self.assertEqual(result["provider_session_id"], "prov-2")
+        asyncio.run(manager.schedule_proposal(self.binding, "delegation-before-rollover", 600))
+        self.assertEqual(len(self.admit_calls), 1)
+        self.assertEqual(len(provider_creates), 1)
+        with self.store._lock, self.store._connection() as connection:
+            row = connection.execute("SELECT max_ends_at FROM live_calls WHERE call_id = ?", (self.call_id,)).fetchone()
+        remaining = (datetime.fromisoformat(row["max_ends_at"].replace("Z", "+00:00"))
+                     - datetime.now(timezone.utc)).total_seconds()
+        self.assertGreater(remaining, 3500)
+        self.assertLessEqual(remaining, 3600)
         self.assertFalse(manager._mark_recovering(
             self.binding, reason="sideband_disconnected", summary="late old socket close",
         ))
@@ -950,7 +1247,7 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
         self.assertEqual(snap["snapshot"]["phase"], "connecting")
         self.assertEqual(snap["snapshot"]["scope"]["call_epoch"], 2)
 
-    def test_repeated_failed_resume_attempts_terminalize_the_call(self):
+    def test_automatic_resume_budget_preserves_call_and_explicit_retry_recovers(self):
         with self.store._lock, self.store._connection() as connection:
             connection.execute(
                 "UPDATE live_calls SET phase = 'recovering' WHERE call_id = ?",
@@ -958,43 +1255,120 @@ class LiveVoiceManagerStoreTests(unittest.TestCase):
             )
             for attempt in range(5):
                 self.store._append_event(
-                    connection,
-                    session_id=self.session_id,
-                    run_id=None,
-                    kind="voice.live.call.state",
-                    summary="Replacing phone transport",
-                    detail={
-                        "scope": self.scope,
-                        "phase": "connecting",
-                        "reason": "transport_resume_requested",
-                        "attempt": attempt + 1,
-                    },
+                    connection, session_id=self.session_id, run_id=None,
+                    kind="voice.live.call.state", summary="Replacing phone transport",
+                    detail={"scope": self.scope, "phase": "connecting",
+                            "reason": "transport_resume_requested", "attempt": attempt + 1},
                 )
-        self.manager._phone_session = lambda *_args, **_kwargs: self.fail(
-            "provider setup must not run after the recovery limit"
-        )
-        with self.assertRaisesRegex(
-            LiveVoiceError, "live_recovery_attempts_exhausted"
+        payload = {**self.scope, "sdp": "v=0\r\n",
+                   "idempotency_key": "automatic-after-budget", "phone_revision": PHONE_REVISION}
+        with self.assertRaisesRegex(LiveVoiceError, "live_recovery_attempts_exhausted"):
+            asyncio.run(self.manager._op_resume(self.owner_id, payload))
+        snapshot = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))["snapshot"]
+        self.assertEqual(snapshot["phase"], "recovering")
+        self.assertIsNone(snapshot["ended_at"])
+        self.assertTrue(snapshot["resume_automatic_attempts_exhausted"])
+        self.assertTrue(snapshot["manual_resume_after_budget"])
+
+        created = []
+        async def fit(_http, *, key, model, input_messages, required_message_count, history_unit_message_counts):
+            return list(input_messages), {"input_tokens_exact": 123, "history_omitted_units": 0}
+        async def create(_http, *, key, request):
+            created.append(request)
+            return {"provider_session_id": "prov-manual", "sdp_answer": "v=0\r\n"}
+        async def close(_key, provider_id, **_kwargs):
+            self.assertEqual(provider_id, "prov-1")
+            return "confirmed", None
+        async def sideband(binding, _key, _provider_id):
+            self.manager._sideband_ready_events[binding.call_id].set()
+        @asynccontextmanager
+        async def fake_http():
+            yield object()
+        self.manager._close_provider_session = close
+        self.manager._run_sideband = sideband
+        manual = {**payload, "idempotency_key": "manual-after-budget", "manual_retry": True}
+        with (
+            patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http),
+            patch("orchestrator.frontend_live_voice.openai_live.fit_live_session_input", fit),
+            patch("orchestrator.frontend_live_voice.openai_live.create_provider_session", create),
         ):
-            asyncio.run(self.manager._op_resume(self.owner_id, {
-                **self.scope,
-                "sdp": "v=0\r\n",
-                "idempotency_key": "resume-after-limit",
-                "phone_revision": PHONE_REVISION,
-            }))
+            result = asyncio.run(self.manager._op_resume(self.owner_id, manual))
+            replay = asyncio.run(self.manager._op_resume(self.owner_id, manual))
+        self.assertEqual(result["call_id"], self.call_id)
+        self.assertEqual(result["binding"]["call_epoch"], 2)
+        self.assertEqual(replay["sdp_answer"], result["sdp_answer"])
+        self.assertEqual(len(created), 1)
+        self.assertFalse(self.manager._mark_recovering(
+            self.binding, reason="late-old-transport", summary="stale"))
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("UPDATE live_calls SET phase = 'ended' WHERE call_id = ?", (self.call_id,))
+        with self.assertRaisesRegex(LiveVoiceError, "live_call_not_recovering"):
+            asyncio.run(self.manager._op_resume(self.owner_id, manual))
+        self.assertEqual(len(created), 1)
+
+    def test_manual_resume_does_not_replay_unknown_provider_creation(self):
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("UPDATE live_calls SET phase = 'recovering' WHERE call_id = ?", (self.call_id,))
+        created = []
+        async def fit(_http, *, key, model, input_messages, required_message_count, history_unit_message_counts):
+            return list(input_messages), {"input_tokens_exact": 123, "history_omitted_units": 0}
+        async def create(_http, *, key, request):
+            created.append(request)
+            raise LiveVoiceError("live_provider_create_unknown", 502)
+        async def close(_key, _provider_id, **_kwargs):
+            return "confirmed", None
+        @asynccontextmanager
+        async def fake_http():
+            yield object()
+        self.manager._close_provider_session = close
+        payload = {**self.scope, "sdp": "v=0\r\n", "idempotency_key": "unknown-create",
+                   "phone_revision": PHONE_REVISION, "manual_retry": True}
+        with (
+            patch("orchestrator.frontend_live_voice.openai_live.provider_http_session", fake_http),
+            patch("orchestrator.frontend_live_voice.openai_live.fit_live_session_input", fit),
+            patch("orchestrator.frontend_live_voice.openai_live.create_provider_session", create),
+        ):
+            with self.assertRaisesRegex(LiveVoiceError, "live_provider_create_unknown"):
+                asyncio.run(self.manager._op_resume(self.owner_id, payload))
+            snapshot = asyncio.run(self.manager._op_snapshot(self.owner_id, self.scope))["snapshot"]
+            self.assertEqual(snapshot["phase"], "recovering")
+            self.assertTrue(snapshot["resume_outcome_unsettled"])
+            retry = {**payload, **snapshot["scope"], "idempotency_key": "manual-after-unknown"}
+            with self.assertRaisesRegex(LiveVoiceError, "live_outcome_unknown"):
+                asyncio.run(self.manager._op_resume(self.owner_id, retry))
+        self.assertEqual(len(created), 1)
         with self.store._lock, self.store._connection() as connection:
             row = connection.execute(
-                "SELECT phase, ended_at FROM live_calls WHERE call_id = ?",
-                (self.call_id,),
+                "SELECT state FROM live_call_attempts WHERE attempt_id = ?", ("unknown-create",),
             ).fetchone()
-            attempt = connection.execute(
-                "SELECT 1 FROM live_call_attempts WHERE attempt_id = ?",
-                ("resume-after-limit",),
-            ).fetchone()
-        self.assertEqual(row["phase"], "failed")
-        self.assertIsNotNone(row["ended_at"])
-        self.assertIsNone(attempt)
+        self.assertEqual(row["state"], "unknown")
 
+
+    def test_resume_http_reports_unknown_provider_creation_truthfully(self):
+        class FailingService:
+            available = True
+            code = "live_provider_create_unknown"
+            status = 502
+
+            async def invoke(self, operation, authority, payload):
+                raise LiveVoiceError(self.code, self.status)
+
+        async def scenario():
+            service = FailingService()
+            app = web.Application()
+            async def authorize(_request, _operation, _payload):
+                return {"owner_id": self.owner_id}
+            register_live_voice_routes(app, service, authorize, qualified=True)
+            async with TestClient(TestServer(app)) as client:
+                response = await client.post("/api/v1/live-voice/calls/test-call/resume", json={})
+                self.assertEqual(response.status, 502)
+                self.assertIsNone((await response.json())["accepted"])
+                service.code = "live_recovery_attempts_exhausted"
+                service.status = 409
+                response = await client.post("/api/v1/live-voice/calls/test-call/resume", json={})
+                self.assertEqual(response.status, 409)
+                self.assertIs((await response.json())["accepted"], False)
+        asyncio.run(scenario())
 
     def test_provider_close_reason_is_preserved_in_independent_call_audit(self):
         class ProviderSocket:

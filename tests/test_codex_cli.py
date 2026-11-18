@@ -1015,7 +1015,7 @@ def test_codex_nonzero_exit_preserves_last_agent_message(tmp_path, monkeypatch: 
     assert logged_message["chars"] == len("Latest progress before stop.")
 
 
-def test_codex_broken_top_level_workspace_link_fails_before_process_start(
+def test_codex_broken_unrelated_workspace_link_does_not_prevent_start(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1026,78 +1026,90 @@ def test_codex_broken_top_level_workspace_link_fails_before_process_start(
         pytest.skip("directory symlinks are unavailable on this platform")
     adapter = _build_adapter(tmp_path)
     launches = []
+    proc = _HangingProc([
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}),
+        json.dumps({"type": "turn.completed"}),
+    ])
 
     async def _fake_create_subprocess_exec(*args, **kwargs):
         launches.append((args, kwargs))
-        raise AssertionError("Codex must not start with a broken workspace link")
+        proc.finish(0)
+        return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
 
     response = asyncio.run(adapter.generate_response("hello", "req-broken-link"))
 
-    assert response.is_success is False
-    assert response.error_code == "CODEX_WORKSPACE_LINK_UNAVAILABLE"
-    assert response.error_retryable is False
-    assert "_hashi_workbench_v2" in (response.error or "")
-    assert launches == []
+    assert response.is_success is True and response.text == "done"
+    assert len(launches) == 1
+    assert launches[0][1]["cwd"] == str(tmp_path)
+    assert broken.is_symlink() and not broken.exists()
+
+    from tools.registry import ToolRegistry
+    registry = ToolRegistry(allowed_tools=["file_read"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={})
+    readable = tmp_path / "readable.txt"
+    readable.write_text("still available", encoding="utf-8")
+    good = asyncio.run(registry.execute("file_read", {"path": str(readable)}, "good"))
+    unavailable = asyncio.run(registry.execute("file_read", {"path": str(broken / "wanted.txt")}, "missing"))
+    assert not good.is_error and "still available" in good.output
+    assert unavailable.is_error and "wanted.txt" in unavailable.output
+
+    outside = tmp_path / "external-link"
+    outside.symlink_to(tmp_path.parent / "unavailable-outside-scope", target_is_directory=True)
+    denied = asyncio.run(registry.execute("file_read", {"path": str(outside / "secret.txt")}, "outside"))
+    assert denied.is_error and "outside the allowed access scopes" in denied.output
 
 
-def test_codex_workspace_link_preflight_is_bounded_and_reports_io_failures(
+def test_codex_workspace_preflight_checks_only_the_requested_directory(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    class _Entry:
-        def __init__(self, name: str, *, linked: bool, stat_error: OSError | None = None):
-            self.name = name
-            self.path = str(tmp_path / name)
-            self._linked = linked
-            self._stat_error = stat_error
-            self.stat_calls = 0
+    def _must_not_scan(_path):
+        raise AssertionError("unrelated children must not be enumerated")
 
-        def is_symlink(self):
-            return self._linked
-
-        def stat(self, *, follow_symlinks: bool):
-            assert follow_symlinks is True
-            self.stat_calls += 1
-            if self._stat_error is not None:
-                raise self._stat_error
-            return SimpleNamespace()
-
-    class _Scandir:
-        def __init__(self, entries):
-            self._entries = entries
-
-        def __enter__(self):
-            return iter(self._entries)
-
-        def __exit__(self, *_args):
-            return False
-
-    ordinary = _Entry("ordinary", linked=False)
-    broken = _Entry(
-        "_hashi_workbench_v2",
-        linked=True,
-        stat_error=FileNotFoundError("missing target"),
-    )
-    monkeypatch.setattr(os, "scandir", lambda _path: _Scandir([ordinary, broken]))
-
-    failure = CodexCLIAdapter._workspace_preflight_failure(tmp_path)
-
-    assert failure is not None
-    assert failure[0] == "CODEX_WORKSPACE_LINK_UNAVAILABLE"
-    assert "_hashi_workbench_v2" in failure[1]
-    assert ordinary.stat_calls == 0
-    assert broken.stat_calls == 1
-
-    def _denied(_path):
-        raise PermissionError("denied")
-
-    monkeypatch.setattr(os, "scandir", _denied)
-    denied = CodexCLIAdapter._workspace_preflight_failure(tmp_path)
+    monkeypatch.setattr(os, "scandir", _must_not_scan)
+    assert CodexCLIAdapter._workspace_preflight_failure(tmp_path) is None
+    denied = CodexCLIAdapter._workspace_preflight_failure(tmp_path / "missing")
     assert denied is not None
     assert denied[0] == "CODEX_WORKSPACE_PREFLIGHT_FAILED"
     assert "permissions" in denied[1]
+
+
+def test_codex_workspace_with_more_than_4096_entries_can_launch(tmp_path, monkeypatch):
+    for index in range(4097):
+        (tmp_path / f"entry-{index:04d}").touch()
+    adapter = _build_adapter(tmp_path)
+    launches = []
+    proc = _HangingProc([
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}),
+        json.dumps({"type": "turn.completed"}),
+    ])
+
+    async def create_subprocess(*args, **kwargs):
+        launches.append((args, kwargs))
+        proc.finish(0)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    response = asyncio.run(adapter.generate_response("Read one file", "req-large-workspace"))
+    assert response.is_success and response.text == "done"
+    assert len(launches) == 1 and launches[0][1]["cwd"] == str(tmp_path)
+
+
+def test_codex_unavailable_requested_workspace_still_fails_before_launch(tmp_path, monkeypatch):
+    adapter = _build_adapter(tmp_path)
+    monkeypatch.setattr(type(adapter), "effective_workdir", property(lambda _self: tmp_path / "missing"))
+    launches = []
+
+    async def create_subprocess(*args, **kwargs):
+        launches.append((args, kwargs))
+        raise AssertionError("invalid cwd must not launch")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+    response = asyncio.run(adapter.generate_response("hello", "req-missing-workspace"))
+    assert not response.is_success and response.error_code == "CODEX_WORKSPACE_PREFLIGHT_FAILED"
+    assert launches == []
 
 
 def test_codex_file_tool_exit_records_typed_failure_and_bounded_tool_receipt(

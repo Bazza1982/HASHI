@@ -35,6 +35,12 @@ class _ProtocolStub:
     def get_protocol_status(self):
         return {"capabilities": ["handshake_v2", "message_attachments_v1"]}
 
+    def handle_handshake(self, payload):
+        return {
+            "status": "handshake_accept", "instance_id": "HASHI_LOCAL",
+            "capabilities": ["message_attachments_v1"],
+        }
+
     async def handle_protocol_message(self, payload: dict):
         self.messages.append(payload)
         return self.status, dict(self.result)
@@ -582,3 +588,66 @@ def test_streaming_v2_enforces_ten_files_and_one_gibibyte_without_type_filters(
             size_bytes=1,
             sha256=hashlib.sha256(b"declared-over").hexdigest(),
         )
+
+
+def test_real_group_sender_transfers_each_selected_attachment_to_authenticated_receiver(tmp_path, monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from urllib.parse import urlsplit
+    from tools import hchat_send, protocol_send
+
+    _write_shared_token(tmp_path)
+    client, protocol = _client(tmp_path, lan_mode=False)
+    source = tmp_path / "selected.txt"
+    source.write_bytes(b"exact selected attachment")
+    cfg = {
+        "global": {"instance_id": "HASHI2", "workbench_port": 18800},
+        "agents": [], "groups": {"reviewers": {"members": ["rain@HASHI_LOCAL", "lily@HASHI_LOCAL"]}},
+    }
+    class Response:
+        def __init__(self, response):
+            self.status = response.status_code
+            self.content = response.content
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return self.content
+
+    requests = []
+    def route_to_fixture(req, timeout=0):
+        parsed = urlsplit(req.full_url)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+        requests.append(path)
+        response = client.request(req.get_method(), path, content=req.data, headers=dict(req.header_items()))
+        if response.status_code >= 400:
+            raise HTTPError(req.full_url, response.status_code, "fixture response", {}, BytesIO(response.content))
+        return Response(response)
+
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(protocol_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(protocol_send, "_load_instances", lambda: {})
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda *a: None)
+    monkeypatch.setattr(hchat_send, "_register_hchat_outbound_correlation", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_hchat_channel_egress_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "shared-secret")
+    monkeypatch.setattr(protocol_send, "_find_remote_instance", lambda *a, **k: {"remote_host": "127.0.0.1", "remote_port": 9999})
+    monkeypatch.setattr(protocol_send, "_probe_remote_http", lambda *a: True)
+    monkeypatch.setattr(protocol_send, "_local_sidecar_base_url", lambda *a: None)
+    monkeypatch.setattr(protocol_send, "_record_outbound_correlation", lambda *a, **k: None)
+    monkeypatch.setattr(protocol_send, "fetch_remote_protocol_capabilities", lambda *a, **k: ({"message_attachments_v1"}, None))
+    monkeypatch.setattr(protocol_send.urllib_request, "urlopen", route_to_fixture)
+
+    with client:
+        result = hchat_send.send_hchat_result(
+            "@reviewers", "zelda", "please review", attachments=[source], message_id="group-e2e",
+        )
+    assert result.handled
+    assert [item.recipient for item in result.recipients] == ["rain@HASHI_LOCAL", "lily@HASHI_LOCAL"]
+    assert [item.accepted for item in result.recipients] == [True, True]
+    assert len(protocol.messages) == 2 and len({item["message_id"] for item in protocol.messages}) == 2
+    assert requests.count("/attachments/upload") == 2
+    assert requests.count("/protocol/message-with-attachments") == 2
+    for message in protocol.messages:
+        attachment = message["body"]["attachments"][0]
+        assert attachment["sha256"] == hashlib.sha256(b"exact selected attachment").hexdigest()
+        assert Path(attachment["stored_path"]).read_bytes() == b"exact selected attachment"

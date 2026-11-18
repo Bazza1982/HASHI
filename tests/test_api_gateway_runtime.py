@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,174 @@ from orchestrator.api_gateway import APIGatewayServer, _AdapterPool
 class _FakeAdapter:
     async def generate_response(self, prompt, request_id, is_retry=False, silent=True, on_stream_event=None):
         return SimpleNamespace(is_success=True, text=f"reply:{prompt}", error=None)
+
+
+@pytest.mark.asyncio
+async def test_gateway_uses_instance_resource_policy_for_independent_same_model_slots(tmp_path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(json.dumps({"global": {"execution_limits": {
+        "instance_sessions": 12, "engines": {"codex-cli": 12}
+    }}}), encoding="utf-8")
+    cfg = SimpleNamespace(api_gateway_port=18801, api_host="127.0.0.1",
+                          project_root=tmp_path, config_path=config_path)
+    server = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path)
+    pool = server._pool
+    seen = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def create(engine, model):
+        return SimpleNamespace(config=SimpleNamespace(model=model))
+
+    async def invoke():
+        async with pool.lease("codex-cli", "same-model") as adapter:
+            seen.append(adapter)
+            if len(seen) == 12:
+                entered.set()
+            await release.wait()
+
+    pool._create = create
+    tasks = [asyncio.create_task(invoke()) for _ in range(12)]
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert len({id(adapter) for adapter in seen}) == 12
+    finally:
+        release.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_gateway_honours_existing_explicit_model_limit_without_fixed_maximum(tmp_path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(json.dumps({"global": {"execution_limits": {
+        "instance_sessions": 15, "engines": {"codex-cli": 15}
+    }}}), encoding="utf-8")
+    gateway_path = tmp_path / "state" / "api_gateway_config.json"
+    gateway_path.parent.mkdir()
+    gateway_path.write_text(json.dumps({"max_parallel_per_model": 10}), encoding="utf-8")
+    cfg = SimpleNamespace(api_gateway_port=18801, api_host="127.0.0.1",
+                          project_root=tmp_path, config_path=config_path)
+    server = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path)
+    assert server._pool._model_capacity("codex-cli") == 10
+
+
+@pytest.mark.asyncio
+async def test_gateway_reports_capacity_wait_and_cancellation_without_blocking_other_engine(tmp_path):
+    pool = _AdapterPool(SimpleNamespace(project_root=tmp_path), {}, tmp_path,
+                        capacity=None, total_capacity=2, engine_capacity=1)
+    pool._create = lambda engine, model: asyncio.sleep(0, result=SimpleNamespace())
+    entered_a, entered_b, entered_c = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release = asyncio.Event()
+
+    async def use(engine, model, entered):
+        async with pool.lease(engine, model):
+            entered.set()
+            await release.wait()
+
+    tasks = [asyncio.create_task(use("one", "a", entered_a))]
+    try:
+        await asyncio.wait_for(entered_a.wait(), 1)
+        tasks.append(asyncio.create_task(use("one", "b", entered_b)))
+        await asyncio.sleep(0)
+        assert pool.capacity_status()["waiting"] == {"engine_capacity": 1}
+        tasks.append(asyncio.create_task(use("two", "c", entered_c)))
+        await asyncio.wait_for(entered_c.wait(), 1)
+        assert not entered_b.is_set()
+        tasks[1].cancel()
+        await asyncio.gather(tasks[1], return_exceptions=True)
+        assert pool.capacity_status()["waiting"] == {}
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_gateway_reports_actual_total_bottleneck_without_reserving_engine_slots(tmp_path):
+    pool = _AdapterPool(SimpleNamespace(project_root=tmp_path), {}, tmp_path,
+                        capacity=None, total_capacity=1, engine_capacity=1)
+    pool._create = lambda engine, model: asyncio.sleep(0, result=SimpleNamespace())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def use(engine, model, first=False):
+        async with pool.lease(engine, model):
+            if first:
+                entered.set()
+            await release.wait()
+
+    tasks = [asyncio.create_task(use("one", "first", True))]
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        tasks.append(asyncio.create_task(use("two", "second")))
+        tasks.append(asyncio.create_task(use("two", "third")))
+        await asyncio.sleep(0)
+        assert pool.capacity_status()["waiting"] == {"instance_capacity": 2}
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_gateway_health_reports_loaded_policy_not_unapplied_configuration(tmp_path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(json.dumps({"global": {"execution_limits": {
+        "instance_sessions": 9, "engines": {"codex-cli": 7}
+    }}}), encoding="utf-8")
+    cfg = SimpleNamespace(api_gateway_port=18801, api_host="127.0.0.1",
+                          project_root=tmp_path, config_path=config_path)
+    server = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path)
+    config_path.write_text(json.dumps({"global": {"execution_limits": {
+        "instance_sessions": 20, "engines": {"codex-cli": 18}
+    }}}), encoding="utf-8")
+    response = await server.handle_health(_FakeRequest({}))
+    status = json.loads(response.text)["resource_capacity"]
+    assert status["instance_sessions"] == 9
+    assert status["engines"]["codex-cli"] == 7
+    assert status["waiting"] == {} and status["active"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_uses_selected_capacity_wait_deadline_and_releases_waiter(tmp_path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(json.dumps({"global": {"execution_limits": {
+        "instance_sessions": 1, "queue_wait_seconds": 0.03
+    }}}), encoding="utf-8")
+    cfg = SimpleNamespace(api_gateway_port=18801, api_host="127.0.0.1",
+                          project_root=tmp_path, config_path=config_path)
+    pool = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path)._pool
+    pool._create = lambda engine, model: asyncio.sleep(0, result=SimpleNamespace())
+    async def wait_for_slot():
+        async with pool.lease("other", "b"):
+            pytest.fail("capacity waiter unexpectedly entered")
+    async with pool.lease("codex-cli", "a"):
+        with pytest.raises(TimeoutError, match="execution_resource_wait_timeout"):
+            await asyncio.wait_for(wait_for_slot(), 0.3)
+        assert pool.capacity_status()["waiting"] == {}
+    async with pool.lease("other", "b"):
+        assert pool.capacity_status()["active"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_capacity_timeout_is_a_pre_dispatch_response(tmp_path):
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(json.dumps({"global": {"execution_limits": {
+        "instance_sessions": 1, "queue_wait_seconds": 0.03
+    }}}), encoding="utf-8")
+    cfg = SimpleNamespace(api_gateway_port=18801, api_host="127.0.0.1",
+                          project_root=tmp_path, config_path=config_path)
+    server = APIGatewayServer(cfg, secrets={}, workspace_root=tmp_path, default_model="gpt-5.5")
+    server._engine_status["codex-cli"] = {"available": True}
+    adapter = _FakeAdapter()
+    server._pool._create = lambda engine, model: asyncio.sleep(0, result=adapter)
+    async with server._pool.lease("other", "occupied"):
+        response = await server.handle_chat_completions(_FakeRequest({
+            "model": "gpt-5.5", "messages": [{"role": "user", "content": "hello"}]
+        }))
+    assert response.status == 503
+    assert json.loads(response.text)["error"]["code"] == "execution_resource_wait_timeout"
+    assert server._pool.capacity_status()["waiting"] == {}
 
 
 class _FakePool:

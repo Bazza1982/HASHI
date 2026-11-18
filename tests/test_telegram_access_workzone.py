@@ -172,7 +172,7 @@ async def test_scoped_updates_create_distinct_real_sessions_and_honor_revocation
     assert runtime_session.agent_workzone_state(runtime, owner=global_owner)["slots"] == []
 
 
-def test_first_primary_user_is_used_by_proactive_route_without_restart(tmp_path, monkeypatch):
+def test_first_global_delegate_is_not_guessed_as_primary_route(tmp_path, monkeypatch):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.telegram_access import TelegramAccessService
 
@@ -193,4 +193,4 @@ def test_first_primary_user_is_used_by_proactive_route_without_restart(tmp_path,
     service.change("lily", expected_revision=state["revision"],
                    scope="global", action="add", user_id="42")
 
-    assert runtime_session.primary_telegram_chat_id(runtime) == 42
+    assert runtime_session.primary_telegram_chat_id(runtime) is None

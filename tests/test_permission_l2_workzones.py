@@ -33,7 +33,10 @@ async def test_workzone_ceiling_cannot_be_expanded_by_an_installed_grant(install
         args = {"path": str(target), "content": "owned test canary"}
         result = await execute(env, "file_write", args, "outside")
         if level == "L2":
-            assert isinstance(result, ToolResult) and result.details["control_disposition"] == "denied"
+            assert isinstance(result, ToolResult) and result.is_error
+            assert result.details["control_disposition"] == "denied"
+            assert result.details["error_code"] == "permission_scope_outside_policy"
+            assert "outside the selected managed policy" in result.output
             assert not target.exists() and not env.supervisor.writes
             proactive = await execute(env, "request_access", {
                 "reason": "cannot approve outside the hard Workzone",

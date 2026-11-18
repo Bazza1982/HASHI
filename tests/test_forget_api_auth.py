@@ -8,6 +8,80 @@ from tests.test_session_api import _Request, _server
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("multipart", [False, True])
+async def test_unauthenticated_unknown_slash_text_remains_chat_not_a_command(tmp_path, monkeypatch, multipart):
+    from unittest.mock import AsyncMock
+    from orchestrator import slash_command_audit
+    from tests.test_session_api import _MultipartRequest
+
+    server, runtime = _server(tmp_path)
+    server.admin_token = "test-secret"
+    monkeypatch.setattr(slash_command_audit, "is_supported_slash_command",
+                        lambda _runtime, command: command == "status")
+    dispatcher = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr("orchestrator.workbench_api.try_execute_slash_command_text", dispatcher)
+    runtime.enqueue_api_text = AsyncMock(return_value="req-unknown-slash")
+
+    def request(text):
+        fields = {"agent": "lily", "text": text}
+        if multipart:
+            return _MultipartRequest(fields)
+        result = _Request(fields)
+        result.content_type = "application/json"
+        return result
+
+    response = await server.handle_chat(request("/some/project/path is relevant"))
+    assert response.status == 200, response.text
+    assert runtime.enqueue_api_text.await_args.args[0] == "/some/project/path is relevant"
+    dispatcher.assert_not_awaited()
+
+    for text in ("/status", "/telegram off"):
+        denied = await server.handle_chat(request(text))
+        assert denied.status == 401
+    assert runtime.enqueue_api_text.await_count == 1
+    dispatcher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_normal_frontend_commands_require_the_existing_transport_credential(tmp_path, monkeypatch):
+    from orchestrator import command_interaction_bridge, slash_command_audit
+
+    server, _runtime = _server(tmp_path)
+    server.admin_token = "test-secret"
+    session = server.session_store.resolve_primary_session(
+        owner_id="user:7", agent_id="lily", establish=True
+    )
+    monkeypatch.setattr(slash_command_audit, "is_supported_slash_command", lambda *_: True)
+    seen = []
+
+    async def dispatch(_runtime, _payload, metadata):
+        seen.append(metadata)
+        return {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr(command_interaction_bridge, "dispatch_command_interaction", dispatch)
+    request = _Request(
+        {"command": "model", "arguments": [], "client_id": "client-123456789",
+         "request_id": "request-123456789", "context_generation": session["context_generation"]},
+        match_info={"session_id": session["session_id"]},
+    )
+    rejected = await server.handle_v1_session_command_invocation(request)
+    assert rejected.status == 401
+    assert seen == []
+    request.headers["X-Workbench-Token"] = "test-secret"
+    allowed = await server.handle_v1_session_command_invocation(request)
+    assert allowed.status == 200, allowed.text
+    assert seen[0]["_hashi_owner_id"] == "user:7"
+
+    agent_request = _Request({"command": "/model"}, match_info={"name": "lily"})
+    rejected_agent = await server.handle_agent_command(agent_request)
+    assert rejected_agent.status == 401
+    chat_request = _Request({"agent": "lily", "text": "/model"})
+    chat_request.content_type = "application/json"
+    rejected_chat = await server.handle_chat(chat_request)
+    assert rejected_chat.status == 401
+
+
+@pytest.mark.asyncio
 async def test_session_command_needs_real_credentials_before_forget_dispatch(tmp_path, monkeypatch):
     from orchestrator import command_interaction_bridge, slash_command_audit
 
@@ -157,7 +231,9 @@ async def test_encoded_forget_auth_is_bound_to_the_worker_owner(monkeypatch):
     observed = []
     monkeypatch.setattr(
         "orchestrator.runtime_session.current_session",
-        lambda _runtime, **_kwargs: {"session_id": "safe-session", "context_generation": 1},
+        lambda _runtime, **_kwargs: {
+            "session_id": "safe-session", "context_generation": 1, "owner_id": "user:7",
+        },
     )
     monkeypatch.setattr("orchestrator.runtime_session.owner_id", lambda _runtime: "user:7")
 
@@ -169,17 +245,18 @@ async def test_encoded_forget_auth_is_bound_to_the_worker_owner(monkeypatch):
         "orchestrator.command_interaction_bridge.dispatch_command_interaction", dispatch
     )
     text = _wire("open", command="/forget 2h")
+    results = []
     for credentials in (
         {},
         {"_hashi_forget_authenticated": True, "_hashi_owner_id": "user:8"},
         {"_hashi_forget_authenticated": True, "_hashi_owner_id": "user:7"},
     ):
-        await try_execute_slash_command_text(
+        results.append(await try_execute_slash_command_text(
             _runtime(), text, source_channel="workbench_api", session_metadata=credentials,
-        )
+        ))
     assert observed[0].get("_hashi_forget_authenticated") is not True
-    assert observed[1].get("_hashi_forget_authenticated") is not True
-    assert observed[2]["_hashi_forget_authenticated"] is True
+    assert results[1]["error_code"] == "command_menu_forbidden"
+    assert observed[1]["_hashi_forget_authenticated"] is True
 
 
 @pytest.mark.asyncio

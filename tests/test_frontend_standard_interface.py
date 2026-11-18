@@ -349,6 +349,62 @@ def test_t03_stop_control_routes_to_agent_command_without_session_cancel(
     assert active["run_id"] in active_ids
 
 
+@pytest.mark.parametrize("policy", [{}, {"mode": "allowlist"}])
+def test_limited_agent_stop_control_is_available_to_its_owner(tmp_path: Path, policy):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime, store, owner, session = _setup_runtime(tmp_path)
+    runtime.config = SimpleNamespace(type="limited", extra={"limited_policy": policy})
+    runtime._command_policy_mode = "allow_all"
+    runtime._disabled_commands = set()
+    runtime._enabled_commands = set()
+    runtime._evaluate_enterprise_policy = lambda *args, **kwargs: SimpleNamespace(allowed=True)
+    runtime._is_command_allowed = lambda cmd: FlexibleAgentRuntime._is_command_allowed(runtime, cmd)
+    FlexibleAgentRuntime._init_command_policy(runtime)
+
+    def envelope(request_id, session_id):
+        return build_frontend_ingress_envelope(
+            source_id="backend_api", ingress_transport="session-api", surface="workbench",
+            channel_key="default", instance_id="HASHI1",
+            principal={"kind": "human_or_client", "assurance": "runtime_observed"},
+            network_authentication="not_applicable", relay_chain=[], request_id=request_id,
+            idempotency_key=request_id, session_id=session_id, agent_id="test-agent",
+        )
+
+    stop = envelope("limited-stop", session["session_id"])
+    first = admit_frontend_ingress(runtime, stop, control_action="stop")
+    retry = admit_frontend_ingress(runtime, stop, control_action="stop")
+    other = store.ensure_default_session(owner_id="user:8", agent_id="test-agent")
+    foreign = admit_frontend_ingress(
+        runtime, envelope("foreign-stop", other["session_id"]), control_action="stop"
+    )
+    assert first["status"] == "accepted"
+    assert retry["replayed"] is True
+    assert runtime.stop_calls == [[]]
+    assert foreign["status"] == "rejected"
+
+
+@pytest.mark.parametrize("mode", ["denylist", "allowlist"])
+def test_limited_policy_explicit_enable_overrides_preset_but_not_explicit_denial(mode):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(type="limited", extra={"limited_policy": {
+            "mode": mode, "enabled_commands": ["/start", "/backend"],
+            "disabled_commands": ["/backend"],
+        }}),
+        _command_policy_mode="allow_all", _disabled_commands=set(), _enabled_commands=set(),
+        _evaluate_enterprise_policy=lambda *args, **kwargs: SimpleNamespace(allowed=True),
+    )
+    FlexibleAgentRuntime._init_command_policy(runtime)
+    assert FlexibleAgentRuntime._is_command_allowed(runtime, "start")
+    assert FlexibleAgentRuntime._is_command_allowed(runtime, "stop")
+    assert FlexibleAgentRuntime._is_command_allowed(runtime, "terminate")
+    assert not FlexibleAgentRuntime._is_command_allowed(runtime, "backend")
+    runtime._evaluate_enterprise_policy = lambda *args, **kwargs: SimpleNamespace(allowed=False)
+    assert not FlexibleAgentRuntime._is_command_allowed(runtime, "stop")
+
+
 def test_t04_t05_frontend_projection_and_presentation_rendering(tmp_path: Path):
     runtime, store, owner, session = _setup_runtime(tmp_path)
 

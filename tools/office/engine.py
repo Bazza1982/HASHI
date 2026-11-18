@@ -19,10 +19,21 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from zipfile import ZipFile
 
-from package_probe import inspect_ooxml_package, OfficePackageError
+from package_probe import inspect_ooxml_package, OfficePackageError, OfficePackageBudgetError
+from limits import resolve_budgets
 
-MAX_BYTES = 32 * 1024 * 1024
-MAX_CELLS = 200_000
+BUDGETS = resolve_budgets()
+MAX_BYTES = BUDGETS["file_bytes"]
+MAX_CELLS = BUDGETS["materialized_cells"]
+
+
+def configure_budgets(values=None):
+    global BUDGETS, MAX_BYTES, MAX_CELLS
+    BUDGETS = resolve_budgets(values)
+    MAX_BYTES = BUDGETS["file_bytes"]
+    MAX_CELLS = BUDGETS["materialized_cells"]
+
+
 MAX_RESULT_CELLS = 1000
 FORMATS = {"xlsx": "excel", "docx": "word", "pptx": "slides", "pdf": "pdf", "csv": "excel"}
 RECIPES = ("excel_summary", "excel_reconcile", "excel_clean", "excel_chart",
@@ -64,8 +75,10 @@ def scalar(value):
 
 
 def read_bytes(path):
-    if not path.is_file() or path.stat().st_size > MAX_BYTES:
-        raise OfficeError("FILE_LIMIT", "File is missing or exceeds 32 MiB.")
+    if not path.is_file():
+        raise OfficeError("FILE_LIMIT", "File is missing.")
+    if path.stat().st_size > MAX_BYTES:
+        raise OfficeError("FILE_LIMIT", f"Input {path.stat().st_size} bytes exceeds file_bytes budget {MAX_BYTES}; increase the configured resource budget.")
     return path.read_bytes()
 
 
@@ -90,7 +103,7 @@ def safe_chart_workbook(archive, name):
     if not referenced:
         return False
     raw = archive.read(name)
-    nested = inspect_ooxml_package(raw, filename="chart.xlsx")
+    nested = inspect_ooxml_package(raw, filename="chart.xlsx", budgets=BUDGETS)
     if nested["macro_parts_present"]:
         return False
     with ZipFile(io.BytesIO(raw)) as book:
@@ -122,21 +135,17 @@ def preflight(path, *, editing=False):
         with pymupdf.open(path) as doc:
             if doc.is_encrypted:
                 raise OfficeError("ENCRYPTED_FILE", "Encrypted PDF is unsupported.")
-            if doc.page_count > 500:
-                raise OfficeError("FILE_LIMIT", "PDF exceeds 500 pages.")
             return {"format": "pdf", "pages": doc.page_count}
     if suffix == ".csv":
         raw.decode("utf-8-sig")
         return {"format": "excel", "csv": True}
     try:
-        result = inspect_ooxml_package(raw, filename=path.name)
+        result = inspect_ooxml_package(raw, filename=path.name, budgets=BUDGETS)
         with ZipFile(io.BytesIO(raw)) as archive:
             for item in archive.infolist():
                 name = item.filename
                 if item.file_size and item.compress_size == 0:
                     raise OfficeError("INVALID_PACKAGE", "Invalid compressed size.")
-                if item.file_size > 2 * 1024 * 1024 and item.file_size > 200 * max(item.compress_size, 1):
-                    raise OfficeError("FILE_LIMIT", "Archive compression ratio exceeds limit.")
                 if not name.endswith((".xml", ".rels")):
                     continue
                 data = archive.read(item)
@@ -159,6 +168,8 @@ def preflight(path, *, editing=False):
                 for n in names):
                 raise OfficeError("FIDELITY_UNSUPPORTED", "This document contains objects not safely round-tripped by this runtime.")
         return result
+    except OfficePackageBudgetError as exc:
+        raise OfficeError("FILE_LIMIT", str(exc)) from exc
     except OfficePackageError as exc:
         raise OfficeError("INVALID_PACKAGE", str(exc)) from exc
 
@@ -183,18 +194,125 @@ def number(value):
 
 
 def dimensions(book):
-    if len(book.worksheets) > 100 or sum(s.max_row * s.max_column for s in book) > MAX_CELLS:
-        raise OfficeError("FILE_LIMIT", "Workbook exceeds 100 sheets or 200,000 cells.")
-    for sheet in book:
-        for row in sheet:
-            for cell in row:
-                value = cell.value
-                if isinstance(value, str) and value.startswith("=") and re.search(
-                    r"\b(?:WEBSERVICE|HYPERLINK|RTD|DDE)\s*\(|\[.*?\]|\|", value, re.I
-                ):
-                    raise OfficeError("EXTERNAL_FORMULA", "External/DDE formulas are not accepted.")
-    if len(book.worksheets) > 100 or sum(s.max_row * s.max_column for s in book) > MAX_CELLS:
-        raise OfficeError("FILE_LIMIT", "Workbook exceeds 100 sheets or 200,000 cells.")
+    # The rectangular extent can be enormous even when only a few cells are
+    # present (for example a single formatted cell in the last row). Count
+    # materialized cells rather than inventing work for all intervening cells.
+    cells = sum(len(sheet._cells) for sheet in book.worksheets)
+    if cells > MAX_CELLS:
+        raise OfficeError("FILE_LIMIT", f"Workbook has {cells} materialized cells; materialized_cells budget is {MAX_CELLS}. Increase the configured resource budget.")
+
+
+# Formula text is data during openpyxl reads and edits. An external converter
+# can recalculate formulas, so inspect tokens only at that execution boundary.
+# Unclassified expressions stay readable/editable but are not sent to a
+# converter without a proven isolated evaluation route.
+def _formula_conversion_risk(formula):
+    from openpyxl.formula import Tokenizer
+    from openpyxl.utils import FORMULAE
+
+    try:
+        tokens = Tokenizer(formula).items
+    except Exception:
+        return "unclassified formula syntax"
+    stack = []
+    external_functions = {
+        "WEBSERVICE", "RTD", "DDE", "INDIRECT", "CALL", "EXEC", "RUN",
+        "REGISTER.ID", "IMPORTDATA", "IMPORTXML", "IMPORTHTML", "IMPORTFEED",
+        "IMPORTRANGE",
+    }
+    for token in tokens:
+        if token.type in {"FUNC", "PAREN", "ARRAY"}:
+            if token.subtype == "OPEN":
+                stack.append(token.type)
+            elif token.subtype == "CLOSE":
+                if not stack or stack.pop() != token.type:
+                    return "unbalanced formula syntax"
+        if token.type == "FUNC" and token.subtype == "OPEN":
+            name = token.value[:-1].strip().upper()
+            canonical = name.removeprefix("_XLFN.").removeprefix("_XLWS.")
+            if canonical in external_functions or canonical.startswith("CUBE"):
+                return "formula may evaluate an external resource"
+            if canonical not in FORMULAE:
+                return "unclassified formula function"
+        if token.type == "OPERAND" and token.subtype == "RANGE":
+            value = token.value
+            if "|" in value or re.search(r"\[[^\]]+\][^!]*!", value):
+                return "formula may reference an external resource"
+    return "unbalanced formula syntax" if stack else None
+
+
+def _check_converter_formulas(book):
+    def check(value):
+        if not isinstance(value, str) or not value:
+            reason = "unclassified formula representation"
+        else:
+            reason = _formula_conversion_risk(value if value.startswith("=") else "=" + value)
+        if reason:
+            raise OfficeError(
+                "EXTERNAL_FORMULA_EVALUATION",
+                f"Conversion may evaluate external or unclassified formulas ({reason}); "
+                "read and edit remain available without recalculation.",
+            )
+
+    dimensions(book)
+    name_scopes = [book.defined_names]
+    for sheet in book.worksheets:
+        name_scopes.append(sheet.defined_names)
+        # Openpyxl has already materialized these cells; avoid expanding the
+        # entire rectangular extent solely to examine formula expressions.
+        for cell in sheet._cells.values():
+            if cell.data_type == "f":
+                check(cell.value)
+    # Named expressions can indirectly refer to external formulas.
+    for scope in name_scopes:
+        for defined in scope.values():
+            check(defined.attr_text)
+
+
+def _check_converter_connections(archive):
+    # Connections and query tables can request refresh independently of cell
+    # formulas. They remain readable data; an unisolated converter cannot run
+    # them until an explicit, scoped evaluation route is available.
+    if any(
+        name.casefold() == "xl/connections.xml"
+        or name.casefold().startswith((
+            "xl/querytables/", "xl/externallinks/", "xl/macrosheets/", "xl/dialogsheets/",
+        ))
+        for name in archive.namelist()
+    ):
+        raise OfficeError(
+            "EXTERNAL_FORMULA_EVALUATION",
+            "Conversion may refresh external workbook connections; "
+            "read and edit remain available without recalculation.",
+        )
+
+
+def _check_converter_input(source):
+    suffix = source.suffix.lower()
+    if suffix in {".xlsx", ".csv"}:
+        if suffix == ".xlsx":
+            with ZipFile(source) as archive:
+                _check_converter_connections(archive)
+        book = load_book(source)
+        try:
+            _check_converter_formulas(book)
+        finally:
+            book.close()
+    elif suffix == ".pptx":
+        import openpyxl
+        with ZipFile(source) as archive:
+            for name in archive.namelist():
+                if re.fullmatch(r"ppt/embeddings/[^/]+\.xlsx", name, re.I):
+                    raw = archive.read(name)
+                    with ZipFile(io.BytesIO(raw)) as nested:
+                        _check_converter_connections(nested)
+                    embedded = openpyxl.load_workbook(
+                        io.BytesIO(raw), keep_links=False, rich_text=True,
+                    )
+                    try:
+                        _check_converter_formulas(embedded)
+                    finally:
+                        embedded.close()
 
 
 def describe(path):
@@ -212,22 +330,30 @@ def describe(path):
     elif kind == "word":
         from docx import Document
         doc = Document(path)
-        result.update(paragraphs=len(doc.paragraphs), tables=len(doc.tables),
-                      images=len(doc.inline_shapes),
-                      headings=[p.text[:160] for p in doc.paragraphs if p.style.name.startswith("Heading")][:30])
+        paragraphs = doc.paragraphs
+        headings = [p.text for p in paragraphs if p.style.name.startswith("Heading")]
+        headings_truncated = len(headings) > 30 or any(len(text) > 160 for text in headings[:30])
+        result.update(paragraphs=len(paragraphs), tables=len(doc.tables),
+                      images=len(doc.inline_shapes), headings=[text[:160] for text in headings[:30]],
+                      headings_truncated=headings_truncated)
+        if headings_truncated:
+            result["truncated"] = True
+            result["next_target"] = f"paragraph:1-{len(paragraphs)}"
     elif kind == "slides":
         from pptx import Presentation
         deck = Presentation(path)
-        if len(deck.slides) > 200:
-            raise OfficeError("FILE_LIMIT", "Presentation exceeds 200 slides.")
         result["slides"] = [{"index": i, "title": s.shapes.title.text[:160] if s.shapes.title else "",
                             "shapes": len(s.shapes),
                             "charts": sum(bool(x.has_chart) for x in s.shapes),
                             "tables": sum(bool(x.has_table) for x in s.shapes)}
                            for i, s in enumerate(deck.slides, 1) if i <= 30]
         result["total_slides"] = len(deck.slides)
-        result["truncated"] = len(deck.slides) > 30
-        result["next_target"] = "slide:31-40" if len(deck.slides) > 30 else None
+        title_truncated = any(slide.shapes.title and len(slide.shapes.title.text) > 160
+                              for slide in list(deck.slides)[:30])
+        result["title_truncated"] = bool(title_truncated)
+        result["truncated"] = len(deck.slides) > 30 or bool(title_truncated)
+        result["next_target"] = (f"slide:1-{len(deck.slides)}" if title_truncated else
+                                 f"slide:31-{len(deck.slides)}" if len(deck.slides) > 30 else None)
     result["fully_validated"] = True
     result["recipes"] = list(RECIPES)
     result["recalculation"] = "not_performed"
@@ -261,12 +387,208 @@ def slice_target(target, maximum, prefix):
     if not match:
         raise OfficeError("INVALID_TARGET", "Use " + prefix + ":1-10.")
     start, end = int(match[1]) - 1, int(match[2] or match[1])
-    if start < 0 or end <= start or start >= maximum or end - start > 50:
-        raise OfficeError("INVALID_TARGET", "Requested part is absent or exceeds 50 items.")
+    if start < 0 or end <= start or start >= maximum :
+        raise OfficeError("INVALID_TARGET", "Requested part is absent.")
     return start, min(end, maximum)
 
 
-def read(path, target="", view="summary"):
+def excel_fragment_page(sheet, bounds, continuation):
+    """Return bounded row-major cell fragments without discarding any text."""
+    from openpyxl.utils import get_column_letter
+    left, top, right, bottom = bounds
+    if continuation is None:
+        row, column, offset = top, left, 0
+    else:
+        try:
+            if continuation.get("kind") != "excel_cells":
+                raise ValueError()
+            row, column, offset = (continuation[k] for k in ("row", "column", "offset"))
+            if (type(row) is not int or type(column) is not int or type(offset) is not int
+                    or not top <= row <= bottom or not left <= column <= right or offset < 0):
+                raise ValueError()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise OfficeError("INVALID_CURSOR", "Invalid Excel continuation.") from None
+    fragments = []
+    budget = 0
+    while row <= bottom:
+        value = scalar(sheet.cell(row, column).value)
+        if isinstance(value, str):
+            if offset > len(value):
+                raise OfficeError("INVALID_CURSOR", "Excel continuation exceeds the cell.")
+            part = value[offset:offset + 512]
+            complete = offset + len(part) >= len(value)
+        else:
+            if offset:
+                raise OfficeError("INVALID_CURSOR", "Invalid scalar cell continuation.")
+            part, complete = value, True
+        fragment = {"cell": f"{get_column_letter(column)}{row}", "offset": offset,
+                    "value": part, "complete": complete}
+        size = len(json.dumps(fragment, ensure_ascii=False)) + 2
+        if fragments and (budget + size > 10500 or len(fragments) >= 100):
+            break
+        fragments.append(fragment)
+        budget += size
+        if complete:
+            offset = 0
+            column += 1
+            if column > right:
+                column, row = left, row + 1
+        else:
+            offset += len(part)
+    next_state = ({"kind": "excel_cells", "row": row, "column": column, "offset": offset}
+                  if row <= bottom else None)
+    return {"sheet": sheet.title, "representation": "cell_fragments", "cell_fragments": fragments,
+            "truncated": next_state is not None, "text_truncated": any(not f["complete"] for f in fragments),
+            "next_target": None, "_continuation": next_state}
+
+
+def word_table_fragment_page(table, table_index, start, end, continuation):
+    row, column, offset = start, 0, 0
+    if continuation is not None:
+        try:
+            if continuation.get("kind") != "word_table" or continuation.get("table") != table_index:
+                raise ValueError()
+            row, column, offset = (continuation[k] for k in ("row", "column", "offset"))
+            if (any(type(v) is not int for v in (row, column, offset))
+                    or not start <= row < end or column < 0 or offset < 0):
+                raise ValueError()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise OfficeError("INVALID_CURSOR", "Invalid table continuation.") from None
+    rows = table.rows
+    fragments, budget = [], 0
+    while row < end:
+        cells = rows[row].cells
+        if column >= len(cells):
+            if offset or (not fragments and column > len(cells)):
+                raise OfficeError("INVALID_CURSOR", "Invalid table cell continuation.")
+            row, column = row + 1, 0
+            continue
+        text = cells[column].text
+        if offset > len(text):
+            raise OfficeError("INVALID_CURSOR", "Table continuation exceeds the cell.")
+        part = text[offset:offset + 512]
+        complete = offset + len(part) >= len(text)
+        fragment = {"row": row + 1, "column": column + 1, "offset": offset,
+                    "text": part, "complete": complete}
+        size = len(json.dumps(fragment, ensure_ascii=False)) + 2
+        if fragments and (budget + size > 10500 or len(fragments) >= 100):
+            break
+        fragments.append(fragment)
+        budget += size
+        if complete:
+            column, offset = column + 1, 0
+        else:
+            offset += len(part)
+    state = ({"kind": "word_table", "table": table_index, "row": row,
+              "column": column, "offset": offset} if row < end else None)
+    return {"table": table_index, "representation": "table_fragments", "table_fragments": fragments,
+            "truncated": state is not None,
+            "text_truncated": any(not f["complete"] for f in fragments),
+            "next_target": None, "_continuation": state}
+
+
+def text_fragment_page(kind, start, end, continuation, get_item, representation):
+    """Page complete text items with stable character offsets."""
+    index, offset = start, 0
+    if continuation is not None:
+        try:
+            if continuation.get("kind") != kind:
+                raise ValueError()
+            index, offset = continuation["index"], continuation["offset"]
+            if (type(index) is not int or type(offset) is not int
+                    or not start <= index < end or offset < 0):
+                raise ValueError()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise OfficeError("INVALID_CURSOR", "Invalid text continuation.") from None
+    fragments, budget = [], 0
+    while index < end:
+        text, extra = get_item(index)
+        if offset > len(text):
+            raise OfficeError("INVALID_CURSOR", "Text continuation exceeds the item.")
+        part = text[offset:offset + 512]
+        complete = offset + len(part) >= len(text)
+        fragment = {"index": index + 1, "offset": offset, "text": part,
+                    "complete": complete, **extra}
+        size = len(json.dumps(fragment, ensure_ascii=False)) + 2
+        if fragments and (budget + size > 10500 or len(fragments) >= 100):
+            break
+        fragments.append(fragment)
+        budget += size
+        if complete:
+            index, offset = index + 1, 0
+        else:
+            offset += len(part)
+    state = ({"kind": kind, "index": index, "offset": offset} if index < end else None)
+    return {"representation": representation, representation: fragments,
+            "truncated": state is not None,
+            "text_truncated": any(not f["complete"] for f in fragments),
+            "next_target": None, "_continuation": state}
+
+
+def slide_parts(deck, start, end):
+    for slide_index in range(start, end):
+        slide_no = slide_index + 1
+        yield {"slide": slide_no, "kind": "slide"}, ""
+        for shape_index, shape in enumerate(deck.slides[slide_index].shapes, 1):
+            base = {"slide": slide_no, "shape": shape_index}
+            yield {**base, "kind": "shape_name", "type": str(shape.shape_type)}, shape.name
+            if shape.has_text_frame:
+                yield {**base, "kind": "shape_text"}, shape.text
+            if shape.has_table:
+                table = shape.table
+                yield {**base, "kind": "table", "rows": len(table.rows), "columns": len(table.columns)}, ""
+                for row, row_value in enumerate(table.rows, 1):
+                    for column, cell in enumerate(row_value.cells, 1):
+                        yield {**base, "kind": "table_cell", "row": row, "column": column}, cell.text
+            if shape.has_chart:
+                chart = shape.chart
+                yield {**base, "kind": "chart", "type": str(chart.chart_type)}, ""
+                for number, series in enumerate(chart.series, 1):
+                    yield {**base, "kind": "chart_series", "series": number}, str(series.name or "")
+
+
+def slide_fragment_page(deck, start, end, continuation):
+    source_start, wanted, offset = start, 0, 0
+    if continuation is not None:
+        try:
+            if continuation.get("kind") != "slide_parts":
+                raise ValueError()
+            source_start, wanted, offset = (continuation[k] for k in ("start", "part", "offset"))
+            if (any(type(v) is not int for v in (source_start, wanted, offset))
+                    or not start <= source_start < end or wanted < 0 or offset < 0):
+                raise ValueError()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise OfficeError("INVALID_CURSOR", "Invalid slide continuation.") from None
+    fragments, budget, found = [], 0, False
+    for number, (meta, text) in enumerate(slide_parts(deck, source_start, end)):
+        if number < wanted:
+            continue
+        found = True
+        current = offset if number == wanted else 0
+        if current > len(text):
+            raise OfficeError("INVALID_CURSOR", "Slide continuation exceeds the item.")
+        while True:
+            part = text[current:current + 512]
+            complete = current + len(part) >= len(text)
+            fragment = {**meta, "offset": current, "text": part, "complete": complete}
+            size = len(json.dumps(fragment, ensure_ascii=False)) + 2
+            if fragments and (budget + size > 10500 or len(fragments) >= 100):
+                state = {"kind": "slide_parts", "start": source_start, "part": number, "offset": current}
+                return {"representation": "slide_fragments", "slide_fragments": fragments,
+                        "truncated": True, "text_truncated": any(not f["complete"] for f in fragments),
+                        "next_target": None, "_continuation": state}
+            fragments.append(fragment)
+            budget += size
+            if complete:
+                break
+            current += len(part)
+    if continuation is not None and not found:
+        raise OfficeError("INVALID_CURSOR", "Slide continuation is past the requested content.")
+    return {"representation": "slide_fragments", "slide_fragments": fragments,
+            "truncated": False, "text_truncated": False, "next_target": None, "_continuation": None}
+
+
+def read(path, target="", view="summary", continuation=None):
     meta = describe(path)
     kind = meta["format"]
     if view in {"summary", "structure"} and not target:
@@ -275,9 +597,11 @@ def read(path, target="", view="summary"):
         book = load_book(path, values=view == "values")
         try:
             sheet, (left, top, right, bottom) = sheet_target(book, target)
+            if continuation is not None or right - left + 1 > 100:
+                page = excel_fragment_page(sheet, (left, top, right, bottom), continuation)
+                page["formula_values"] = "cached_only" if view == "values" else "formula_text"
+                return page
             actual_bottom = min(bottom, top + 199, top + MAX_RESULT_CELLS // (right - left + 1) - 1)
-            if right - left + 1 > 100:
-                raise OfficeError("READ_LIMIT", "Read no more than 100 columns per call.")
             rows = [[scalar(c.value) for c in row] for row in sheet.iter_rows(
                 min_row=top, max_row=actual_bottom, min_col=left, max_col=right)]
             while len(json.dumps(rows, ensure_ascii=False)) > 12000 and len(rows) > 1:
@@ -285,9 +609,9 @@ def read(path, target="", view="summary"):
             actual_bottom = top + len(rows) - 1
             text_truncated = False
             if len(json.dumps(rows, ensure_ascii=False)) > 12000:
-                width = max(32, 10000 // max(len(rows[0]), 1))
-                rows = [[v[:width] if isinstance(v, str) else v for v in rows[0]]]
-                text_truncated = True
+                page = excel_fragment_page(sheet, (left, top, right, bottom), None)
+                page["formula_values"] = "cached_only" if view == "values" else "formula_text"
+                return page
             from openpyxl.utils import get_column_letter
             next_target = (f"{sheet.title}!{get_column_letter(left)}{actual_bottom+1}:"
                            f"{get_column_letter(right)}{bottom}") if actual_bottom < bottom else None
@@ -300,6 +624,17 @@ def read(path, target="", view="summary"):
     if kind == "word":
         from docx import Document
         doc = Document(path)
+        table_list = re.fullmatch(r"table-list:(\d+)(?:-(\d+))?", target or "", re.I)
+        if table_list:
+            start = int(table_list[1]) - 1
+            scope_end = min(int(table_list[2] or table_list[1]), len(doc.tables))
+            if start < 0 or start >= scope_end:
+                raise OfficeError("INVALID_TARGET", "Requested table list is absent.")
+            end = min(scope_end, start + 30)
+            return {"table_summaries": [{"index": i + 1, "rows": len(doc.tables[i].rows),
+                                         "columns": len(doc.tables[i].columns)} for i in range(start, end)],
+                    "total_tables": len(doc.tables), "truncated": end < scope_end,
+                    "next_target": f"table-list:{end+1}-{scope_end}" if end < scope_end else None}
         table_match = re.fullmatch(r"table:(\d+)(?:!(\d+):(\d+))?", target or "", re.I)
         if table_match:
             index = int(table_match[1]) - 1
@@ -307,70 +642,105 @@ def read(path, target="", view="summary"):
                 raise OfficeError("TARGET_NOT_FOUND", "Table not found. Inspect the document for table indexes.")
             table = doc.tables[index]
             start = int(table_match[2] or 1) - 1
-            end = min(int(table_match[3] or start+30), len(table.rows))
-            if start < 0 or start >= end or end-start > 50 or len(table.columns)>50:
-                raise OfficeError("INVALID_TARGET", "Use table:1!1:30 with at most 50 rows and columns.")
-            rows = [[c.text[:500] for c in row.cells] for row in table.rows[start:end]]
-            while len(json.dumps(rows,ensure_ascii=False))>11000 and len(rows)>1:
+            scope_end = min(int(table_match[3]) if table_match[3] else len(table.rows), len(table.rows))
+            if start < 0 or start >= scope_end:
+                raise OfficeError("INVALID_TARGET", "Requested table rows are absent.")
+            end = min(scope_end, start + 30)
+            rows = [[c.text for c in row.cells] for row in table.rows[start:end]]
+            if (continuation is not None or len(table.columns) > 50
+                    or any(len(value) > 500 for row in rows for value in row)
+                    or (rows and len(json.dumps(rows[0], ensure_ascii=False)) > 11000)):
+                return word_table_fragment_page(table, index + 1, start, scope_end, continuation)
+            while len(json.dumps(rows, ensure_ascii=False)) > 11000 and len(rows) > 1:
                 rows.pop()
-            width = max(32, 10000//max(1,len(table.columns)))
-            rows = [[v[:width] for v in row] for row in rows]
-            end = start+len(rows)
-            return {"table":index+1,"start_row":start+1,"rows":rows,
-                    "text_truncated":any(len(c.text)>min(width,500) for row in table.rows[start:end] for c in row.cells),
-                    "truncated":end<len(table.rows),
-                    "next_target":f"table:{index+1}!{end+1}:{min(end+30,len(table.rows))}" if end<len(table.rows) else None}
+            end = start + len(rows)
+            return {"table": index + 1, "start_row": start + 1, "rows": rows,
+                    "text_truncated": False, "truncated": end < scope_end,
+                    "next_target": f"table:{index+1}!{end+1}:{scope_end}" if end < scope_end else None}
+        paragraphs = doc.paragraphs
         if target and not re.fullmatch(r"(?:paragraphs?:?)?\d+(?:[-:]\d+)?", target, re.I):
-            matches = [i for i, p in enumerate(doc.paragraphs) if p.text == target]
+            matches = [i for i, p in enumerate(paragraphs) if p.text == target]
             if not matches:
                 raise OfficeError("TARGET_NOT_FOUND", "Section heading not found.")
             start = matches[0]
-            end = next((i for i in range(start + 1, len(doc.paragraphs))
-                        if doc.paragraphs[i].style.name.startswith("Heading")), len(doc.paragraphs))
-            end = min(end, start + 50)
+            scope_end = next((i for i in range(start + 1, len(paragraphs))
+                              if paragraphs[i].style.name.startswith("Heading")), len(paragraphs))
+        elif target:
+            start, scope_end = slice_target(target, len(paragraphs), "paragraphs?")
         else:
-            start, end = slice_target(target, len(doc.paragraphs), "paragraphs?")
-        while sum(len(p.text[:2000]) + 100 for p in doc.paragraphs[start:end]) > 11000 and end > start + 1:
+            start, scope_end = 0, len(paragraphs)
+        end = min(scope_end, start + 30)
+        if continuation is not None or any(len(p.text) > 2000 for p in paragraphs[start:end]):
+            return text_fragment_page("word_paragraphs", start, scope_end, continuation,
+                                      lambda i: (paragraphs[i].text, {"style": paragraphs[i].style.name}),
+                                      "paragraph_fragments")
+        while sum(len(p.text) + 100 for p in paragraphs[start:end]) > 11000 and end > start + 1:
             end -= 1
-        return {"paragraphs": [{"index": i + 1, "text": p.text[:2000], "style": p.style.name}
-                                for i, p in enumerate(doc.paragraphs[start:end], start)],
-                "text_truncated": any(len(p.text) > 2000 for p in doc.paragraphs[start:end]),
+        return {"paragraphs": [{"index": i + 1, "text": p.text, "style": p.style.name}
+                                for i, p in enumerate(paragraphs[start:end], start)],
+                "text_truncated": False,
                 "tables": [{"index":i+1,"rows":len(table.rows),"columns":len(table.columns)} for i,table in enumerate(doc.tables)][:30],
-                "truncated": end < len(doc.paragraphs), "next_target": f"paragraph:{end+1}-{min(end+30,len(doc.paragraphs))}" if end < len(doc.paragraphs) else None}
+                "total_tables": len(doc.tables), "tables_truncated": len(doc.tables) > 30,
+                "tables_next_target": f"table-list:31-{len(doc.tables)}" if len(doc.tables) > 30 else None,
+                "truncated": end < scope_end,
+                "next_target": f"paragraph:{end+1}-{scope_end}" if end < scope_end else None}
     if kind == "slides":
         from pptx import Presentation
         deck = Presentation(path)
-        start, end = slice_target(target, len(deck.slides), "slides?")
+        start, scope_end = slice_target(target, len(deck.slides), "slides?") if target else (0, len(deck.slides))
+        if continuation is not None:
+            return slide_fragment_page(deck, start, scope_end, continuation)
+        end = min(scope_end, start + 10)
         items = []
-        for i in range(start,end):
+        for i in range(start, end):
             shapes = []
-            for index,shape in enumerate(deck.slides[i].shapes,1):
-                item = {"index":index,"name":shape.name,"type":str(shape.shape_type)}
-                if shape.has_text_frame: item["text"] = shape.text[:1000]
+            for index, shape in enumerate(deck.slides[i].shapes, 1):
+                item = {"index": index, "name": shape.name, "type": str(shape.shape_type)}
+                if shape.has_text_frame:
+                    if len(shape.text) > 1000:
+                        return slide_fragment_page(deck, start, scope_end, None)
+                    item["text"] = shape.text
                 if shape.has_table:
-                    item["table"] = {"rows":len(shape.table.rows),"columns":len(shape.table.columns),
-                                     "values":[[c.text[:100] for c in list(row.cells)[:10]] for row in list(shape.table.rows)[:10]]}
+                    table = shape.table
+                    values = [[c.text for c in row.cells] for row in table.rows]
+                    if (len(table.rows) > 10 or len(table.columns) > 10
+                            or any(len(value) > 100 for row in values for value in row)):
+                        return slide_fragment_page(deck, start, scope_end, None)
+                    item["table"] = {"rows": len(table.rows), "columns": len(table.columns), "values": values}
                 if shape.has_chart:
-                    item["chart"] = {"type":str(shape.chart.chart_type),
-                                     "series":[s.name for s in shape.chart.series][:20]}
+                    series = [s.name for s in shape.chart.series]
+                    if len(series) > 20:
+                        return slide_fragment_page(deck, start, scope_end, None)
+                    item["chart"] = {"type": str(shape.chart.chart_type), "series": series}
                 shapes.append(item)
-            slide = {"index":i+1,"shapes":shapes[:50],"shapes_truncated":len(shapes)>50}
-            if len(json.dumps(slide,ensure_ascii=False))>11000:
-                raise OfficeError("READ_LIMIT","Slide exceeds the text budget. Inspect its structure or render a preview.")
-            if items and len(json.dumps(items+[slide],ensure_ascii=False))>11000:
+                if len(shapes) > 50:
+                    return slide_fragment_page(deck, start, scope_end, None)
+            slide = {"index": i + 1, "shapes": shapes, "shapes_truncated": False}
+            if len(json.dumps(slide, ensure_ascii=False)) > 11000:
+                return slide_fragment_page(deck, start, scope_end, None)
+            if items and len(json.dumps(items + [slide], ensure_ascii=False)) > 11000:
                 end = i
                 break
             items.append(slide)
-        return {"slides":items,"truncated":end<len(deck.slides),
-                "next_target":f"slide:{end+1}-{min(end+10,len(deck.slides))}" if end<len(deck.slides) else None}
+        return {"slides": items, "truncated": end < scope_end,
+                "next_target": f"slide:{end+1}-{scope_end}" if end < scope_end else None}
     import pymupdf
     with pymupdf.open(path) as doc:
-        start, end = slice_target(target, doc.page_count, "pages?")
-        while sum(len(doc[i].get_text()[:6000]) + 100 for i in range(start, end)) > 11000 and end > start + 1:
+        start, scope_end = slice_target(target, doc.page_count, "pages?") if target else (0, doc.page_count)
+        end = min(scope_end, start + 3)
+        texts = {}
+        def page_text(i):
+            if i not in texts:
+                texts[i] = doc[i].get_text()
+            return texts[i]
+        if continuation is not None or any(len(page_text(i)) > 6000 for i in range(start, end)):
+            return text_fragment_page("pdf_pages", start, scope_end, continuation,
+                                      lambda i: (page_text(i), {}), "page_fragments")
+        while sum(len(page_text(i)) + 100 for i in range(start, end)) > 11000 and end > start + 1:
             end -= 1
-        return {"text_truncated": any(len(doc[i].get_text()) > 6000 for i in range(start, end)), "pages": [{"index": i + 1, "text": doc[i].get_text()[:6000]} for i in range(start, end)],
-                "truncated": end < doc.page_count,
-                "next_target": f"page:{end+1}-{min(end+3,doc.page_count)}" if end < doc.page_count else None}
+        return {"text_truncated": False, "pages": [{"index": i + 1, "text": page_text(i)} for i in range(start, end)],
+                "truncated": end < scope_end,
+                "next_target": f"page:{end+1}-{scope_end}" if end < scope_end else None}
 
 
 def rows_from(content):
@@ -382,8 +752,11 @@ def rows_from(content):
         rows = [[number(v) for v in row] for row in rows]
     else:
         raise OfficeError("INVALID_CONTENT", "Supply CSV text or a JSON array of rows.")
-    if not all(isinstance(row, list) for row in rows) or sum(len(row) for row in rows) > MAX_CELLS:
-        raise OfficeError("INVALID_CONTENT", "Rows must be arrays with at most 200,000 cells.")
+    if not all(isinstance(row, list) for row in rows):
+        raise OfficeError("INVALID_CONTENT", "Rows must be arrays.")
+    cells = sum(len(row) for row in rows)
+    if cells > MAX_CELLS:
+        raise OfficeError("FILE_LIMIT", f"Input has {cells} cells; materialized_cells budget is {MAX_CELLS}. Increase the configured resource budget.")
     for row in rows:
         if any(isinstance(v, (dict, list)) for v in row):
             raise OfficeError("INVALID_CONTENT", "Cells must be scalar values.")
@@ -509,8 +882,8 @@ def add_slides(deck, content, job):
                     current = {"title": "Overview", "text": []}
                     slides.append(current)
                 current["text"].append(line.lstrip("-* ").strip())
-    if not slides or len(slides) + len(deck.slides) > 200:
-        raise OfficeError("INVALID_CONTENT", "Supply 1-200 slides or a Markdown outline.")
+    if not slides:
+        raise OfficeError("INVALID_CONTENT", "Supply slides or a Markdown outline.")
     for item in slides:
         if not isinstance(item, dict):
             raise OfficeError("INVALID_CONTENT", "Each slide must be an object.")
@@ -553,11 +926,12 @@ def add_slides(deck, content, job):
 
 def create(fmt, path, content, *, template=None, source=None, style="professional", job=None):
     if template:
-        preflight(template, editing=True)
+        preflight(template, editing=not (content is None and source is None))
         if template.suffix.lower() != "." + fmt:
             raise OfficeError("FORMAT_MISMATCH", "Template format must match output format.")
     if source:
-        preflight(source, editing=True)
+        exact_copy = content is None and not template and source.suffix.lower() == "." + fmt
+        preflight(source, editing=not exact_copy)
     if template and content is None and source is None:
         path.write_bytes(read_bytes(template))
         return describe(path)
@@ -660,7 +1034,108 @@ def preserve_objects(before, after):
                 raise OfficeError("FIDELITY_LOSS", "Existing media bytes changed unexpectedly; original retained.")
 
 
+def append_plain_word(source, output, text):
+    """Append simple paragraphs while preserving all existing package parts."""
+    import xml.parsers.expat as expat
+    from xml.sax.saxutils import escape
+
+    lines = text.splitlines()
+    if any(line.startswith(("# ", "## ", "### ", "#### ", "- ", "* ")) for line in lines):
+        return False
+    for index, line in enumerate(lines[:-1]):
+        if "|" in line:
+            cells = [part.strip().replace("\\|", "|")
+                     for part in re.split(r"(?<!\\)\|", lines[index + 1].strip().strip("|"))]
+            if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                return False
+    for line in lines:
+        if any(not (char == "\t" or 0x20 <= ord(char) <= 0xD7FF
+                    or 0xE000 <= ord(char) <= 0xFFFD
+                    or 0x10000 <= ord(char) <= 0x10FFFF) for char in line):
+            raise OfficeError("INVALID_CONTENT", "Text contains characters not supported by XML.")
+
+    preflight(source)
+    with ZipFile(source) as archive:
+        infos = archive.infolist()
+        names = [item.filename for item in infos]
+        if len(names) != len(set(names)):
+            raise OfficeError("INVALID_PACKAGE", "Duplicate package members cannot be safely edited.")
+        if any(name.casefold().startswith("_xmlsignatures/")
+               or name.casefold().endswith("vbaprojectsignature.bin") for name in names):
+            raise OfficeError("SIGNATURE_UNSUPPORTED", "Editing would invalidate the existing digital signature; use a signature-aware route.")
+        raw = archive.read("word/document.xml")
+        if b"\x00" in raw[:128]:
+            return False
+        try:
+            raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return False
+        declaration = re.match(rb'^\s*<\?xml[^?]*encoding\s*=\s*["\x27]([^"\x27]+)', raw, re.I)
+        if declaration and declaration.group(1).lower().replace(b"-", b"") != b"utf8":
+            return False
+
+        namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        body_name, section_name = namespace + "}body", namespace + "}sectPr"
+        parser = expat.ParserCreate(namespace_separator="}")
+        stack, body_count, body_end, section_start, section_ended, after_section = [], 0, None, None, False, False
+        def start(name, attrs):
+            nonlocal body_count, section_start, after_section
+            parent = stack[-1] if stack else None
+            if name == body_name:
+                body_count += 1
+            if parent == body_name:
+                if section_ended:
+                    after_section = True
+                if name == section_name:
+                    if section_start is not None:
+                        raise OfficeError("INVALID_DOCUMENT", "Multiple final section properties cannot be safely edited.")
+                    section_start = parser.CurrentByteIndex
+            stack.append(name)
+        def end(name):
+            nonlocal body_end, section_ended
+            if name == section_name and len(stack) > 1 and stack[-2] == body_name:
+                section_ended = True
+            if name == body_name:
+                body_end = parser.CurrentByteIndex
+            stack.pop()
+        def forbidden(*args):
+            raise OfficeError("UNSAFE_XML", "DTD/entity declarations are not supported.")
+        parser.StartElementHandler = start
+        parser.EndElementHandler = end
+        parser.StartDoctypeDeclHandler = forbidden
+        parser.EntityDeclHandler = forbidden
+        parser.ExternalEntityRefHandler = forbidden
+        try:
+            parser.Parse(raw, True)
+        except expat.ExpatError as exc:
+            raise OfficeError("INVALID_DOCUMENT", "Malformed Word document XML.") from exc
+        if (body_count != 1 or body_end is None or raw[body_end:body_end + 2] != b"</"
+                or after_section):
+            raise OfficeError("FIDELITY_UNSUPPORTED", "Word body cannot be safely extended by this route.")
+        position = section_start if section_start is not None else body_end
+        pieces = []
+        for line in lines:
+            if not line:
+                continue
+            runs = []
+            for index, fragment in enumerate(line.split("\t")):
+                if index:
+                    runs.append("<w:tab/>")
+                runs.append('<w:t xml:space="preserve">' + escape(fragment) + "</w:t>")
+            pieces.append('<w:p xmlns:w="' + namespace + '"><w:r>' + "".join(runs) + "</w:r></w:p>")
+        inserted = "".join(pieces).encode("utf-8")
+        updated = raw[:position] + inserted + raw[position:]
+        with ZipFile(output, "w") as destination:
+            destination.comment = archive.comment
+            for item in infos:
+                destination.writestr(item, updated if item.filename == "word/document.xml" else archive.read(item))
+    return True
+
+
 def edit(source, output, action, target, content, *, other=None, job=None, converter=None):
+    if (source.suffix.lower() == ".docx" and action == "append_section"
+            and isinstance(content, str) and append_plain_word(source, output, content)):
+        return describe(output)
     meta = preflight(source, editing=True)
     kind = meta["format"]
     spec = content if isinstance(content, dict) else {}
@@ -686,8 +1161,6 @@ def edit(source, output, action, target, content, *, other=None, job=None, conve
         elif action == "set_formula":
             if not isinstance(content, str) or not content.startswith("=") or (left, top) != (right, bottom):
                 raise OfficeError("INVALID_CONTENT", "set_formula needs one cell and formula text starting =.")
-            if re.search(r"\b(?:WEBSERVICE|HYPERLINK|RTD|DDE)\s*\(|\[.*?\]|\|", content, re.I):
-                raise OfficeError("EXTERNAL_FORMULA", "External/DDE formulas are not accepted.")
             sheet.cell(top, left, content)
         elif action == "append_rows":
             for row in rows_from(content):
@@ -922,6 +1395,7 @@ def convert(source, output, fmt, *, converter=None, job=None):
         raise OfficeError("CONVERTER_UNAVAILABLE", "Configure a qualified LibreOffice executable for Office PDF conversion/recalculation. Originals are unchanged.")
     if fmt not in {"pdf", "xlsx", "docx", "pptx", "html"}:
         raise OfficeError("FORMAT_UNSUPPORTED", "Converter supports pdf, xlsx, docx, pptx or html.")
+    _check_converter_input(source)
     conversion_dir = job / "converted"
     conversion_dir.mkdir(exist_ok=True)
     profile = (job / "libreoffice-profile").as_uri()
@@ -972,7 +1446,7 @@ def perform(operation, args, job, *, converter=None):
     if operation == "inspect":
         return {"data": describe(source)}
     if operation == "read":
-        return {"data": read(source, args.get("target", ""), args.get("view", "summary"))}
+        return {"data": read(source, args.get("target", ""), args.get("view", "summary"), args.get("continuation"))}
     if operation == "create":
         output = local(job, args["output"])
         meta = create(args["format"], output, payload(args.get("content")), template=template,

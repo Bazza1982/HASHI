@@ -182,7 +182,7 @@ async def test_tool_result_is_masked_on_second_deepseek_call(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_privacy_expansion_is_capacity_checked_before_http(tmp_path):
+async def test_privacy_expansion_remains_masked_when_provider_decides_fit(tmp_path):
     async def expanding_detector(texts: list[str]) -> list[list[dict]]:
         return [
             [
@@ -222,13 +222,18 @@ async def test_privacy_expansion_is_capacity_checked_before_http(tmp_path):
         backend_manager=None,
     )
     adapter._call_api_once = AsyncMock(
-        return_value=_APIResult("unexpected", None, "stop", 1, 1)
+        return_value=_APIResult("provider accepted", None, "stop", 1, 1)
     )
 
     response = await adapter.generate_response("X " * 200, "req-private-capacity")
 
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
-    adapter._call_api_once.assert_not_awaited()
+    assert response.is_success and response.text == "provider accepted"
+    adapter._call_api_once.assert_awaited_once()
+    payload = adapter._call_api_once.await_args.args[0]
+    protected = next(message["content"] for message in payload["messages"]
+                     if "[PERSON_1]" in str(message.get("content", "")))
+    assert "X" not in protected
+    assert protected.count("[PERSON_") == 200
 
 
 @pytest.mark.asyncio
@@ -385,3 +390,4 @@ async def test_opt_in_real_deepseek_receives_redacted_pii_and_solves_task(tmp_pa
         assert "100" in response.text
     finally:
         await adapter.shutdown()
+# HASHI-Fingerprint: hfp_cc8f3df977b2497daac25ddba87aeaec

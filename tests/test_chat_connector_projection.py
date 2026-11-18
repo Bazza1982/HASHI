@@ -90,7 +90,7 @@ async def test_transcript_identity_and_recovery_are_bound_to_current_session(tmp
     server.config_path = tmp_path / "agents.json"
     server.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="test")
     server._runtime_map = lambda: {}
-    server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
+    server._load_agent_rows = lambda **_kwargs: [{"name": "a", "workspace_dir": str(tmp_path)}]
     session = server.session_store.resolve_session(owner_id="user:7", agent_id="a", surface="workbench", channel_key="default")
     accepted = server.session_store.accept_run(session_id=session["session_id"], owner_id="user:7", agent_id="a", request_id="r", text="hello", source="api", idempotency_key="first")
     workspace = server.session_store.session_workspace(session["session_id"], session["context_generation"])
@@ -200,7 +200,7 @@ async def test_open_transcript_receives_history_generation_reset_after_continuit
         tmp_path / "target.sqlite", instance_id="HASHI3"
     )
     server._runtime_map = lambda: {}
-    server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
+    server._load_agent_rows = lambda **_kwargs: [{"name": "a", "workspace_dir": str(tmp_path)}]
     target_session = server.session_store.resolve_session(
         owner_id="user:7",
         agent_id="a",
@@ -993,7 +993,7 @@ def _server(tmp_path: Path):
     server.global_config = SimpleNamespace(instance_id="test", authorized_id=7, deployment_profile="personal")
     server.config_path = tmp_path / "agents.json"
     server.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="test")
-    server._load_agent_rows = lambda: [{"name": "a", "workspace_dir": str(tmp_path)}]
+    server._load_agent_rows = lambda **_kwargs: [{"name": "a", "workspace_dir": str(tmp_path)}]
     server._runtime_map = lambda: {}
     return server
 
@@ -1128,3 +1128,134 @@ async def test_required_commentary_matches_canonical_router_with_optional_switch
     assert projected["presentation_channel"] == "commentary"
     assert projected["summary"] == event.summary
 # HASHI-Fingerprint: hfp_1cf752395d3a47d08d67d8c1a97e6666
+
+
+@pytest.mark.asyncio
+async def test_transcript_original_over_upload_limit_is_streamed_and_verified(tmp_path):
+    import aiohttp
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    media = tmp_path / "media"
+    media.mkdir()
+    original = media / "large.bin"
+    with original.open("wb") as stream:
+        stream.write(b"begin")
+        stream.seek(64 * 1024 * 1024 + 11)
+        stream.write(b"end")
+    expected = hashlib.sha256()
+    with original.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            expected.update(chunk)
+    digest = expected.hexdigest()
+    server = _server(tmp_path)
+    server.global_config.base_media_dir = media
+    server._v1_owner_id = lambda _request: "user:7"
+    server.session_store.visible_agent_message_attachment = lambda **_kwargs: {
+        "local_ref": str(original), "mime_type": "application/octet-stream",
+        "filename": "large.bin", "size_bytes": original.stat().st_size, "sha256": digest,
+    }
+    app = web.Application()
+    app.router.add_get("/api/transcript/{name}/attachments/{message_id}/{attachment_id}",
+                       server.handle_transcript_attachment)
+    async with TestServer(app) as upstream, aiohttp.ClientSession() as client:
+        url = str(upstream.make_url("/api/transcript/a/attachments/message/attachment?download=1"))
+        async with client.get(url) as response:
+            assert response.status == 200, await response.text()
+            actual = hashlib.sha256()
+            count = 0
+            async for chunk in response.content.iter_chunked(1024 * 1024):
+                actual.update(chunk)
+                count += len(chunk)
+            assert count == original.stat().st_size
+            assert actual.hexdigest() == digest
+            assert response.headers["X-Hashi-Attachment-SHA256"] == digest
+            assert response.headers["Content-Length"] == str(count)
+
+        server.session_store.visible_agent_message_attachment = lambda **_kwargs: {
+            "local_ref": str(original), "mime_type": "application/octet-stream",
+            "filename": "large.bin", "size_bytes": original.stat().st_size, "sha256": "0" * 64,
+        }
+        async with client.get(url) as response:
+            assert response.status == 409
+
+
+@pytest.mark.asyncio
+async def test_cancelled_attachment_snapshot_closes_late_completed_copy(tmp_path, monkeypatch):
+    import asyncio
+    import tempfile
+    import threading
+    from orchestrator import transcript_attachment_stream
+
+    started, release = threading.Event(), threading.Event()
+    snapshot = tempfile.TemporaryFile(mode="w+b")
+
+    def delayed(_path, *, observed_size, expected_digest, cancelled):
+        started.set()
+        assert release.wait(5)
+        return snapshot, "a" * 64
+
+    monkeypatch.setattr(transcript_attachment_stream, "_snapshot", delayed)
+    task = asyncio.create_task(transcript_attachment_stream._prepare_snapshot(
+        tmp_path / "fixture", observed_size=1, expected_digest=""))
+    try:
+        assert await asyncio.to_thread(started.wait, 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        async with asyncio.timeout(5):
+            while not snapshot.closed:
+                await asyncio.sleep(.01)
+    finally:
+        release.set()
+        if not snapshot.closed:
+            snapshot.close()
+
+
+@pytest.mark.asyncio
+async def test_inactive_agent_durable_history_and_visible_attachment_are_owner_scoped(tmp_path: Path):
+    server = _server(tmp_path)
+    server.global_config.bridge_home = tmp_path
+    server.global_config.project_root = tmp_path
+    server.global_config.base_media_dir = tmp_path / "media"
+    media = server.global_config.base_media_dir / "a"
+    media.mkdir(parents=True)
+    payload = b"\x89PNG\r\n\x1a\ninactive-history"
+    image = media / "inactive.png"
+    image.write_bytes(payload)
+    server._load_agent_rows = lambda *, include_inactive=False: (
+        [{"name": "a", "is_active": False, "workspace_dir": str(tmp_path)}]
+        if include_inactive else []
+    )
+    session = server.session_store.resolve_primary_session(owner_id="user:7", agent_id="a")
+    attachment = _commit_session_attachment(
+        server.session_store, session_id=session["session_id"], owner_id="user:7",
+        filename="inactive.png", media_type="image/png", payload=payload,
+    )
+    part = server.session_store.attachment_canonical_part(
+        session_id=session["session_id"], owner_id="user:7",
+        attachment_id=attachment["attachment_id"], item_index=1, presentation_role="photo",
+    )
+    part["local_ref"] = str(image)
+    accepted = server.session_store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="a",
+        request_id="inactive-photo", text="inactive saved history", source="api",
+        idempotency_key="inactive-photo", content=[part],
+    )
+    query = SimpleNamespace(match_info={"name": "a"}, query={}, headers={})
+    recent = await server.handle_transcript_recent(query)
+    assert recent.status == 200
+    assert any(row.get("text") == "inactive saved history" for row in json.loads(recent.text)["messages"])
+    poll = await server.handle_transcript_poll(query)
+    assert poll.status == 200
+    request = SimpleNamespace(
+        match_info={"name": "a", "message_id": accepted.message_id,
+                    "attachment_id": attachment["attachment_id"]},
+        query={}, headers={},
+    )
+    shown = await server.handle_transcript_attachment(request)
+    assert shown.status == 200 and shown.body == payload
+    server._v1_owner_id = lambda _request: "user:8"
+    denied = await server.handle_transcript_attachment(request)
+    assert denied.status == 404

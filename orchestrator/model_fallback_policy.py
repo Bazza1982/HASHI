@@ -66,9 +66,8 @@ TARGET_KIND_HERV3_MODEL = "herv3_model"
 TARGET_KIND_CODEX_CLI = "codex_cli"
 FALLBACK_TARGET_KINDS = (TARGET_KIND_HERV3_MODEL, TARGET_KIND_CODEX_CLI)
 
-# Hard request-scope exclusions evaluated by the policy evaluator itself, so
-# aliases, scheduler entry, Frontend Connector entry, and future renderers
-# cannot bypass them by hiding UI choices or matching command text.
+# These modalities need an actual continuation contract before a media retry.
+# Destination switching still has a separate conservative route restriction.
 EXCLUDED_MODALITIES = frozenset({"voice", "phone", "call"})
 
 # Stable, language-neutral blocking reasons.  Rendering layers map these to
@@ -81,6 +80,7 @@ REASON_MISSING_KEY_OR_RUNTIME = "missing_key_or_runtime"
 REASON_INCOMPATIBLE_CAPABILITY = "incompatible_capability"
 REASON_UNSAFE_CHECKPOINT = "unsafe_checkpoint"
 REASON_MODALITY_EXCLUDED = "modality_excluded"
+REASON_MEDIA_RECOVERY_UNAVAILABLE = "media_recovery_unavailable"
 REASON_UNKNOWN_COST = "unknown_cost"
 REASON_BUDGET_EXHAUSTED = "budget_exhausted"
 REASON_SOURCE_DISABLED = "source_disabled"
@@ -529,9 +529,12 @@ class CapacityRetryFacts:
     retryable: bool
     retry_index: int
     retry_after_s: float | None = None
+    retry_delays_s: tuple[float, ...] | None = None
     side_effects_possible: bool = False
     resumable_session: bool = False
     modality: str = "text"
+    # Supplied only by a consumer that proved a concrete media continuation.
+    media_recovery_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -608,25 +611,39 @@ def resolve_capacity_retry(
             blocking_reason=reason,
         )
 
-    if modality in EXCLUDED_MODALITIES:
-        return decision(allowed=False, reason=REASON_MODALITY_EXCLUDED)
-    if policy.mode == MODE_OFF:
-        return decision(allowed=False, reason=REASON_DISABLED)
+    if modality in EXCLUDED_MODALITIES and facts.media_recovery_verified is not True:
+        return decision(allowed=False, reason=REASON_MEDIA_RECOVERY_UNAVAILABLE)
     if source not in FALLBACK_SOURCES:
         return decision(allowed=False, reason=REASON_NO_ALLOWED_TARGET)
+    # Destination-switch settings do not authorize or forbid a retry to the
+    # already selected target. The per-source effect choice remains separate.
     rule = policy.source_rule(source)
-    if not rule.enabled:
-        return decision(allowed=False, reason=REASON_SOURCE_DISABLED)
     if (
         str(facts.failure_code or "").strip().upper() != CAPACITY_FAILURE_CODE
         or facts.retryable is not True
     ):
         return decision(allowed=False, reason=REASON_INELIGIBLE_FAILURE)
-    if retry_index < 0 or retry_index >= len(CAPACITY_RETRY_DELAYS_S):
+    delays = (
+        CAPACITY_RETRY_DELAYS_S
+        if facts.retry_delays_s is None else facts.retry_delays_s
+    )
+    if not isinstance(delays, (tuple, list)) or any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        or not math.isfinite(value) or value < 0
+        for value in delays
+    ):
+        raise ValueError("retry_delays_s must contain finite non-negative numbers")
+    if retry_index < 0 or retry_index >= len(delays):
         return decision(allowed=False, reason=REASON_RETRY_EXHAUSTED)
 
     continue_session = False
     if facts.side_effects_possible:
+        # Until an actual resumable-session receipt is available, keep the
+        # previously selected effect policy rather than widening this path.
+        if policy.mode == MODE_OFF:
+            return decision(allowed=False, reason=REASON_DISABLED)
+        if not rule.enabled:
+            return decision(allowed=False, reason=REASON_SOURCE_DISABLED)
         if rule.side_effect_mode != EFFECT_RESUME:
             return decision(allowed=False, reason=REASON_EFFECT_PAUSED)
         if not facts.resumable_session:
@@ -634,7 +651,7 @@ def resolve_capacity_retry(
         continue_session = True
 
     delay_s = max(
-        CAPACITY_RETRY_DELAYS_S[retry_index],
+        delays[retry_index],
         _retry_after_seconds(facts.retry_after_s),
     )
     return decision(

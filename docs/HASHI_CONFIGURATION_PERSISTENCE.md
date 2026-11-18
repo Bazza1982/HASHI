@@ -249,6 +249,17 @@ revision-aware private publication remain required. The Windows transport and
 failure-publication cases are exercised by `tests/test_workbench_auth_windows.py`;
 the real isolated startup gate remains `tests/test_runtime_role_native.py`.
 
+When the local API credential already exists and the local and Remote lifecycle
+read the same secrets document, a missing Remote shared token is prepared by
+the optional Remote lifecycle after local services are available. Disabled
+Remote does not query the task or create its network token. A needed Remote
+publication still resolves its exact consumer before writing the private
+revision-checked candidate; a lookup failure or a concurrent edit leaves the
+existing document untouched and reports Remote as unavailable. This deferral
+does not yet cover a missing local API credential or a separately configured
+Remote secrets root. `tests/test_deferred_remote_credentials.py` and its
+Windows ACL companion cover the scoped behavior.
+
 The query budget includes starting Windows PowerShell, not only scheduler RPC.
 Both the former CIM query and an exact COM query exceeded the former 10-second
 whole-process limit in hosted sealed-role cold starts. A 30-second bounded

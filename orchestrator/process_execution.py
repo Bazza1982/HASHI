@@ -394,6 +394,11 @@ async def terminate_windows_process_tree(pid: int, *, force: bool) -> dict[str, 
         raise RuntimeError("Windows process-tree termination requested off Windows")
     executable = shutil.which("taskkill.exe") or shutil.which("taskkill")
     if not executable:
+        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        candidate = Path(system_root) / "System32" / "taskkill.exe" if system_root else None
+        if candidate is not None and candidate.is_file():
+            executable = str(candidate)
+    if not executable:
         return {
             "returncode": None,
             "output": "taskkill.exe was not found",

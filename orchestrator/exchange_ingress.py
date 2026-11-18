@@ -50,6 +50,13 @@ class ExchangeIngressError(ValueError):
     status = 400
 
 
+class ExchangeIngressAgeExpired(ExchangeIngressError):
+    """An explicitly selected request-age policy rejected a new delivery."""
+
+    code = "MESSAGE_AGE_EXPIRED"
+    status = 409
+
+
 class ExchangeIngressAuthenticationError(ExchangeIngressError):
     code = "AUTH_FAILED"
     status = 401
@@ -246,6 +253,8 @@ class InboxRecord:
     confirmation_owner_id: str | None
     accepted_at: float
     updated_at: float
+    age_policy: dict[str, Any] | None = None
+    admission_owner_id: str | None = None
     replayed: bool = False
 
 
@@ -277,6 +286,8 @@ class ExchangeInbox:
                     message_id TEXT,
                     confirmation_id TEXT,
                     confirmation_owner_id TEXT,
+                    age_policy_json TEXT,
+                    admission_owner_id TEXT,
                     accepted_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
@@ -286,7 +297,8 @@ class ExchangeInbox:
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(exchange_inbox)")
             }
-            for column_name in ("confirmation_id", "confirmation_owner_id"):
+            for column_name in ("confirmation_id", "confirmation_owner_id", "age_policy_json",
+                                "admission_owner_id"):
                 if column_name not in columns:
                     connection.execute(
                         f"ALTER TABLE exchange_inbox ADD COLUMN {column_name} TEXT"
@@ -374,10 +386,24 @@ class ExchangeInbox:
             ),
             accepted_at=float(row["accepted_at"]),
             updated_at=float(row["updated_at"]),
+            age_policy=(
+                json.loads(str(row["age_policy_json"]))
+                if row["age_policy_json"] is not None else None
+            ),
+            admission_owner_id=(
+                str(row["admission_owner_id"]) if row["admission_owner_id"] is not None else None
+            ),
             replayed=replayed,
         )
 
-    def accept(self, delivery: Mapping[str, Any]) -> InboxRecord:
+    def accept(
+        self, delivery: Mapping[str, Any], *, age_policy: Mapping[str, Any] | None = None,
+        admission_owner_id: str | None = None,
+    ) -> InboxRecord:
+        if admission_owner_id is not None and (
+            not isinstance(admission_owner_id, str) or not admission_owner_id.strip()
+        ):
+            raise ValueError("Exchange admission owner is invalid")
         normalized = validate_delivery_frame(dict(delivery))
         identity = delivery_identity_key(normalized)
         inbox_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
@@ -398,12 +424,31 @@ class ExchangeInbox:
                         "Exchange message ID conflicts with accepted payload"
                     )
                 return self._record(row, replayed=True)
+            if age_policy is not None:
+                from orchestrator.message_freshness import (
+                    classify_message_freshness, normalize_hchat_request_age_policy,
+                )
+
+                selected = normalize_hchat_request_age_policy(age_policy)
+                if selected["mode"] == "expire":
+                    freshness = classify_message_freshness(
+                        "hchat", originated_at=normalized["created_at"], is_remote=True,
+                        received_at=datetime.fromtimestamp(now, timezone.utc),
+                        threshold_seconds=selected["max_age_seconds"],
+                    )
+                    if not freshness.is_fresh:
+                        raise ExchangeIngressAgeExpired(
+                            f"Exchange HChat request age policy expired: {freshness.reason}"
+                        )
+                saved_policy = json.dumps(selected, sort_keys=True, separators=(",", ":"))
+            else:
+                saved_policy = None
             connection.execute(
                 """
                 INSERT INTO exchange_inbox(
                     inbox_key, idempotency_key, payload_digest, delivery_json,
-                    target_agent, state, accepted_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?)
+                    target_agent, state, age_policy_json, admission_owner_id, accepted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, ?, ?)
                 """,
                 (
                     inbox_key,
@@ -411,6 +456,8 @@ class ExchangeInbox:
                     digest,
                     rendered,
                     recipient.agent_id,
+                    saved_policy,
+                    admission_owner_id.strip() if admission_owner_id is not None else None,
                     now,
                     now,
                 ),
@@ -420,6 +467,19 @@ class ExchangeInbox:
                 (inbox_key,),
             ).fetchone()
         return self._record(row)
+
+    def existing_delivery(self, delivery: Mapping[str, Any]) -> InboxRecord | None:
+        """Read an already accepted exact delivery without creating a new item."""
+        normalized = validate_delivery_frame(dict(delivery))
+        key = hashlib.sha256(delivery_identity_key(normalized).encode("utf-8")).hexdigest()
+        record = self.get(key)
+        if record is None:
+            return None
+        if record.payload_digest != delivery_payload_digest(normalized):
+            raise ExchangeIngressConflict("Exchange message ID conflicts with accepted payload")
+        from dataclasses import replace
+
+        return replace(record, replayed=True)
 
     def get(self, inbox_key: str) -> InboxRecord | None:
         with self._lock, self._connection() as connection:
@@ -745,12 +805,14 @@ class ExchangeIngressService:
         hashi_root: Path | str,
         runtime_map: Callable[[], Mapping[str, Any]],
         session_store: Any,
+        personal_owner_id: Callable[[], str | None] | None = None,
     ):
         self._storage_lock = asyncio.Lock()
         self._recovery_lock = asyncio.Lock()
         self.hashi_root = Path(hashi_root)
         self._runtime_map = runtime_map
         self.session_store = session_store
+        self._personal_owner_id = personal_owner_id
         authoritative_db = getattr(
             session_store,
             "db_path",
@@ -881,19 +943,61 @@ class ExchangeIngressService:
             require_deadline=require_deadline,
         )
 
+    def _request_age_policy(self) -> dict[str, Any]:
+        from orchestrator.config_json import read_config_json
+        from orchestrator.message_freshness import normalize_hchat_request_age_policy
+
+        try:
+            config = read_config_json(self.hashi_root / "agents.json")
+            settings = config.get("global") or {}
+            if not isinstance(settings, Mapping):
+                raise ValueError("global configuration is invalid")
+            return normalize_hchat_request_age_policy(settings.get("hchat_request_age_policy"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise ExchangeIngressUnavailable("HChat request age policy is unavailable") from exc
+
     def accept(self, *, evidence: Any, prompt: str) -> InboxRecord:
         _principal, delivery = self._verified(
             evidence=evidence,
             prompt=prompt,
+            require_deadline=False,
         )
-        self._verify_reply_correlation(delivery)
+        # A newly authenticated exact retry may retrieve an already committed
+        # receipt after the transport deadline; it cannot create another item.
+        existing = self.inbox.existing_delivery(delivery)
+        if existing is not None:
+            return existing
+        try:
+            validate_delivery_deadline(delivery, now=time.time())
+        except ValueError as exc:
+            raise ExchangeIngressError("Exchange delivery expired") from exc
+        if delivery.get("message_type") == "agent_reply":
+            self._bound_reply_origin(delivery)
         recipient = ExchangeAddress.from_mapping(delivery["recipient"])
         runtime = self._runtime_map().get(recipient.agent_id)
         if runtime is None or getattr(runtime, "startup_success", True) is False:
             raise ExchangeIngressPermissionError(
                 "Exchange recipient runtime is unavailable"
             )
-        return self.inbox.accept(delivery)
+        selected_policy = (
+            self._request_age_policy() if delivery.get("message_type") == "agent_message" else None
+        )
+        admission_owner = None
+        if selected_policy is not None and self._personal_owner_id is not None:
+            local_owner = self._personal_owner_id()
+            if local_owner is not None:
+                sender = ExchangeAddress.from_mapping(delivery["sender"])
+                # The Exchange has verified both actors. A different external
+                # actor must never inherit a personal user's Session history.
+                admission_owner = (
+                    str(local_owner)
+                    if (sender.authority_id == recipient.authority_id
+                        and sender.actor_id == recipient.actor_id)
+                    else f"exchange:{sender.authority_id}:{sender.actor_id}"
+                )
+        return self.inbox.accept(
+            delivery, age_policy=selected_policy, admission_owner_id=admission_owner,
+        )
 
     async def accept_async(self, *, evidence: Any, prompt: str) -> InboxRecord:
         return await self._storage_call(self.accept, evidence=evidence, prompt=prompt)
@@ -955,6 +1059,32 @@ class ExchangeIngressService:
                     "Exchange delivery status identity is invalid"
                 )
 
+    def _bound_reply_origin(self, delivery: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Resolve a verified Exchange reply to its recorded source conversation."""
+        from orchestrator.hchat_origin_binding import HChatOriginConflict, find_outbound_origin
+        from remote.internet_address import parse_hchat_address
+
+        self._verify_reply_correlation(delivery)
+        try:
+            origin = find_outbound_origin(self.session_store, str(delivery.get("in_reply_to") or ""))
+            if origin is None:
+                return None
+            target = parse_hchat_address(origin["target"])
+            sender = ExchangeAddress.from_mapping(delivery["sender"])
+            recipient = ExchangeAddress.from_mapping(delivery["recipient"])
+            if (
+                not isinstance(target, PublicAddress)
+                or target.canonical != sender.address
+                or origin["agent_id"] != recipient.agent_id
+                or origin["instance_id"] != str(self.session_store.instance_id).strip().upper()
+            ):
+                raise HChatOriginConflict("Exchange reply does not match its original conversation")
+            return origin
+        except (HChatOriginConflict, ValueError) as exc:
+            raise ExchangeIngressPermissionError(
+                "Exchange reply does not match its original conversation"
+            ) from exc
+
     async def schedule(
         self,
         *,
@@ -974,6 +1104,15 @@ class ExchangeIngressService:
         current = await self._storage_call(self.inbox.get, inbox_key)
         if current is None:
             raise ExchangeIngressError("Exchange delivery was not durably accepted")
+        if current.payload_digest != delivery_payload_digest(delivery):
+            raise ExchangeIngressConflict("Exchange message ID conflicts with accepted payload")
+        return await self._process_accepted(current, principal, delivery)
+
+    async def _process_accepted(
+        self, current: InboxRecord, principal: VerifiedRemotePrincipal,
+        delivery: Mapping[str, Any], *, recover_leased: bool = False,
+    ) -> InboxRecord:
+        inbox_key = current.inbox_key
         if current.state == "pending_confirmation":
             await self._storage_call(self._queue_sender_status,
                 current,
@@ -1004,23 +1143,31 @@ class ExchangeIngressService:
         sender = ExchangeAddress.from_mapping(delivery["sender"])
         status_notice = self._delivery_status_notice(delivery)
         if status_notice is not None:
-            return await self._schedule_key(inbox_key)
+            return await self._schedule_key(inbox_key, recover_leased=recover_leased)
         from orchestrator.hchat_freshness_gate import (
             check_hchat_freshness_and_register,
         )
 
         is_reply = delivery["message_type"] == "agent_reply"
-        observed_owners = await self._storage_call(self.session_store.conversation_owner_ids,
-            agent_id=recipient.agent_id
+        bound_origin = (
+            await self._storage_call(self._bound_reply_origin, delivery) if is_reply else None
         )
-        user_owners = [
-            owner for owner in observed_owners if not str(owner).startswith("exchange:")
-        ]
-        confirmation_owner = (
-            user_owners[0]
-            if len(user_owners) == 1
-            else f"exchange:{principal.authority_id}:{principal.actor_id}"
-        )
+        if bound_origin:
+            confirmation_owner = bound_origin["owner_id"]
+        elif current.admission_owner_id:
+            confirmation_owner = current.admission_owner_id
+        else:
+            # Legacy records did not freeze a personal routing decision.
+            observed_owners = await self._storage_call(
+                self.session_store.conversation_owner_ids, agent_id=recipient.agent_id
+            )
+            user_owners = [
+                owner for owner in observed_owners if not str(owner).startswith("exchange:")
+            ]
+            confirmation_owner = (
+                user_owners[0] if len(user_owners) == 1
+                else f"exchange:{principal.authority_id}:{principal.actor_id}"
+            )
         is_fresh, confirmation = await self._storage_call(check_hchat_freshness_and_register,
             store=self.session_store,
             originated_at=delivery.get("created_at"),
@@ -1037,6 +1184,12 @@ class ExchangeIngressService:
             owner_id=confirmation_owner,
             idempotency_key=f"hchat:{delivery['message_id']}",
             canonical_text=str(delivery["content"]["text"]),
+            # New ordinary requests retain their acceptance-time policy.
+            # Legacy unbound replies and legacy records keep their old policy.
+            age_policy=(
+                {"mode": "observe" if bound_origin else "confirm"}
+                if is_reply else (current.age_policy or {"mode": "confirm"})
+            ),
             payload_to_execute={
                 "execution_kind": "exchange_inbox",
                 "inbox_key": inbox_key,
@@ -1054,7 +1207,7 @@ class ExchangeIngressService:
                 state="awaiting_confirmation",
             )
             return pending
-        return await self._schedule_key(inbox_key)
+        return await self._schedule_key(inbox_key, recover_leased=recover_leased)
 
     async def confirm_pending(
         self,
@@ -1191,30 +1344,39 @@ class ExchangeIngressService:
                 require_deadline=False,
             )
             recipient = ExchangeAddress.from_mapping(delivery["recipient"])
-            fallback_exchange_owner_id = (
-                f"exchange:{principal.authority_id}:{principal.actor_id}"
+            bound_origin = (
+                await self._storage_call(self._bound_reply_origin, delivery)
+                if delivery["message_type"] == "agent_reply" else None
             )
-            observed_owners = await self._storage_call(self.session_store.conversation_owner_ids,
-                agent_id=recipient.agent_id
-            )
-            user_owners = [
-                owner
-                for owner in observed_owners
-                if not str(owner).startswith("exchange:")
-            ]
-            target_owner_id = str(
-                record.confirmation_owner_id
-                or (
-                    user_owners[0]
-                    if len(user_owners) == 1
-                    else fallback_exchange_owner_id
+            if bound_origin:
+                target_owner_id = bound_origin["owner_id"]
+                target_session = await self._storage_call(
+                    self.session_store.get_session, bound_origin["session_id"],
+                    owner_id=target_owner_id, agent_id=recipient.agent_id,
                 )
-            )
-            target_session = await self._storage_call(self.session_store.resolve_primary_session,
-                owner_id=target_owner_id,
-                agent_id=recipient.agent_id,
-                establish=True,
-            )
+            else:
+                fallback_exchange_owner_id = (
+                    f"exchange:{principal.authority_id}:{principal.actor_id}"
+                )
+                target_owner_id = record.confirmation_owner_id or record.admission_owner_id
+                if not target_owner_id:
+                    # Legacy records without a frozen owner retain their
+                    # existing compatibility route until separately migrated.
+                    observed_owners = await self._storage_call(
+                        self.session_store.conversation_owner_ids, agent_id=recipient.agent_id
+                    )
+                    user_owners = [
+                        owner for owner in observed_owners if not str(owner).startswith("exchange:")
+                    ]
+                    target_owner_id = (
+                        user_owners[0] if len(user_owners) == 1 else fallback_exchange_owner_id
+                    )
+                target_owner_id = str(target_owner_id)
+                target_session = await self._storage_call(self.session_store.resolve_primary_session,
+                    owner_id=target_owner_id,
+                    agent_id=recipient.agent_id,
+                    establish=True,
+                )
             if delivery["message_type"] == "agent_reply":
                 from orchestrator.hchat_delivery_status import (
                     delivery_status_display_text,
@@ -1229,6 +1391,12 @@ class ExchangeIngressService:
                 presentation_kind = (
                     "status" if status_notice is not None else "reply"
                 )
+                from orchestrator.message_freshness import classify_message_freshness
+
+                age = classify_message_freshness(
+                    "hchat", originated_at=delivery.get("created_at"), is_remote=True,
+                    received_at=datetime.fromtimestamp(record.accepted_at, timezone.utc),
+                ).age_metadata()
                 displayed = await self._storage_call(self.session_store.append_presentation_message,
                     session_id=target_session["session_id"],
                     owner_id=target_owner_id,
@@ -1243,7 +1411,11 @@ class ExchangeIngressService:
                     ),
                     presentation_channel=f"hchat-{presentation_kind}",
                     history_eligible=False,
+                    expected_context_generation=(
+                        bound_origin["context_generation"] if bound_origin else None
+                    ),
                     message_context={
+                        "message_age": age,
                         "system_exchange": True,
                         "system_exchange_kind": presentation_kind,
                         "system_exchange_terminal": True,
@@ -1288,7 +1460,14 @@ class ExchangeIngressService:
                 raise ExchangeIngressUnavailable(
                     "local Exchange ingress authentication is unavailable"
                 )
+            from orchestrator.message_freshness import classify_message_freshness
+
+            age = classify_message_freshness(
+                "hchat", originated_at=delivery.get("created_at"), is_remote=True,
+                received_at=datetime.fromtimestamp(record.accepted_at, timezone.utc),
+            ).age_metadata()
             metadata = {
+                "_frontend_message_age": age,
                 CONNECTOR_EVIDENCE_METADATA_KEY: connector_evidence,
                 "owner_id": target_owner_id,
                 "session_id": target_session["session_id"],
@@ -1466,10 +1645,24 @@ class ExchangeIngressService:
             include_leased=recover_scheduled,
         ):
             try:
+                prompt = render_exchange_hchat_prompt(record.delivery)
+                claims = build_exchange_ingress_claims(
+                    delivery=record.delivery,
+                    welcome={
+                        "epoch": record.delivery["recipient_epoch"],
+                        "actor_id": record.delivery["recipient"]["actor_id"],
+                        "instance_address": PublicAddress.parse(
+                            record.delivery["recipient"]["address"]
+                        ).instance_address,
+                    },
+                )
+                principal, delivery = _principal_from_claims(
+                    config, claims, prompt=prompt, now=time.time(),
+                    require_published=False, require_deadline=False,
+                )
                 recovered.append(
-                    await self._schedule_key(
-                        record.inbox_key,
-                        recover_leased=recover_scheduled,
+                    await self._process_accepted(
+                        record, principal, delivery, recover_leased=recover_scheduled,
                     )
                 )
             except Exception as exc:

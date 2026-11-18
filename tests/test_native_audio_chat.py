@@ -808,7 +808,7 @@ def test_session_audio_admission_wins_against_spawned_gc(tmp_path):
     _join_spawned(cleanup)
 
     outcomes = [results.get(timeout=5) for _ in range(2)]
-    assert {outcome[0] for outcome in outcomes} == {"accepted", "cleaned"}
+    assert {outcome[0] for outcome in outcomes} == {"accepted", "cleaned"}, outcomes
     assert next(outcome for outcome in outcomes if outcome[0] == "cleaned") == (
         "cleaned",
         [],
@@ -2747,3 +2747,115 @@ async def test_openrouter_wraps_streaming_pcm16_output_for_terminal_delivery(tmp
         "tools_enabled": False,
         "claimed": False,
     }
+
+
+
+def test_streamed_audio_checks_signature_digest_and_cleanup(tmp_path):
+    store = AudioAssetStore(tmp_path / "assets")
+    source = tmp_path / "selected.wav"
+    source.write_bytes(b"not-wave")
+    with source.open("rb") as handle:
+        with pytest.raises(AudioAssetError, match="do not match"):
+            store.create_stream(
+                handle, owner_id="user:7", session_id="ses-1", direction="input",
+                mime_type="audio/wav", audio_format="wav", expected_size=8,
+                expected_sha256=hashlib.sha256(b"not-wave").hexdigest(), asset_id="bad-signature",
+            )
+    payload = _wav_bytes(source)
+    with source.open("rb") as handle:
+        with pytest.raises(AudioAssetError, match="digest"):
+            store.create_stream(
+                handle, owner_id="user:7", session_id="ses-1", direction="input",
+                mime_type="audio/wav", audio_format="wav", expected_size=len(payload),
+                expected_sha256="0" * 64, asset_id="bad-digest",
+            )
+    assert not list(store.files_root.iterdir())
+    assert not list(store.metadata_root.glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_released_voice_text_recovers_same_target_with_exact_transcript(tmp_path):
+    from dataclasses import replace
+    from orchestrator.her_v2.interfaces import StageInvocationError
+    from orchestrator import model_fallback_policy as fallback
+
+    source = tmp_path / "voice.wav"
+    _wav_bytes(source)
+    content = _voice_content(source)
+    state = {"text": "Please check tomorrow's weather.", "status": "released"}
+    backend = _NativeBackend(
+        BackendResponse(text="", duration_ms=1, is_success=False,
+                        error="temporarily at capacity",
+                        error_code="PROVIDER_CAPACITY_UNAVAILABLE", error_retryable=True),
+        roots=(tmp_path,), audio=False,
+    )
+    runtime = SimpleNamespace(
+        _native_voice_transcripts={"req-voice-recovery": state},
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=0),
+    )
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(
+            privacy_level=1, create_ephemeral_backend=lambda *_a, **_kw: backend,
+        ),
+        runtime_context=runtime,
+    )
+    request = StageRequest(
+        turn_id="turn-voice-recovery", request_ref="hashi-request:req-voice-recovery",
+        stage=Stage.DIRECT, role="direct", attempt=1, goal="Reply to the voice message.",
+        classification=None, effort=Effort.ZERO, context={"request_mode": "text"},
+        request_content=content, attachment_manifest=attachment_manifest(content),
+    )
+    profile = ProviderProfile("main", "text-api", "text-model")
+    with pytest.raises(StageInvocationError) as failure:
+        await provider.invoke(profile, request)
+    digest = failure.value.details["voice_transcript_sha256"]
+    assert digest == hashlib.sha256(state["text"].encode("utf-8")).hexdigest()
+    assert failure.value.details["voice_projection_no_output"] is True
+    evidence = {"voice_transcript_sha256": digest, "provider_activity_observed": False,
+                "voice_projection_no_output": True}
+
+    async def decision(*, req=request, selected=profile, ev=evidence, effects=False):
+        return await provider.resolve_stage_capacity_retry(
+            request=req, selected=selected, failure_code=fallback.CAPACITY_FAILURE_CODE,
+            retryable=True, retry_after_s=None, retry_index=0,
+            side_effects_possible=effects, recovery_evidence=ev,
+        )
+
+    permitted = await decision()
+    assert permitted["allowed"] and permitted["voice_transcript_sha256"] == digest
+    assert (await decision(ev={}))["blocking_reason"] == fallback.REASON_MEDIA_RECOVERY_UNAVAILABLE
+    assert (await decision(ev={**evidence, "provider_activity_observed": True}))["allowed"] is False
+    assert (await decision(ev={**evidence, "voice_projection_no_output": False}))["allowed"] is False
+    assert (await decision(effects=True))["allowed"] is False
+    backend.response = BackendResponse(
+        text="Already emitted a partial answer.", duration_ms=1, is_success=False,
+        error="temporarily at capacity", error_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        error_retryable=True,
+    )
+    with pytest.raises(StageInvocationError) as partial_failure:
+        await provider.invoke(profile, request)
+    assert partial_failure.value.details["voice_projection_no_output"] is False
+    assert (await decision(ev={**evidence, "voice_projection_no_output":
+                              partial_failure.value.details["voice_projection_no_output"]}))["allowed"] is False
+    assert (await decision(selected=replace(profile, options={"_native_audio_route": True})))["allowed"] is False
+    assert (await decision(req=replace(request, context={"request_mode": "call"})))["allowed"] is False
+    state["status"] = "ready"
+    assert (await decision())["allowed"] is False
+    state["status"] = "released"
+
+    retry_request = replace(request, attempt=2, context={
+        "request_mode": "text", "_voice_retry_transcript_sha256": digest,
+    })
+    state["text"] = "A different instruction."
+    before = len(backend.calls)
+    with pytest.raises(StageInvocationError) as changed:
+        await provider.invoke(profile, retry_request)
+    assert changed.value.retryable is False
+    assert len(backend.calls) == before
+
+    state["text"] = "Please check tomorrow's weather."
+    backend.response = BackendResponse(text="Recovered answer.", duration_ms=1)
+    response = await provider.invoke(profile, retry_request)
+    assert response.text == "Recovered answer."
+    assert len(backend.calls) == before + 1
+    assert state["text"] in backend.calls[-1]["prompt"]

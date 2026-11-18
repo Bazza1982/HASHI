@@ -19,7 +19,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.permissions.windows_file_binding import (
-    BoundWindowsCreate, BoundWindowsRead, BoundWindowsWrite, BoundWindowsDirectory, _Windows,
+    BoundWindowsCreate, BoundWindowsRead, BoundWindowsWrite, BoundWindowsDirectory, FileBindingError, _Windows,
 )
 
 
@@ -47,12 +47,41 @@ def run(plan):
 
         return run_script(json.loads(base64.b64decode(plan["data"], validate=True)), plan["handles"])
     if plan["action"] == "http":
-        if plan["handles"]:
-            raise ValueError("a network helper must not receive filesystem handles")
         import asyncio
         from orchestrator.permissions.network_worker import run as run_network
 
-        result = asyncio.run(run_network(json.loads(base64.b64decode(plan["data"], validate=True))))
+        from contextlib import ExitStack
+        import ntpath
+
+        network = json.loads(base64.b64decode(plan["data"], validate=True))
+        if not isinstance(network, dict):
+            raise FilePlanRejected("invalid HTTP plan")
+        source, sink = network.get("body_source"), network.get("response_sink")
+        if (source not in (None, "bound") or sink not in (None, "bound")
+                or len(plan["handles"]) != int(source == "bound") + int(sink == "bound")):
+            raise FilePlanRejected("HTTP held files differ from the approved plan")
+        if sink == "bound":
+            name, directory = plan["name"], plan["directory"]
+            if (not isinstance(name, str) or not name or name in {".", ".."} or name.endswith((" ", "."))
+                    or any(char in name for char in (":", "/", "*", "?", chr(34), "<", ">", "|", chr(92), chr(0)))
+                    or not isinstance(directory, str) or not ntpath.isabs(directory)):
+                raise FilePlanRejected("invalid approved response destination")
+        with ExitStack() as stack:
+            options = {}
+            index = 0
+            if source == "bound":
+                options["body_reader"] = stack.enter_context(BoundWindowsRead(_Windows(), [plan["handles"][index]]))
+                index += 1
+            if sink == "bound":
+                writer = stack.enter_context(BoundWindowsCreate(
+                    _Windows(), [plan["handles"][index]], plan["directory"], plan["name"],
+                ))
+                try:
+                    response_sink = writer.begin_stream()
+                except FileBindingError as error:
+                    raise FilePlanRejected("HTTP response destination cannot be created safely") from error
+                options["response_sink"] = stack.enter_context(response_sink)
+            result = asyncio.run(run_network(network, **options))
         return {"outcome": "succeeded", "data": base64.b64encode(result.encode("utf-8")).decode("ascii")}
     api = _Windows()
     from orchestrator.permissions.file_operations import list_held, search_held, strict_patch
@@ -61,9 +90,13 @@ def run(plan):
         options = json.loads(base64.b64decode(plan["data"], validate=True))
         bindings = [BoundWindowsDirectory(api, [handle]) for handle in plan["handles"]]
         try:
-            text = (list_held(bindings[0], options["arguments"], options["protected"])
+            text = (list_held(bindings[0], options["arguments"], options["protected"],
+                              cursor_key=bytes.fromhex(options.get("list_cursor_key", "")),
+                              scope_binding=options.get("list_scope", ""))
                     if plan["action"] == "list" else search_held(
-                        bindings, options["roots"], options["arguments"], options["protected"]))
+                        bindings, options["roots"], options["arguments"], options["protected"],
+                        cursor_key=bytes.fromhex(options.get("list_cursor_key", "")),
+                        scope_binding=options.get("list_scope", "")))
             return {"outcome": "succeeded", "data": base64.b64encode(text.encode("utf-8")).decode("ascii")}
         finally:
             for bound in bindings:

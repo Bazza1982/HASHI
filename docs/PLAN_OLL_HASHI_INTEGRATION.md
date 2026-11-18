@@ -955,3 +955,41 @@ Decisions made in this proposal:
 - support app-layer encryption on top of TLS
 - separate chat core from page and action modules
 - use explicit thread and source correlation for reliable continuous conversations
+
+
+
+## Browser Gateway ingress budgets (remediation candidate)
+
+The separately started Browser Gateway has independent per-device chat and
+upload budgets. The default selects no request-count limit. Operators may set
+--chat-per-minute and --upload-per-minute, and may provide --device-rate-limits
+as a JSON object mapping exact device IDs to chat/upload overrides. A value of
+zero disables that class's count limit. Authenticated device status reports
+effective limits and the current JSON body ceiling. A selected exhausted budget
+returns HTTP 429 with Retry-After; no chat or attachment is created for that
+rejected request. Device authentication and thread ownership still apply.
+
+
+### Resumable encrypted upload transport
+
+A device may start an upload at POST /browser/file/upload/start with its
+thread ID, filename, ciphertext byte count and SHA-256, encryption metadata,
+and optional notification request. The response gives an upload ID and maximum
+chunk size. PUT /browser/file/upload/{id} streams a binary chunk with
+Upload-Offset and Content-Length; GET on the same route returns the committed
+offset after interruption. POST /browser/file/upload/{id}/finish checks the
+complete ciphertext length and SHA-256 before registering the attachment.
+DELETE cancels an unfinished upload and removes its staged data. All operations
+verify the authenticated device and thread ownership.
+
+The JSON body limit, per-chunk resource budget and optional per-upload maximum
+are exposed through authenticated device status and can be selected using
+--json-body-bytes, --upload-chunk-bytes and --upload-max-bytes. The default
+maximum is unset; a chunk budget does not limit total file size. The original
+JSON/base64 endpoint remains available within its configured body budget.
+
+Finalization is repeatable without creating a second attachment or resending an
+already attempted notification. An interruption after notification begins is
+reported as an unknown outcome and is not automatically resent. This route
+requires a compatible browser client; client integration and real user delivery
+remain separate verification steps.

@@ -47,8 +47,14 @@ _FIELDS = frozenset(
 
 def _decode_transport(text: str) -> dict[str, Any]:
     encoded = text[len(TRANSPORT_PREFIX) :]
-    if not encoded or len(text) > MAX_TRANSPORT_LENGTH:
+    if not encoded:
         raise InteractionError("command_menu_request_invalid", 400)
+    if len(text) > MAX_TRANSPORT_LENGTH:
+        raise InteractionError(
+            "command_menu_request_too_large", 413,
+            f"Encoded command and quoted data exceed the {MAX_TRANSPORT_LENGTH} character limit. "
+            "Use an excerpt or shorten the command.",
+        )
     try:
         padding = "=" * (-len(encoded) % 4)
         raw = base64.b64decode(
@@ -102,21 +108,29 @@ async def try_dispatch_command_interaction_transport(
             raise InteractionError("command_menu_forbidden", 403)
         payload = _decode_transport(text)
         config = runtime.global_config
-        if str(getattr(config, "deployment_profile", "personal") or "personal") != "personal":
-            raise InteractionError("command_menu_governed_not_supported", 501)
-        # A primary user can be configured after this Worker starts. Resolve
-        # the current PAO-owned identity before the bridge and native handlers
-        # consult this runtime's compatibility projection. Never retain stale
-        # authorization when the persisted policy cannot be read.
-        from orchestrator.telegram_actor_scope import refresh_primary_user
-
-        try:
-            actor = refresh_primary_user(runtime)
-        except (OSError, ValueError, TypeError, LookupError):
-            raise InteractionError("command_menu_forbidden", 403) from None
-        checker = getattr(runtime, "_is_authorized_user", None)
-        if type(actor) is not int or (callable(checker) and not checker(actor)):
+        # The Backend API passes its authenticated owner over the private
+        # Worker RPC. Legacy callers without that metadata retain their
+        # original Telegram-actor behavior.
+        trusted_owner = str(
+            (session_metadata or {}).get("_hashi_owner_id") or ""
+        ).strip() if isinstance(session_metadata, Mapping) else ""
+        governed = str(getattr(config, "deployment_profile", "personal") or "personal") != "personal"
+        if governed and not (trusted_owner.startswith("enterprise:") and trusted_owner.removeprefix("enterprise:").strip()):
+            # Governed ingress must carry the canonical user authenticated by
+            # the Backend API; Telegram fallback is only for legacy personal calls.
             raise InteractionError("command_menu_forbidden", 403)
+        if trusted_owner:
+            actor = trusted_owner
+        else:
+            from orchestrator.telegram_actor_scope import refresh_primary_user
+
+            try:
+                actor = refresh_primary_user(runtime)
+            except (OSError, ValueError, TypeError, LookupError):
+                raise InteractionError("command_menu_forbidden", 403) from None
+            checker = getattr(runtime, "_is_authorized_user", None)
+            if type(actor) is not int or (callable(checker) and not checker(actor)):
+                raise InteractionError("command_menu_forbidden", 403)
         metadata: dict[str, Any] = {
             "actor_id": actor,
             "instance_id": str(getattr(config, "instance_id", "") or ""),
@@ -124,6 +138,9 @@ async def try_dispatch_command_interaction_transport(
             "session_channel_key": "default",
             "connection_binding": payload.pop("connection_binding"),
         }
+        if trusted_owner:
+            metadata["_hashi_owner_id"] = trusted_owner
+            metadata["owner_id"] = trusted_owner
         if "reply_reference" in payload:
             # Quote data cannot select or authorize the invocation's Session.
             metadata["reply_reference"] = payload["reply_reference"]
@@ -135,12 +152,15 @@ async def try_dispatch_command_interaction_transport(
                     runtime,
                     surface="workbench",
                     channel_key="default",
+                    **({"explicit_owner_id": trusted_owner} if trusted_owner else {}),
                     **({"explicit_session_id": selected} if selected else {}),
                 )
+                if trusted_owner and str(session.get("owner_id") or "") != trusted_owner:
+                    raise InteractionError("command_menu_forbidden", 403)
                 if expected_generation is not None and int(session["context_generation"]) != expected_generation:
                     raise InteractionError("command_menu_session_changed", 409)
                 metadata.update(
-                    owner_id=runtime_session.owner_id(runtime),
+                    owner_id=trusted_owner or runtime_session.owner_id(runtime),
                     session_id=str(session["session_id"]),
                     context_generation=int(session["context_generation"]),
                     _durable_command_invocation=True,

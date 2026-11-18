@@ -5641,3 +5641,56 @@ async def test_scheduled_turn_carries_hcc_through_real_pcm_and_fixed_transport(t
     assert "SCHEDULED_HCC_SNAPSHOT" in accepted.materialized_prompt
     assert runtime._last_prompt_audit["hcc"]["included"] is True
     assert runtime.current_request_meta["session_scope"] == runtime_pipeline.SESSION_SCOPE_ISOLATED
+
+@pytest.mark.asyncio
+async def test_stream_audit_character_flush_and_terminal_drain_preserve_all_deltas(monkeypatch):
+    monkeypatch.setattr(runtime_pipeline, "CANONICAL_STREAM_BATCH_MAX_AGE_S", 3600.0)
+
+    class BatchStore:
+        def __init__(self):
+            self.commits = []
+
+        def record_many(self, records):
+            self.commits.append([dict(record) for record in records])
+
+    store = BatchStore()
+    runtime = SimpleNamespace(canonical_audit=store, error_logger=_Logger())
+    batch = runtime_pipeline._CanonicalStreamAuditBatch(runtime, "req-threshold")
+    deltas = [f"{index:04d}:" + "x" * 195 for index in range(100)]
+    for delta in deltas:
+        batch.capture(StreamEvent(kind=KIND_THINKING, summary="", raw_delta=delta, origin="fixture"))
+    batch.flush(reason="terminal")
+    stream = [record for commit in store.commits for record in commit
+              if record["event_type"] == "provider_stream_event"]
+    assert len(store.commits) >= 2
+    assert [record["payload"]["raw_delta"] for record in stream] == deltas
+    assert [record["payload"]["_canonical_capture"]["stream_sequence"] for record in stream] == list(range(1, 101))
+
+@pytest.mark.asyncio
+async def test_capacity_recovery_uses_fenced_presentation_from_real_feedback_setup(tmp_path):
+    from orchestrator.frontend_projection import poll_frontend_feed
+    from orchestrator.runtime_capacity_recovery import _emit
+    from tests.test_telegram_connector_transport import setup_delivery
+
+    route, store, owner, session, accepted, _ = setup_delivery(tmp_path)
+    runtime = _runtime()
+    runtime.name = "agent1"
+    runtime.global_config.instance_id = "HASHI3"
+    runtime.session_store = store
+    run = store.get_run(accepted.run_id, owner_id=owner)
+    item = _item(
+        request_id=accepted.request_id, run_id=accepted.run_id,
+        session_id=session["session_id"], owner_id=owner,
+        context_generation=session["context_generation"],
+        fencing_token=run["fencing_token"], session_surface="workbench",
+        deliver_to_telegram=False,
+    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(
+        runtime, item, audit_active=False, audit_collector=None,
+    )
+    await _emit(feedback.on_stream_event, "fallback.retry.wait", attempt=1, count=1, seconds=5)
+    feed = poll_frontend_feed(store, session["session_id"], owner_id=owner, run_id=accepted.run_id)
+    notices = [event for event in feed["durable_events"] if event["semantic_kind"] == "notification"]
+    assert len(notices) == 1
+    assert notices[0]["run_id"] == accepted.run_id
+    assert notices[0]["content_blocks"][0]["text"]

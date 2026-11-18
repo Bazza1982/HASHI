@@ -43,7 +43,9 @@ decision for `activity.superloop.delete`, bound to the Agent and loop ID.
 The short file mutation holds the existing Run fence after parsing the body.
 Stopped, cancelled, revoked or superseded Runs cannot mutate loops. Loop
 ownership remains checked by the existing service; deletion retains its audit
-record and prevents further advancement.
+record and prevents further advancement. When the record already says deleted,
+an authenticated live Run can read that retained result without another approval
+or another deletion; a stopped Run or another Agent still cannot access it.
 
 See [PAO's Backend mutation contract](HASHI_PAO_SYSTEM_DESIGN.md#backend-mutation-authentication-2026-11-07)
 for the shared Scheduler/Superloop authentication boundary.
@@ -406,6 +408,28 @@ rows do not fan out recovery. Existing heartbeat supervision remains the
 fallback after the single recovery budget is exhausted. Scheduler auto-advance still does not
 dispatch work and must not be enabled as a substitute for controller execution.
 
+
+### Reviewed receipt as closeout evidence
+
+A completed `hchat_agent` task may use the PAO dispatch and receipt-review
+records in place of a retained transcript copy. The validator requires the
+same loop and task, a uniquely correlated accepted dispatch and collected
+terminal record, the matching receipt-review admission event, a completed
+controller review and its existing loop-local evidence. A later attempt, a
+reopened/recreated task, incomplete journal, mismatched identity or unreviewed
+receipt cannot use this fallback. Missing or stale transcript copies remain
+visible as legacy diagnostics when the canonical records are sufficient. New
+review rows retain the sender and destination already verified during receipt
+admission. Older reviews can use an existing dispatch owner binding; records
+without either identity source need reconciliation rather than an inferred
+identity from the current taskboard. The validation rechecks its observed
+files for changes during reading; that check is not a cross-process transaction.
+
+This projection supplies dispatch and receipt evidence only. It does not prove
+the content of a report, the outcome of a task, runtime adoption or delivery to
+the user. Explicit artifact requirements and delivery acceptance checks remain
+independent. It does not mutate old task records or invent a transcript; other
+legacy status representations still need their own reconciliation.
 
 ### Explicit delivery closeout contract (2026-09-08)
 

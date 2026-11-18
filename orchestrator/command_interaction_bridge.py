@@ -21,7 +21,7 @@ def build_frontend_command_invocation(
     payload: Mapping,
     metadata: Mapping,
     *,
-    actor: int,
+    actor: int | str,
     command_name: str,
     arguments: list[str],
     decision: str = "allowed",
@@ -89,12 +89,14 @@ def _store(runtime):
     return store
 
 
-def _allowed(runtime, command):
+def _allowed(runtime, command, owner_id=None):
     from orchestrator.admin_local_testing import supported_commands
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
     if command not in supported_commands(runtime):
         return False
     check = getattr(runtime, "_is_command_allowed", None)
-    return not callable(check) or bool(check(command))
+    with bind_frontend_command_principal(runtime, owner_id):
+        return not callable(check) or bool(check(command))
 
 
 def _resolve(runtime, data):
@@ -168,15 +170,23 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
         if not isinstance(metadata, Mapping):
             raise InteractionError("command_menu_binding_missing", 400)
         actor = metadata.get("actor_id")
-        configured_actor = getattr(runtime.global_config, "authorized_id", None)
-        if type(actor) is not int or actor != configured_actor:
-            raise InteractionError("command_menu_forbidden", 403)
-        checker = getattr(runtime, "_is_authorized_user", None)
-        if callable(checker) and not checker(actor):
-            raise InteractionError("command_menu_forbidden", 403)
+        trusted_owner = str(metadata.get("_hashi_owner_id") or "").strip()
+        if trusted_owner:
+            if actor != trusted_owner or str(metadata.get("owner_id") or trusted_owner) != trusted_owner:
+                raise InteractionError("command_menu_forbidden", 403)
+        else:
+            configured_actor = getattr(runtime.global_config, "authorized_id", None)
+            if type(actor) is not int or actor != configured_actor:
+                raise InteractionError("command_menu_forbidden", 403)
+            checker = getattr(runtime, "_is_authorized_user", None)
+            if callable(checker) and not checker(actor):
+                raise InteractionError("command_menu_forbidden", 403)
         locale = ui_language.normalize_locale(payload.get("ui_locale"))
         if op == "catalogue":
-            return _catalogue(runtime, locale)
+            from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+            with bind_frontend_command_principal(runtime, trusted_owner or None):
+                return _catalogue(runtime, locale)
         if (not isinstance(metadata.get("session_id"), str) or not metadata["session_id"]
                 or not isinstance(metadata.get("connection_binding"), str) or not metadata["connection_binding"]
                 or not isinstance(metadata.get("instance_id"), str)
@@ -230,7 +240,7 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                 raise InteractionError("command_menu_command_invalid", 400) from None
             from orchestrator.admin_local_testing import _split_command
             command, command_args = _split_command(command_line)
-            if not command_line.lstrip().startswith("/") or not _allowed(runtime, command):
+            if not command_line.lstrip().startswith("/") or not _allowed(runtime, command, trusted_owner or None):
                 raise InteractionError("command_menu_forbidden", 403)
             typed_invocations.append(
                 command_invocation(command, command_args, decision="allowed")
@@ -395,7 +405,10 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                         if original_send is not None:
                             runtime._send_text = publishing_capture.capture_send
                         try:
+                            from orchestrator.frontend_command_context import bind_frontend_command_principal
+
                             with (_capture_local_output(runtime, publishing_capture),
+                                  bind_frontend_command_principal(runtime, trusted_owner or None),
                                   ui_language.language_scope(runtime, update, locale=locale),
                                   bind_slash_command_audit_session(session)):
                                 if dynamic:
@@ -412,7 +425,7 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
                                 runtime._send_text = original_send
                             session.finish()
                 result = await perform_action(store, binding, payload, capture, actor_id=actor,
-                                              authorize=lambda cmd: _allowed(runtime, cmd), invoke=invoke)
+                                              authorize=lambda cmd: _allowed(runtime, cmd, trusted_owner or None), invoke=invoke)
                 result["refresh_required"] = before != _refresh_signature(runtime)
                 if typed_invocations:
                     result["command_invocation"] = typed_invocations[0]

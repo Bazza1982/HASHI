@@ -627,11 +627,11 @@ def _upsert_secrets(secrets: dict, root: Path):
         else new_config_json(secrets_file)
     )
     existing.update(secrets)
-    from orchestrator.workbench_auth import _windows_remote_runtime_sids
+    from orchestrator.workbench_auth import resolve_remote_runtime_sids
 
     write_config_json(
         secrets_file, existing,
-        private_full_control_sids=_windows_remote_runtime_sids(root),
+        private_full_control_sids=resolve_remote_runtime_sids(root),
     )
     print(f"  secrets.json updated on target ({len(secrets)} keys)")
 
@@ -766,6 +766,10 @@ def main():
     )
     parser.add_argument("--transfer-mode", choices=("identity_memory", "workspace"),
                         help="Required for direct moves: carry identity/memory or the full workspace (1 GB)")
+    parser.add_argument("--target-state", choices=("preserve", "active", "inactive"), default="preserve",
+                        help="Destination activation after the move (default: preserve source state)")
+    parser.add_argument("--history-mode", choices=("move", "retain_source"), default="move",
+                        help="Carry conversation history or archive it on the source (default: move)")
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview actions without making changes"
     )
@@ -1005,6 +1009,8 @@ def main():
                 args.target_instance,
                 source_instance=source_instance,
                 transfer_mode=args.transfer_mode,
+                history_mode=args.history_mode,
+                desired_target_active=None if args.target_state == "preserve" else args.target_state == "active",
             )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
@@ -1017,6 +1023,8 @@ def main():
             source_instance=source_instance,
             transfer_mode=args.transfer_mode,
             keep_source=args.keep_source,
+            history_mode=args.history_mode,
+            desired_target_active=None if args.target_state == "preserve" else args.target_state == "active",
         )
         print(json.dumps(prepared, ensure_ascii=False, indent=2))
         if not args.yes:

@@ -90,14 +90,13 @@ async def test_workzone_add_edit_remove_are_revision_checked_and_keep_directorie
         assert pending["pending_activation"] is True
         assert pending["management_supported"] is True
 
-        no_confirm = await client.post(f"{root}/3/delete-if-unchanged", headers=headers(),
-                                        json={"expected_revision":3})
-        assert no_confirm.status == 403
+        anonymous = await client.post(f"{root}/3/delete-if-unchanged", json={"expected_revision":3})
+        assert anonymous.status == 401
         old_delete = await client.post(f"{root}/3/delete-if-unchanged", headers=headers(),
             json={"expected_revision":2,"authorization":"explicit_user_authorization"})
         assert old_delete.status == 409
         removed = await client.post(f"{root}/3/delete-if-unchanged", headers=headers(),
-            json={"expected_revision":3,"authorization":"explicit_user_authorization"})
+            json={"expected_revision":3})
         assert removed.status == 200
         assert (await removed.json())["revision"] == 4
         latest = server.session_store.get_agent_workzone_set(owner_id=owner, agent_id="momo")
@@ -246,3 +245,50 @@ async def test_governed_workzone_management_requires_access_and_management_role(
         assert (await client.put("/api/agents/momo/workzones/1", headers=headers("admin"), json=body)).status == 200
     state = server.session_store.get_agent_workzone_set(owner_id="enterprise:admin",agent_id="momo")
     assert state["slots"][0]["path"] == str(directories[0])
+
+@pytest.mark.asyncio
+async def test_workzone_save_keeps_status_responsive_during_database_writer(api, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    server, _runtime, directories = api
+    started = threading.Event()
+    original = server.session_store.set_agent_workzone_slot
+
+    def observed_save(**kwargs):
+        started.set()
+        return original(**kwargs)
+
+    monkeypatch.setattr(server.session_store, "set_agent_workzone_slot", observed_save)
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    connection.execute("BEGIN IMMEDIATE")
+    task = None
+    try:
+        async with TestClient(TestServer(server.app)) as client:
+            task = asyncio.create_task(client.put(
+                "/api/agents/momo/workzones/1", headers=headers(),
+                json={"expected_revision": 0, "mode": "add", "path": str(directories[0])},
+            ))
+            assert await asyncio.to_thread(started.wait, 2)
+            assert not task.done()
+            before = time.monotonic()
+            status = await client.get("/api/v1/capabilities", headers=headers())
+            assert status.status == 200
+            assert time.monotonic() - before < 1
+            connection.rollback()
+            response = await asyncio.wait_for(task, 3)
+            assert response.status == 200
+            assert (await response.json())["revision"] == 1
+            replay = await client.put(
+                "/api/agents/momo/workzones/1", headers=headers(),
+                json={"expected_revision": 0, "mode": "add", "path": str(directories[0])},
+            )
+            assert replay.status == 409
+            assert (await replay.json())["error_code"] == "workzone_revision_conflict"
+    finally:
+        connection.rollback()
+        connection.close()
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)

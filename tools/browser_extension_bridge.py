@@ -144,7 +144,6 @@ def send_bridge_command(
     path = Path(endpoint)
 
     deadline = time.monotonic() + connect_wait_s
-    last_error: Optional[Exception] = None
     while True:
         if not path.exists():
             if time.monotonic() >= deadline:
@@ -157,8 +156,12 @@ def send_bridge_command(
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout_s)
+            sent_or_partial = False
             try:
                 client.connect(str(path))
+                # sendall can fail after writing a prefix, so treat an attempted
+                # send as potentially dispatched. Only pre-send failures retry.
+                sent_or_partial = True
                 client.sendall(encoded_request)
                 chunks: list[bytes] = []
                 while True:
@@ -170,21 +173,34 @@ def send_bridge_command(
                         break
                 break
             except (OSError, socket.timeout) as exc:
-                last_error = exc
+                if sent_or_partial:
+                    raise BrowserBridgeError(
+                        f"extension bridge response unconfirmed after dispatch: {exc}; "
+                        "inspect the operation before retrying"
+                    ) from exc
                 if time.monotonic() >= deadline:
-                    raise BrowserBridgeError(f"failed talking to extension bridge: {exc}") from exc
+                    raise BrowserBridgeError(f"failed talking to extension bridge before dispatch: {exc}") from exc
                 time.sleep(DEFAULT_RETRY_DELAY_S)
                 continue
 
     payload = b"".join(chunks).decode("utf-8").strip()
     if not payload:
-        if last_error is not None:
-            raise BrowserBridgeError(f"extension bridge returned empty response after retry: {last_error}")
-        raise BrowserBridgeError("extension bridge returned empty response")
+        raise BrowserBridgeError(
+            "extension bridge response unconfirmed after dispatch: empty response; "
+            "inspect the operation before retrying"
+        )
     try:
         response = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise BrowserBridgeError(f"invalid bridge response: {payload[:300]}") from exc
+        raise BrowserBridgeError(
+            "extension bridge response unconfirmed after dispatch: invalid response; "
+            "inspect the operation before retrying"
+        ) from exc
+    if not isinstance(response, dict):
+        raise BrowserBridgeError(
+            "extension bridge response unconfirmed after dispatch: non-object response; "
+            "inspect the operation before retrying"
+        )
 
     logger.debug("Bridge response for %s: %s", action, response)
     return response
@@ -210,6 +226,7 @@ def ensure_bridge_session(
     safety_mode: str | None = None,
     socket_path: Optional[Path | str] = None,
     auth_file: Optional[Path] = None,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     payload = dict(args or {})
     payload["owner"] = _derive_owner(payload)
@@ -218,11 +235,13 @@ def ensure_bridge_session(
         payload["url"] = url
     if safety_mode:
         payload["safety_mode"] = safety_mode
+    selected_timeout = {"timeout_s": timeout_s} if timeout_s is not None else {}
     response = send_bridge_command(
         "session_create",
         payload,
         socket_path=socket_path,
         auth_file=auth_file,
+        **selected_timeout,
     )
     if not response.get("ok"):
         raise BrowserBridgeError(str(response.get("error", "failed to create browser session")))

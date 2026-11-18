@@ -87,7 +87,8 @@ reports an existing foreground media call.
 `start` adds `generation`, `revision`, a new random `call_id`, and `allow_cloud`.
 Subsequent `turn`, `snapshot`, `speech`, and `end` operations carry the same
 scope and generation. `save_profile` accepts only the revision and a selection
-of known targets/options; it is refused while this owner's call is active.
+of known targets/options. A profile can be saved during a call: the current call
+keeps its frozen settings, and the saved profile applies to subsequent calls.
 
 `turn` adds a monotonically increasing `sequence`, random `turn_id`, `audio_b64`,
 and optionally `image_b64` + `captured_at`. Repeating exactly the latest upload

@@ -117,6 +117,9 @@ DEFAULTS = {
     "retries": 2,
     "max_side": 1280,
     "max_mb": 1.5,
+    "max_input_bytes": 128 * 1024 * 1024,
+    "max_response_bytes": 4 * 1024 * 1024,
+    "resize_retries": 2,
 }
 
 
@@ -159,22 +162,32 @@ def completion_url(api_url):
     """Accept a base, a /v1 base, or an exact completion endpoint."""
     if not isinstance(api_url, str) or not api_url.strip():
         raise VisionError("configure an API URL before sending images")
-    url = api_url.strip().rstrip("/")
+    url = api_url.strip()
     try:
         parsed = urllib.parse.urlsplit(url)
         valid = (parsed.scheme in ("http", "https") and parsed.hostname
                  and parsed.username is None and parsed.password is None
-                 and not parsed.query and not parsed.fragment
-                 and not any(c.isspace() for c in url)
+                 and not parsed.fragment
+                 and not any(c.isspace() or ord(c) < 32 for c in url)
                  and (parsed.port is None or 1 <= parsed.port <= 65535))
     except ValueError:
         valid = False
     if not valid:
-        raise VisionError("API URL must be HTTP(S), without credentials, query or fragment")
-    if url.endswith("/chat/completions"):
-        return url
-    return url + ("/chat/completions" if parsed.path.rstrip("/").endswith("/v1")
-                  else "/v1/chat/completions")
+        raise VisionError("API URL must be HTTP(S), without embedded credentials or fragment")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/chat/completions"):
+        path += "/chat/completions" if path.endswith("/v1") else "/v1/chat/completions"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+
+def display_api_url(api_url):
+    """Do not reveal routing parameters, which may contain credentials."""
+    if not api_url:
+        return api_url
+    parsed = urllib.parse.urlsplit(api_url)
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "[redacted]" if parsed.query else "", "")
+    )
 
 
 def _pack(name, mime, data, orig_bytes, sent_bytes, resized):
@@ -198,18 +211,31 @@ def _to_rgb(frame):
     return canvas
 
 
-def prepare_image(path, max_side, max_mb, no_resize):
+def _read_limited(stream, limit, error):
+    """Read in bounded chunks without preallocating the whole configured budget."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = stream.read(min(1024 * 1024, limit - total + 1))
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise VisionError(error)
+        chunks.append(chunk)
+
+
+def prepare_image(path, max_side, max_mb, no_resize, max_input_bytes=None):
     """Read a bounded image; re-encode and shrink until the byte budget fits."""
     p = Path(path)
+    input_limit = MAX_INPUT_BYTES if max_input_bytes is None else max_input_bytes
     if p.suffix.lower() not in MIME_BY_SUFFIX:
         raise VisionError("unsupported image extension")
     try:
         with p.open("rb") as stream:
-            raw = stream.read(MAX_INPUT_BYTES + 1)
+            raw = _read_limited(stream, input_limit, "image exceeds the input size limit")
     except OSError:
         raise VisionError("cannot read image") from None
-    if len(raw) > MAX_INPUT_BYTES:
-        raise VisionError("image exceeds the input size limit")
     orig = len(raw)
     mime = MIME_BY_SUFFIX[p.suffix.lower()]
     limit = int(max_mb * 1024 * 1024)
@@ -273,9 +299,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def post_with_retry(url, body, api_key, timeout_s, retries):
+def post_with_retry(url, body, api_key, timeout_s, retries, max_response_bytes=None):
     """Bounded POST with redirects disabled and sanitized failures."""
     opener = urllib.request.build_opener(_NoRedirect())
+    response_limit = MAX_RESPONSE_BYTES if max_response_bytes is None else max_response_bytes
     delay = 1.0
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=body, method="POST")
@@ -284,10 +311,9 @@ def post_with_retry(url, body, api_key, timeout_s, retries):
             req.add_header("Authorization", "Bearer " + api_key)
         try:
             with opener.open(req, timeout=timeout_s) as response:
-                data = response.read(MAX_RESPONSE_BYTES + 1)
-                if len(data) > MAX_RESPONSE_BYTES:
-                    raise VisionError("backend response exceeds the size limit")
-                return data
+                return _read_limited(
+                    response, response_limit, "backend response exceeds the size limit"
+                )
         except urllib.error.HTTPError as exc:
             code = exc.code
             error_body = _safe_read(exc)
@@ -300,14 +326,14 @@ def post_with_retry(url, body, api_key, timeout_s, retries):
             if code >= 500 and attempt < retries:
                 eprint("warning: backend unavailable; retry {}/{}".format(attempt + 1, retries))
                 time.sleep(delay)
-                delay *= 2
+                delay = min(delay * 2, 60.0)
                 continue
             raise VisionError("HTTP {} from backend".format(code)) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError, http.client.HTTPException):
             if attempt < retries:
                 eprint("warning: connection failed; retry {}/{}".format(attempt + 1, retries))
                 time.sleep(delay)
-                delay *= 2
+                delay = min(delay * 2, 60.0)
                 continue
             raise VisionError("cannot reach backend") from None
     raise VisionError("request retry budget exhausted")
@@ -340,14 +366,17 @@ def extract_answer(data):
 
 
 def ask(api_url, model, api_key, images, question, max_tokens, temperature,
-        timeout_s, retries, max_side, max_mb, no_resize):
+        timeout_s, retries, max_side, max_mb, no_resize, *,
+        max_input_bytes=None, max_response_bytes=None, resize_retries=2):
     """One request: send all images + the question, return a result dict."""
     url = completion_url(api_url)
     t0 = time.monotonic()
     side = max_side
     budget_mb = max_mb
-    for attempt in range(3):  # original send + up to two 413 shrink retries
-        preps = [prepare_image(p, side, budget_mb, no_resize) for p in images]
+    for attempt in range(resize_retries + 1):  # original send plus selected 413 retries
+        preps = [prepare_image(p, side, budget_mb, no_resize, max_input_bytes) for p in images]
+        if any(prep["resized"] for prep in preps):
+            eprint("warning: image resized or re-encoded; visual detail may be reduced")
         content = []
         if question:
             content.append({"type": "text", "text": question})
@@ -365,10 +394,10 @@ def ask(api_url, model, api_key, images, question, max_tokens, temperature,
         except UnicodeError:
             raise VisionError("request text is not valid Unicode") from None
         try:
-            raw = post_with_retry(url, body, api_key, timeout_s, retries)
+            raw = post_with_retry(url, body, api_key, timeout_s, retries, max_response_bytes)
             data = json.loads(raw.decode("utf-8"))
         except HTTP413Error:
-            if no_resize or not HAS_PIL or attempt == 2:
+            if no_resize or not HAS_PIL or attempt == resize_retries:
                 raise VisionError(
                     "backend rejected the image: payload too large (HTTP 413). "
                     "Let auto-resize run (install Pillow) or pre-compress the image."
@@ -583,6 +612,9 @@ def _verify_positive(cfg, img_path, band, region, tmp_files):
         cfg["framing_q"]["crop"],
         cfg["max_tokens"], cfg["temperature"], cfg["timeout_s"], cfg["retries"],
         cfg["max_side"], cfg["max_mb"], False,
+        max_input_bytes=cfg.get("max_input_bytes"),
+        max_response_bytes=cfg.get("max_response_bytes"),
+        resize_retries=cfg.get("resize_retries", 2),
     )
     verdict, _ = _parse_verdict(cres["answer"], region["keywords"],
                                        cfg["negations"])
@@ -614,6 +646,9 @@ def ask_framing(cfg, img_path, fast=False):
             cfg["api_url"], cfg["model"], cfg["api_key"], [str(img_path)], q,
             cfg["max_tokens"], cfg["temperature"], cfg["timeout_s"], cfg["retries"],
             cfg["max_side"], cfg["max_mb"], cfg["no_resize"],
+            max_input_bytes=cfg.get("max_input_bytes"),
+            max_response_bytes=cfg.get("max_response_bytes"),
+            resize_retries=cfg.get("resize_retries", 2),
         )
         resized = resized or res["resized"]
         _add_usage(usage, res.get("usage"))
@@ -755,6 +790,9 @@ def run_one(cfg, img_path, question):
                 cfg["api_url"], cfg["model"], cfg["api_key"], [str(img_path)], question,
                 cfg["max_tokens"], cfg["temperature"], cfg["timeout_s"], cfg["retries"],
                 cfg["max_side"], cfg["max_mb"], cfg["no_resize"],
+                max_input_bytes=cfg.get("max_input_bytes"),
+                max_response_bytes=cfg.get("max_response_bytes"),
+                resize_retries=cfg.get("resize_retries", 2),
             )
         return {"file": str(img_path), "ok": True, **res}
     except VisionError as exc:
@@ -790,7 +828,7 @@ def build_parser():
     parser.add_argument("--limit", type=int, default=None,
                         help="with --dir: process at most N images (default: all)")
     parser.add_argument("--jobs", type=int, default=1,
-                        help="with --dir: parallel workers (1-32; default 1); "
+                        help="with --dir: positive parallel worker count (default 1); "
                              "respect provider concurrency limits")
     parser.add_argument("--api-url", default=None, help="API base URL (OpenAI-compatible)")
     parser.add_argument("--model", default=None, help="model id")
@@ -807,6 +845,12 @@ def build_parser():
                         help="auto-resize longest side in px (default 1280)")
     parser.add_argument("--max-mb", type=float, default=None,
                         help="auto-resize/encode byte budget in MB (default 1.5)")
+    parser.add_argument("--max-input-bytes", type=int, default=None,
+                        help="maximum source bytes per image")
+    parser.add_argument("--max-response-bytes", type=int, default=None,
+                        help="maximum backend response bytes")
+    parser.add_argument("--resize-retries", type=int, default=None,
+                        help="maximum image shrink retries after HTTP 413")
     parser.add_argument("--no-resize", action="store_true",
                         help="send files byte-for-byte (disables auto-resize "
                              "and the 413 shrink retry)")
@@ -863,6 +907,9 @@ def _resolve_settings(args, cfg):
         "retries": pick(args.retries, None, "retries", int),
         "max_side": pick(args.max_side, "VISION_MAX_SIDE", "max_side", int),
         "max_mb": pick(args.max_mb, "VISION_MAX_MB", "max_mb", float),
+        "max_input_bytes": pick(args.max_input_bytes, "VISION_MAX_INPUT_BYTES", "max_input_bytes", int),
+        "max_response_bytes": pick(args.max_response_bytes, "VISION_MAX_RESPONSE_BYTES", "max_response_bytes", int),
+        "resize_retries": pick(args.resize_retries, "VISION_RESIZE_RETRIES", "resize_retries", int),
     }
     if values["api_url"]:
         completion_url(values["api_url"])
@@ -872,11 +919,15 @@ def _resolve_settings(args, cfg):
     key = "" if key is None else key
     if not isinstance(key, str) or "\r" in key or "\n" in key:
         raise VisionError("invalid value for api_key")
-    if (values["max_tokens"] <= 0 or not 0 <= values["temperature"] <= 2
-            or not 0 < values["timeout_s"] <= 3600 or not 0 <= values["retries"] <= 5
-            or not 1 <= values["max_side"] <= 16384
-            or values["max_mb"] * 1024 * 1024 < 1 or values["max_mb"] > 128
-            or not 1 <= args.jobs <= 32 or (args.limit is not None and args.limit <= 0)):
+    image_budget = values["max_mb"] * 1024 * 1024
+    if (values["max_tokens"] <= 0 or values["temperature"] < 0
+            or values["timeout_s"] <= 0 or values["retries"] < 0
+            or values["max_side"] < 1 or not math.isfinite(image_budget)
+            or not 1 <= image_budget < sys.maxsize
+            or not 1 <= values["max_input_bytes"] < sys.maxsize
+            or not 1 <= values["max_response_bytes"] < sys.maxsize
+            or values["resize_retries"] < 0
+            or args.jobs < 1 or (args.limit is not None and args.limit <= 0)):
         raise VisionError("numeric options are outside supported bounds")
     for name in ("mode_questions", "framing_questions"):
         if name in cfg and (not isinstance(cfg[name], dict)
@@ -923,7 +974,7 @@ def main(argv=None):
     if args.show_config:
         print(json.dumps({
             "vision_skill_version": VERSION,
-            "api_url": api_url,
+            "api_url": display_api_url(api_url),
             "model": model,
             "api_key_set": bool(api_key),
             "max_tokens": max_tokens,
@@ -932,6 +983,9 @@ def main(argv=None):
             "retries": retries,
             "max_side": max_side,
             "max_mb": max_mb,
+            "max_input_bytes": cfg_ctx["max_input_bytes"],
+            "max_response_bytes": cfg_ctx["max_response_bytes"],
+            "resize_retries": cfg_ctx["resize_retries"],
             "no_resize": no_resize,
             "fast": bool(args.fast),
             "pillow_available": HAS_PIL,
@@ -1019,7 +1073,10 @@ def main(argv=None):
         else:
             res = ask(api_url, model, api_key, [str(p) for p in args.images], question,
                       max_tokens, temperature, timeout_s, retries,
-                      max_side, max_mb, no_resize)
+                      max_side, max_mb, no_resize,
+                      max_input_bytes=cfg_ctx["max_input_bytes"],
+                      max_response_bytes=cfg_ctx["max_response_bytes"],
+                      resize_retries=cfg_ctx["resize_retries"])
     except VisionError as exc:
         if args.json:
             print(json.dumps({"file": str(Path(args.images[0]).resolve()), "ok": False,

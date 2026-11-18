@@ -1069,6 +1069,58 @@ async def test_gateway_does_not_shutdown_adapters_when_transport_drain_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("large_description", [False, True])
+async def test_gateway_passes_large_catalogue_and_returns_call_beyond_128(tmp_path, large_description):
+    class LargeCatalogueAdapter(_ExternalAdapter):
+        async def generate_external_tool_response(self, *args, **kwargs):
+            result = await super().generate_external_tool_response(*args, **kwargs)
+            result.tool_calls = [{"id": "call-129", "type": "function", "function": {
+                "name": "tool_128", "arguments": "{}"}}]
+            return result
+
+    tools = [{"type": "function", "function": {"name": f"tool_{index}",
+              "parameters": {"type": "object", "properties": {}}}}
+             for index in range(129)]
+    if large_description:
+        tools[-1]["function"]["description"] = "x" * (1024 * 1024 + 1)
+    adapter = LargeCatalogueAdapter()
+    server = _server(tmp_path, adapter)
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post("/v1/chat/completions", json={
+            "model": "grok-4.3", "messages": [{"role": "user", "content": "Use the final tool"}],
+            "tools": tools, "tool_choice": {"type": "function", "function": {"name": "tool_128"}},
+        })
+        payload = await response.json()
+    assert response.status == 200
+    assert adapter.calls[0]["tools"] == tools
+    assert payload["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "tool_128"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("policy", "error_code"), [
+    ({"max_external_tools": 1}, "too_many_tools"),
+    ({"max_external_tool_bytes": 10}, "tools_too_large"),
+])
+async def test_gateway_enforces_selected_local_catalogue_budget(tmp_path, policy, error_code):
+    from orchestrator.api_gateway_config import save_api_gateway_config
+
+    config = SimpleNamespace(project_root=tmp_path)
+    save_api_gateway_config(config, **policy)
+    adapter = _ExternalAdapter()
+    server = _server(tmp_path, adapter)
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post("/v1/chat/completions", json={
+            "model": "grok-4.3", "messages": [{"role": "user", "content": "Use a tool"}],
+            "tools": [TOOL_SCHEMA, {"type": "function", "function": {"name": "another"}}],
+        })
+        payload = await response.json()
+    assert response.status == 400
+    assert payload["error"]["code"] == error_code
+    assert "locally configured" in payload["error"]["message"]
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
 async def test_sync_external_tools_preserve_full_protocol_and_return_tool_calls(tmp_path):
     adapter = _ExternalAdapter()
     server = _server(tmp_path, adapter)

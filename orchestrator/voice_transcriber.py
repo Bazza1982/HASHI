@@ -41,6 +41,13 @@ DEFAULT_LANGUAGE = None  # None = auto-detect
 EXTERNAL_TRANSCRIPTION_TIMEOUT_SECONDS = 900.0
 
 
+def compute_audio_input_limit(config: dict) -> int:
+    limit = config.get("max_compute_input_bytes", 8 * 1024 * 1024)
+    if type(limit) is not int or limit < 1:
+        raise ValueError("transcription max_compute_input_bytes is invalid")
+    return limit
+
+
 def _transcription_configuration() -> tuple[Path, dict]:
     root = Path(os.environ.get("BRIDGE_HOME") or os.environ.get("HASHI_SOURCE_ROOT")
                 or Path(__file__).resolve().parents[1])
@@ -147,7 +154,10 @@ class VoiceTranscriber:
         """Compatibility text API; errors contain safe codes and a diagnostic reference."""
         return (await self.transcribe_result(audio_path)).legacy_text()
 
-    async def transcribe_result(self, audio_path: str | Path, *, include_segments: bool = False) -> TranscriptionResult:
+    async def transcribe_result(
+        self, audio_path: str | Path, *, include_segments: bool = False,
+        allow_compute: bool = True,
+    ) -> TranscriptionResult:
         """Return immutable facts for this call, independently of Engine and PAO state."""
         phase = "input"
         try:
@@ -158,6 +168,8 @@ class VoiceTranscriber:
             root, config = _transcription_configuration()
             if config.get("provider") == "compute":
                 phase = "compute"
+                if not allow_compute:
+                    raise PermissionError("local-only transcription forbids Compute")
                 text = await self._transcribe_compute(audio_path, root, config)
             else:
                 external_python = _external_python()
@@ -195,11 +207,12 @@ class VoiceTranscriber:
         suffix = audio_path.suffix.casefold()
         if suffix not in {".wav", ".ogg", ".mp3", ".m4a", ".webm", ".flac", ".mp4", ".aac"}:
             raise ValueError("transcription audio format is unsupported")
-        # Bound the read as well as the HTTP upload, including files that grow.
+        # Bound the read and HTTP upload by the owner's configured service budget.
+        maximum = compute_audio_input_limit(config)
         with audio_path.open("rb") as handle:
-            audio = handle.read(8 * 1024 * 1024 + 1)
-        if not 1 <= len(audio) <= 8 * 1024 * 1024:
-            raise ValueError("transcription audio exceeds the service upload limit")
+            audio = handle.read(maximum + 1)
+        if not 1 <= len(audio) <= maximum:
+            raise ValueError("transcription audio exceeds the configured service upload limit")
         async with self._lock:
             client = ComputeServiceClient()
             directory = ComputeServiceDirectory(
@@ -216,7 +229,8 @@ class VoiceTranscriber:
                 ),
             )
             result = await client.transcribe(
-                resolved, audio, filename="utterance" + suffix, language=self.language
+                resolved, audio, filename="utterance" + suffix, language=self.language,
+                max_input_bytes=maximum,
             )
         logger.info("Compute transcription complete: %d chars", len(result["text"]))
         return str(result["text"]).strip()

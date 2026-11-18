@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -129,7 +130,7 @@ class JsonlAuditWriter:
 
 
 class DurableAuditLog:
-    """Write every required record to primary storage or a durable spool.
+    """Write required records to canonical storage or durable legacy logs.
 
     Event identifiers are idempotency keys.  Replaying a fallback spool never
     duplicates an event already present in the primary log.
@@ -144,7 +145,7 @@ class DurableAuditLog:
         fallback_writer: AuditWriter | None = None,
         redactor: Callable[[Any], Any] | None = None,
         observer: Callable[[Mapping[str, Any]], None] | None = None,
-        canonical_observer: Callable[[Mapping[str, Any]], None] | None = None,
+        canonical_observer: Callable[[Mapping[str, Any]], int | None] | None = None,
     ):
         if primary_writer is None and primary_path is None:
             raise ValueError("a primary audit path or writer is required")
@@ -240,22 +241,35 @@ class DurableAuditLog:
             # The SQLite recovery/control log is authoritative. Write it
             # before the JSONL audit/shadow so a tool intent can never execute
             # merely because an optional projection failed.
+            canonical_sequence = None
             if self.canonical_observer is not None:
-                self.canonical_observer(record)
+                canonical_sequence = self.canonical_observer(record)
             if identifier in self._seen:
                 return f"hashi-log:deduplicated:{identifier}"
+            shadow_persisted = True
             try:
                 ref = self.primary_writer.append(record)
             except Exception as primary_error:
                 try:
                     ref = self.fallback_writer.append(record)
                 except Exception as fallback_error:
-                    raise AuditPersistenceError(
-                        "HER v2 audit persistence failed in primary and fallback storage "
-                        f"(primary={type(primary_error).__name__}, "
-                        f"fallback={type(fallback_error).__name__})"
-                    ) from fallback_error
-            self._seen.add(identifier)
+                    if type(canonical_sequence) is not int or canonical_sequence <= 0:
+                        raise AuditPersistenceError(
+                            "HER v2 audit persistence failed in primary and fallback storage "
+                            f"(primary={type(primary_error).__name__}, "
+                            f"fallback={type(fallback_error).__name__})"
+                        ) from fallback_error
+                    shadow_persisted = False
+                    ref = f"hashi-canonical:{canonical_sequence}:{identifier}"
+                    logging.getLogger("HASHI.HERV3.Audit").warning(
+                        "Canonical audit stored; optional audit projections unavailable "
+                        "(primary=%s, fallback=%s)",
+                        type(primary_error).__name__, type(fallback_error).__name__,
+                    )
+            # A canonically saved but unprojected event remains retryable on a
+            # later append. The canonical store deduplicates the event itself.
+            if shadow_persisted:
+                self._seen.add(identifier)
             if self.observer is not None:
                 try:
                     self.observer(record)

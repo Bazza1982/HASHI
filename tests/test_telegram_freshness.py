@@ -84,7 +84,8 @@ class _MockRuntime:
         self.session_store = SessionStore(tmp_path / "sessions.sqlite", instance_id="HASHI3")
         self.bot = _MockBot()
         self.global_config = SimpleNamespace(
-            ui_language="zh-CN", authorized_id=123, bridge_home=tmp_path
+            ui_language="zh-CN", authorized_id=123, bridge_home=tmp_path,
+            telegram_message_age_policy={"mode": "confirm"},
         )
         self.app = SimpleNamespace(bot=self.bot, process_update=self._process_update)
         self.enqueue_request_calls = []
@@ -130,6 +131,53 @@ async def test_telegram_fresh_message_not_intercepted(runtime):
     intercepted = await check_telegram_message_freshness(runtime, update, handler_kind="text")
     assert intercepted is False
     assert len(runtime.bot.sent_messages) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp", [
+    datetime.now(timezone.utc) - timedelta(hours=1),
+    None,
+    datetime.now(timezone.utc) + timedelta(minutes=5),
+])
+async def test_default_telegram_policy_does_not_block_ordinary_delayed_updates(runtime, timestamp):
+    runtime.global_config.telegram_message_age_policy = {}
+    update = _MockUpdate("ordinary Telegram message", timestamp, message_id=120)
+    assert not await check_telegram_message_freshness(runtime, update)
+    assert runtime.bot.sent_messages == []
+    from orchestrator.ingress_confirmation import IngressConfirmationService
+    assert IngressConfirmationService(runtime.session_store).list_for_connector(
+        agent_id="kasumi", connector_id="telegram",
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_discard_remains_effective_after_policy_changes(runtime):
+    update = _MockUpdate("do not execute", datetime.now(timezone.utc) - timedelta(minutes=2), message_id=121)
+    assert await check_telegram_message_freshness(runtime, update)
+    card = runtime.bot.sent_messages[0]
+    confirmation_id = card["reply_markup"].inline_keyboard[0][1].callback_data.split(":")[1]
+    callback = _MockCallbackQuery(
+        f"ingress_confirm:{confirmation_id}:discard",
+        SimpleNamespace(message_id=card["message_id"], chat_id=123),
+    )
+    assert await handle_telegram_confirmation_callback(
+        runtime, SimpleNamespace(callback_query=callback, effective_user=SimpleNamespace(id=123)),
+    )
+    runtime.global_config.telegram_message_age_policy = {}
+    assert await check_telegram_message_freshness(runtime, update)
+    assert runtime.enqueue_request_calls == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_telegram_expiry_is_durable_and_does_not_create_confirmation(runtime):
+    runtime.global_config.telegram_message_age_policy = {"mode": "expire", "max_age_seconds": 60}
+    update = _MockUpdate("expired action", datetime.now(timezone.utc) - timedelta(minutes=2), message_id=122)
+    assert await check_telegram_message_freshness(runtime, update)
+    assert await check_telegram_message_freshness(runtime, update)
+    assert len(runtime.bot.sent_messages) == 1
+    assert runtime.bot.sent_messages[0]["reply_markup"] is None
+    assert "已失效" in runtime.bot.sent_messages[0]["text"]
+    assert runtime.enqueue_request_calls == []
 
 
 @pytest.mark.asyncio

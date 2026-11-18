@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -18,6 +19,13 @@ _request_json = request_workbench_json
 def _render_result(status: int, payload: dict[str, Any]) -> str:
     if status >= 400 or payload.get("ok") is False:
         detail = str(payload.get("error") or payload.get("message") or "request failed")
+        if payload.get("error_code") == "approval_required":
+            approval = payload.get("approval")
+            approval_id = approval.get("approval_id") if isinstance(approval, dict) else None
+            if isinstance(approval_id, str) and re.fullmatch(r"approval_[0-9a-f]{32}", approval_id):
+                return (f"Error: Superloop API request failed ({status}) [approval_required]: "
+                        f"{detail} Pending approval ID: {approval_id}")
+            return f"Error: Superloop API request failed ({status}) [approval_required]: {detail}"
         return f"Error: Superloop API request failed ({status}): {detail}"
     authoritative = {
         "authority": "HASHI Superloop",
@@ -34,6 +42,11 @@ async def execute_hashi_superloop_tool(
     audit_context: Mapping[str, Any] | None,
     credential: str = "",
 ) -> str:
+    from tools.hashi_scheduler import governed_scheduler_context, renew_scheduler_tool_credential
+
+    if not credential and governed_scheduler_context(audit_context):
+        return ("Error: scheduler_delegation_unavailable: The current Run has no usable Superloop "
+                "delegation. Check the live user binding and instance credential availability.")
     try:
         base_url, agent = workbench_endpoint(audit_context, require_agent=True)
     except ValueError as exc:
@@ -47,6 +60,11 @@ async def execute_hashi_superloop_tool(
     encoded_agent = quote(agent, safe="")
     args = dict(arguments or {})
     try:
+        credential, renewal_error = await renew_scheduler_tool_credential(
+            credential, base_url, agent, tool_name, _request_json,
+        )
+        if renewal_error is not None:
+            return _render_result(*renewal_error)
         if tool_name == "hashi_superloop_list":
             query = {}
             if bool(args.get("include_deleted", False)):
@@ -86,11 +104,6 @@ async def execute_hashi_superloop_tool(
                 payload=payload,
             )
         elif tool_name == "hashi_superloop_delete":
-            if args.get("authorization") != "explicit_user_authorization":
-                return (
-                    "Error: hashi_superloop_delete requires explicit authorization for "
-                    "this exact loop"
-                )
             loop_id = str(args.get("loop_id") or "").strip()
             if not loop_id:
                 return "Error: hashi_superloop_delete requires loop_id"
@@ -99,7 +112,6 @@ async def execute_hashi_superloop_tool(
                 f"{base_url}/api/agents/{encoded_agent}/superloops/{quote(loop_id, safe='')}",
                 payload={
                     "requested_by": "hashi_tool_gateway",
-                    "authorization": "explicit_user_authorization",
                 },
             )
         else:

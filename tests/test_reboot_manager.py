@@ -1024,6 +1024,32 @@ async def test_receipt_delivery_survives_origin_worker_loss_and_does_not_repeat_
     assert final["delivery"]["attempts"] == 2
 
 
+@pytest.mark.asyncio
+async def test_reboot_notice_unknown_outcome_does_not_send_again(tmp_path, monkeypatch):
+    from orchestrator.reboot_receipts import RebootReceipts
+
+    kernel, manager, request = _notice_manager(tmp_path)
+    calls = []
+
+    async def send(_kernel, **_kwargs):
+        record = RebootReceipts(tmp_path).records()[-1]
+        calls.append(record["status"])
+        if record["status"] == "running":
+            return {"sent": True, "sender": "sunny", "message_id": 1}
+        return {"sent": False, "delivery_state": "unknown"}
+
+    monkeypatch.setattr("orchestrator.reboot_manager.send_runtime_notice", send)
+    kernel.queue_generation("a", names=("zelda",))
+    manager.submit(request)
+    assert await manager.hot_restart(kernel._restart_request)
+    await manager.send_pending(now=10**12)
+    await manager.send_pending(now=10**12 + 1000)
+    delivery = manager.receipts.records()[-1]["delivery"]
+    assert calls.count("succeeded") == 1
+    assert delivery["status"] == "exhausted"
+    assert delivery["reason"] == "notice_delivery_outcome_unknown"
+
+
 @pytest.mark.parametrize(
     ("restart", "expected"),
     [

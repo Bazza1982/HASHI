@@ -59,10 +59,10 @@ Workbench v2 的简单模式只通过 allowlist 路由和现有 Remote/HMAC 连�
 
 - `level`：HASHI 当前支持的 0、1 或 2。
 - `expected_current_level`：用户读取时见到的当前值，作为并发比较依据。
-- `confirm_downgrade`：降低保护时必须显式确认。
-- `accept_level_two_risk`：首次启用 Level 2 时必须显式接受。
+- `confirm_downgrade`：降低保护时为 `true`，表示用户明确应用所选更改。
+- `accept_level_two_risk`：首次启用 Level 2 时为 `true`，表示用户在看到影响说明后明确应用所选更改。
 
-HASHI 再次验证当前值、backend 兼容性、Level 2 隔离过滤器就绪状态和持久化结果。旧值已变化时返回冲突而不静默覆盖。Workbench 仅显示 HASHI 回执。
+Workbench 在保存前显示变化和 Level 2 的局限，一次应用携带这些既有意图字段，不要求额外对话框或复选框。HASHI 再次验证当前值、backend 兼容性、Level 2 隔离过滤器就绪状态和持久化结果。旧值已变化时返回冲突而不静默覆盖。Workbench 仅显示 HASHI 回执。
 
 ## 权限操作
 
@@ -70,8 +70,8 @@ HASHI 再次验证当前值、backend 兼容性、Level 2 隔离过滤器就绪�
 
 - 读取当前 Agent 的 active backend 及实际文件访问范围。
 - 只允许 HASHI 已定义的 `workspace`、`project`、`drive` 三种值。
-- 写操作使用 `permissions.set_access_scope`，携带 backend、`expected_current_scope`、新范围和 `confirm_scope_expansion`。
-- HASHI 核对当前实例、Agent、backend 与旧值；扩大范围必须显式确认。范围更新会重建该 Agent 的当前 backend，再由 HASHI 原子保存配置。
+- 写操作使用 `permissions.set_access_scope`，携带 backend、`expected_current_scope` 和用户选择的新范围。经过认证的前端直接保存操作即表示应用这一选择，不需要额外的确认标记。
+- HASHI 核对当前实例、Agent、backend 与旧值；Workbench 在扩大范围前显示说明，一次保存应用选择。范围更新会重建该 Agent 的当前 backend，再由 HASHI 原子保存配置。兼容旧客户端传入的 `confirm_scope_expansion`；明确传入 `false` 时不执行范围扩大。HASHI 在能力信息中声明该字段可省略；Workbench 对旧版 HASHI 自动发送旧字段，无须额外确认或盲目重试。
 - Workbench 只展示并更改这一项 HASHI 原生权限。工具/动作的具体授权和审批仍由 HASHI 原有机制控制，不因页面名称或 FC 能力而扩大。
 
 读取接口为 `GET /api/v1/agents/{agent_id}/settings/permissions?instance_id=…`，写入为 `PATCH /api/v1/agents/{agent_id}/settings/permissions`。FC 只转发该 allowlist 操作。
@@ -84,7 +84,7 @@ HASHI 再次验证当前值、backend 兼容性、Level 2 隔离过滤器就绪�
 - 支持 HASHI 现有的 cron、heartbeat、nudge 作业，动作仍为 `enqueue_prompt`。
 - Cron 的 IANA 时区由 Workbench 明确传入；当前界面默认使用并显示本机时区，由 HASHI 校验后持久化。
 - 创建和更新复用 HASHI 的 Scheduler 校验及 Agent 所有权检查。
-- 删除必须带 `explicit_user_confirmation: true`，再由 HASHI 校验作业归属并执行。
+- 已认证用户的删除操作携带所选作业的 `expected_revision`；HASHI 核对作业归属与当前版本后执行，无需额外的固定确认字段。旧客户端仍可携带 `explicit_user_confirmation: true`。Agent 代用户发起的操作仍使用其现有 PAO 决策路径。
 - 作业开关只更新该作业的 `enabled` 状态；不改变全局权限或其他作业。
 
 “可用操作”列表说明 FC 可提供哪些调用，不代表已经授予 Agent 任意行动权限。HASHI 对具体操作的 Remote 身份、owner、Scheduler、隐私及确认约束仍然有效。

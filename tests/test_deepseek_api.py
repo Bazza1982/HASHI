@@ -911,7 +911,7 @@ def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
 
 
 @pytest.mark.asyncio
-async def test_declared_capacity_rejects_oversized_serialized_payload_before_http(tmp_path):
+async def test_capacity_estimate_warns_but_provider_determines_fit(tmp_path, caplog):
     adapter = _adapter(tmp_path)
     adapter.tool_registry = None
     adapter.config._hashi_runtime = SimpleNamespace(
@@ -936,8 +936,9 @@ async def test_declared_capacity_rejects_oversized_serialized_payload_before_htt
 
     response = await adapter.generate_response("long " * 2500, "req-capacity-local")
 
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
-    assert adapter._call_api_once.await_count == 0
+    assert response.is_success is True
+    assert adapter._call_api_once.await_count == 1
+    assert "provider will determine actual fit" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -3438,18 +3439,31 @@ def _checkpoint_evidence_registry(tmp_path, *, request_id: str, invocation_id: s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_remaining", [None, 0, 1, 4])
 @pytest.mark.parametrize(
     "meaningful_response_started",
     [True, False],
     ids=["stream-idle", "response-start"],
 )
 async def test_herv3_stream_inactivity_timeout_continues_from_completed_checkpoints(
-    monkeypatch, tmp_path, meaningful_response_started
+    monkeypatch, tmp_path, meaningful_response_started, recovery_remaining
 ):
     from orchestrator.flexible_backend_registry import public_backend_engine
 
     adapter = _adapter(tmp_path, model="deepseek-flash")
     adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    retry_after_values = []
+    if recovery_remaining is not None:
+        from orchestrator.her_v2.retry import ProviderRetryPolicy
+        policy = ProviderRetryPolicy(max_provider_retries=recovery_remaining,
+                                     base_delay_s=0, max_delay_s=0)
+        if recovery_remaining == 1:
+            class RecordingPolicy:
+                def delay(self, index, retry_after):
+                    retry_after_values.append((index, retry_after))
+                    return 0
+            policy = RecordingPolicy()
+        adapter.configure_herv3_recovery(recovery_remaining, policy)
     observed_calls = []
     adapter.set_provider_call_observer(observed_calls.append)
     evidence = _checkpoint_evidence_registry(
@@ -3492,6 +3506,12 @@ async def test_herv3_stream_inactivity_timeout_continues_from_completed_checkpoi
         if meaningful_response_started
         else "PROVIDER_RESPONSE_START_TIMEOUT"
     )
+    if recovery_remaining == 1:
+        http_request = httpx.Request("POST", "https://provider.invalid")
+        http_response = httpx.Response(
+            503, headers={"Retry-After": "7"}, request=http_request
+        )
+        timeout = httpx.HTTPStatusError("capacity", request=http_request, response=http_response)
     tool_calls = [
         {
             "id": "call-read",
@@ -3517,7 +3537,8 @@ async def test_herv3_stream_inactivity_timeout_continues_from_completed_checkpoi
         seen.append(json.dumps(payload["messages"], sort_keys=True, default=str))
         if len(seen) == 1:
             return _APIResult("", tool_calls, "tool_calls")
-        if len(seen) == 2:
+        failures = 4 if recovery_remaining == 4 else 1
+        if 2 <= len(seen) <= failures + 1:
             await on_stream_event(
                 StreamEvent(kind=KIND_THINKING, summary="incomplete internal draft")
             )
@@ -3535,28 +3556,40 @@ async def test_herv3_stream_inactivity_timeout_continues_from_completed_checkpoi
         on_stream_event=capture,
     )
 
-    assert response.is_success is True, response.error
-    assert response.text == "continued final answer"
-    assert len(seen) == 3
-    assert seen[1] == seen[2], "the continuation reuses the assembled messages"
-    assert "incomplete internal draft" not in seen[2]
-    assert "call-read" in seen[2] and "call-write" in seen[2]
     assert executed == ["file_read", "file_write"]
     assert (tmp_path / "checkpoint.txt").read_text(
         encoding="utf-8"
     ) == "saved exactly once"
-    assert response.stream_metadata["provider_transport_retry_count"] == 1
-    assert response.stream_metadata["provider_local_recovery_count"] == 1
-    assert response.stream_metadata["provider_local_recovery_limit"] == 3
+    if recovery_remaining == 0:
+        assert response.is_success is False
+        assert len(seen) == 2
+        assert response.stream_metadata["provider_transport_retry_count"] == 0
+        return
+    failures = 4 if recovery_remaining == 4 else 1
+    assert response.is_success is True, response.error
+    assert response.text == "continued final answer"
+    assert len(seen) == failures + 2
+    assert all(item == seen[1] for item in seen[2:]), "continuation reuses assembled messages"
+    assert "incomplete internal draft" not in seen[-1]
+    assert "call-read" in seen[-1] and "call-write" in seen[-1]
+    assert response.stream_metadata["provider_transport_retry_count"] == failures
+    assert response.stream_metadata["provider_local_recovery_count"] == failures
+    if recovery_remaining == 1:
+        assert retry_after_values == [(0, 7.0)]
+    if recovery_remaining is None:
+        assert response.stream_metadata["provider_local_recovery_limit"] == 3
+    else:
+        assert response.stream_metadata["provider_local_recovery_limit"] is None
+        assert response.stream_metadata["provider_transport_retry_limit"] == recovery_remaining
     calls = response.stream_metadata["meter"]["provider_calls"]
     assert calls == observed_calls
-    assert [call["retry_count"] for call in calls] == [0, 0, 1]
+    assert [call["retry_count"] for call in calls] == [0] + list(range(failures + 1))
     failed_call = calls[1]
     assert failed_call["decision"] == "retry_current_call_checkpoint"
     assert failed_call["effect_recovery"]["safe_current_call_continuation"] is True
     assert failed_call["effect_recovery"]["tools_replayed"] is False
     assert failed_call["effect_recovery"]["completed_checkpoint_count"] == 1
-    assert calls[2]["recovery_kind"] == "current_call_checkpoint"
+    assert all(call["recovery_kind"] == "current_call_checkpoint" for call in calls[2:])
     assert public_backend_engine("her-v2") == "her-v3"
     assert "her-v2" not in json.dumps(failed_call, default=str)
 

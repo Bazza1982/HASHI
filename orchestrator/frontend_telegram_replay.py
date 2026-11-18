@@ -33,11 +33,12 @@ class ReplayDecision:
     def label(self, *, locale: str) -> str:
         from orchestrator.ui_language import tr
 
-        assert self.state == "send" and self.original_at is not None
+        assert self.state == "send"
         return tr(
             "delivery.replay_label",
             locale=locale,
-            timestamp=self.original_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            timestamp=(self.original_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                       if self.original_at is not None else "—"),
         )
 
 
@@ -65,6 +66,7 @@ def telegram_replay_decision(
         )
         context = message.get("message_context") or {}
     policy = context.get("delivery_recovery") or {}
+    durable_transfer_result = policy.get("category") == "transfer_result"
     if policy.get("original_at") is not None:
         original_notice = _timestamp(policy["original_at"])
         original = (
@@ -145,7 +147,24 @@ def telegram_replay_decision(
         ):
             category = "result"
 
+    if category == "active_run_notice":
+        from orchestrator.session_store import SessionConflict, SessionNotFound
+
+        bound_run_id = str(policy.get("run_id") or "")
+        if not bound_run_id or bound_run_id != str(claim.get("run_id") or ""):
+            return ReplayDecision("suppressed", "invalid_run_binding", original)
+        try:
+            run = store.get_run(bound_run_id, owner_id=owner_id)
+            session = store.get_session(str(claim["session_id"]), owner_id=owner_id)
+        except (SessionNotFound, SessionConflict):
+            return ReplayDecision("suppressed", "run_unavailable", original)
+        if (run["state"] != "running" or session["status"] != "active"
+                or run["session_id"] != claim["session_id"]
+                or run["context_generation"] != session["context_generation"]):
+            return ReplayDecision("suppressed", "run_no_longer_active", original)
+
     ttl = {
+        "active_run_notice": NOTICE_TTL_SECONDS,
         "result": RESULT_TTL_SECONDS,
         "failure": NOTICE_TTL_SECONDS,
         "command_result": NOTICE_TTL_SECONDS,
@@ -160,6 +179,10 @@ def telegram_replay_decision(
         )
         or (recovery and connected_at is None)
     )
+    # A finished transfer's result remains useful after an outage. Its
+    # publication and delivery identity still govern whether retry is safe.
+    if durable_transfer_result:
+        return ReplayDecision("send", "eligible", original, is_replay=is_replay)
     if ttl is None:
         if is_replay:
             return ReplayDecision("suppressed", "not_replayable", original)

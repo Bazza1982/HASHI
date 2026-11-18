@@ -315,11 +315,17 @@ class PermissionServiceApplication:
         policy = self._policy_resolver(subject.agent_id, subject.owner_id, subject.session_id)
         if not isinstance(policy, ManagedRunPolicy) or policy.settings.requested_level is not PermissionLevel.L1:
             raise PermissionDenied("personal button decisions require current L1 policy")
-        users = [key for key, owner in self.owners.items() if owner == subject.owner_id]
-        user = self.identity.get_user(users[0]) if len(users) == 1 else None
-        if user is None or user.status != "active":
+        # Obsolete bindings to deleted or disabled humans cannot act and
+        # must not make the one current personal owner appear ambiguous.
+        users = []
+        for key, owner in self.owners.items():
+            if owner == subject.owner_id:
+                user = self.identity.get_user(key)
+                if user is not None and user.status == "active":
+                    users.append(user)
+        if len(users) != 1:
             raise PermissionDenied("personal permission owner is unavailable")
-        login = self.identity.create_session(user_id=user.id, ttl_seconds=60)
+        login = self.identity.create_session(user_id=users[0].id, ttl_seconds=60)
         return {"session_token": login.token, "expires_at": login.expires_at}
 
     def native_login(self, *, subject, connector_id, actor_id, invocation_id):

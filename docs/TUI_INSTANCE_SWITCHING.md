@@ -140,15 +140,20 @@ following the launch repository instead.
 @relative/path        attach one file from the target Agent's active Workzone
 ```
 
-A peer is selectable after its authenticated Remote handshake completes.
-Cached liveness and capability metadata may still be shown for diagnosis, but
-the real proxied request decides current availability. An unreachable or
-incompatible peer therefore returns its concrete transport or endpoint error
-instead of being rejected from stale registry metadata.
+A discovered peer can be selected even when cached handshake or liveness
+metadata is old. An explicitly named configured route can also be tried when
+its peer record is absent. Before sending a proxied operation, Remote checks
+the route with the existing nonce-bound authenticated handshake and verifies
+the responding instance. Updated receivers additionally reject a signed
+request naming another target before execution. A failed switch keeps the
+previous connection, and an uncertain mutation is not sent to an alternate
+address automatically.
 
 ## Rollout compatibility
 
 Existing `python tui.py`, `/to`, `/agents`, `/log`, and `/quit` behavior remains
-available. Remote processes must adopt this version before they use
-handshake-only TUI admission; cached capability and liveness fields remain
-visible for diagnosis but are no longer access-control inputs.
+available. Remote processes must adopt this version to use the live-route
+check and receiver-side target binding. Older peers remain usable through the
+authenticated handshake, although their receiver does not enforce the new
+target field. Cached capability, handshake and liveness fields remain visible
+for diagnosis and do not themselves grant access.

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import shutil
 import secrets
 import sys
 import time
@@ -95,22 +97,60 @@ def resolve_search_budget(args, *, options, operation, recursive=None):
 
 
 
+class InvalidRegex(ValueError):
+    pass
+
+
 class Continuations:
     """Ephemeral Function-local derived state; never a filesystem index."""
     def __init__(self):
         self.items = OrderedDict()
         self.bytes = 0
+        self.policy = {'max_entries': 64, 'max_bytes': 8 * 1024 * 1024,
+                       'max_state_bytes': 3 * 1024 * 1024, 'ttl_seconds': 0}
+
+    def configure(self, options):
+        selected = options.get('continuations', {})
+        if not isinstance(selected, dict):
+            raise ValueError('file_search continuations configuration must be an object')
+        defaults = {'max_entries': 64, 'max_bytes': 8 * 1024 * 1024,
+                    'max_state_bytes': 3 * 1024 * 1024, 'ttl_seconds': 0}
+        if set(selected) - set(defaults):
+            raise ValueError('unknown file_search continuations configuration')
+        policy = {**defaults, **selected}
+        for key in ('max_entries', 'max_bytes', 'max_state_bytes'):
+            if type(policy[key]) is not int or policy[key] < 0:
+                raise ValueError(f'continuations {key} must be a nonnegative integer')
+        ttl = policy['ttl_seconds']
+        if (type(ttl) not in (int, float) or ttl < 0 or
+                type(ttl) is float and not math.isfinite(ttl)):
+            raise ValueError('continuations ttl_seconds must be a nonnegative finite number')
+        self.policy = policy
+        now = time.monotonic()
+        for key, row in list(self.items.items()):
+            if ((ttl and now - row[0] > ttl) or
+                    (policy['max_state_bytes'] and row[4] > policy['max_state_bytes'])):
+                self.drop(key)
+        while self.items and ((policy['max_entries'] and len(self.items) > policy['max_entries']) or
+                              (policy['max_bytes'] and self.bytes > policy['max_bytes'])):
+            self.drop(next(iter(self.items)))
 
     def put(self, binding, state, operation_id):
         encoded = json.dumps(state, ensure_ascii=False)
         size = len(encoded.encode('utf-8'))
-        if size > 3 * 1024 * 1024:
+        maximum_state = self.policy['max_state_bytes']
+        maximum_bytes = self.policy['max_bytes']
+        maximum_entries = self.policy['max_entries']
+        if (maximum_state and size > maximum_state) or (maximum_bytes and size > maximum_bytes):
             return None
         now = time.monotonic()
-        for key in list(self.items):
-            if now - self.items[key][0] > 900:
-                self.drop(key)
-        while self.items and (len(self.items) >= 64 or self.bytes + size > 8 * 1024 * 1024):
+        ttl = self.policy['ttl_seconds']
+        if ttl:
+            for key in list(self.items):
+                if now - self.items[key][0] > ttl:
+                    self.drop(key)
+        while self.items and ((maximum_entries and len(self.items) >= maximum_entries) or
+                              (maximum_bytes and self.bytes + size > maximum_bytes)):
             self.drop(next(iter(self.items)))
         token = secrets.token_urlsafe(32)
         self.items[token] = (now, binding, state, operation_id, size)
@@ -124,8 +164,12 @@ class Continuations:
 
     def get(self, key, binding):
         row = self.items.get(key)
-        if row is None or row[1] != binding or time.monotonic() - row[0] > 900:
-            raise ValueError('cursor stale, expired or bound to another query/Run/Agent; choose a new query explicitly')
+        if row is None or row[1] != binding:
+            raise ValueError('Cursor is unavailable for this query/Run/Agent or no longer retained')
+        ttl = self.policy['ttl_seconds']
+        if ttl and time.monotonic() - row[0] > ttl:
+            self.drop(key)
+            raise ValueError('Cursor has expired')
         return row[2], row[3]
 
 
@@ -135,28 +179,49 @@ def outcome(status, data=None, error=None, warning=None):
                       ensure_ascii=False, separators=(',', ':'))
 
 
-def failed(message, *, status='failed', code='invalid_search'):
+def failed(message, *, status='failed', code='invalid_search', data=None):
     from tools.builtins import BuiltinExecutionResult
-    return BuiltinExecutionResult(outcome(status, error={'code': code, 'message': message,
-                                                         'retryable': False}),
+    return BuiltinExecutionResult(outcome(status, data=data, error={'code': code, 'message': message,
+                                                                    'retryable': False}),
                                   {'search_outcome': status, 'unavailable': status == 'unavailable'})
+
+
+def restart_guidance():
+    return {
+        'action': 'restart_without_cursor',
+        'instruction': 'Repeat the same search without cursor and compare results with prior pages',
+        'deduplicate_by': ['path', 'type', 'file_signature', 'character_offset', 'term'],
+        'revision': 'A restart rescans the current filesystem; changed files can produce different results',
+        'preserves_unreturned_results': False,
+    }
 
 
 def normalize_query(args: dict, *, defaults: list[dict], read_roots, cwd: Path,
                     allow_wsl_windows_drive_paths=False, operation='file_search'):
     from tools.builtins import _resolve_path
     query = args.get('query')
-    if not isinstance(query, str) or not query.strip() or len(query) > 1024:
-        raise ValueError('query must be a non-empty string of at most 1024 characters')
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError('query must be a non-empty string')
     mode = args.get('mode', 'path')
     match = args.get('match', 'literal')
     profile = args.get('profile', 'project')
+    options = args.get('options') or {}
+    if not isinstance(options, dict):
+        raise ValueError('options must be an object')
+    regex_engine = options.get('regex_engine', 'auto')
+    if not isinstance(regex_engine, str) or regex_engine not in {'auto', 'ripgrep', 'python'}:
+        raise ValueError('regex_engine must be auto, ripgrep or python')
     if mode not in {'path', 'content'} or match not in {'literal', 'glob', 'regex'}:
         raise ValueError('invalid mode or match')
-    if match == 'regex':
-        raise NotImplementedError('Regex search backend is unavailable; use literal/path or an appropriate scoped Shell command')
-    if mode == 'content' and match != 'literal':
-        raise ValueError('content search supports literal matching')
+    if mode == 'content' and match not in {'literal', 'regex'}:
+        raise ValueError('content search supports literal or regex matching')
+    regex_backend = None
+    if match == 'regex' and mode == 'content':
+        if '\n' in query or '\r' in query:
+            raise InvalidRegex('Content regex is line-oriented and cannot contain a newline')
+        regex_backend = shutil.which('rg') if regex_engine != 'python' else None
+        if regex_engine == 'ripgrep' and regex_backend is None:
+            raise NotImplementedError('The selected ripgrep regex engine is not installed')
     if profile not in {'project', 'expanded'}:
         raise ValueError('profile must be project or expanded')
     raw_roots = args.get('roots')
@@ -179,9 +244,11 @@ def normalize_query(args: dict, *, defaults: list[dict], read_roots, cwd: Path,
             selected.append({**item, 'path': str(path)})
     if not selected:
         raise ValueError('no preferred search roots are available')
-    options = args.get('options') or {}
-    if not isinstance(options, dict):
-        raise ValueError('options must be an object')
+    regex_line_budget = options.get('regex_max_line_bytes')
+    if regex_line_budget is not None and (
+        type(regex_line_budget) is not int or regex_line_budget < 0
+    ):
+        raise ValueError('regex_max_line_bytes must be a nonnegative integer')
     bools = {'case_sensitive': args.get('case_sensitive', False),
              'include_hidden': args.get('include_hidden', False),
              'follow_links': options.get('follow_links', False),
@@ -202,10 +269,16 @@ def normalize_query(args: dict, *, defaults: list[dict], read_roots, cwd: Path,
         raise ValueError('max_results must be 1..200; context_chars must be 0..2000')
     return {'query': query, 'mode': mode, 'match': match, 'profile': profile,
             'selected_roots': selected, **bools, **filters,
-            'max_results': size, 'context_chars': context, 'operation': operation}
+            'max_results': size, 'context_chars': context, 'operation': operation,
+            **({'regex_content': True, 'regex_backend': regex_backend,
+                'regex_engine_requested': regex_engine, 'regex_line_budget_requested': regex_line_budget}
+               if match == 'regex' and mode == 'content' else {})}
 
 
 async def run_worker(config):
+    request = json.dumps(config, ensure_ascii=False).encode('utf-8') + b'\n'
+    if len(request) > 4 * 1024 * 1024:
+        raise ValueError('Search request exceeds the worker transport capacity')
     from tools.builtins import (_bash_process_kwargs, _bash_process_group_id,
                                 _cleanup_bash_process, _shield_bash_cleanup)
     activity = CURRENT_ACTIVITY.get()
@@ -253,7 +326,7 @@ async def run_worker(config):
             await proc.wait()
             return b'', bytes(stderr_tail)
         drain_task = asyncio.create_task(drain())
-        proc.stdin.write(json.dumps(config, ensure_ascii=False).encode('utf-8') + b'\n')
+        proc.stdin.write(request)
         await proc.stdin.drain()
         proc.stdin.close()
         deadline = config.get('deadline')
@@ -322,17 +395,24 @@ async def run_worker(config):
 
 async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_context,
                               continuations: Continuations, options=None,
-                              protected_read_paths=(), operation='file_search'):
+                              protected_read_paths=(), operation='file_search',
+                              retain_scope=None):
     from tools.builtins import BuiltinExecutionResult
     options = options or {}
     if operation == 'file_search' and options.get('enabled') is False:
         return failed('Scoped search is disabled', status='unavailable')
+    try:
+        continuations.configure(options)
+    except ValueError as exc:
+        return failed(str(exc))
     defaults = search_scope.get('preferred_roots') or [
         {'path': str(cwd.resolve()), 'provenance': 'execution-cwd'}]
     try:
         config = normalize_query(args, defaults=defaults, read_roots=read_roots, cwd=cwd,
                                  allow_wsl_windows_drive_paths=audit_context.get('allow_wsl_windows_drive_paths', False),
                                  operation=operation)
+    except InvalidRegex as exc:
+        return failed(str(exc), code='invalid_regex')
     except NotImplementedError as exc:
         return failed(str(exc), status='unavailable', code='regex_unavailable')
     except (ValueError, OSError) as exc:
@@ -342,7 +422,9 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                   match_budget=8000)
     scope_size = len(json.dumps({'query': config['query'], 'roots': config['selected_roots'],
         'filters': {key: config[key] for key in ('include', 'exclude')}}, ensure_ascii=False))
-    config['match_budget'] = min(8000, MAX_ENVELOPE_CHARS - scope_size * 2 - 4000)
+    compact_scope = operation == 'file_search' and scope_size > 4000
+    config['match_budget'] = (8000 if compact_scope else
+                              min(8000, MAX_ENVELOPE_CHARS - scope_size * 2 - 4000))
     if config['match_budget'] < 1024:
         return failed('Scope/filter metadata exceeds the output budget; narrow the roots or filters',
                       code='scope_output_budget')
@@ -366,7 +448,27 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
             if activity:
                 activity.operation_id = operation_id
         except ValueError as exc:
-            return failed(str(exc), code='cursor_stale')
+            return failed(str(exc), code='cursor_stale', data={
+                'stop_reason': 'cursor_stale', 'can_continue': False,
+                'scope_exhausted': False, 'coverage_complete': False,
+                'recovery': restart_guidance(),
+            })
+    if config.get('regex_content'):
+        saved_state = config.get('state') or {}
+        if 'regex_line_budget_effective' in saved_state:
+            config['regex_line_budget_effective'] = saved_state['regex_line_budget_effective']
+            config['regex_line_budget_source'] = saved_state['regex_line_budget_source']
+        else:
+            requested = config['regex_line_budget_requested']
+            if requested is None:
+                from tools.office.limits import _available_memory
+
+                available = _available_memory()
+                config['regex_line_budget_effective'] = max(1, available // 8) if available else 0
+                config['regex_line_budget_source'] = 'available_memory' if available else 'memory_unavailable'
+            else:
+                config['regex_line_budget_effective'] = requested
+                config['regex_line_budget_source'] = 'selected' if requested else 'unlimited'
     try:
         timeout, budget_policy = resolve_search_budget(
             args, options=options, operation=operation,
@@ -407,6 +509,15 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
             'this scan with next_cursor, narrow the roots, refine the query, switch '
             'tools, or stop when you have enough evidence. A deadline is not a '
             'command to abandon the task.')
+    result['effective_policy']['continuations'] = {
+        **continuations.policy, 'retention': 'registry_lifetime'}
+    if config.get('regex_content'):
+        result['effective_policy']['regex_engine'] = result.pop('regex_engine', None)
+        result['coverage']['regex_matching_scope'] = 'single_lf_delimited_lines'
+        result['effective_policy']['regex_max_line_bytes'] = config['regex_line_budget_effective']
+        result['effective_policy']['regex_line_budget_source'] = config['regex_line_budget_source']
+        if config['regex_line_budget_source'] == 'memory_unavailable':
+            result['warnings'].append('Available memory is unknown; regex has no automatic line budget')
     result['coverage']['excluded_content'] = 'Containers/media/binary; ordinary UTF-8 text only' if config['mode'] == 'content' else 'No file bodies read'
     from tools.search_worker import PROJECT_EXCLUDED_DIRS, PROJECT_EXCLUDED_FILES, CONTAINER_SUFFIXES
     result['coverage']['default_directory_exclusions'] = (
@@ -417,13 +528,58 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
         sorted(CONTAINER_SUFFIXES) if config['mode'] == 'content' and operation != 'log_query' else [])
     if broad_scope_advisory([entry['path'] for entry in config['selected_roots']]):
         result['warnings'].append('Broad selected roots may take longer; scope is advisory, not denied')
+    if compact_scope:
+        root_ids = {entry['path']: f'root-{index}' for index, entry in
+                    enumerate(config['selected_roots'])}
+        original_coverage_roots = result['coverage']['roots']
+        metadata = {
+            'version': 1,
+            'query': config['query'],
+            'selected_roots': [{**entry, 'root_id': root_ids[entry['path']]}
+                               for entry in config['selected_roots']],
+            'filters': {'include': config['include'], 'exclude': config['exclude']},
+        }
+        encoded = json.dumps(metadata, ensure_ascii=True, separators=(',', ':'))
+        digest = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+        saved_reference = (config.get('state') or {}).get('scope_metadata_reference') or {}
+        reference = (saved_reference.get('reference')
+                     if saved_reference.get('sha256') == digest else None)
+        if not reference:
+            try:
+                reference = retain_scope(encoded) if retain_scope is not None else None
+            except Exception:
+                reference = None
+        if not reference:
+            return failed('Large search scope needs Run-bound output retention to page metadata',
+                          code='scope_output_budget')
+        result['scope_reference'] = {
+            'reference': reference, 'read_tool': 'tool_output_read',
+            'sha256': digest,
+            'format': 'json',
+        }
+        result['query'] = None
+        result['selected_roots'] = [
+            {'root_id': root_ids[entry['path']], 'provenance': entry.get('provenance'),
+             **({'available': entry['available']} if 'available' in entry else {})}
+            for entry in config['selected_roots']]
+        result['coverage']['roots'] = [
+            {'root_id': root_ids[entry['path']], 'exhausted': entry['exhausted'],
+             'failed': entry['failed']} for entry in result['coverage']['roots']]
+        for match in result['matches']:
+            match['root'] = root_ids[match['root']]
+        result['effective_policy']['include'] = None
+        result['effective_policy']['exclude'] = None
+        result['effective_policy']['filters_in_scope_reference'] = True
     status = 'success' if complete else 'partial'
-    if result['stop_reason'] == 'cursor_stale' or all(
+    if result['stop_reason'] in {'cursor_stale', 'invalid_regex', 'regex_backend_error'} or all(
             root.get('failed') for root in result['coverage']['roots']) and result['coverage']['roots']:
         status = 'failed'
     error = None
     if status == 'failed':
-        error = {'code': result['stop_reason'], 'message': 'No complete valid search coverage; inspect coverage errors', 'retryable': False}
+        message = 'No complete valid search coverage; inspect coverage errors'
+        if result['stop_reason'] == 'invalid_regex' and result['coverage']['errors']:
+            message = result['coverage']['errors'][0]['code']
+        error = {'code': result['stop_reason'], 'message': message, 'retryable': False}
     # Preserve scope/coverage first, then budget individual matches. Never cut JSON.
     output = outcome(status, result, error=error)
     removed = []
@@ -439,9 +595,15 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
         return failed('Selected scope metadata exceeds the structured output budget; narrow the roots',
                       code='scope_output_budget')
     if removed:
+        coverage_roots = (original_coverage_roots if compact_scope
+                          else result['coverage']['roots'])
+        if compact_scope:
+            paths = {root_id: path for path, root_id in root_ids.items()}
+            for match in removed:
+                match['root'] = paths[match['root']]
         state = state or {'roots': [{'path': root['path'], 'done': True, 'initialized': True,
                                      'failed': root['failed'], 'stack': [], 'pending_file': None}
-                                    for root in result['coverage']['roots']],
+                                    for root in coverage_roots],
                          'counters': dict(result['counters']), 'errors': result['coverage']['errors'],
                          'warnings': result['warnings'], 'turn': 0}
         pending = ([state.pop('pending_match')] if 'pending_match' in state else [])
@@ -450,10 +612,15 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
         state['counters']['matches'] = result['counters']['matches']
         result.update(coverage_complete=False, scope_exhausted=False, stop_reason='output_budget')
         complete, status = False, 'partial'
+    if state and compact_scope:
+        state['scope_metadata_reference'] = result['scope_reference']
     next_cursor = continuations.put(binding, state, operation_id) if state else None
     result.update(can_continue=next_cursor is not None, next_cursor=next_cursor)
     if state and next_cursor is None:
         result['warnings'].append('Continuation capacity exceeded; no automatic restart')
+    if (result['stop_reason'] == 'cursor_stale' or
+            status == 'partial' and not next_cursor and not result['scope_exhausted']):
+        result['recovery'] = restart_guidance()
     output = outcome(status, result, error=error)
     return BuiltinExecutionResult(output, {'search_outcome': status,
                                           'foreground_cleanup': result['cleanup'],

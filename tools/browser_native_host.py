@@ -52,7 +52,7 @@ DEFAULT_LOG_PATH = Path(
 )
 DEFAULT_AUDIT_PATH = default_audit_path()
 DEFAULT_REQUEST_TIMEOUT_S = float(
-    os.environ.get("HASHI_BROWSER_BRIDGE_TIMEOUT", "20")
+    os.environ.get("HASHI_BROWSER_BRIDGE_TIMEOUT", "32")
 )
 MUTATING_ACTIONS = {
     "click",
@@ -159,7 +159,14 @@ class BridgeState:
                     "args": request_args,
                 }
             )
-            response = wait_queue.get(timeout=self.request_timeout_s)
+            wait_seconds = self.request_timeout_s
+            if action in {"session_create", "active_tab", "get_text", "get_html", "evaluate"}:
+                selected = request_args.get("timeout_ms")
+                extra = request_args.get("wait_ms", 0)
+                if type(selected) is int and selected > 0:
+                    extra = extra if type(extra) is int and extra > 0 else 0
+                    wait_seconds = (selected + extra) / 1000 + 2
+            response = wait_queue.get(timeout=wait_seconds)
             self.write_audit(
                 {
                     "kind": "browser_action",
@@ -186,7 +193,18 @@ class BridgeState:
             return response
         except queue.Empty:
             self.logger.error("timeout waiting for extension response: %s", request_id)
-            return {"ok": False, "error": f"timeout waiting for extension action '{action}'"}
+            response = {
+                "ok": False, "effect_state": "unknown",
+                "error": (f"timeout waiting for extension action '{action}'; outcome unconfirmed; "
+                          "inspect the operation before retrying"),
+            }
+            self.write_audit({
+                "kind": "browser_action", "action": action, "request_id": request_id,
+                "session_id": session_id or request_args.get("session_id", ""),
+                "args": request_args, "response": response,
+                "elapsed_ms": int((time.time() - started) * 1000),
+            })
+            return response
         finally:
             with self.pending_lock:
                 self.pending.pop(request_id, None)
@@ -299,15 +317,18 @@ def dispatch_local_request(state: BridgeState, request: dict[str, Any]) -> dict[
             }
         ext_response = state.dispatch_request("session_create", args)
         if not ext_response.get("ok"):
+            reason = str(ext_response.get("error") or "").strip().casefold()
+            if reason != "unsupported action: session_create":
+                return ext_response
             state.logger.info("session_create unsupported by extension; falling back to active_tab")
-            ext_response = state.dispatch_request(
-                "active_tab",
-                {
-                    "url": args.get("url", ""),
-                    "wait_ms": args.get("wait_ms", 0),
-                    "safety_mode": args.get("safety_mode", "read_write"),
-                },
-            )
+            fallback_args = {
+                "url": args.get("url", ""),
+                "wait_ms": args.get("wait_ms", 0),
+                "safety_mode": args.get("safety_mode", "read_write"),
+            }
+            if "timeout_ms" in args:
+                fallback_args["timeout_ms"] = args["timeout_ms"]
+            ext_response = state.dispatch_request("active_tab", fallback_args)
         if not ext_response.get("ok"):
             return ext_response
         raw = ext_response.get("output", "{}")

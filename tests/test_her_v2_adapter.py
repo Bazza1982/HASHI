@@ -81,6 +81,7 @@ from orchestrator.her_v2.presentation import (
     RenderedRequiredMessage,
     RequiredUserMessage,
 )
+from orchestrator.her_v2.runtime import HERv2Runtime
 from orchestrator.her_v2.wip_journal import CONTEXT_HEADER, WIPJournal
 from orchestrator.pcm import render_pcm_document
 
@@ -94,6 +95,20 @@ def _profiles():
         }
         for name in ("lightweight", "triage", "premium", "reviewer", "orchestrator")
     }
+
+
+@pytest.mark.asyncio
+async def test_adapter_starts_when_optional_audit_projection_replay_is_unavailable(tmp_path, monkeypatch, caplog):
+    def unavailable(_log):
+        raise OSError("synthetic shadow failure")
+
+    monkeypatch.setattr(DurableAuditLog, "replay_fallback", unavailable)
+    config = _agent_config(tmp_path)
+    config._her_v2_stage_provider = _DirectProvider()
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize()
+    assert "audit projection replay unavailable" in caplog.text
+    await adapter.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1766,7 +1781,10 @@ async def test_adapter_accepts_main_model_natural_language_without_finalisation(
 @pytest.mark.asyncio
 async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp_path):
     provider = _SideEffectFailureProvider()
-    config = _agent_config(tmp_path)
+    config = _agent_config(tmp_path, her_v2={
+        "profiles": _profiles(),
+        "provider_recovery": {"max_provider_retries": 3},
+    })
     setattr(config, "_her_v2_stage_provider", provider)
     adapter = HERv2Adapter(config, _global_config(tmp_path))
 
@@ -1776,6 +1794,7 @@ async def test_adapter_exposes_primary_failure_recovery_decision_and_cleanup(tmp
         "request-complete-failure-chain",
     )
 
+    assert sum(request.stage is Stage.DIRECT for _, request in provider.requests) == 1
     primary_code = ProviderFailureCode.PROVIDER_INCOMPLETE_STREAM_TIMEOUT.value
     recovery_code = ProviderFailureCode.SIDE_EFFECT_REPLAY_BLOCKED.value
     assert response.is_success is False
@@ -3225,6 +3244,70 @@ def _stage_request(stage, *, allow_tools, allow_side_effects=False):
         allow_tools=allow_tools,
         allow_side_effects=allow_side_effects,
     )
+
+
+@pytest.mark.asyncio
+async def test_herv3_on_demand_provider_exposes_and_uses_long_result_reader(tmp_path, monkeypatch):
+    from tools.registry import ToolRegistry
+
+    original = "provider-visible section " * 2000 + "complete-tail"
+    registry = ToolRegistry(
+        ["tool_find", "file_read"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, audit_context={
+            "instance_id": "i", "agent_name": "agent", "owner_id": "owner",
+            "hashi_session_id": "session", "hashi_run_id": "run", "request_id": "request",
+        },
+        tool_options={"herv3_tool_presentation": {"mode": "on_demand"}},
+    )
+    dispatch = registry._dispatch
+
+    async def fixture(name, arguments, *, tool_call_id=""):
+        if name == "file_read":
+            return original
+        return await dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(registry, "_dispatch", fixture)
+
+    class Backend(_FakeBackend):
+        async def generate_response(self, *args, **kwargs):
+            self.names = {
+                item["function"]["name"] for item in self.tool_registry.get_tool_definitions(tiers=["core"])
+            }
+            first = await self.tool_registry.execute("file_read", {"path": "synthetic.txt"}, "read")
+            reference = first.details["output_continuation"]
+            parts, offset = [], 0
+            while True:
+                result = await self.tool_registry.execute(
+                    "tool_output_read", {"reference": reference, "offset": offset}, f"page-{offset}",
+                )
+                assert not result.is_error
+                page, _ = json.JSONDecoder().raw_decode(result.output)
+                parts.append(page["text"])
+                if page["complete"]:
+                    break
+                assert page["next_offset"] > offset
+                offset = page["next_offset"]
+            self.complete_text = "".join(parts)
+            return await super().generate_response(*args, **kwargs)
+
+    class Manager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == ("openrouter-api", "configured/model")
+            backend = Backend()
+            self.backends.append(backend)
+            return backend
+
+    manager = Manager()
+    provider = HashiStageProvider(backend_manager=manager, tool_registry=registry)
+    request = _stage_request(Stage.EXECUTION, allow_tools=True, allow_side_effects=True)
+    request = StageRequest(**{**request.__dict__, "context": {"her_v3": True}})
+    await provider.invoke(
+        ProviderProfile("execution", "openrouter-api", "configured/model"), request,
+    )
+    backend = manager.backends[-1]
+    assert {"tool_find", "tool_catalog", "tool_output_read"} <= backend.names
+    assert backend.complete_text == original
+
 
 
 @pytest.mark.asyncio
@@ -5278,3 +5361,166 @@ async def test_read_only_delegation_uses_registry_capability_not_her_name_list()
     assert [item[0] for item in base_registry.executed] == ["file_read"]
     assert base_registry.denials[0][0] == "file_write"
     assert base_registry.denials[0][3]["safety_mode"] == "read_only"
+
+
+@pytest.mark.asyncio
+async def test_same_target_retry_budget_is_task_frozen_and_fallback_independent(tmp_path, monkeypatch):
+    class Provider(_DirectProvider):
+        async def invoke(self, profile, request):
+            self.requests.append((profile, request))
+            if len(self.requests) <= 3:
+                raise StageInvocationError(
+                    "temporary connection failure",
+                    code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+                    retry_after_s=2,
+                )
+            return StageResponse(
+                text="Recovered on the selected model.",
+                provider=profile.engine,
+                model=profile.model,
+            )
+
+    waits = []
+    async def fake_wait(self, state, **kwargs):
+        waits.append(kwargs["retry_delay"])
+    monkeypatch.setattr(HERv2Runtime, "_wait_for_stage_retry", fake_wait)
+
+    provider = Provider()
+    config = _agent_config(tmp_path, effort="zero", her_v2={
+        "profiles": _profiles(),
+        "provider_recovery": {
+            "max_provider_retries": 1,
+            "base_delay_s": 0.5,
+            "max_delay_s": 5,
+            "capacity_delays_s": [],
+        },
+    })
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    monkeypatch.setattr(
+        adapter,
+        "_runtime_request_meta",
+        lambda request_id: {
+            "request_id": request_id,
+            "provider_recovery": {"max_provider_retries": 3},
+        },
+    )
+    assert await adapter.initialize() is True
+    response = await adapter.generate_response("Do the task.", "req-same-target-recovery")
+
+    assert response.is_success is True, response.error
+    assert response.text == "Recovered on the selected model."
+    assert len(provider.requests) == 4
+    assert len({(profile.engine, profile.model) for profile, _ in provider.requests}) == 1
+    assert len({request.retry_invariant_hash for _, request in provider.requests}) == 1
+    assert waits == [2, 2, 2]
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_selected_ordinary_retry_budget_stops_when_exhausted(tmp_path, monkeypatch):
+    class Provider(_DirectProvider):
+        async def invoke(self, profile, request):
+            self.requests.append((profile, request))
+            raise StageInvocationError(
+                "temporary connection failure",
+                code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+            )
+    async def fake_wait(self, state, **kwargs):
+        return None
+    monkeypatch.setattr(HERv2Runtime, "_wait_for_stage_retry", fake_wait)
+    provider = Provider()
+    config = _agent_config(tmp_path, effort="zero", her_v2={
+        "profiles": _profiles(),
+        "provider_recovery": {"max_provider_retries": 2, "capacity_delays_s": []},
+    })
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize()
+    response = await adapter.generate_response("Do the task.", "req-exhausted-retry")
+    assert response.is_success is False
+    assert len(provider.requests) == 3
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_uses_configured_retry_budget(tmp_path):
+    class Provider(_RetryingMaintenanceProvider):
+        async def invoke(self, profile, request):
+            self.requests.append((profile, request))
+            if len(self.requests) <= 2:
+                raise StageInvocationError(
+                    "temporary connection failure",
+                    code=ProviderFailureCode.PROVIDER_CONNECTION_FAILED,
+                )
+            return StageResponse(text='{"actions":[]}', provider=profile.engine, model=profile.model)
+    provider = Provider()
+    config = _agent_config(tmp_path, her_v2={
+        "profiles": _profiles(),
+        "provider_recovery": {"max_provider_retries": 2, "base_delay_s": 0},
+    })
+    config._her_v2_stage_provider = provider
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    assert await adapter.initialize()
+    result = await adapter._invoke_maintenance_model(
+        Stage.MEDITATION, "Maintain catalogue.", "turn-maint", "req-maint", None
+    )
+    assert result.provider_attempt == 3
+    assert [req.attempt for _, req in provider.requests] == [1, 2, 3]
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_voice_retry_runtime_carries_transcript_proof_and_blocks_partial_output(tmp_path):
+    from orchestrator.her_v2.retry import ProviderRetryPolicy
+
+    digest = "a" * 64
+    for observed in (False, True):
+        class VoiceRetryProvider(_DirectProvider):
+            def __init__(self):
+                super().__init__()
+                self.recovery_evidence = []
+
+            async def invoke(self, profile, request):
+                self.requests.append((profile, request))
+                if len(self.requests) == 1:
+                    if observed:
+                        request.provider_activity_callback({
+                            "kind": "text_delta", "content": "partial answer",
+                        })
+                    raise StageInvocationError(
+                        "temporarily at capacity",
+                        code=ProviderFailureCode.PROVIDER_CAPACITY_UNAVAILABLE,
+                        details={"voice_transcript_sha256": digest,
+                                 "voice_projection_no_output": True},
+                    )
+                assert request.context["_voice_retry_transcript_sha256"] == digest
+                return StageResponse(text="Recovered.", provider=profile.engine, model=profile.model)
+
+            async def resolve_stage_capacity_retry(self, **kwargs):
+                evidence = kwargs["recovery_evidence"]
+                self.recovery_evidence.append(evidence)
+                return {"allowed": not evidence["provider_activity_observed"],
+                        "delay_s": 0, "continue_session": False}
+
+        path = tmp_path / ("partial" if observed else "no-output")
+        path.mkdir()
+        provider = VoiceRetryProvider()
+        config = _agent_config(path, effort="zero")
+        config._her_v2_stage_provider = provider
+        config._her_v2_retry_policy = ProviderRetryPolicy(
+            max_provider_retries=0, capacity_delays_s=(0,),
+        )
+        adapter = HERv2Adapter(config, _global_config(path))
+        assert await adapter.initialize()
+        try:
+            response = await adapter.generate_response("Voice transcript", "voice-retry")
+        finally:
+            await adapter.shutdown()
+        assert provider.recovery_evidence == [{
+            "voice_transcript_sha256": digest,
+            "voice_projection_no_output": True,
+            "provider_activity_observed": observed,
+        }]
+        assert response.is_success is (not observed)
+        assert len(provider.requests) == (1 if observed else 2)

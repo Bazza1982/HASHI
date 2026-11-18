@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--capsule-dir")
     parser.add_argument("--expected-plan-digest")
+    parser.add_argument("--plan-file", help="JSON output from the matching dry-run")
     parser.add_argument("--backup-dir")
     args = parser.parse_args(argv)
     try:
@@ -65,19 +66,22 @@ def main(argv: list[str] | None = None) -> int:
             if (
                 not args.target_root
                 or not args.capsule_dir
-                or not args.expected_plan_digest
+                or not (args.expected_plan_digest or args.plan_file)
                 or not args.backup_dir
             ):
                 parser.error(
                     "apply requires --target-root, --capsule-dir, "
-                    "--expected-plan-digest, and --backup-dir"
+                    "--plan-file or --expected-plan-digest, and --backup-dir"
                 )
+            plan = _manifest(args.plan_file) if args.plan_file else None
+            digest = args.expected_plan_digest or (plan or {}).get("plan_digest")
             result = apply_history_backfill(
                 args.target_root,
                 manifest,
                 capsule_dir=args.capsule_dir,
-                expected_plan_digest=args.expected_plan_digest,
+                expected_plan_digest=digest,
                 backup_dir=args.backup_dir,
+                expected_plan=plan,
             )
         elif args.command == "status":
             if not args.target_root:

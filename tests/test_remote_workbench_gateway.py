@@ -416,6 +416,27 @@ def test_signed_file_content_survives_the_actual_gateway_and_rejects_policy_tamp
     assert len(captured) == 1
 
 
+def test_file_content_gateway_bounds_body_before_authentication(tmp_path, monkeypatch):
+    from orchestrator import file_content_service
+    monkeypatch.setenv("HASHI_FILE_CONTENT_REQUEST_TIMEOUT_SECONDS", "350")
+    client, token = _client(tmp_path)
+    captured = []
+    monkeypatch.setattr(file_content_service, "CONTENT_WIRE_MAX_BYTES", 16)
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request",
+                        lambda **kwargs: (captured.append(kwargs) or 200, b"{}", {}))
+    path = "/workbench/v1/proxy/api/v1/file-content"
+    oversized = client.post(path, content=b"x" * 17)
+    assert oversized.status_code == 413
+    assert oversized.json()["error_code"] == "fileshare_content_limit"
+    assert captured == []
+    body = b"small"
+    response = client.post(path, content=body,
+                           headers=_signed_headers(token, method="POST", path=path, body=body))
+    assert response.status_code == 200
+    assert captured[0]["body_bytes"] == body
+    assert captured[0]["timeout"] == 350
+
+
 def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(
     monkeypatch,
 ):
@@ -466,6 +487,8 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(
             "x-hashi-trace-id": "call-trace-2",
             "x-hashi-span-id": "remote-span-2",
             "x-hashi-digest": "must-not-leak",
+            "authorization": "Bearer fixture-user-session",
+            "x-workbench-session": "fixture-user-session",
         },
     )
 
@@ -482,6 +505,8 @@ def test_forwarder_keeps_gateway_auth_out_of_loopback_and_injects_local_admin(
     assert captured["headers"]["x-hashi-correlation-id"] == "call-request-2"
     assert captured["headers"]["x-hashi-trace-id"] == "call-trace-2"
     assert captured["headers"]["x-hashi-span-id"] == "remote-span-2"
+    assert captured["headers"]["authorization"] == "Bearer fixture-user-session"
+    assert captured["headers"]["x-workbench-session"] == "fixture-user-session"
     assert "x-hashi-digest" not in captured["headers"]
     started = remote_server._request_workbench_agent_lifecycle(
         "windows-fixture", action="start"
@@ -742,3 +767,210 @@ def test_desktop_error_envelope_distinguishes_preflight_from_unknown_outcome(
         assert response.json()["code"] == code
         assert response.json()["accepted"] is accepted
         assert response.json()["retryable"] is retryable
+
+
+@pytest.mark.asyncio
+async def test_attachment_relay_streams_before_upstream_completes(tmp_path, monkeypatch):
+    import asyncio
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    release = asyncio.Event()
+    observed = {}
+
+    async def source(request):
+        observed["path"] = request.path_qs
+        observed["token"] = request.headers.get("X-Workbench-Token")
+        observed["encoding"] = request.headers.get("Accept-Encoding")
+        response = web.StreamResponse(headers={
+            "Content-Type": "application/octet-stream", "Content-Length": "9",
+            "X-Hashi-Attachment-SHA256": "a" * 64, "ETag": '"' + "a" * 64 + '"',
+        })
+        await response.prepare(request)
+        await response.write(b"first")
+        await release.wait()
+        await response.write(b"tail")
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/api/transcript/a/attachments/m/f", source)
+    async with TestServer(app) as server:
+        monkeypatch.setattr(remote_server, "_workbench_port", server.port)
+        monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
+        monkeypatch.setattr(remote_server, "_workbench_admin_token", lambda: "fixture-admin")
+        result = await remote_server._forward_workbench_attachment_stream(
+            api_path="transcript/a/attachments/m/f", query="download=1", request_headers={},
+        )
+        try:
+            assert result.status_code == 200
+            assert result.headers["content-length"] == "9"
+            assert result.headers["x-hashi-attachment-sha256"] == "a" * 64
+            first = await asyncio.wait_for(anext(result.body_iterator), 3)
+            assert first == b"first"
+            assert not release.is_set()
+            release.set()
+            rest = b"".join([part async for part in result.body_iterator])
+            assert first + rest == b"firsttail"
+            assert observed == {
+                "path": "/api/transcript/a/attachments/m/f?download=1",
+                "token": "fixture-admin", "encoding": "identity",
+            }
+        finally:
+            release.set()
+            await result.body_iterator.aclose()
+
+
+def test_attachment_relay_still_requires_authenticated_exact_request(tmp_path, monkeypatch):
+    from fastapi.responses import StreamingResponse
+
+    client, token = _client(tmp_path)
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        async def chunks():
+            yield b"fixture"
+        return StreamingResponse(chunks(), headers={"X-Hashi-Attachment-SHA256": "f" * 64})
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_attachment_stream", stream)
+    path = "/workbench/v1/proxy/api/transcript/a/attachments/m/f"
+    query = "download=1"
+    assert client.get(f"{path}?{query}").status_code == 401
+    assert not calls
+    response = client.get(
+        f"{path}?{query}", headers=_signed_headers(token, method="GET", path=path, query=query))
+    assert response.status_code == 200
+    assert response.content == b"fixture"
+    assert response.headers["x-hashi-attachment-sha256"] == "f" * 64
+    assert calls[0]["api_path"] == "transcript/a/attachments/m/f"
+    assert calls[0]["query"] == query
+
+
+def test_gateway_session_proof_authenticates_exact_session_and_run_without_private_content(tmp_path, monkeypatch):
+    client, token = _client(tmp_path)
+    calls = []
+    session = {"session_id": "ses-old", "agent_id": "lily", "owner_id": "user:7",
+               "context_generation": 3, "status": "active", "private": "NEVER_SEND"}
+    run = {"session_id": "ses-old", "run_id": "run-old", "request_id": "req-old",
+           "agent_id": "lily", "context_generation": 3, "state": "running",
+           "private": "NEVER_SEND"}
+
+    def fake_forward(**kwargs):
+        calls.append(kwargs)
+        api_path = kwargs["api_path"]
+        if api_path == "v1/sessions/ses-old":
+            payload = {"ok": True, "session": session}
+        elif api_path == "v1/sessions/ses-old/runs/run-old":
+            payload = {"ok": True, "run": run}
+        else:
+            return 404, b'{"ok":false}', {"content-type": "application/json"}
+        return 200, json.dumps(payload).encode(), {"content-type": "application/json"}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    path = "/workbench/v1/session-proof"
+    body = b'{"session_id":"ses-old","run_id":"run-old"}'
+    assert client.post(path, content=body).status_code == 401
+    assert not calls
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    response = client.post(path, content=body, headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    proof = payload.pop("response_auth")
+    assert verify_response_auth(shared_token=token, request_nonce=headers[HEADER_NONCE],
+                                payload=payload, response_auth=proof)
+    assert payload["instance_id"] == "HASHI1"
+    assert payload["session"]["session_id"] == "ses-old"
+    assert payload["session"]["owner_id"] == "user:7"
+    assert payload["run"]["run_id"] == "run-old"
+    assert "NEVER_SEND" not in response.text
+    assert all(call["method"] == "GET" for call in calls)
+
+    run["session_id"] = "different"
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    mismatch = client.post(path, content=body, headers=headers)
+    assert mismatch.status_code == 409
+
+
+def test_gateway_agent_proof_signs_only_exact_read_only_lifecycle_status(tmp_path, monkeypatch):
+    client, token = _client(tmp_path)
+    agents = [{"id": "lily", "is_active": True, "online": True,
+               "status": "online", "private": "NEVER_SEND"}]
+    calls = []
+
+    def fake_forward(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["method"] == "GET"
+        assert kwargs["api_path"] == "agents"
+        assert kwargs["query"] == "include_inactive=1"
+        return 200, json.dumps({"ok": True, "agents": agents}).encode(), {}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    path = "/workbench/v1/agent-proof"
+    body = b'{"agent_id":"lily"}'
+    assert client.post(path, content=body).status_code == 401
+    assert not calls
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    response = client.post(path, content=body, headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    proof = payload.pop("response_auth")
+    assert verify_response_auth(shared_token=token, request_nonce=headers[HEADER_NONCE],
+                                payload=payload, response_auth=proof)
+    assert payload["instance_id"] == "HASHI1"
+    assert payload["agent"]["id"] == "lily"
+    assert payload["agent"]["is_active"] is True
+    assert "NEVER_SEND" not in response.text
+
+    agents.append(dict(agents[0]))
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    assert client.post(path, content=body, headers=headers).status_code == 409
+
+
+def test_gateway_agent_proof_signs_exact_operation_result_and_preserves_not_found(tmp_path, monkeypatch):
+    client, token = _client(tmp_path)
+    calls = []
+    status = {"ok": True, "operation_id": "fixture-op-123", "agent_id": "lily",
+              "desired_active": True, "state": "failed", "error_code": "agent_start_failed",
+              "private": "NEVER_SEND"}
+    def fake_forward(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["method"] == "GET"
+        if kwargs["api_path"] == "agents":
+            return 200, json.dumps({"ok": True, "agents": [
+                {"id": "lily", "is_active": False, "online": False, "status": "inactive"}
+            ]}).encode(), {}
+        assert kwargs["api_path"] == "agents/lily/active/operations/fixture-op-123"
+        if status.get("not_found"):
+            return 404, b'{"ok":false}', {}
+        return 200, json.dumps(status).encode(), {}
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", fake_forward)
+    path = "/workbench/v1/agent-proof"
+    body = b'{"agent_id":"lily","operation_id":"fixture-op-123"}'
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    response = client.post(path, content=body, headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    proof = payload.pop("response_auth")
+    assert verify_response_auth(shared_token=token, request_nonce=headers[HEADER_NONCE],
+                                payload=payload, response_auth=proof)
+    assert payload["operation"] == {"operation_id": "fixture-op-123", "agent_id": "lily",
+                                    "desired_active": True, "state": "failed",
+                                    "error_code": "agent_start_failed"}
+    assert "NEVER_SEND" not in response.text
+    assert len(calls) == 2
+
+    status["operation_id"] = "different"
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    assert client.post(path, content=body, headers=headers).status_code == 409
+
+    status["not_found"] = True
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+    missing = client.post(path, content=body, headers=headers)
+    assert missing.status_code == 200
+    missing_payload = missing.json()
+    missing_proof = missing_payload.pop("response_auth")
+    assert verify_response_auth(shared_token=token, request_nonce=headers[HEADER_NONCE],
+                                payload=missing_payload, response_auth=missing_proof)
+    assert missing_payload["operation"] is None

@@ -74,8 +74,6 @@ _ADAPTER_SLOT = ContextVar("hashi_api_adapter_slot", default=0)
 # ── Constants ────────────────────────────────────────────────────────────────
 
 SESSION_TTL_SEC = 1800  # 30 minutes
-MAX_EXTERNAL_TOOLS = 128
-MAX_EXTERNAL_TOOL_BYTES = 1024 * 1024
 # Request limits are part of stable Core API ingress. Changing them is a Core
 # migration; an Agent Function Worker reboot does not replace this service.
 MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
@@ -633,6 +631,9 @@ def _validate_reasoning_effort(
 def _validate_external_tool_request(
     body: dict[str, Any],
     messages: list[dict],
+    *,
+    max_tools: int | None = None,
+    max_tool_bytes: int | None = None,
 ) -> tuple[list[dict] | None, web.Response | None]:
     if not all(isinstance(message, dict) for message in messages):
         return None, _external_tool_error(
@@ -698,9 +699,9 @@ def _validate_external_tool_request(
             code="invalid_tools",
             param="tools",
         )
-    if len(raw_tools) > MAX_EXTERNAL_TOOLS:
+    if max_tools is not None and len(raw_tools) > max_tools:
         return None, _external_tool_error(
-            f"tools exceeds the limit of {MAX_EXTERNAL_TOOLS}",
+            f"tools exceeds the locally configured limit of {max_tools}",
             code="too_many_tools",
             param="tools",
         )
@@ -712,9 +713,9 @@ def _validate_external_tool_request(
             code="invalid_tools",
             param="tools",
         )
-    if tool_bytes > MAX_EXTERNAL_TOOL_BYTES:
+    if max_tool_bytes is not None and tool_bytes > max_tool_bytes:
         return None, _external_tool_error(
-            "tools payload exceeds the 1 MiB limit",
+            f"tools payload exceeds the locally configured limit of {max_tool_bytes} bytes",
             code="tools_too_large",
             param="tools",
         )
@@ -898,6 +899,10 @@ class _SessionCache:
 
 # ── Adapter pool ──────────────────────────────────────────────────────────────
 
+class _GatewayCapacityTimeout(TimeoutError):
+    """The selected admission deadline elapsed before an adapter was leased."""
+
+
 class _AdapterPool:
     """Lazily initialized, model-stable adapters with exclusive request leases.
 
@@ -908,26 +913,108 @@ class _AdapterPool:
     by a request lock.
     """
 
-    def __init__(self, global_config, secrets: dict, workspace_root: Path, *, capacity: int = 2,
-                 total_capacity: int = 8, engine_capacity: int = 4):
+    def __init__(self, global_config, secrets: dict, workspace_root: Path, *, capacity: int | None = 2,
+                 total_capacity: int = 8, engine_capacity: int = 4,
+                 engine_capacities: dict[str, int] | None = None,
+                 queue_wait_seconds: float | None = None):
         self._global_config = global_config
         self._secrets = secrets
         self._workspace_root = workspace_root
         self._adapters: dict[tuple[str, str], Any] = {}
         self._init_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._request_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        from orchestrator.execution_resources import limit
-        self._capacity = limit(capacity,"max_parallel_per_model",2,8)
-        self._total_quota = asyncio.Semaphore(limit(total_capacity,"max_parallel_requests",8))
+        from orchestrator.execution_resources import limit, queue_wait_seconds as validate_queue_wait
+        self._capacity = None if capacity is None else limit(capacity,"max_parallel_per_model",2)
+        self._total_capacity = limit(total_capacity,"max_parallel_requests",8)
         self._engine_capacity = limit(engine_capacity,"max_parallel_per_engine",4)
-        self._engine_quotas: dict[str, asyncio.Semaphore] = {}
-        self._quotas: dict[tuple[str, str], asyncio.Semaphore] = {}
+        self._engine_capacities = {
+            engine: limit(value, f"execution_limits.engines.{engine}", 4)
+            for engine, value in (engine_capacities or {}).items()
+        }
+        self._queue_wait_seconds = validate_queue_wait(queue_wait_seconds)
         self._slots: dict[tuple[tuple[str, str], int], Any] = {}
         self._busy: set[tuple[tuple[str, str], int]] = set()
+        self._capacity_condition = asyncio.Condition()
+        self._capacity_queue: list[tuple[object, tuple[str, str]]] = []
+        self._active_total = 0
+        self._active_engines: dict[str, int] = {}
+        self._active_models: dict[tuple[str, str], int] = {}
 
     @staticmethod
     def _key(engine: str, model: str) -> tuple[str, str]:
         return (str(engine).strip(), str(model).strip())
+
+    def _model_capacity(self, engine: str) -> int:
+        return self._capacity or self._engine_capacities.get(engine, self._engine_capacity)
+
+    def _capacity_reason(self, key: tuple[str, str]) -> str | None:
+        engine, _model = key
+        if self._active_total >= self._total_capacity:
+            return "instance_capacity"
+        if self._active_engines.get(engine, 0) >= self._engine_capacities.get(engine, self._engine_capacity):
+            return "engine_capacity"
+        if self._active_models.get(key, 0) >= self._model_capacity(engine):
+            return "model_capacity" if self._capacity is not None else "engine_capacity"
+        return None
+
+    def capacity_status(self) -> dict[str, Any]:
+        waits: dict[str, int] = {}
+        for _ticket, key in self._capacity_queue:
+            reason = self._capacity_reason(key) or "queue_order"
+            waits[reason] = waits.get(reason, 0) + 1
+        return {
+            "instance_sessions": self._total_capacity,
+            "default_engine_sessions": self._engine_capacity,
+            "engines": dict(self._engine_capacities),
+            "selected_model_limit": self._capacity,
+            "queue_wait_seconds": self._queue_wait_seconds,
+            "active": self._active_total,
+            "waiting": waits,
+        }
+
+    @asynccontextmanager
+    async def _reserve_capacity(self, key: tuple[str, str]):
+        # Claim all budgets atomically. A waiter for one busy engine must not
+        # hold an instance slot and prevent another independent engine working.
+        ticket = (object(), key)
+        async with self._capacity_condition:
+            self._capacity_queue.append(ticket)
+            try:
+                async with asyncio.timeout(self._queue_wait_seconds):
+                    while True:
+                        first_eligible = next(
+                            (item for item in self._capacity_queue if self._capacity_reason(item[1]) is None),
+                            None,
+                        )
+                        if first_eligible is ticket:
+                            self._capacity_queue.remove(ticket)
+                            self._active_total += 1
+                            self._active_engines[key[0]] = self._active_engines.get(key[0], 0) + 1
+                            self._active_models[key] = self._active_models.get(key, 0) + 1
+                            self._capacity_condition.notify_all()
+                            break
+                        await self._capacity_condition.wait()
+            except TimeoutError as exc:
+                self._capacity_queue.remove(ticket)
+                self._capacity_condition.notify_all()
+                raise _GatewayCapacityTimeout("execution_resource_wait_timeout") from exc
+            except BaseException:
+                if ticket in self._capacity_queue:
+                    self._capacity_queue.remove(ticket)
+                    self._capacity_condition.notify_all()
+                raise
+        try:
+            yield
+        finally:
+            async with self._capacity_condition:
+                self._active_total -= 1
+                self._active_engines[key[0]] -= 1
+                self._active_models[key] -= 1
+                if not self._active_engines[key[0]]:
+                    del self._active_engines[key[0]]
+                if not self._active_models[key]:
+                    del self._active_models[key]
+                self._capacity_condition.notify_all()
 
     async def get(self, engine: str, model: str) -> Any:
         key = self._key(engine, model)
@@ -953,13 +1040,13 @@ class _AdapterPool:
     async def lease(self, engine: str, model: str):
         """Own an independent CLI process/thread slot until dispatch finishes."""
         key = self._key(engine, model)
-        quota = self._quotas.setdefault(key, asyncio.Semaphore(self._capacity))
-        async with quota, self._engine_quotas.setdefault(engine,asyncio.Semaphore(self._engine_capacity)), self._total_quota:
+        capacity = self._model_capacity(key[0])
+        async with self._reserve_capacity(key):
             slot_key = None
             try:
                 lock = self._init_locks.setdefault(key, asyncio.Lock())
                 async with lock:
-                    index = next(i for i in range(self._capacity) if (key, i) not in self._busy)
+                    index = next(i for i in range(capacity) if (key, i) not in self._busy)
                     slot_key = (key, index)
                     self._busy.add(slot_key)
                     adapter = self._adapters.get(key) if index == 0 else self._slots.get(slot_key)
@@ -1049,7 +1136,6 @@ class _AdapterPool:
         self._request_locks.clear()
         self._slots.clear()
         self._busy.clear()
-        self._quotas.clear()
 
 
 # ── Gateway server ────────────────────────────────────────────────────────────
@@ -1114,6 +1200,13 @@ class APIGatewayServer:
             if str(model).strip() in self._engine_for_model
         }
         gateway_config = load_api_gateway_config(global_config)
+        from orchestrator.execution_resources import limit
+        self._max_external_tools = gateway_config.get("max_external_tools")
+        self._max_external_tool_bytes = gateway_config.get("max_external_tool_bytes")
+        if self._max_external_tools is not None:
+            self._max_external_tools = limit(self._max_external_tools, "max_external_tools", 1)
+        if self._max_external_tool_bytes is not None:
+            self._max_external_tool_bytes = limit(self._max_external_tool_bytes, "max_external_tool_bytes", 1)
         self.enabled: bool = bool(gateway_config.get("enabled", False))
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
         self.default_model = (
@@ -1137,10 +1230,13 @@ class APIGatewayServer:
             if capability_root
             else None
         )
+        from orchestrator.execution_resources import instance_execution_configuration
+        resource_config = instance_execution_configuration(global_config)
         self._pool = _AdapterPool(global_config, secrets, workspace_root,
-                                  capacity=gateway_config.get("max_parallel_per_model", 2),
-                                  total_capacity=gateway_config.get("max_parallel_requests",8),
-                                  engine_capacity=gateway_config.get("max_parallel_per_engine",4))
+                                  capacity=gateway_config.get("max_parallel_per_model"),
+                                  total_capacity=resource_config.get("instance_sessions", 8),
+                                  engine_capacities=resource_config.get("engines") or {},
+                                  queue_wait_seconds=resource_config.get("queue_wait_seconds"))
         self.gateway_instance_id = f"gateway-{uuid.uuid4().hex[:12]}"
         logs_root = Path(
             getattr(global_config, "base_logs_dir", workspace_root / "logs")
@@ -1698,6 +1794,10 @@ class APIGatewayServer:
                 "accepting_requests": self._accepting_requests,
                 "draining": self._draining,
                 "active_requests": len(self._active_requests),
+                "resource_capacity": (
+                    self._pool.capacity_status()
+                    if callable(getattr(self._pool, "capacity_status", None)) else None
+                ),
                 "configured_enabled": configured_enabled,
                 "engines": initialized,
                 "adapter_instances": adapter_instances,
@@ -1952,7 +2052,8 @@ class APIGatewayServer:
             # messages. Validate after reconstructing the cached assistant
             # tool request so call/result pairing remains strict.
             validated_tools, validation_error = _validate_external_tool_request(
-                body, messages
+                body, messages, max_tools=self._max_external_tools,
+                max_tool_bytes=self._max_external_tool_bytes,
             )
             if validation_error is not None:
                 return validation_error
@@ -2033,6 +2134,12 @@ class APIGatewayServer:
         except _AdapterInitializationError as exc:
             logger.error("Adapter init failed for %s: %s", engine, exc)
             return web.json_response({"error": f"backend unavailable: {exc}"}, status=503)
+        except _GatewayCapacityTimeout:
+            return web.json_response({"error": {
+                "message": "The configured capacity wait deadline elapsed before dispatch.",
+                "code": "execution_resource_wait_timeout",
+                "type": "capacity_timeout",
+            }}, status=503)
 
     @asynccontextmanager
     async def _lease_adapter(self, engine: str, model: str):

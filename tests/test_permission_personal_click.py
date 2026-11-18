@@ -32,8 +32,12 @@ def api(service, subject, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_l1_personal_button_without_login_commits_exactly_once(environment, tmp_path):
+@pytest.mark.parametrize("stale_bindings", [False, True])
+async def test_l1_personal_button_without_login_commits_exactly_once(environment, tmp_path, stale_bindings):
     service, authority, identity, arguments, subject = environment
+    if stale_bindings:
+        service.owners.update({"missing-user": subject.owner_id, "other": subject.owner_id})
+        identity.deactivate_user(user_id="other")
     binding = await service.open_execution(**arguments)
     scope = normalize_scope("file", str(tmp_path / "one.txt"), ("write",), cwd=tmp_path)
     request = authority.request_access(binding.context, [scope], purpose="Write one file",
@@ -220,3 +224,36 @@ async def test_unloaded_frontend_checks_authentication_before_reading_installati
     server._strict_authenticated_owner = lambda request: subject.owner_id
     request.query["context_generation"] = "2"
     assert (await read(server, request)).status == 409
+
+
+
+@pytest.mark.asyncio
+async def test_personal_login_ignores_inactive_historical_owner_mappings(environment, tmp_path):
+    service, authority, identity, arguments, subject = environment
+    binding = await service.open_execution(**arguments)
+    # These two historical records name the same personal owner, but neither
+    # is an active human and neither can grant a decision.
+    service.owners.update({"missing-user": subject.owner_id, "other": subject.owner_id})
+    identity.deactivate_user(user_id="other")
+    login = service.personal_l1_login(subject=subject)
+    token = login["session_token"]
+    assert identity.get_session_user(token).id == "human"
+    scope = normalize_scope("file", str(tmp_path / "permitted.txt"), ("write",), cwd=tmp_path)
+    request = authority.request_access(binding.context, [scope], purpose="Write the selected file")
+    decided = service.submit_session_decision(
+        subject, ["approve", request.request_id, "task", "--revision", str(request.revision)],
+        session_token=token, invocation_id="personal-click", connection_binding="private-fc",
+    )
+    assert decided.choice == "approve"
+    assert authority.evaluate(binding.context, [scope], operation_id="first")
+    service.logout(session_token=token)
+
+    # Two active users bound to the same owner are genuinely ambiguous.
+    identity.update_user_profile(user_id="other", status="active")
+    with pytest.raises(PermissionDenied):
+        service.personal_l1_login(subject=subject)
+    # A different owner's active user must never be selected as a substitute.
+    service.owners["other"] = "user:someone-else"
+    identity.deactivate_user(user_id="human")
+    with pytest.raises(PermissionDenied):
+        service.personal_l1_login(subject=subject)

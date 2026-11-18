@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -390,10 +391,10 @@ async def test_primary_direct_passes_current_live_frames_only_to_visual_backend(
     frame = {
         "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
         "frame_sequence": 8,
-        "captured_at": "2026-10-17T06:20:00+11:00",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
     }
     runtime = SimpleNamespace()
-    bind_live_frames(runtime, "request-media", (frame,))
+    bind_live_frames(runtime, "request-media", (frame,), freshness_seconds=20)
     backend = _Backend([BackendResponse(text="I can see it.", duration_ms=1)])
     provider = HashiStageProvider(
         backend_manager=_Manager(backend), runtime_context=runtime
@@ -405,14 +406,31 @@ async def test_primary_direct_passes_current_live_frames_only_to_visual_backend(
 
 
 @pytest.mark.asyncio
+async def test_primary_direct_drops_live_frames_that_expire_in_the_runtime_queue():
+    frame = {
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
+        "frame_sequence": 8,
+        "captured_at": (datetime.now(timezone.utc) - timedelta(seconds=21)).isoformat(),
+    }
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-media", (frame,), freshness_seconds=20)
+    backend = _Backend([BackendResponse(text="No current camera frame.", duration_ms=1)])
+    provider = HashiStageProvider(backend_manager=_Manager(backend), runtime_context=runtime)
+
+    await provider.invoke(_profile(), _request(Stage.DIRECT, None))
+
+    assert backend.calls[0]["transient_images"] is _MISSING
+
+
+@pytest.mark.asyncio
 async def test_primary_direct_does_not_pass_live_frames_to_text_only_backend():
     frame = {
         "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABD/2Q==",
         "frame_sequence": 8,
-        "captured_at": "2026-10-17T06:20:00+11:00",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
     }
     runtime = SimpleNamespace()
-    bind_live_frames(runtime, "request-media", (frame,))
+    bind_live_frames(runtime, "request-media", (frame,), freshness_seconds=20)
     backend = _Backend([BackendResponse(text="Text answer.", duration_ms=1)])
     backend.input_capability = InputCapability(
         provider="fake-api",

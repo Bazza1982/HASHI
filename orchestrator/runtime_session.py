@@ -605,6 +605,7 @@ def accept_request(
     request_metadata: Mapping[str, Any] | None,
     request_content: Mapping[str, Any] | None,
     idempotency_key: str | None,
+    replay_only: bool = False,
 ) -> tuple[dict[str, Any], Any | None, str, str, str]:
     session, resolved_owner, surface, channel_key = resolve_request_session(
         runtime, source=source, chat_id=chat_id, metadata=request_metadata
@@ -656,7 +657,7 @@ def accept_request(
     expected_generation = (
         explicit_expected_generation
         if explicit_expected_generation is not None
-        else int(session["context_generation"])
+        else None if replay_only else int(session["context_generation"])
     )
     from orchestrator.fingerprint.runtime import admission_policy
     accepted = ensure_store(runtime).accept_run(
@@ -693,6 +694,7 @@ def accept_request(
         ),
         fingerprint_policy=admission_policy(runtime),
         agent_workspace=getattr(runtime, "workspace_dir", None),
+        replay_only=replay_only,
     )
     return session, accepted, resolved_owner, surface, channel_key
 

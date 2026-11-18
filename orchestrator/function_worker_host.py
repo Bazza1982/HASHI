@@ -19,6 +19,14 @@ from types import SimpleNamespace
 from typing import Any
 
 from orchestrator.kernel_artifact import GenerationModuleFinder
+from orchestrator.function_worker_large_request import (
+    ABORT as LARGE_REQUEST_ABORT,
+    CONTROL_METHODS as LARGE_REQUEST_CONTROL_METHODS,
+    LARGE_REQUEST_VERSION,
+    BoundedWorkerPeer,
+    LargeRequestReceiver,
+    receive_capability_result,
+)
 from orchestrator.function_generation import (
     FUNCTION_GENERATION_SCHEMA_VERSION,
     SourceManifest,
@@ -434,6 +442,9 @@ class WorkerKernelFacade:
 
     def update_topology(self, topology: Mapping[str, Any]) -> None:
         self._topology = dict(topology or {})
+        update_transport = getattr(self.peer, "update_topology", None)
+        if callable(update_transport):
+            update_transport(self._topology)
         self._service_endpoints = dict(
             self._topology.get("service_endpoints") or {}
         )
@@ -561,20 +572,24 @@ class WorkerKernelFacade:
         timeout_seconds: float = 60.0,
         lease_id: str | None = None,
     ) -> Any:
-        return await self.peer.request(
-            "core.capability.invoke",
-            {
-                "capability_kind": str(capability_kind),
-                "action": str(action),
-                "args": dict(args or {}),
-                "task_id": str(task_id),
-                "request_id": request_id,
-                "authorization": str(authorization),
-                "timeout_seconds": float(timeout_seconds),
-                "lease_id": lease_id,
-            },
-            timeout=max(1.0, float(timeout_seconds) + 10.0),
-        )
+        params = {
+            "capability_kind": str(capability_kind),
+            "action": str(action),
+            "args": dict(args or {}),
+            "task_id": str(task_id),
+            "request_id": request_id,
+            "authorization": str(authorization),
+            "timeout_seconds": float(timeout_seconds),
+            "lease_id": lease_id,
+        }
+        timeout = max(1.0, float(timeout_seconds) + 10.0)
+        topology = getattr(self, "_topology", {})
+        advertised = topology.get("worker_large_capability_results", {}) if isinstance(topology, Mapping) else {}
+        if isinstance(advertised, Mapping) and advertised.get("version") == LARGE_REQUEST_VERSION:
+            return await receive_capability_result(self.peer.request, params, timeout=timeout)
+        # An older shared Functions generation has not advertised the new
+        # transport. Use its existing method without guessing or replaying.
+        return await self.peer.request("core.capability.invoke", params, timeout=timeout)
 
     async def acquire_capability_lease(
         self,
@@ -796,12 +811,13 @@ class FunctionWorkerHost:
             self.bootstrap["runtime"]
         )
         self.manifest = SourceManifest.from_mapping(self.bootstrap["manifest"])
-        self.peer = JsonConnectionPeer(
+        raw_peer = JsonConnectionPeer(
             connection,
             label=f"worker:{self.agent_name}:{os.getpid()}",
             request_handler=self.handle_request,
             event_handler=self.handle_event,
         )
+        self.peer = BoundedWorkerPeer(raw_peer, self.bootstrap.get("topology") or {})
         self.paths: Any | None = None
         self.runtime: Any | None = None
         self.facade: WorkerKernelFacade | None = None
@@ -961,6 +977,13 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError("Agent runtime is not prepared")
         return self.runtime
 
+    def _large_request_store(self) -> LargeRequestReceiver:
+        receiver = getattr(self, "_large_request_uploads", None)
+        if receiver is None:
+            receiver = LargeRequestReceiver()
+            self._large_request_uploads = receiver
+        return receiver
+
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         from orchestrator.agent_incarnation import lifecycle_id_from_config
@@ -1046,6 +1069,7 @@ class FunctionWorkerHost:
                 "session_id": str(runtime.session_id_dt),
                 "worker_pid": os.getpid(),
                 "worker_protocol": FUNCTION_WORKER_PROTOCOL_VERSION,
+                "worker_large_request": self._large_request_store().capability(),
                 "telegram_scoped_access_protocol": SCOPED_ACCESS_PROTOCOL_VERSION,
                 "parked_topic_guarded_writes": callable(
                     getattr(getattr(runtime, "parked_topics", None), "delete_if_unchanged", None)
@@ -1408,6 +1432,9 @@ class FunctionWorkerHost:
             return {"ok": True}
         self.phase = "STOPPING"
         self.accepting = False
+        receiver = getattr(self, "_large_request_uploads", None)
+        if receiver is not None:
+            receiver.close()
         await self._cancel_connector_tasks()
         command_menu_task = getattr(self, "command_menu_task", None)
         if command_menu_task is not None:
@@ -1496,18 +1523,43 @@ class FunctionWorkerHost:
             await self.emit_metadata()
             return {"ok": True}
 
+        # Cleanup is allowed even after quiesce, so a cancelled transfer can
+        # release its private temporary file without admitting new work.
+        if method == LARGE_REQUEST_ABORT:
+            return await self._large_request_store().handle(method, params, self.handle_request)
         runtime = self._require_runtime()
+        if (method == "runtime.cancel_session_run"
+                and ((self.phase == "ACTIVE" and self.accepting) or self.phase == "DRAINING")):
+            from orchestrator.runtime_cancel import cancel_session_run
+
+            return await cancel_session_run(
+                runtime,
+                owner_id=str(params.get("owner_id") or ""),
+                session_id=str(params.get("session_id") or ""),
+                run_id=str(params.get("run_id") or ""),
+                request_id=str(params.get("request_id") or ""),
+                reason=str(params.get("reason") or "cancelled_by_user"),
+            )
         if self.phase != "ACTIVE" or not self.accepting:
             raise FunctionWorkerStateError(
                 f"Agent {self.agent_name!r} is not accepting requests (phase={self.phase})"
             )
+        if method in LARGE_REQUEST_CONTROL_METHODS:
+            return await self._large_request_store().handle(method, params, self.handle_request)
+        if method == "worker.telegram_access.observe":
+            from orchestrator.telegram_access import access_policy_revision
+            from orchestrator.telegram_actor_scope import runtime_snapshot
+
+            snapshot = await asyncio.to_thread(runtime_snapshot, runtime)
+            return {"policy_revision": access_policy_revision(snapshot)}
         if method == "runtime.enqueue_request":
             content = params.get("request_content")
             request_metadata = params.get("request_metadata")
+            replay_only = bool(params.get("replay_only", False))
             metadata = (
                 request_metadata if isinstance(request_metadata, Mapping) else {}
             )
-            transcript_state = await self._begin_native_voice_transcription(
+            transcript_state = None if replay_only else await self._begin_native_voice_transcription(
                 content,
                 terminal=str(
                     metadata.get("session_surface")
@@ -1532,6 +1584,7 @@ class FunctionWorkerHost:
                 request_metadata=request_metadata,
                 request_content=content,
                 idempotency_key=params.get("idempotency_key"),
+                replay_only=replay_only,
             )
             if request_id and transcript_state is not None:
                 self._bind_native_voice_transcription(
@@ -1676,17 +1729,6 @@ class FunctionWorkerHost:
 
             return await handle_phone_action_operation(runtime, str(params.get("operation") or ""),
                                                        dict(params.get("payload") or {}))
-        if method == "runtime.cancel_session_run":
-            from orchestrator.runtime_cancel import cancel_session_run
-
-            return await cancel_session_run(
-                runtime,
-                owner_id=str(params.get("owner_id") or ""),
-                session_id=str(params.get("session_id") or ""),
-                run_id=str(params.get("run_id") or ""),
-                request_id=str(params.get("request_id") or ""),
-                reason=str(params.get("reason") or "cancelled_by_user"),
-            )
         if method == "runtime.slash":
             from orchestrator.admin_local_testing import (
                 try_execute_slash_command_text,

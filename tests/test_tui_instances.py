@@ -70,7 +70,7 @@ def test_portable_local_endpoint_requires_matching_identity_and_loopback(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_instance_discovery_uses_completed_handshake_as_the_only_peer_gate(tmp_path):
+async def test_instance_discovery_allows_live_check_when_handshake_cache_is_stale(tmp_path):
     (tmp_path / "agents.json").write_text(
         json.dumps({"global": {"instance_id": "HASHI1", "workbench_port": 18800, "remote_port": 8766}}),
         encoding="utf-8",
@@ -122,10 +122,10 @@ async def test_instance_discovery_uses_completed_handshake_as_the_only_peer_gate
     assert by_id["HASHI1"].current is True
     assert by_id["HASHI2"].available is True
     assert by_id["HASHI2"].transport == "remote"
-    assert by_id["HASHI3"].available is False
-    assert by_id["HASHI3"].reason == "handshake required"
+    assert by_id["HASHI3"].available is True
+    assert by_id["HASHI3"].reason == "identity checked on connect"
     assert by_id["HASHI4"].available is True
-    assert by_id["HASHI4"].reason == ""
+    assert by_id["HASHI4"].reason == "identity checked on connect"
 
 
 @pytest.mark.asyncio

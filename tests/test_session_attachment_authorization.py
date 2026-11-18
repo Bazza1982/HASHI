@@ -743,3 +743,42 @@ async def test_telegram_download_reaches_backend_as_current_run_attachment(tmp_p
     rejected = await mgr.generate_response("foreign", accepted.request_id,
         request_content={"type": "hashi.request-content", "version": 1, "parts": [foreign]})
     assert not rejected.is_success and rejected.error_code == "MEDIA_PATH_NOT_AUTHORIZED"
+
+
+@pytest.mark.asyncio
+async def test_queued_fixed_cli_rechecks_attachment_grant_before_dispatch(tmp_path, monkeypatch):
+    import adapters.hashi_mcp as hashi_mcp
+
+    manager, backend, store, _session, run, _meta, content = fixture(tmp_path)
+    monkeypatch.setattr(hashi_mcp, "MAX_ACTIVE_INVOCATIONS_PER_ADAPTER", 1)
+    manager.config.active_backend = "codex-cli"
+    backend._hashi_mcp_enabled = True
+    backend._active_hashi_mcp_invocations = {1: object()}
+
+    async def wait_for_queue():
+        while not getattr(getattr(backend, "_hashi_mcp_admission", None), "waiters", ()):
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(manager.generate_response(
+        "synthetic", run["request_id"], request_content=content,
+    ))
+    try:
+        await asyncio.wait_for(wait_for_queue(), 2)
+        with store._connection() as connection:
+            connection.execute(
+                "UPDATE session_attachments SET state='staged' WHERE attachment_id=?",
+                (content["parts"][0]["attachment_id"],),
+            )
+        backend._active_hashi_mcp_invocations.clear()
+        backend._hashi_mcp_admission.notify_closed()
+        response = await asyncio.wait_for(task, 5)
+        assert not response.is_success
+        assert response.error_code == "MEDIA_PATH_NOT_AUTHORIZED"
+        assert response.stream_metadata["media_diagnostic"]["reason"] == "committed_attachment_missing"
+        assert not hasattr(backend, "seen_prompt")
+    finally:
+        backend._active_hashi_mcp_invocations.clear()
+        admission = getattr(backend, "_hashi_mcp_admission", None)
+        if admission:
+            admission.notify_closed()
+        await asyncio.gather(task, return_exceptions=True)

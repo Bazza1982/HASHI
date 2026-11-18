@@ -188,7 +188,7 @@ async def test_herv3_capacity_retry_excludes_live_request_modes(
 
     assert decision["allowed"] is False
     assert decision["delay_s"] is None
-    assert decision["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+    assert decision["blocking_reason"] == policy_owner.REASON_MEDIA_RECOVERY_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -248,7 +248,7 @@ async def test_herv3_capacity_retry_excludes_semantic_voice_origin(tmp_path):
 
     assert decision["allowed"] is False
     assert decision["delay_s"] is None
-    assert decision["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+    assert decision["blocking_reason"] == policy_owner.REASON_MEDIA_RECOVERY_UNAVAILABLE
 
 
 def _checkpoint_registry(tmp_path, request):
@@ -1443,3 +1443,25 @@ async def test_herv3_fallback_skips_permanent_failures(monkeypatch, tmp_path):
     assert record["disposition"] == "blocked"
     assert record["reason"] == "ineligible_failure"
     assert record["additional_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_herv3_capacity_retry_uses_task_schedule_without_fallback_runtime():
+    from orchestrator.her_v2.retry import ProviderRetryPolicy
+
+    provider = HashiStageProvider(
+        backend_manager=SimpleNamespace(privacy_level=int(PrivacyLevel.PROVIDER_TRUST)),
+        retry_policy=ProviderRetryPolicy(capacity_delays_s=(0, 1, 2, 3)),
+    )
+    decision = await provider.resolve_stage_capacity_retry(
+        request=_request("req-same-target-only"),
+        selected=SimpleNamespace(engine="deepseek-api", model="deepseek-v4-flash"),
+        failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+        retryable=True,
+        retry_after_s=4,
+        retry_index=3,
+        side_effects_possible=False,
+    )
+    assert decision["allowed"] is True
+    assert decision["delay_s"] == 4
+    assert decision["continue_session"] is False

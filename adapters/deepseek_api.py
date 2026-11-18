@@ -32,6 +32,7 @@ from adapters.openrouter_api import (
     _annotate_stream_exception,
     _assistant_content_text,
     _iter_provider_stream_lines,
+    _live_camera_request_extensions,
     _message_structured_data,
     _provider_request_id,
     _read_http_error_body,
@@ -679,7 +680,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
         _validate_deepseek_payload(payload)
-        response = await self.client.post(_DEEPSEEK_URL, json=payload, headers=headers)
+        response = await self.client.post(
+            _DEEPSEEK_URL, json=payload, headers=headers,
+            **_live_camera_request_extensions(payload),
+        )
         await _read_http_error_body(response)
         response.raise_for_status()
         try:
@@ -823,7 +827,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
         protocol_state["wire_evidence"] = wire_evidence
         inactivity_guard = self._new_her_v2_stream_inactivity_guard()
 
-        async with self.client.stream("POST", _DEEPSEEK_URL, json=payload, headers=headers) as response:
+        async with self.client.stream(
+            "POST", _DEEPSEEK_URL, json=payload, headers=headers,
+            **_live_camera_request_extensions(payload),
+        ) as response:
             await _read_http_error_body(response)
             response.raise_for_status()
             transport_request_id = _provider_request_id(response)

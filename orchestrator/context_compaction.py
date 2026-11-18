@@ -58,9 +58,8 @@ CONTEXT_CAPACITY_REJECTED = "CONTEXT_CAPACITY_REJECTED"
 DEFAULT_RECENT_EXCHANGES = 10
 DEFAULT_RESPONSE_HEADROOM_TOKENS = 16_384
 DEFAULT_MAX_CAPSULE_CHARS = 24_000
-# Compact uses a product-level operating window, independent of provider
-# capacity metadata: manual requests become useful at 64k effective tokens and
-# automatic maintenance starts only after the context exceeds 128k.
+# Default operating thresholds remain compatible with earlier instances.
+# Explicit policy can change them; forced manual Compact does not require them.
 DEFAULT_MANUAL_COMPACTION_MIN_TOKENS = 64_000
 DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS = 128_000
 DEFAULT_POST_COMPACTION_TARGET_TOKENS = 64_000
@@ -175,10 +174,10 @@ def estimate_effective_context_tokens(
 ) -> int:
     """Return HASHI's effective current-context estimate for Compact policy.
 
-    The most recently assembled prompt is authoritative when available.  A
-    cold command process falls back to the managed history plus the Agent
-    system prompt.  Provider tool-schema overhead is included because it is
-    serialized into the same context window.
+    The most recently assembled prompt estimate is used when available. A
+    cold command process falls back to estimated managed history and the Agent
+    system prompt. Provider tool-schema overhead is also estimated; the result
+    is not an exact count for another model's tokenizer.
     """
 
     measured = _safe_int(prompt_tokens, minimum=1)
@@ -697,15 +696,17 @@ def load_policy(runtime: Any) -> CompactionPolicy:
     def deadline(name: str, default: float) -> float:
         return _safe_float(raw.get(name), minimum=1.0, maximum=3600.0) or default
 
+    def threshold(name: str, default: int, *, minimum: int = 1) -> int:
+        value = _safe_int(raw.get(name), minimum=minimum)
+        return default if value is None else value
+
     return CompactionPolicy(
         recent_exchanges=_safe_int(raw.get("recent_exchanges")) or DEFAULT_RECENT_EXCHANGES,
         response_headroom_tokens=_safe_int(raw.get("response_headroom_tokens")) or DEFAULT_RESPONSE_HEADROOM_TOKENS,
         max_capsule_chars=_safe_int(raw.get("max_capsule_chars"), minimum=256) or DEFAULT_MAX_CAPSULE_CHARS,
-        # The user-selected operating window is product policy, not mutable
-        # Agent state. Stale or hand-edited threshold fields are ignored.
-        manual_min_tokens=DEFAULT_MANUAL_COMPACTION_MIN_TOKENS,
-        auto_trigger_tokens=DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS,
-        post_compaction_target_tokens=DEFAULT_POST_COMPACTION_TARGET_TOKENS,
+        manual_min_tokens=threshold("manual_min_tokens", DEFAULT_MANUAL_COMPACTION_MIN_TOKENS, minimum=0),
+        auto_trigger_tokens=threshold("auto_trigger_tokens", DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS),
+        post_compaction_target_tokens=threshold("post_compaction_target_tokens", DEFAULT_POST_COMPACTION_TARGET_TOKENS),
         tier_2_attempt_seconds=deadline("tier_2_attempt_seconds", DEFAULT_TIER_2_ATTEMPT_SECONDS),
         tier_2_recovery_seconds=deadline("tier_2_recovery_seconds", DEFAULT_TIER_2_RECOVERY_SECONDS),
         tier_3_attempt_seconds=deadline("tier_3_attempt_seconds", DEFAULT_TIER_3_ATTEMPT_SECONDS),
@@ -758,7 +759,10 @@ def resolve_capacity_profile(
     response_headroom_tokens: int | None = None,
 ) -> CapacityProfile | None:
     provider = canonical_backend_engine(provider)
-    headroom = int(response_headroom_tokens or load_policy(runtime).response_headroom_tokens)
+    block = _workspace_state(runtime).get(STATE_KEY)
+    policy = block.get("policy") if isinstance(block, Mapping) else None
+    policy_headroom = _safe_int(policy.get("response_headroom_tokens")) if isinstance(policy, Mapping) else None
+    requested_headroom = _safe_int(response_headroom_tokens) if response_headroom_tokens is not None else None
     sources: list[tuple[str, Mapping[str, Any]]] = []
     if isinstance(profile_options, Mapping):
         sources.append(("her_v2_profile", profile_options))
@@ -793,7 +797,8 @@ def resolve_capacity_profile(
             continue
         provenance = str(candidate.get("capacity_provenance") or source_name).strip()
         estimator = str(candidate.get("tokenizer") or candidate.get("estimator") or "hashi_mixed_char_estimator_v1")
-        candidate_headroom = _safe_int(candidate.get("response_headroom_tokens")) or headroom
+        candidate_headroom = (requested_headroom or _safe_int(candidate.get("response_headroom_tokens"))
+                              or policy_headroom or min(DEFAULT_RESPONSE_HEADROOM_TOKENS, max(1, tokens // 4)))
         if candidate_headroom >= tokens:
             continue
         return CapacityProfile(
@@ -815,10 +820,9 @@ def preflight_route_context_fit(
 ) -> dict[str, Any]:
     """Check every target in a proposed HER route against current context.
 
-    This is deliberately read-only.  A route change never compacts history as
-    a side effect, and an active Turn is never rewritten to make a target fit.
-    Unknown capacity remains explicit diagnostic state; a target with known
-    insufficient capacity is rejected before the routing revision is stored.
+    This is deliberately read-only. A route change never compacts history as
+    a side effect. The current count is an estimate, not the target provider's
+    tokenizer result; an estimated overrun is advisory rather than a veto.
     """
 
     current_tokens = estimate_effective_context_tokens(
@@ -831,7 +835,7 @@ def preflight_route_context_fit(
         else getattr(selected, "all_targets", lambda: ())()
     )
     rows: list[dict[str, Any]] = []
-    insufficient: list[dict[str, Any]] = []
+    estimated_over_budget: list[dict[str, Any]] = []
     for target in proposed_targets:
         provider = canonical_backend_engine(str(getattr(target, "provider", "")))
         model = str(getattr(target, "model", "") or "").strip()
@@ -850,21 +854,25 @@ def preflight_route_context_fit(
             "response_headroom_tokens": (
                 capacity.response_headroom_tokens if capacity is not None else None
             ),
-            "fits": (
+            "fits": None,
+            "estimated_fits": (
                 current_tokens <= capacity.usable_input_tokens
                 if capacity is not None
                 else None
             ),
+            "count_source": "hashi_estimate",
             "provenance": capacity.provenance if capacity is not None else "unknown",
         }
         rows.append(row)
-        if row["fits"] is False:
-            insufficient.append(row)
+        if row["estimated_fits"] is False:
+            estimated_over_budget.append(row)
     return {
-        "status": "insufficient" if insufficient else "fits_or_unknown",
+        "status": "estimated_over_budget" if estimated_over_budget else "fits_or_unknown",
         "current_context_tokens": current_tokens,
+        "count_source": "hashi_estimate",
         "targets": rows,
-        "insufficient_targets": insufficient,
+        "insufficient_targets": [],
+        "estimated_over_budget_targets": estimated_over_budget,
     }
 
 
@@ -912,11 +920,10 @@ def resolve_trigger_budget(
     *,
     policy: CompactionPolicy | None = None,
 ) -> CompactionTriggerBudget:
-    """Resolve the universal manual/automatic Compact operating window.
+    """Resolve the selected manual/automatic Compact operating window.
 
-    Provider capacity metadata remains diagnostic information only.  It must
-    not silently move the user-selected 64k manual floor or 128k automatic
-    trigger, and response headroom is not counted as existing context.
+    Provider capacity remains diagnostic for this maintenance policy, and
+    response headroom is not counted as existing context.
     """
 
     effective_policy = policy or load_policy(runtime)
@@ -925,7 +932,10 @@ def resolve_trigger_budget(
         high_projected_tokens=effective_policy.auto_trigger_tokens,
         low_input_tokens=effective_policy.post_compaction_target_tokens,
         response_headroom_tokens=0,
-        provenance="hashi_compaction_window_64k_128k_v1",
+        provenance=("hashi_compaction_window_64k_128k_v1"
+                    if (effective_policy.auto_trigger_tokens == DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
+                        and effective_policy.post_compaction_target_tokens == DEFAULT_POST_COMPACTION_TARGET_TOKENS)
+                    else "configured_compaction_policy"),
         target=target,
     )
 
@@ -2697,7 +2707,7 @@ class ContextCompactionCoordinator:
         continue_request_on_failure: bool = False,
     ) -> CompactionOutcome:
         policy = load_policy(self.runtime)
-        if trigger == "manual_command":
+        if trigger == "manual_command" and not force:
             current_tokens = estimate_effective_context_tokens(self.runtime)
             if current_tokens < policy.manual_min_tokens:
                 return CompactionOutcome(
@@ -2719,7 +2729,9 @@ class ContextCompactionCoordinator:
         async with self._operation_lock:
             self._active_task = task
             compaction_id = f"cmp-{uuid.uuid4().hex}"
-            route = resolve_compact_route(self.runtime)
+            # An unavailable model is irrelevant when there is no eligible
+            # history. Keep a factual empty route for safe failure reporting.
+            route = ResolvedCompactRoute(config=CompactRouteConfig())
             try:
                 snapshot = (
                     _snapshot(
@@ -2774,6 +2786,7 @@ class ContextCompactionCoordinator:
                         route_reasoning=route.reasoning,
                         her_effort=route.her_effort,
                     )
+                route = resolve_compact_route(self.runtime)
                 if route.crosses_provider:
                     secret_bearing = [
                         str(record.get("segment_ids") or ["unknown"])[0]

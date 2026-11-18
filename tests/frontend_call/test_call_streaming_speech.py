@@ -329,7 +329,7 @@ async def test_public_commentary_is_spoken_but_reasoning_is_never_queued(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_call_projection_removes_stage_directions_from_captions_and_speech(
+async def test_call_preserves_result_text_and_removes_stage_directions_from_speech(
     tmp_path,
 ):
     service, ports, _adapters, base, _clock = setup(tmp_path)
@@ -367,15 +367,14 @@ async def test_call_projection_removes_stage_directions_from_captions_and_speech
         await finish_task(service)
         call = service.calls["call-1"]
         assert source["text"].startswith("（小声）")
-        assert call.turn["answer"] == "李总，电话通了。预算（含 GST）不变。"
+        assert call.turn["answer"] == source["text"]
         assert call.turn["speech_segments"] == [
             "李总，电话通了。预算（含 GST）不变。",
         ]
         assistant_rows = [
             row["text"] for row in call.rows if row.get("speaker") == "assistant"
         ]
-        assert assistant_rows[-1] == "李总，电话通了。预算（含 GST）不变。"
-        assert all("小声" not in text for text in assistant_rows)
+        assert assistant_rows[-1] == source["text"]
     finally:
         await service.close()
 

@@ -72,6 +72,14 @@ Discovery does not mean:
 - protocol is compatible
 - agent directory is known
 
+Cached absence of the optional freshness or delivery-status capability does not
+prevent an authenticated protocol text message or its completed reply. When a
+delivery-status notice or reply attachment needs its own optional feature,
+the sender refreshes a missing cached capability using the existing
+nonce-authenticated handshake. An unsupported or unverified attachment is
+reported without silently sending only the text. A lost acknowledgement is
+an unknown outcome and is not automatically sent to another route.
+
 ### Discovery readiness and recovery
 
 Every configured backend reports `advertising`, `browsing`, `readiness`, peer
@@ -266,11 +274,17 @@ ACL without rewriting the credential bytes. Principal lookup or ACL repair
 failure remains an actionable startup error rather than being reclassified as
 an absent credential.
 
-Credential publication and ACL repair are explicit shared-Function bootstrap
-work. The shared candidate performs them once before starting Agent Workers;
-ordinary configuration reads and per-Agent Workers are read-only. A targeted
-Worker reboot therefore never repeats scheduled-task principal discovery or
-rewrites the shared secrets-file ACL.
+Credential publication and ACL repair belong to shared Functions. If a local
+API credential already exists but the same secrets document lacks the Remote
+shared token, shared bootstrap leaves the document unchanged and optional
+Remote activation prepares the token and consumer ACL after local readiness.
+Disabled Remote does not perform that preparation. Failure or a concurrent
+configuration change prevents that Remote publication without making an
+already-ready local service unready. Missing local credentials and separately
+configured Remote roots retain their existing synchronous bootstrap behavior.
+Ordinary configuration reads and per-Agent Workers are read-only. A targeted
+Worker reboot never repeats scheduled-task principal discovery or rewrites the
+shared secrets-file ACL.
 
 Handshake and protocol message requests include:
 

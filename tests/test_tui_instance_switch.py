@@ -119,6 +119,29 @@ async def test_failed_instance_switch_keeps_existing_connection(tmp_path):
         assert app._connection_generation == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("healthy", [True, False])
+async def test_instance_switch_can_try_configured_route_without_cached_peer(tmp_path, healthy):
+    (tmp_path / "agents.json").write_text(
+        '{"global":{"instance_id":"HASHI1","workbench_port":18800},"agents":[]}',
+        encoding="utf-8",
+    )
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    resolver = _Resolver(_targets()[:1])
+    resolver._remote_url = "http://127.0.0.1:8766"
+    app._instance_resolver = resolver
+    seen = []
+    candidate = _Candidate(healthy=healthy)
+    app._client_for_instance = lambda target: seen.append(target) or candidate
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._handle_instance_cmd("/instance HASHI2")
+        await pilot.pause()
+        assert seen[0].instance_id == "HASHI2"
+        assert app.current_instance_id == ("HASHI2" if healthy else "HASHI1")
+
+
 def test_tui_keeps_code_root_separate_from_portable_state_root(tmp_path):
     bridge_home = tmp_path / "data"
     code_root = tmp_path / "app" / "hashi"

@@ -65,6 +65,25 @@ async def test_external_agent_document_access_is_authorized_and_revision_checked
 
 
 @pytest.mark.asyncio
+async def test_document_api_advertises_configured_budget_and_saves_supported_large_edit(document_api):
+    server, headers = document_api.server, document_api.headers
+    server.global_config.agent_document_max_bytes = 3 * 1024 * 1024
+    content = render_pcm_document(persona="large", system="x" * (2 * 1024 * 1024 + 80))
+    async with TestClient(TestServer(server.app)) as client:
+        root = "/api/agents/momo/agent-document"
+        snapshot = await (await client.get(root, headers=headers)).json()
+        assert snapshot["max_document_bytes"] == 3 * 1024 * 1024
+        saved = await client.put(root, headers=headers, json={"expected_revision": snapshot["revision"], "content": content})
+        assert saved.status == 200
+        assert (await (await client.get(root, headers=headers)).json())["content"] == content
+        server.global_config.agent_document_max_bytes = 1024
+        limited = await client.get(root, headers=headers)
+        assert limited.status == 413
+        assert (await limited.json())["max_document_bytes"] == 1024
+        assert (document_api.workspace / "agent.md").read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
 async def test_agent_document_lock_wait_does_not_block_unrelated_api_requests(
     document_api, monkeypatch,
 ):

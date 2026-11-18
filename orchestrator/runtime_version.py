@@ -235,6 +235,12 @@ def render_version_all(
 
 
 async def _send(runtime: Any, update: Any, text: str) -> None:
+    from orchestrator.admin_local_testing import local_command_capture
+
+    capture = local_command_capture(runtime)
+    if capture is not None:
+        await capture.capture_send(update.effective_chat.id, text, parse_mode="HTML")
+        return
     await runtime.send_long_message(
         int(update.effective_chat.id),
         text,

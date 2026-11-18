@@ -357,3 +357,76 @@ async def test_scoped_run_admission_never_holds_sqlite_across_worker_await(tmp_p
         status, result = await mutate(client, base, "run", loop, headers=headers)
         assert status == 200, result
         assert len(runtime.reruns) == 1
+
+@pytest.mark.asyncio
+async def test_recovery_run_check_waits_without_blocking_event_loop(tmp_path):
+    import asyncio
+    import threading
+
+    from orchestrator.agent_mutation import _current_check
+    from orchestrator.scheduler import TaskScheduler
+
+    server, runtime, _, _ = fixture_state(tmp_path)
+    binding = active_run(server)
+    scheduler = TaskScheduler(
+        tasks_path=tmp_path / "tasks.json",
+        state_path=tmp_path / "recovery.json",
+        runtimes=[runtime],
+        authorized_id=123,
+    )
+    scheduler.state["recovery_batches"] = server.orchestrator.scheduler.state["recovery_batches"]
+    held, release = threading.Event(), threading.Event()
+
+    def hold_store_lock():
+        with server.session_store._lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_store_lock, daemon=True)
+    holder.start()
+    assert await asyncio.to_thread(held.wait, 2)
+    token = _current_check.set(lambda: server.session_store.hold_active_run(**binding))
+    operation = None
+    try:
+        operation = asyncio.create_task(scheduler.resolve_recovery_batch(
+            agent_name="momo", batch_id="batch-1", action="skip",
+            counts=None, runtime_map={"momo": runtime},
+        ))
+        await asyncio.wait_for(asyncio.sleep(0.05), 1)
+        assert not operation.done()
+        release.set()
+        result = await asyncio.wait_for(operation, 4)
+        assert result["resolution"]["action"] == "skip"
+    finally:
+        release.set()
+        if operation is not None and not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+        _current_check.reset(token)
+        await asyncio.to_thread(holder.join, 2)
+
+
+@pytest.mark.asyncio
+async def test_repeated_superloop_delete_reports_existing_result_without_second_approval(tmp_path):
+    server, runtime, loop, foreign = fixture_state(tmp_path)
+    binding = active_run(server)
+    async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+        base = str(upstream.make_url("")).rstrip("/")
+        token = credential(server, base, binding, tools=["hashi_superloop_delete"])
+        headers = {"X-Hashi-Scheduler-Token": token}
+        status, pending = await mutate(client, base, "loop_delete", loop, headers=headers)
+        assert status == 403
+        await approve(client, base, server, pending)
+        status, deleted = await mutate(client, base, "loop_delete", loop, headers=headers)
+        assert status == 200 and deleted["status"] == "deleted"
+        after = snapshot(tmp_path, runtime)
+        status, replay = await mutate(client, base, "loop_delete", loop, headers=headers)
+        assert status == 200, replay
+        assert replay["status"] == "deleted" and replay["already_deleted"] is True
+        assert snapshot(tmp_path, runtime) == after
+        status, _ = await mutate(client, base, "loop_delete", foreign, headers=headers)
+        assert status == 404
+        server.session_store.cancel_run(binding["run_id"], owner_id=binding["owner_id"])
+        status, _ = await mutate(client, base, "loop_delete", loop, headers=headers)
+        assert status in {401, 403}
+        assert snapshot(tmp_path, runtime) == after

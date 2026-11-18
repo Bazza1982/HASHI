@@ -11,6 +11,7 @@ import copy
 import hashlib
 import hmac
 import json
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -342,7 +343,7 @@ def _normalized_authorization_results(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, (list, tuple)):
         return []
     results: list[dict[str, Any]] = []
-    for raw in value[:16]:
+    for raw in value:
         if not isinstance(raw, Mapping):
             continue
         state = str(raw.get("state") or "invalid").strip().casefold()
@@ -355,6 +356,15 @@ def _normalized_authorization_results(value: Any) -> list[dict[str, Any]]:
                 "runtime_verified" if state == "success" else "runtime_rejected"
             ),
         }
+        reason = str(raw.get("reason") or "")
+        if state != "success" and reason in {
+            "proof_budget_exceeded", "resource_budget_exceeded", "policy_invalid", "policy_unavailable"
+        }:
+            item["reason"] = reason
+            for key in ("provided_count", "max_proofs", "max_resources"):
+                count = raw.get(key)
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    item[key] = count
         proof_id = str(raw.get("proof_id") or "").strip()
         if proof_id:
             item["proof_id"] = proof_id[:128]
@@ -499,6 +509,30 @@ def build_message_context_snapshot(
         "private_authorizations": authorizations,
         "authorization_scope": "current_message",
     }
+    # This is display-only information supplied by the Session API after it
+    # classifies the sender's timestamp. It is never an authorization input.
+    age = inputs.get("_frontend_message_age")
+    if isinstance(age, Mapping):
+        from orchestrator.message_freshness import parse_rfc3339_utc
+
+        reason = str(age.get("reason") or "")
+        received = parse_rfc3339_utc(age.get("received_at"))
+        originated = parse_rfc3339_utc(age.get("originated_at"))
+        seconds = age.get("age_seconds")
+        valid_seconds = (
+            seconds is None
+            or (type(seconds) in {int, float} and math.isfinite(seconds))
+        )
+        if (reason in {"fresh", "stale", "timestamp_missing", "timestamp_invalid", "timestamp_in_future"}
+                and received is not None and valid_seconds
+                and ((originated is None and seconds is None)
+                     or (originated is not None and seconds is not None))):
+            snapshot["message_age"] = {
+                "reason": reason,
+                "originated_at": age.get("originated_at") if originated is not None else None,
+                "received_at": age.get("received_at"),
+                "age_seconds": seconds,
+            }
     if (
         source_fact["id"] == "agentpresence"
         and inputs.get(AGENTPRESENCE_AUTHENTICATED_METADATA_KEY) is True
@@ -556,6 +590,8 @@ def build_message_context_snapshot(
             and hchat_idempotency == f"hchat:{hchat_message_id}"
             and re.fullmatch(r"sha256:[0-9a-f]{64}", hchat_digest)
         ):
+            exchange_binding = hchat.get("exchange_message")
+            exchange_binding = exchange_binding if isinstance(exchange_binding, Mapping) else {}
             snapshot["hchat_message"] = {
                 "message_id": hchat_message_id,
                 "originated_at": str(hchat.get("originated_at") or "").strip(),
@@ -564,6 +600,9 @@ def build_message_context_snapshot(
                 ).strip().casefold(),
                 "idempotency_key": hchat_idempotency,
                 "payload_digest": hchat_digest,
+                "conversation_id": str(hchat.get("conversation_id") or exchange_binding.get("conversation_id") or "").strip(),
+                "in_reply_to": str(hchat.get("in_reply_to") or exchange_binding.get("in_reply_to") or "").strip(),
+                "to_instance": to_instance,
             }
         origin = hchat.get("origin_instance")
         if isinstance(origin, Mapping) and str(origin.get("id") or "").strip():
@@ -614,7 +653,7 @@ def build_message_context_snapshot(
                 message_id = str(exchange_message.get("message_id") or "").strip()
                 origin_instance_id = str(
                     (origin or {}).get("id") if isinstance(origin, Mapping) else ""
-                ).strip().upper()
+                ).strip()
                 target_instance_id = str(snapshot["processing_instance"]).upper()
                 if message_id and origin_instance_id and target_instance_id:
                     from orchestrator.frontend_contracts import normalize_relay_envelope
@@ -677,7 +716,7 @@ def resolve_private_authorizations(
                 "state": "invalid",
                 "verification": "runtime_rejected",
             }
-            for proof in proofs[:16]
+            for proof in proofs
         ]
     from orchestrator.private_authorization import authorization_content_sha256
 
@@ -705,11 +744,14 @@ def resolve_private_authorizations(
                 "state": "invalid",
                 "verification": "runtime_rejected",
             }
-            for proof in proofs[:16]
+            for proof in proofs
         ]
     root = project_root_for_runtime(runtime)
     if root is None:
-        return []
+        return [{
+            "credential_id": "unknown", "state": "invalid", "verification": "runtime_rejected",
+            "reason": "policy_unavailable", "provided_count": len(proofs),
+        }]
     from orchestrator.private_authorization import verify_configured_proofs
 
     return verify_configured_proofs(root, proofs=proofs, binding=binding)

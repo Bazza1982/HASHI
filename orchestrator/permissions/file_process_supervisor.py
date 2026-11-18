@@ -12,6 +12,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import secrets
 import tempfile
 from uuid import uuid4
 
@@ -19,14 +20,62 @@ from orchestrator.permissions.authority import PermissionDenied
 from orchestrator.permissions.descriptors import describe_tool
 from orchestrator.permissions.pao_run_fence import PaoRunFence
 from orchestrator.permissions.windows_file_binding import (
-    BoundWindowsCreate, FileBindingError, FileBindingCleanupFailed, open_bound_read, open_bound_write, open_bound_directory, _path_parts,
+    BoundWindowsCreate, FileBindingError, FileBindingCleanupFailed, open_bound_create, open_bound_read, open_bound_write, open_bound_directory, _path_parts,
 )
-from orchestrator.permissions.file_operations import FILE_TOOLS, search_options
+from orchestrator.permissions.file_operations import FILE_TOOLS, listing_options, search_options
 from orchestrator.permissions.network_worker import NETWORK_TOOLS, RequestNotSent, prepare as prepare_network
 from orchestrator.permissions.file_results import PRESTART_BINDING_FAILURE, render_helper_result
 from orchestrator.permissions.windows_process import (
     WindowsProcessCleanupFailed, inheritable_handle_copy, launch_suspended,
 )
+
+
+def prepare_managed_listing(context, descriptor, arguments, *, protected_paths, cursor_key):
+    """Build a private worker plan after the caller has validated its descriptor."""
+    listing_options(arguments)
+    if (descriptor.tool_name != "file_list" or len(descriptor.scopes) != 1
+            or not isinstance(cursor_key, bytes) or len(cursor_key) < 32):
+        raise ValueError("invalid managed directory listing plan")
+    scope_digest = sha256(json.dumps(asdict(context), sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {"arguments": {**arguments, "path": descriptor.scopes[0].resource},
+            "roots": [descriptor.scopes[0].resource], "protected": tuple(protected_paths),
+            "list_cursor_key": cursor_key.hex(), "list_scope": scope_digest}
+
+
+def prepare_managed_search(context, descriptor, arguments, *, protected_paths, cursor_key):
+    """Bind continuation to the reviewed roots and the current live Run."""
+    search_options(arguments)
+    if (descriptor.tool_name != "file_search" or not descriptor.scopes
+            or not isinstance(cursor_key, bytes) or len(cursor_key) < 32):
+        raise ValueError("invalid managed search plan")
+    scope_digest = sha256(json.dumps(asdict(context), sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {"arguments": arguments, "roots": [item.resource for item in descriptor.scopes],
+            "protected": tuple(protected_paths), "list_cursor_key": cursor_key.hex(),
+            "list_scope": scope_digest}
+
+
+def prepare_managed_http_file_scopes(descriptor, arguments, *, cwd):
+    """Order exact approved HTTP handles as request body followed by response file."""
+    from orchestrator.permissions.models import normalize_scope
+
+    if descriptor.tool_name not in NETWORK_TOOLS or not isinstance(arguments, dict):
+        raise ValueError("invalid HTTP descriptor")
+    expected = []
+    source = arguments.get("body_file") if descriptor.tool_name == "http_request" else None
+    target = arguments.get("response_file") if descriptor.tool_name == "http_request" else None
+    if source is not None:
+        expected.append(normalize_scope("file", source, ("read",), cwd=cwd))
+    if target is not None:
+        output = normalize_scope("file", target, ("create", "write"), cwd=cwd)
+        if expected and output.resource == expected[0].resource:
+            raise ValueError("HTTP request and response files must differ")
+        expected.append(output)
+    actual = tuple(item for item in descriptor.scopes if item.kind == "file")
+    if len(actual) != len(expected) or set(actual) != set(expected):
+        raise ValueError("HTTP files differ from the approved descriptor")
+    return tuple(expected)
 
 
 class WindowsFileProcessSupervisor:
@@ -52,6 +101,7 @@ class WindowsFileProcessSupervisor:
         self._network_options = dict(network_options or {})
         self._runner, self._parent_job = runner_client, parent_job
         self.credential_names = tuple(sorted(self._network_options.get("credentials", {})))
+        self._list_cursor_key = secrets.token_bytes(32)
         self._capacity = asyncio.Semaphore(1)
         self._active, self._closed = {}, False
         self._tasks = set()
@@ -125,12 +175,22 @@ class WindowsFileProcessSupervisor:
                 raise PermissionDenied("file data exceeds the supervised limit")
         else:
             if descriptor.tool_name == "file_search":
-                search_options(frozen)
-            elif (set(frozen) - {"path", "limit"} or type(frozen.get("limit", 200)) is not int
-                    or not 1 <= frozen.get("limit", 200) <= 500):
-                raise PermissionDenied("unsupported directory list arguments")
-            data = json.dumps({"arguments": frozen, "roots": [item.resource for item in descriptor.scopes],
-                               "protected": self._protected_paths}, ensure_ascii=False).encode("utf-8")
+                try:
+                    plan_data = prepare_managed_search(
+                        context, descriptor, frozen, protected_paths=self._protected_paths,
+                        cursor_key=self._list_cursor_key,
+                    )
+                except ValueError as exc:
+                    raise PermissionDenied(str(exc)) from exc
+            else:
+                try:
+                    plan_data = prepare_managed_listing(
+                        context, descriptor, frozen, protected_paths=self._protected_paths,
+                        cursor_key=self._list_cursor_key,
+                    )
+                except ValueError as exc:
+                    raise PermissionDenied(str(exc)) from exc
+            data = json.dumps(plan_data, ensure_ascii=False).encode("utf-8")
         async with self._capacity:
             if self._closed:
                 raise PermissionDenied("file supervisor is closed")
@@ -150,10 +210,19 @@ class WindowsFileProcessSupervisor:
                 bounds, transfers = [], []
                 resource.update(bounds=bounds, transfers=transfers)
                 bound_scopes = tuple(item for item in descriptor.scopes if item.kind == "file")
-                for item in (() if descriptor.tool_name in NETWORK_TOOLS else bound_scopes):
-                    bound = (open_bound_directory(item) if descriptor.tool_name in {"file_list", "file_search"} else
-                             open_bound_read(item, exclusive=descriptor.tool_name == "run_script")
-                             if descriptor.tool_name in {"file_read", "run_script"} else open_bound_write(item))
+                if descriptor.tool_name in NETWORK_TOOLS:
+                    try:
+                        bound_scopes = prepare_managed_http_file_scopes(descriptor, frozen, cwd=self._cwd)
+                    except ValueError as error:
+                        raise PermissionDenied("HTTP files differ from the reviewed descriptor") from error
+                for item in bound_scopes:
+                    if descriptor.tool_name in NETWORK_TOOLS:
+                        bound = (open_bound_read(item, exclusive=True) if item.actions == ("read",)
+                                 else open_bound_create(item))
+                    else:
+                        bound = (open_bound_directory(item) if descriptor.tool_name in {"file_list", "file_search"} else
+                                 open_bound_read(item, exclusive=descriptor.tool_name == "run_script")
+                                 if descriptor.tool_name in {"file_read", "run_script"} else open_bound_write(item))
                     bounds.append(bound)
                     copy_kernel, copy_handle = inheritable_handle_copy(bound._handles[-1])
                     transfers.append((copy_kernel, copy_handle))
@@ -178,9 +247,11 @@ class WindowsFileProcessSupervisor:
                         "runner": self._runner.script_helper_descriptor(), "parent_job_name": private_job_name(preassigned),
                         "input_indices": indices, "result": str(result_path),
                     }, ensure_ascii=False).encode("utf-8")
+                plan_bound = (bounds[-1] if descriptor.tool_name in NETWORK_TOOLS
+                              and frozen.get("response_file") is not None else bound)
                 plan = {
                     "format": "hashi-file-helper-v1", "action": action, "handles": [handle for _, handle in transfers],
-                    "directory": getattr(bound, "_directory", ""), "name": getattr(bound, "_name", ""),
+                    "directory": getattr(plan_bound, "_directory", ""), "name": getattr(plan_bound, "_name", ""),
                     "data": base64.b64encode(data or b"").decode("ascii"), "result": str(result_path),
                 }
                 encoded = json.dumps(plan, separators=(",", ":"), allow_nan=False).encode("utf-8")

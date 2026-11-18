@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import re
 import sys
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from orchestrator.config_json import read_config_json
+from orchestrator.lan_transport import lan_host_is_admissible
 from orchestrator.tts_routing import normalize_language
 
 
@@ -34,10 +36,6 @@ _CREDENTIAL_REF = re.compile(
     r"(?:env://[A-Z][A-Z0-9_]{0,100}|secrets://[A-Za-z0-9][A-Za-z0-9_-]{0,100})"
 )
 _CREDENTIAL_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,100}")
-_PRIVATE_LAN_NETWORKS = tuple(
-    ip_network(cidr)
-    for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
-)
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _RESERVED_REQUEST_FIELDS = frozenset(
     {
@@ -113,13 +111,34 @@ def _identifier(value: object, field: str) -> str:
     return selected
 
 
-def _plain_text(value: object, field: str, maximum: int) -> str:
+def _selected_capacity(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    if not raw.isascii() or not raw.isdecimal() or int(raw) < 1:
+        raise VoiceCatalogError(f"invalid voice capacity setting: {name}")
+    return int(raw)
+
+
+def _model_text(value: object) -> str:
+    if (not isinstance(value, str) or not value.strip()
+        or any(ord(character) < 32 for character in value)):
+        raise VoiceCatalogError("service model is invalid")
+    maximum = _selected_capacity("HASHI_MEDIA_MAX_MODEL_CHARS")
+    if maximum is not None and len(value) > maximum:
+        error = VoiceCatalogError("service model exceeds selected capacity")
+        error.capacity = {"setting": "HASHI_MEDIA_MAX_MODEL_CHARS", "limit": maximum}
+        raise error
+    return value
+
+
+def _plain_text(value: object, field: str, maximum: int | None) -> str:
     if not isinstance(value, str):
         raise VoiceCatalogError(f"{field} must be text")
     selected = value.strip()
     if (
         not selected
-        or len(selected) > maximum
+        or maximum is not None and len(selected) > maximum
         or any(ord(character) < 32 for character in selected)
     ):
         raise VoiceCatalogError(f"{field} is invalid")
@@ -193,16 +212,6 @@ def _localized_text(value: object, field: str) -> dict[str, str]:
     return result
 
 
-def _private_lan_literal(host: str) -> bool:
-    try:
-        address = ip_address(host)
-    except ValueError:
-        return False
-    return address.version == 4 and any(
-        address in network for network in _PRIVATE_LAN_NETWORKS
-    )
-
-
 def _validate_openai_endpoint(service: dict[str, object]) -> None:
     raw_url = _plain_text(service.get("base_url"), "service base_url", 500)
     try:
@@ -224,7 +233,7 @@ def _validate_openai_endpoint(service: dict[str, object]) -> None:
     if location == "local":
         valid = parsed.scheme in {"http", "https"} and hostname in _LOOPBACK_HOSTS
     elif location == "lan":
-        valid = parsed.scheme in {"http", "https"} and _private_lan_literal(hostname)
+        valid = parsed.scheme in {"http", "https"} and lan_host_is_admissible(hostname)
     elif location == "cloud":
         valid = parsed.scheme == "https" and hostname not in _LOOPBACK_HOSTS
         try:
@@ -310,7 +319,7 @@ def _validate_service(value: object) -> dict[str, object]:
         "location": value.get("location"),
         "base_url": value.get("base_url"),
     }})
-    service["model"] = _plain_text(value.get("model"), "service model", 200)
+    service["model"] = _model_text(value.get("model"))
     if "automatic_performance" in value:
         if type(value["automatic_performance"]) is not bool:
             raise VoiceCatalogError("automatic_performance must be boolean")
@@ -423,8 +432,13 @@ def _validated_rows(document: Mapping[str, object], key: str, validator) -> list
     if not document:
         return []
     rows = document.get(key, [])
-    if not isinstance(rows, list) or len(rows) > 500:
-        raise VoiceCatalogError(f"voice catalog {key} must be a bounded list")
+    if not isinstance(rows, list):
+        raise VoiceCatalogError(f"voice catalog {key} must be a list")
+    maximum = _selected_capacity("HASHI_VOICE_CATALOG_MAX_ROWS")
+    if maximum is not None and len(rows) > maximum:
+        error = VoiceCatalogError(f"voice catalog {key} exceeds selected capacity")
+        error.capacity = {"setting": "HASHI_VOICE_CATALOG_MAX_ROWS", "limit": maximum}
+        raise error
     selected = [validator(row) for row in rows]
     identifiers = [str(row["id"]) for row in selected]
     if len(set(identifiers)) != len(identifiers):

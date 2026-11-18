@@ -11,6 +11,7 @@ from pathlib import Path
 import aiohttp
 
 from orchestrator.media_runtime import configured_media_executable
+from orchestrator.lan_transport import LanDestinationError, configured_media_session
 from orchestrator.openai_compatible_speech import (
     SpeechProtocolError,
     build_speech_request,
@@ -93,7 +94,7 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
         if planning_budget is not None:
             headers["X-Hashi-Speech-Budget-Ms"] = str(max(1, int(planning_timeout*1000)))
         timeout = aiohttp.ClientTimeout(total=planning_timeout, sock_connect=10, sock_read=planning_timeout)
-        async with self.session_factory(timeout=timeout, trust_env=False) as session:
+        async with configured_media_session(self.session_factory, self.service, timeout=timeout) as session:
             async with session.post(
                 str(self.service["base_url"]).rstrip("/") + "/speech/performance",
                 json={"model": self.service["model"], "input": text},
@@ -123,7 +124,7 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
         if maximum is None and sink is None:
             raise ValueError("Unbounded speech responses require a file sink")
         try:
-            async with self.session_factory(timeout=timeout, trust_env=False) as session:
+            async with configured_media_session(self.session_factory, self.service, timeout=timeout) as session:
                 async with session.post(
                     str(self.service["base_url"]).rstrip("/") + "/audio/speech",
                     json=body,
@@ -183,6 +184,12 @@ class OpenAICompatibleTTSProvider(BaseTTSProvider):
             raise OpenAICompatibleTTSError(
                 "tts_timeout",
                 f"{self.service_id} TTS request timed out.",
+                retryable=True,
+            ) from exc
+        except LanDestinationError as exc:
+            raise OpenAICompatibleTTSError(
+                "tts_provider_unavailable",
+                f"{self.service_id} TTS LAN destination is unavailable.",
                 retryable=True,
             ) from exc
         except (aiohttp.ClientError, OSError) as exc:

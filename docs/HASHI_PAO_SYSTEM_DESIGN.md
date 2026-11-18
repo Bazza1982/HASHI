@@ -18,6 +18,16 @@ updates keep their original generation fence and their late output is rejected.
 A failed or uncertain store commit never guesses a new generation or retries
 the reset. This is a Functions-side completion fix, not runtime adoption proof.
 
+### 2026-11-18 Attachment storage wait
+
+Session attachment staging and commit execute outside the HTTP event loop.
+Each uses a bounded in-process and SQLite lock wait, defaulting to 1,500ms;
+`HASHI_ATTACHMENT_STORAGE_WAIT_MS` selects 1 to 60,000ms. The effective wait is
+advertised in the frontend connector capability. An exhausted wait returns
+`session_storage_busy` (503). A cancelled or lost response does not establish
+whether an operation completed: use its existing stage idempotency key or
+attachment identity to reconcile; the server does not submit a second write.
+
 ### 2026-11-03 Nonblocking history reads and bounded search candidates
 
 PAO remains the sole history owner. Session list/get/messages/run/event and
@@ -27,9 +37,12 @@ transaction and error semantics; worker threads do not hold a new authority.
 
 `POST /api/v1/agents/{agent_id}/history/search` is an authenticated, read-only
 Session extension, advertised separately as `agent_history_search` v1.0 with
-`literal_superset_v1`. A private JSON body contains a literal query (256-character
-maximum), bounded limit and optional opaque cursor. Search text is never put
-in a URL. The existing history signature additionally binds a keyed query
+`literal_superset_v1`. A private JSON body contains a literal query, bounded
+limit and optional opaque cursor. The default query budget is 16,384 Unicode
+characters; an instance may select `HASHI_HISTORY_SEARCH_MAX_QUERY_CHARS`
+from 1 to 1,048,576. The capability advertises the effective query and
+JSON-body budgets. Over-budget queries are rejected explicitly and never
+truncated. Search text is never put in a URL. The existing history signature additionally binds a keyed query
 fingerprint: owner, instance, Agent, query and older-history boundary must match;
 ordinary history and search cursors are not interchangeable.
 
@@ -75,8 +88,9 @@ New Agent-scoped users receive chat and conversation-confirmation controls.
 Legacy allowlist users retain their previous owner Session and command access
 until removed. Management commands are for global and legacy users. Direct Telegram management
 commands cannot use a chat-only grant to reach other Agents.
-Replacing the primary revokes previously granted global users. An additional
-new actor's direct private Telegram chat uses its own Session owner scope; the
+Replacing the primary preserves unrelated global and Agent-specific grants by
+default; an explicit revoke-all choice removes them. The old primary loses its
+former owner authority. An additional new actor's direct private Telegram chat uses its own Session owner scope; the
 existing primary owner scope and Workbench conversation remain unchanged.
 Authorized users inherit the selected Agent's existing Workzone profile; global
 and legacy users may manage it, while new Agent-only users cannot. Global users
@@ -236,6 +250,13 @@ is cancelled on quiesce and cannot hold the real Run drain boundary. Terminal
 receipt retention also bounds notification retries; stale undelivered notices
 cannot consume active-operation capacity. See [reboot receipts](HASHI_REBOOT_RECEIPTS.md)
 and the [HASHI3 repair](repairs/REBOOT_NONBLOCKING_NOTICES_20261008.md).
+
+During shared-Functions handoff, the retiring generation answers GET
+/api/health with a minimal no-storage draining snapshot and ready: false.
+That response describes the old generation; it does not establish that the new
+generation is ready or authorize new work. Other endpoints remain temporarily
+unavailable with Retry-After. A reliable Core-owned cancellation route during
+handoff still requires implementation and verification.
 
 Agent deletion is a PAO-owned lifecycle operation in shared Functions. A
 Function generation that implements the preview, confirmation, cleanup, and
@@ -755,8 +776,11 @@ to delete. Legacy request-only tokens cannot perform a scoped deletion.
 
 This reuses the existing PAO decision API/events, not a second approval UI or
 the L1/L2 permission service. Personal L0 listing, creation and editing remain
-unchanged. Authenticated frontend settings retain their explicit confirmation
-and revision-safe deletion; Governed management checks remain in force.
+unchanged. An authenticated frontend's explicit deletion action carries its
+exact target and revision without a second literal confirmation marker;
+governed management checks remain in force. Agent-originated deletion still
+uses the existing PAO decision path pending consolidation with the canonical
+operation decision.
 Focused coverage includes real HTTP ToolRegistry and serialized gateway
 approved deletion, forged approval, owner-only decisions, stopped-Run replay,
 attempt/generation revocation, one-use decisions, concurrent stop, foreign
@@ -781,8 +805,11 @@ immediate single-job rerun and Superloop deletion use PAO's existing owner
 decision endpoint and one-use Run approval. Their exact scopes are respectively
 `activity.scheduler.run` (Agent, kind, job ID and current definition revision)
 and `activity.superloop.delete` (Agent and loop ID). Model strings cannot approve
-either action. Confirmed Scheduler deletion above retains its existing writer,
-ownership and revision checks unchanged.
+either action. A repeat Superloop deletion of an already-deleted owned record
+returns its retained state without a new approval or write, after validating
+the live Run; it does not claim that this attempt performed the deletion.
+Confirmed Scheduler deletion above retains its existing writer, ownership and
+revision checks unchanged.
 
 Short local effects reacquire and hold the Run fence through the write, including
 after body parsing. Async queue/Worker operations validate admission without
@@ -1037,11 +1064,29 @@ ledger.
 Optional private authorization uses `hashi.private-authorization-proof` version
 1 with HMAC-SHA-256. One proof binds message ID, source and target Agent/instance,
 the SHA-256 of the sender-authored content, requested resources, issue time,
-expiry, and a random nonce. The sender explicitly selects at most 16 credential
-IDs for one message; HASHI never auto-attaches every credential held by an
-Agent. The receiver's protected configuration alone maps a credential to group,
-scopes, allowed source/target identities, resources, expiry and revocation.
+expiry, and a random nonce. The sender explicitly selects credential IDs for
+each message; HASHI never auto-attaches every credential held by an Agent. The
+receiver's protected configuration alone maps a credential to group, scopes,
+allowed source/target identities, resources, expiry and revocation.
 Sender-claimed scopes are not accepted.
+
+The optional nested credential configuration may include a policy with
+default_ttl_seconds, max_ttl_seconds, max_proofs_per_message and
+max_resources_per_message. Defaults remain 90 seconds, 300 seconds, 16 proofs
+and 64 resources. Each instance advertises its effective receiver budget.
+A receiver whose budget is smaller reports an explicit rejection without
+silently verifying a prefix; a malformed optional policy does not block messages
+without proofs. Message context includes every verified result.
+
+A fresh proof may renew the same recipient/message binding. The existing PAO
+nonce store now also records the first verified binding for each credential and
+recipient so a later signed proof cannot change that message's content,
+resources or source. Different fanout recipients have independent bindings.
+This record is currently durable without an automatic retention cleanup.
+Pre-upgrade nonce records contain only a binding digest and cannot reconstruct
+a missing recipient binding; existing message histories need a separate
+migration/reconciliation review. Automatic sender renewal and negotiation of
+different peer budgets are not yet implemented.
 
 Credential material is stored only in the existing ignored `secrets.json`
 boundary under `hashi_private_shared_credentials.credentials`. The minimal
@@ -1285,7 +1330,8 @@ across startup or a shared Functions handoff. This does not alter Core lifecycle
 
 PAO retains one Agent queue, admission sequence, configuration writer, Run fences
 and canonical delivery owners. The default execution budget is two persistent
-Sessions (Agent extra `max_concurrent_sessions`, integer 1..8). SessionQueue keeps
+Sessions (Agent extra `max_concurrent_sessions`, a positive integer selected for
+the available resources). SessionQueue keeps
 waiting turns in the existing visible queue, selects the earliest eligible turn,
 and holds a Session slot through detached completion. One Session remains FIFO.
 
@@ -1308,6 +1354,13 @@ pool. No auxiliary call reacquires its owning Run's quota. The same queue derive
 selected-request wait reasons; cancellation releases a capacity waiter and
 settles its queue item once. Canonical filesystem intent leases protect nested
 workspace mutations without serializing independent file writes or model work.
+The owner may set `execution_limits.instance_sessions` and per-engine values to
+positive integers. Capacity wait has no default deadline; an optional positive
+`execution_limits.queue_wait_seconds` sets a specific deadline. API Gateway
+derives its instance and engine slot settings from the same configuration;
+Gateway and Function active slots are still accounted separately across
+processes. The optional saved Gateway per-model limit remains respected. The
+filesystem lease timeout is separate.
 Failed attachment intake uses owner-scoped atomic unbound discard; uncertain
 admission keeps the existing idempotency identity and assets. See the nightly
 repair record for limits, focused red/green and separate adoption evidence.

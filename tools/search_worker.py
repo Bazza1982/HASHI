@@ -6,6 +6,7 @@ from functools import cache
 import json
 import stat
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,9 @@ if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.literal_search import scan_literal
+from tools.regex_search import (
+    RegexScanError, scan_python_regex, scan_regex, validate_python_regex, validate_regex,
+)
 
 PROJECT_EXCLUDED_DIRS = frozenset({'.git', 'node_modules', '.venv', '.venv-wsl',
                                   'venv', '__pycache__', '.tox', '.cache', 'target',
@@ -63,6 +67,9 @@ class Scanner:
                          'matches': 0, 'skipped': 0, 'errors': 0},
             'errors': [], 'warnings': [], 'turn': 0,
         }
+        if config.get('regex_content'):
+            self.state.setdefault('regex_line_budget_effective', config['regex_line_budget_effective'])
+            self.state.setdefault('regex_line_budget_source', config['regex_line_budget_source'])
         self.count = self.state['counters']
         self.matches = []
         self.match_chars = 0
@@ -77,6 +84,7 @@ class Scanner:
         self.blocked = [Path(value).resolve() for value in config.get('protected_read_paths', [])]
         self.selected = [Path(item['path']).resolve() for item in config['selected_roots']]
         self.iterators: dict[str, object] = {}
+        self.path_regex = None
 
     def error(self, path, code):
         self.count['errors'] += 1
@@ -111,6 +119,8 @@ class Scanner:
         query = self.cfg['query']
         if self.cfg['match'] == 'glob':
             return glob_match(relative, query, self.cfg['case_sensitive'])
+        if self.path_regex is not None:
+            return self.path_regex.search(relative) is not None
         return query in relative if self.cfg['case_sensitive'] else query.casefold() in relative.casefold()
 
     def add(self, match):
@@ -122,6 +132,15 @@ class Scanner:
         match['file_signature'] = observed
         if match['type'] == 'file':
             match['size_bytes'] = observed[2]
+        if (self.cfg['operation'] == 'file_search' and
+                match.get('term') == self.cfg['query'] and len(self.cfg['query']) > 2048):
+            match.pop('term')
+            match['term_ref'] = 'query'
+            excerpt = match.get('excerpt')
+            if isinstance(excerpt, str) and len(excerpt) > 1600:
+                match['excerpt'] = excerpt[:1600]
+                match['excerpt_truncated'] = True
+                match['excerpt_original_chars'] = len(excerpt)
         size = len(json.dumps(match, ensure_ascii=False))
         if size > self.cfg['match_budget']:
             self.error(match['path'], 'match_exceeds_output_budget')
@@ -222,11 +241,30 @@ class Scanner:
         def progress(count):
             self.count['characters_read'] = before + count
             self.progress()
-        result = scan_literal(physical, terms=tuple(self.cfg.get('terms') or [self.cfg['query']]),
-                              case_sensitive=self.cfg['case_sensitive'],
-                              max_results=max(1, self.cfg['max_results'] - len(self.matches)),
-                              context_chars=self.cfg['context_chars'], state=item['text_state'],
-                              character_budget=128 * 1024, progress=progress)
+        if self.cfg['match'] == 'regex':
+            try:
+                arguments = dict(
+                    query=self.cfg['query'], case_sensitive=self.cfg['case_sensitive'],
+                    max_results=max(1, self.cfg['max_results'] - len(self.matches)),
+                    context_chars=self.cfg['context_chars'], state=item['text_state'],
+                    expected_signature=item['signature'],
+                    max_line_bytes=self.cfg['regex_line_budget_effective'], progress=progress,
+                )
+                result = (scan_regex(physical, binary=self.cfg['regex_backend'], **arguments)
+                          if self.state['regex_engine_effective'] == 'ripgrep'
+                          else scan_python_regex(physical, **arguments))
+            except RegexScanError as exc:
+                if exc.code == 'file_changed':
+                    raise StaleCursor(str(path)) from exc
+                self.error(path, f'{exc.code}: {exc}')
+                root['pending_file'] = None
+                return True
+        else:
+            result = scan_literal(physical, terms=tuple(self.cfg.get('terms') or [self.cfg['query']]),
+                                  case_sensitive=self.cfg['case_sensitive'],
+                                  max_results=max(1, self.cfg['max_results'] - len(self.matches)),
+                                  context_chars=self.cfg['context_chars'], state=item['text_state'],
+                                  character_budget=128 * 1024, progress=progress)
         item['text_state'] = result['continuation']
         if result['encoding_warning'] and 'UTF-8 replacement characters observed' not in self.state['warnings']:
             self.state['warnings'].append('UTF-8 replacement characters observed')
@@ -309,9 +347,6 @@ class Scanner:
                 if not self.cfg['cross_filesystems'] and sig[0] != root['signature'][0]:
                     self.count['skipped'] += 1
                     continue
-                if len(root['stack']) >= 128:
-                    self.error(path, 'depth_budget')
-                    continue
                 root['stack'].append(self.frame(
                     path, sig=sig, resolved=str(target)))
                 if self.cfg['mode'] == 'path' and self.path_matches(relative) and self.selected_candidate(relative):
@@ -341,6 +376,35 @@ class Scanner:
 
     def run(self):
         try:
+            if self.cfg['match'] == 'regex' and self.cfg['mode'] == 'path':
+                try:
+                    self.path_regex = re.compile(
+                        self.cfg['query'], 0 if self.cfg['case_sensitive'] else re.IGNORECASE)
+                except (re.error, OverflowError, RecursionError) as exc:
+                    self.stop_reason = 'invalid_regex'
+                    self.error('query', f'invalid regex: {exc}')
+                    return self.result(stale=True)
+            if self.cfg.get('regex_content') and 'regex_engine_effective' not in self.state:
+                requested = self.cfg['regex_engine_requested']
+                engine = 'ripgrep' if self.cfg['regex_backend'] else 'python'
+                try:
+                    if engine == 'ripgrep':
+                        try:
+                            validate_regex(
+                                self.cfg['regex_backend'], self.cfg['query'], self.cfg['case_sensitive']
+                            )
+                        except RegexScanError as exc:
+                            if requested != 'auto' or exc.code != 'invalid_regex':
+                                raise
+                            validate_python_regex(self.cfg['query'])
+                            engine = 'python'
+                    else:
+                        validate_python_regex(self.cfg['query'])
+                except RegexScanError as exc:
+                    self.stop_reason = exc.code
+                    self.error('query', f'{exc.code}: {exc}')
+                    return self.result(stale=True)
+                self.state['regex_engine_effective'] = engine
             for root in self.state['roots']:
                 if root.get('initialized') and not root['done']:
                     if signature(Path(root['path'])) != root['signature']:
@@ -400,7 +464,9 @@ class Scanner:
         state = None if exhausted or stale else self.state
         if state and len(json.dumps(state, ensure_ascii=False).encode('utf-8')) > 2500000:
             state = None
-            self.state['warnings'].append('Continuation capacity exceeded; no scan continues after return')
+            warning = 'Continuation capacity exceeded; no scan continues after return'
+            self.state['warnings'].append(warning)
+            warnings.append(warning)
         self.progress(force=True)
         return {'matches': self.matches, 'counters': self.count,
                 'coverage': {'roots': [{'path': root['path'], 'exhausted': root['done'],
@@ -408,6 +474,8 @@ class Scanner:
                              'errors': self.state['errors']},
                 'scope_exhausted': exhausted, 'coverage_complete': complete,
                 'stop_reason': self.stop_reason, 'warnings': warnings,
+                **({'regex_engine': self.state.get('regex_engine_effective')}
+                   if self.cfg.get('regex_content') else {}),
                 'state': state}
 
 

@@ -215,6 +215,11 @@ def load_live_runtime_policy(
     if secrets_path is not None:
         protected_write.append(secrets_path)
         protected_read.append(secrets_path)
+    from orchestrator.workbench_auth import scheduler_delegation_path
+
+    delegation_path = scheduler_delegation_path(bridge_home)
+    protected_write.append(delegation_path)
+    protected_read.append(delegation_path)
     instance_id = str(getattr(global_config, "instance_id", "") or "").strip()
     service_targets = [instance_id] if instance_id else []
     configuration_error: str | None = None

@@ -9,7 +9,9 @@ from textual.containers import VerticalScroll, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
-from onboarding.connection import ConnectionError, choices, validate, save, adopt_if_running, connect_telegram
+from onboarding.connection import (
+    ConnectionError, choices, connection_revisions, validate, save, adopt_if_running, connect_telegram,
+)
 
 
 class ConnectionScreen(ModalScreen[dict | None]):
@@ -17,8 +19,8 @@ class ConnectionScreen(ModalScreen[dict | None]):
     ConnectionScreen { align: center middle; background: $background 85%; }
     #connection-page { width: 76; max-width: 96%; height: auto; max-height: 95%; padding: 1 2; background: $surface; border: solid $primary; }
     #connection-page Input, #connection-page Select { margin-bottom: 1; }
-    #connection-buttons { height: auto; }
-    #connection-buttons Button { margin-right: 1; }
+    #connection-buttons, #connection-secondary { height: auto; }
+    #connection-buttons Button, #connection-secondary Button { margin-right: 1; }
     '''
 
     def __init__(self, home: Path, *, language='en'):
@@ -26,6 +28,7 @@ class ConnectionScreen(ModalScreen[dict | None]):
         self.home = Path(home)
         self.language = language
         self.options = choices(home)
+        self.revisions = connection_revisions(home)
         self.busy = False
         self.telegram_mode = False
 
@@ -39,6 +42,8 @@ class ConnectionScreen(ModalScreen[dict | None]):
                                 '选择一个后端。发现 CLI 不等于已登录。确认前不会发送验证请求。'))
             yield Select([(r['engine'] + (' · CLI' if r['kind']=='cli' else ' · API'),r['engine']) for r in self.options],prompt=self.t('Choose backend','选择后端'),id='connection-backend')
             yield Select([],prompt=self.t('Choose model','选择模型'),id='connection-model')
+            yield Input(placeholder=self.t('Custom model ID (optional)','自定义模型 ID（可选）'),
+                        id='connection-custom-model', disabled=True)
             yield Input(password=True,placeholder=self.t('API key (API only; kept out of chat)','API 密钥（仅 API 使用；不进入聊天）'),id='connection-key')
             yield Input(placeholder=self.t('Telegram numeric user ID (optional setup only)','Telegram 数字用户 ID（仅可选设置）'),id='connection-user-id')
             yield Checkbox(self.t('Allow one minimal model check (charges may apply) and reload idle Hashiko after saving.','允许一次最小模型验证（可能收费），保存后重载空闲的小乔。'),id='connection-consent')
@@ -46,7 +51,9 @@ class ConnectionScreen(ModalScreen[dict | None]):
             yield Static('',id='connection-result')
             with Horizontal(id='connection-buttons'):
                 yield Button(self.t('Connect','连接'),id='connection-submit',variant='primary')
+                yield Button(self.t('Save unverified','先保存（未验证）'),id='connection-save-unverified')
                 yield Button(self.t('Cancel','取消'),id='connection-cancel')
+            with Horizontal(id='connection-secondary'):
                 yield Button('Telegram',id='connection-telegram')
                 yield Button('中文 / English',id='connection-language')
 
@@ -66,6 +73,9 @@ class ConnectionScreen(ModalScreen[dict | None]):
             field = self.query_one('#connection-key',Input)
             field.value = ''
             field.disabled = not selected or selected['kind']=='cli'
+            custom = self.query_one('#connection-custom-model',Input)
+            custom.value = ''
+            custom.disabled = not selected or not selected.get('custom_models')
             model = self.query_one('#connection-model',Select)
             model.set_options([(m,m) for m in selected['models']] if selected else [])
             if selected:
@@ -81,6 +91,8 @@ class ConnectionScreen(ModalScreen[dict | None]):
         elif event.button.id == 'connection-telegram' and not self.busy:
             self.telegram_mode = not self.telegram_mode
             self.query_one('#connection-user-id').display = self.telegram_mode
+            self.query_one('#connection-custom-model').display = not self.telegram_mode
+            self.query_one('#connection-save-unverified').display = not self.telegram_mode
             for control in self.query(Select):
                 control.display = not self.telegram_mode
             field = self.query_one('#connection-key',Input)
@@ -95,11 +107,14 @@ class ConnectionScreen(ModalScreen[dict | None]):
             self.recompose()
         elif event.button.id == 'connection-submit' and not self.busy:
             self.connect()
+        elif event.button.id == 'connection-save-unverified' and not self.busy and not self.telegram_mode:
+            self.connect(unverified=True)
 
     @work(exclusive=True)
-    async def connect(self):
+    async def connect(self, *, unverified=False):
         self.busy = True
         self.query_one('#connection-submit',Button).disabled = True
+        self.query_one('#connection-save-unverified',Button).disabled = True
         key_input = self.query_one('#connection-key',Input)
         key = key_input.value
         for control in self.query(Select):
@@ -115,17 +130,41 @@ class ConnectionScreen(ModalScreen[dict | None]):
                 return
             engine = self.query_one('#connection-backend',Select).value
             model = self.query_one('#connection-model',Select).value
+            custom = self.query_one('#connection-custom-model',Input)
+            if custom.value.strip():
+                if custom.disabled:
+                    raise ConnectionError('MODEL_UNAVAILABLE')
+                model = custom.value.strip()
             if not isinstance(engine,str) or not isinstance(model,str):
                 raise ConnectionError('SELECTION_REQUIRED')
+            if unverified:
+                result = save(self.home,engine,model,key,allow_unverified=True,
+                    replace_confirmed=self.query_one('#connection-replace',Checkbox).value,
+                    language=self.language,expected_revisions=self.revisions)
+                self.dismiss(result)
+                return
             proof = await validate(self.home,engine,model,key,
                 confirmed=self.query_one('#connection-consent',Checkbox).value)
             result = save(self.home,engine,model,key,verified=proof,
-                replace_confirmed=self.query_one('#connection-replace',Checkbox).value,language=self.language)
+                replace_confirmed=self.query_one('#connection-replace',Checkbox).value,
+                language=self.language,expected_revisions=self.revisions)
             adoption = await self._adopt_saved()
             self.dismiss({**result, **adoption})
         except ConnectionError as exc:
-            detail = self.t('Settings are saved; live adoption is still pending. Retry when Hashiko is idle.',
-                            '设置已保存，尚未完成运行采用。请在小乔空闲后重试。') if exc.code=='SAVED_ADOPTION_PENDING' else self.t('Retry, choose another backend, or cancel.','可重试、换后端或取消。')
+            if exc.code == 'SAVED_ADOPTION_PENDING':
+                detail = self.t('Settings are saved; live adoption is still pending. Retry when Hashiko is idle.',
+                                '设置已保存，尚未完成运行采用。请在小乔空闲后重试。')
+            elif exc.code == 'SAVED_WORKSPACE_PENDING':
+                detail = self.t('Settings were saved, but workspace setup is incomplete. Reopen the page and inspect the workspace before retrying.',
+                                '设置已保存，但工作区尚未准备好。重试前请重新打开页面并检查工作区。')
+            elif exc.code in {'SAVE_PARTIAL', 'SAVE_DURABILITY_UNKNOWN'}:
+                detail = self.t('Save state is uncertain or partial. Reopen the page and inspect the saved settings and key before retrying.',
+                                '保存状态不确定或只完成了一部分。重试前请重新打开页面并检查已保存的设置与密钥。')
+            elif exc.code == 'CONFIG_CHANGED':
+                detail = self.t('Settings changed elsewhere. Reopen the page to load the latest settings.',
+                                '设置已在其他地方改变。请重新打开页面，加载最新设置。')
+            else:
+                detail = self.t('Retry, choose another backend, or cancel.','可重试、换后端或取消。')
             self.query_one('#connection-result',Static).update(exc.code + '\n' + detail)
         except Exception:
             # Provider exceptions may contain request headers; never display raw errors.
@@ -137,6 +176,7 @@ class ConnectionScreen(ModalScreen[dict | None]):
                 for control in self.query(Select):
                     control.disabled = False
                 self.query_one('#connection-submit',Button).disabled = False
+                self.query_one('#connection-save-unverified',Button).disabled = False
 
     async def _adopt_saved(self):
         self.query_one('#connection-result',Static).update(self.t(
@@ -161,6 +201,8 @@ def main():
         return 78
     home=Path(os.environ.get('BRIDGE_HOME') or Path.cwd())
     result=ConnectionApp(home,os.environ.get('HASHI_UI_LANGUAGE','en')).run()
+    if result and result.get('saved') and result.get('verified') is False:
+        print('Saved without verification; no reload requested. / 已保存（未验证）；未请求重载。')
     return 0 if result else 130
 
 

@@ -341,7 +341,7 @@ def main() -> None:
     parser.add_argument(
         "--full-page", dest="full_page", action="store_true", default=False
     )
-    parser.add_argument("--max-length", dest="max_length", type=int, default=15000)
+    parser.add_argument("--max-length", dest="max_length", type=int, default=None)
 
     # Element interaction
     parser.add_argument("--selector", default=None, help="CSS selector")

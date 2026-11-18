@@ -1260,3 +1260,20 @@ def test_public_route_probe_reports_an_unpublished_sender(monkeypatch):
     assert result["ok"] is False
     assert result["route_type"] == "independent_exchange"
     assert result["error"] == "sender is not published"
+
+
+def test_check_hchat_route_reports_each_remote_group_member_without_sending(monkeypatch):
+    cfg = _local_cfg()
+    cfg["groups"] = {"staff": {"members": ["akane", "rain"]}}
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_shared_token_for_protocol", lambda: "fixture-token")
+    monkeypatch.setattr(hchat_send, "_find_remote_instance", lambda agent, local, target_instance=None: {
+        "instance_id": target_instance, "remote_host": "127.0.0.1", "remote_port": 19999,
+    })
+    monkeypatch.setattr(hchat_send, "_probe_remote_http", lambda *a: True)
+    monkeypatch.setattr(hchat_send, "_send_via_protocol_transport", lambda *a, **k: pytest.fail("route check sent a message"))
+    result = hchat_send.check_hchat_route("@staff", "zelda", target_instance="HASHI9")
+    assert result["ok"] is True and result["delivery_attempted"] is False
+    assert result["route_type"] == "group_per_recipient"
+    assert result["members"] == ["akane@HASHI9", "rain@HASHI9"]
+    assert all(route["ok"] and not route["delivery_attempted"] for route in result["member_routes"])

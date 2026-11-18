@@ -55,8 +55,8 @@ Response behavior:
 
 Limits:
 
-- 128 declared tools per request
-- 1 MiB serialized tool-schema payload
+- Optional instance-selected Gateway tool count and serialized schema byte budgets;
+  the HTTP request-body budget and actual provider limits also apply
 - unique function names matching `[A-Za-z0-9_-]{1,64}`
 - no Gateway `session_id` during a structured tool conversation
 

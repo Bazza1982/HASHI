@@ -129,10 +129,11 @@ async def _try_permission_command(api, request, runtime, text, *, owner_id):
         f"permission-fc-v1\0{api.session_store.instance_id}\0{owner_id}\0{operation['client_id']}".encode(),
     ).hexdigest()
     metadata = {
-        "actor_id": api.global_config.authorized_id,
+        "actor_id": owner_id,
         "instance_id": api.session_store.instance_id, "session_surface": "workbench",
         "session_channel_key": "default", "connection_binding": connection,
-        "owner_id": owner_id, "session_id": session["session_id"],
+        "owner_id": owner_id, "_hashi_owner_id": owner_id,
+        "session_id": session["session_id"],
         "context_generation": session["context_generation"], "connector_id": "backend_api",
         "ingress_transport": "workbench-command-ui", "source_channel": "workbench_api",
         "_durable_command_invocation": True,

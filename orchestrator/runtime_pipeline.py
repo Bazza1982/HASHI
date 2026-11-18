@@ -2721,6 +2721,9 @@ async def _delete_live_verbose_placeholder(runtime, item, message) -> bool:
 
 
 def _drain_stream_queue(event_queue: asyncio.Queue) -> None:
+    # Off/on is a visibility boundary: neither old events nor their omission
+    # counts should appear in a later presentation interval.
+    event_queue._hashi_omitted = 0
     while not event_queue.empty():
         try:
             event_queue.get_nowait()
@@ -3146,6 +3149,12 @@ async def setup_interactive_feedback(
         "flush_canonical_audit",
         canonical_stream_batch.flush,
     )
+
+    async def _publish_capacity_notice(event):
+        from orchestrator.frontend_notice_delivery import publish_run_capacity_notice
+        return await publish_run_capacity_notice(runtime, item, event)
+
+    setattr(_canonical_stream_callback, "publish_capacity_notice", _publish_capacity_notice)
 
     # Canonical evidence collection is independent of Telegram visibility and
     # the sanitised operational audit toggle.

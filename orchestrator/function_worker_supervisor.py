@@ -31,8 +31,20 @@ from orchestrator.function_generation import (
     verify_qualified_manifest_bytes,
 )
 from orchestrator.function_worker_features import WORKER_LOG_RELAY_FEATURE
+from orchestrator.function_worker_large_request import (
+    ALLOWED_METHODS as LARGE_REQUEST_METHODS,
+    CAPABILITY_INVOKE,
+    CAPABILITY_PROBE,
+    CAPABILITY_READ,
+    CAPABILITY_RELEASE,
+    CORE_CONTROL_ALIASES,
+    LargeCapabilityResultStore,
+    LargeRequestReceiver,
+    send_large_request,
+)
 from orchestrator.function_worker_protocol import (
     FUNCTION_WORKER_PROTOCOL_VERSION,
+    MAX_FRAME_BYTES,
     FunctionWorkerDisconnected,
     FunctionWorkerProtocolError,
     JsonConnectionPeer,
@@ -496,7 +508,75 @@ class FunctionWorkerClient:
             )
         return await self.peer.request(method, params, timeout=timeout)
 
+    def _large_capability_result_store(self) -> LargeCapabilityResultStore:
+        store = getattr(self, "_large_capability_results", None)
+        if store is None:
+            store = LargeCapabilityResultStore()
+            self._large_capability_results = store
+            peer = getattr(self, "peer", None)
+            if peer is not None and callable(getattr(peer, "wait_closed", None)):
+                async def close_on_disconnect() -> None:
+                    await peer.wait_closed()
+                    store.close()
+                self._large_result_cleanup_task = asyncio.create_task(close_on_disconnect())
+        return store
+
+    def _worker_large_request_store(self) -> LargeRequestReceiver:
+        store = getattr(self, "_worker_large_request_uploads", None)
+        if store is None:
+            store = LargeRequestReceiver(allow_core_methods=True)
+            self._worker_large_request_uploads = store
+            peer = getattr(self, "peer", None)
+            if peer is not None and callable(getattr(peer, "wait_closed", None)):
+                async def close_on_disconnect() -> None:
+                    await peer.wait_closed()
+                    store.close()
+                self._large_upload_cleanup_task = asyncio.create_task(close_on_disconnect())
+        return store
+
     async def _handle_request(self, method: str, params: dict[str, Any]) -> Any:
+        control = CORE_CONTROL_ALIASES.get(method)
+        if control is not None:
+            return await self._worker_large_request_store().handle(
+                control, params, self._handle_request
+            )
+        if method == CAPABILITY_PROBE:
+            return self._large_capability_result_store().capability()
+        if method == CAPABILITY_INVOKE:
+            # The existing capability broker remains authoritative for this
+            # actual Worker and task. The wrapper changes only result transport.
+            store = self._large_capability_result_store()
+            transfer_id = store.begin(params.get("transfer_id"))
+            try:
+                operation = params.get("operation")
+                if not isinstance(operation, Mapping):
+                    raise FunctionWorkerProtocolError("capability invocation must be an object")
+                result = await self.supervisor.handle_worker_request(
+                    self, "core.capability.invoke", dict(operation)
+                )
+                try:
+                    return store.publish(transfer_id, result)
+                except Exception as exc:
+                    # The broker has already returned: a storage/encoding
+                    # failure must not imply that a side effect was rolled
+                    # back or make an automatic retry appear safe.
+                    reason = "result storage or encoding failed"
+                    if isinstance(exc, FunctionWorkerProtocolError):
+                        if str(exc).startswith("capability result exceeds configured logical byte budget ("):
+                            reason = f"result exceeded configured byte budget ({store.max_bytes})"
+                        elif str(exc).startswith("capability result transfer capacity reached"):
+                            reason = "result transfer capacity reached"
+                    raise FunctionWorkerProtocolError(
+                        f"Capability result unavailable after the operation returned ({reason}); "
+                        "the effect may have occurred; do not automatically retry. "
+                        "Reconcile the original operation."
+                    ) from exc
+            finally:
+                store.finish(transfer_id)
+        if method == CAPABILITY_READ:
+            return self._large_capability_result_store().read(params)
+        if method == CAPABILITY_RELEASE:
+            return self._large_capability_result_store().release(params)
         return await self.supervisor.handle_worker_request(self, method, params)
 
     async def _handle_event(self, event: str, payload: dict[str, Any]) -> None:
@@ -553,6 +633,12 @@ class FunctionWorkerClient:
             await asyncio.to_thread(self.process.join, 0.2)
         except (AssertionError, RuntimeError):
             pass
+        result_store = getattr(self, "_large_capability_results", None)
+        if result_store is not None:
+            result_store.close()
+        request_store = getattr(self, "_worker_large_request_uploads", None)
+        if request_store is not None:
+            request_store.close()
         if not self.ready.done():
             self.ready.set_exception(
                 FunctionWorkerError(
@@ -586,6 +672,12 @@ class FunctionWorkerClient:
                 await asyncio.to_thread(self.process.join, 5.0)
         self.closed = True
         await self.peer.close()
+        result_store = getattr(self, "_large_capability_results", None)
+        if result_store is not None:
+            result_store.close()
+        request_store = getattr(self, "_worker_large_request_uploads", None)
+        if request_store is not None:
+            request_store.close()
         monitor = self.monitor_task
         if monitor is not None and monitor is not asyncio.current_task():
             monitor.cancel()
@@ -615,6 +707,7 @@ class AgentRuntimeHandle:
         self._cutover = False
         self._reboot_fence = False
         self._reboot_reject_new = False
+        self._shared_handoff_cancel_client: FunctionWorkerClient | None = None
         self._offline_error: str | None = None
         self._route_inflight = 0
         self._request_listeners: dict[str, list[Any]] = {}
@@ -818,12 +911,13 @@ class AgentRuntimeHandle:
                 self._reboot_reject_new = False
                 self._condition.notify_all()
 
-    async def begin_cutover(self) -> FunctionWorkerClient:
+    async def begin_cutover(self, *, shared_handoff: bool = False) -> FunctionWorkerClient:
         async with self._condition:
-            if self._cutover and not self._reboot_fence:
+            if self._cutover and (shared_handoff or not self._reboot_fence):
                 raise FunctionWorkerError(f"Agent {self.name!r} is already cutting over")
             self._cutover = True
             self._reboot_fence = False
+            self._shared_handoff_cancel_client = self._client if shared_handoff else None
             try:
                 while self._route_inflight:
                     await self._condition.wait()
@@ -832,6 +926,7 @@ class AgentRuntimeHandle:
                 self._cutover = False
                 self._reboot_fence = False
                 self._reboot_reject_new = False
+                self._shared_handoff_cancel_client = None
                 self._condition.notify_all()
                 raise
 
@@ -846,6 +941,7 @@ class AgentRuntimeHandle:
             self._client = client
             self.metadata = dict(metadata)
             self._offline_error = None
+            self._shared_handoff_cancel_client = None
             self._cutover = False
             self._reboot_fence = False
             self._reboot_reject_new = False
@@ -853,6 +949,7 @@ class AgentRuntimeHandle:
 
     async def abort_cutover(self) -> None:
         async with self._condition:
+            self._shared_handoff_cancel_client = None
             self._cutover = False
             self._reboot_fence = False
             self._reboot_reject_new = False
@@ -860,6 +957,7 @@ class AgentRuntimeHandle:
 
     async def close_route(self, message: str) -> None:
         async with self._condition:
+            self._shared_handoff_cancel_client = None
             self._offline_error = str(message)
             self._cutover = False
             self._reboot_fence = False
@@ -872,9 +970,17 @@ class AgentRuntimeHandle:
         params: Mapping[str, Any] | None = None,
         *,
         timeout: float = WORKER_REQUEST_TIMEOUT_SECONDS,
+        allow_handoff_cancel: bool = False,
     ) -> Any:
         async with self._condition:
             while self._cutover:
+                if allow_handoff_cancel and method == "runtime.cancel_session_run":
+                    if (not self._reboot_fence
+                            and self._shared_handoff_cancel_client is self._client):
+                        break
+                    raise FunctionWorkerDisconnected(
+                        f"Agent {self.name!r} has a different active cutover; retry the stop"
+                    )
                 if self._reboot_reject_new:
                     raise FunctionWorkerDisconnected(
                         f"Agent {self.name!r} is rebooting; retry after it is online"
@@ -885,7 +991,21 @@ class AgentRuntimeHandle:
             client = self._client
             self._route_inflight += 1
         try:
-            return await client.call(method, params, timeout=timeout)
+            try:
+                return await client.call(method, params, timeout=timeout)
+            except FunctionWorkerProtocolError as exc:
+                # encode_envelope rejects an oversized local request before
+                # sending any bytes. Do not retry a remote/disconnect error:
+                # its outcome may already be committed.
+                if (type(exc) is not FunctionWorkerProtocolError
+                        or method not in LARGE_REQUEST_METHODS
+                        or not str(exc).startswith(
+                            f"IPC frame exceeds {MAX_FRAME_BYTES} bytes:"
+                        )):
+                    raise
+                return await send_large_request(
+                    client.call, method, params, timeout=timeout
+                )
         finally:
             async with self._condition:
                 self._route_inflight -= 1
@@ -922,6 +1042,7 @@ class AgentRuntimeHandle:
         request_metadata: Mapping[str, Any] | None = None,
         request_content: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
+        replay_only: bool = False,
     ) -> str | None:
         result = await self._route(
             "runtime.enqueue_request",
@@ -940,9 +1061,10 @@ class AgentRuntimeHandle:
                 "request_metadata": dict(request_metadata or {}),
                 "request_content": dict(request_content or {}) if request_content else None,
                 "idempotency_key": idempotency_key,
+                "replay_only": bool(replay_only),
             },
         )
-        if result:
+        if result and not replay_only:
             self._outstanding_request_ids.add(str(result))
         return None if result is None else str(result)
 
@@ -980,12 +1102,37 @@ class AgentRuntimeHandle:
         )
 
     async def deliver_telegram_update(self, update: Mapping[str, Any]) -> bool:
+        # The polling route belongs to the shared Functions process, so it can
+        # enforce the persisted policy even while an older Worker is still live.
+        # A denial is acknowledged (and not sent to the Worker); an unreadable
+        # policy leaves the update unacknowledged for a later retry.
+        from orchestrator.telegram_actor_scope import runtime_ingress_user_ids
+        from telegram import Update
+
+        if getattr(self.global_config, "config_path", None):
+            try:
+                allowed_users = await asyncio.to_thread(runtime_ingress_user_ids, self)
+                parsed = Update.de_json(dict(update), bot=None)
+                actor = getattr(getattr(parsed, "effective_user", None), "id", None)
+                if actor is not None and (
+                    not isinstance(actor, int) or isinstance(actor, bool)
+                    or actor not in allowed_users
+                ):
+                    return True
+            except (OSError, ValueError, TypeError, AttributeError, LookupError) as exc:
+                raise FunctionWorkerError("Telegram access policy is unavailable") from exc
         return bool(
             await self._route(
                 "runtime.telegram_update",
                 {"update": dict(update)},
             )
         )
+
+    async def observe_telegram_access_policy(self) -> str:
+        result = await self._route("worker.telegram_access.observe", {}, timeout=3.0)
+        if not isinstance(result, Mapping) or not isinstance(result.get("policy_revision"), str):
+            raise FunctionWorkerError("Telegram policy observation is unavailable")
+        return result["policy_revision"]
 
     async def enqueue_api_media(
         self,
@@ -1157,6 +1304,16 @@ class AgentRuntimeHandle:
             "owner_id": owner_id, "session_id": session_id, "run_id": run_id,
             "request_id": request_id, "reason": reason,
         }, timeout=12) or {})
+
+    async def cancel_session_run_during_handoff(
+        self, *, owner_id: str, session_id: str, run_id: str,
+        request_id: str, reason: str,
+    ) -> dict[str, Any]:
+        """Route an already authenticated exact stop to the retiring Worker."""
+        return dict(await self._route("runtime.cancel_session_run", {
+            "owner_id": owner_id, "session_id": session_id, "run_id": run_id,
+            "request_id": request_id, "reason": reason,
+        }, timeout=12, allow_handoff_cancel=True) or {})
 
     async def execute_slash_command(
         self,
@@ -1672,6 +1829,10 @@ class FunctionWorkerSupervisor:
             "services": {"api_gateway": api_gateway},
             "service_endpoints": service_endpoints,
             "capabilities": capabilities,
+            "worker_large_capability_results": LargeCapabilityResultStore().capability(),
+            "worker_large_requests_to_core": LargeRequestReceiver(
+                allow_core_methods=True
+            ).capability(),
         }
 
     async def start_telegram_ingress(

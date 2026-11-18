@@ -10,7 +10,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
 
 import httpx
 
@@ -25,9 +24,6 @@ _ATTACHMENT_REF_RE = re.compile(
     r"^attachment:(?P<message>[A-Za-z0-9._-]+):(?P<attachment>[A-Za-z0-9._-]+)$"
 )
 _DETAIL_LEVELS = {"brief", "standard", "detailed"}
-_MAX_QUESTION_CHARS = 2_000
-_MAX_ITEM_CHARS = 1_500
-_MAX_ITEMS = 20
 
 
 class VisionInspectError(ValueError):
@@ -61,34 +57,38 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _validated_endpoint(options: dict[str, Any]) -> str:
-    endpoint = str(options.get("endpoint") or "http://127.0.0.1:8081/v1").rstrip("/")
-    parsed = urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise VisionInspectError("vision endpoint must be an http(s) URL")
-    allowed_hosts = {
-        str(item).strip().casefold()
-        for item in options.get("allowed_hosts", [])
-        if str(item).strip()
-    }
-    if not _is_loopback_host(parsed.hostname) and parsed.hostname.casefold() not in allowed_hosts:
-        raise VisionInspectError(
-            "vision endpoint must be loopback or explicitly listed in allowed_hosts"
-        )
-    return endpoint
+    configured = str(options.get("endpoint") or "http://127.0.0.1:8081/v1").strip()
+    try:
+        parsed = httpx.URL(configured)
+    except httpx.InvalidURL as exc:
+        raise VisionInspectError("vision endpoint must be an http(s) URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.host or parsed.username or parsed.password:
+        raise VisionInspectError("vision endpoint must be an http(s) URL without embedded credentials")
+    # An explicit host policy remains a restriction. In its absence the
+    # configured endpoint is the operator-selected destination; the model
+    # never supplies it as an argument to vision_inspect.
+    selected_hosts = options.get("allowed_hosts")
+    if selected_hosts is not None:
+        if not isinstance(selected_hosts, (list, tuple, set, frozenset)):
+            raise VisionInspectError("vision allowed_hosts must be a list")
+        allowed_hosts = {str(item).strip().casefold() for item in selected_hosts if str(item).strip()}
+        if not _is_loopback_host(parsed.host) and parsed.host.casefold() not in allowed_hosts:
+            raise VisionInspectError("vision endpoint is outside allowed_hosts")
+    return str(parsed)
 
 
-def _clip_text(value: Any, maximum: int = _MAX_ITEM_CHARS) -> str:
-    return str(value or "").strip()[:maximum]
+def _request_failure(provider: str, error: Exception) -> str:
+    # Request URLs can contain configured query credentials. Preserve a useful
+    # failure category/status without copying the URL into model-visible output.
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"{provider} request failed with HTTP {error.response.status_code}"
+    return f"{provider} request failed ({type(error).__name__})"
 
 
 def _string_items(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
-    return tuple(
-        text
-        for text in (_clip_text(item) for item in value[:_MAX_ITEMS])
-        if text
-    )
+    return tuple(str(item) for item in value if item is not None and str(item).strip())
 
 
 def _content_text(content: Any) -> str:
@@ -119,14 +119,14 @@ def _parse_answer(content: Any) -> VisionAnswer:
     except json.JSONDecodeError:
         payload = None
     if isinstance(payload, dict):
-        answer = _clip_text(payload.get("answer"), 6_000)
+        answer = str(payload.get("answer") or "")
         observations = _string_items(payload.get("observations"))
         uncertainties = _string_items(payload.get("uncertainties"))
-        if answer:
+        if answer.strip():
             return VisionAnswer(answer, observations, uncertainties)
     if not text:
         raise VisionInspectError("vision provider returned an empty answer")
-    return VisionAnswer(_clip_text(text, 6_000))
+    return VisionAnswer(text)
 
 
 class LlamaCppVisionProvider:
@@ -183,11 +183,13 @@ class LlamaCppVisionProvider:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.idle_timeout)
         try:
-            response = await client.post(f"{self.endpoint}/chat/completions", json=payload)
+            url = httpx.URL(self.endpoint)
+            url = url.copy_with(path=url.path.rstrip("/") + "/chat/completions")
+            response = await client.post(str(url), json=payload, follow_redirects=False)
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise VisionInspectError(f"llama.cpp request failed: {exc}") from exc
+            raise VisionInspectError(_request_failure("llama.cpp", exc)) from None
         finally:
             if owns_client:
                 await client.aclose()
@@ -253,15 +255,18 @@ class OpenRouterVisionProvider(LlamaCppVisionProvider):
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.idle_timeout)
         try:
+            url = httpx.URL(self.endpoint)
+            url = url.copy_with(path=url.path.rstrip("/") + "/chat/completions")
             response = await client.post(
-                f"{self.endpoint}/chat/completions",
+                str(url),
                 json=payload,
                 headers={"Authorization": f"Bearer {self.api_key}"},
+                follow_redirects=False,
             )
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise VisionInspectError(f"OpenRouter vision request failed: {exc}") from exc
+            raise VisionInspectError(_request_failure("OpenRouter vision", exc)) from None
         finally:
             if owns_client:
                 await client.aclose()
@@ -340,18 +345,16 @@ async def execute_vision_inspect(
     secrets: dict[str, Any] | None = None,
     provider: VisionProvider | None = None,
 ) -> str:
-    """Inspect one authorized image and return bounded semantic evidence as JSON."""
+    """Inspect one authorized image and return semantic evidence as JSON."""
     started = time.monotonic()
     try:
         image_ref = str(args.get("image_ref") or "").strip()
-        question = str(args.get("question") or "").strip()
+        question = str(args.get("question") or "")
         detail = str(args.get("detail") or "standard").strip().casefold()
         if not image_ref:
             raise VisionInspectError("image_ref is required")
-        if not question:
+        if not question.strip():
             raise VisionInspectError("question is required")
-        if len(question) > _MAX_QUESTION_CHARS:
-            raise VisionInspectError("question exceeds 2000 characters")
         if detail not in _DETAIL_LEVELS:
             raise VisionInspectError("detail must be brief, standard, or detailed")
         path = _resolve_image(

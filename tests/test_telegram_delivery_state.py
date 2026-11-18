@@ -164,3 +164,34 @@ def test_transferred_state_rejects_malformed_target_owner(tmp_path):
             transferred_record=_record(),
             operation="move",
         )
+
+
+def test_retirement_snapshots_latest_record_before_revision_checked_removal(tmp_path, monkeypatch):
+    path = tmp_path / "state" / "telegram_delivery_health.json"
+    state_store.mutate_state(path, lambda document: (
+        document["agents"].update({"kasumi": _record()}), True
+    ))
+    real_write = state_store.write_config_json
+    snapshots = []
+    injected = False
+
+    def interleaved_write(target, document):
+        nonlocal injected
+        if not injected:
+            injected = True
+            newer = state_store.read_state(target)
+            newer["agents"]["kasumi"]["per_chat"]["123"]["undelivered_request_ids"].append("req-2")
+            real_write(target, newer)
+            raise ConfigConflictError("injected conflict")
+        return real_write(target, document)
+
+    monkeypatch.setattr(state_store, "write_config_json", interleaved_write)
+    state_store.retire_agent_state(
+        tmp_path, "kasumi", lifecycle_id="1" * 32, reason="test",
+        before_retire=lambda record: snapshots.append(record),
+    )
+    assert len(snapshots) == 2
+    assert snapshots[-1]["per_chat"]["123"]["undelivered_request_ids"] == ["req-1", "req-2"]
+    saved = state_store.read_state(path)
+    assert "kasumi" not in saved["agents"]
+    assert saved["quarantine"][-1]["record"] == snapshots[-1]

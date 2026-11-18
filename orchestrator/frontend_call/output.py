@@ -752,13 +752,24 @@ async def negotiate_output(
     resolver = getattr(ports, "call_output", None)
     if not callable(resolver):
         return None
+    # Bind the output selection to the same configuration revision as the
+    # call before awaiting the connector. A concurrent profile save must only
+    # affect subsequent calls. Defer read errors until a connector actually
+    # exists, preserving audio-only behavior and protocol error precedence.
+    reader = getattr(config, "video_tts_selection", None)
+    selection = None
+    selection_error = None
+    try:
+        selection = reader(revision) if callable(reader) else None
+    except Exception as exc:
+        selection_error = exc
     connector = await resolver(call.owner, call.binding, generation=generation)
     if connector is None:
         return None
     if protocol != OUTPUT_PROTOCOL:
         raise CallError("call_output_client_upgrade_required", 409)
-    reader = getattr(config, "video_tts_selection", None)
-    selection = reader(revision) if callable(reader) else None
+    if selection_error is not None:
+        raise selection_error
     resolved = None
     fallback_reason_code = ""
     transient_reason_code = ""

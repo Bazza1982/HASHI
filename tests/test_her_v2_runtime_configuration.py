@@ -445,7 +445,7 @@ def test_missing_pricing_revision_is_rejected_instead_of_mixing_generations(
         _loaded_pricing_revision()
 
 
-def test_provider_switch_preflight_rejects_known_too_small_context(tmp_path):
+def test_provider_switch_keeps_estimate_as_advisory(tmp_path):
     manager = _manager(tmp_path)
     for grant in manager.config.allowed_backends:
         if grant.get("engine") == "openrouter-api":
@@ -460,10 +460,15 @@ def test_provider_switch_preflight_rejects_known_too_small_context(tmp_path):
     manager.runtime = runtime
     candidate = manager.prepare_her_v2_provider("openrouter-api")
 
-    with pytest.raises(ValueError, match="context is too small"):
-        manager.apply_her_v2_configuration(candidate)
+    manager.apply_her_v2_configuration(candidate)
 
-    assert manager.get_her_v2_configuration().routing_revision == 1
+    assert manager.get_her_v2_configuration().routing_revision == 2
+    persisted = json.loads(manager.state_file.read_text(encoding="utf-8"))
+    preflight = persisted["her_v2_last_route_preflight"]
+    assert preflight["status"] == "estimated_over_budget"
+    assert preflight["insufficient_targets"] == []
+    assert preflight["estimated_over_budget_targets"][0]["fits"] is None
+    assert preflight["estimated_over_budget_targets"][0]["estimated_fits"] is False
 
 
 def test_reasoning_only_switch_does_not_run_target_context_preflight(tmp_path):

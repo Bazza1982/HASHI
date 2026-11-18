@@ -9,7 +9,7 @@ from telegram.error import BadRequest
 from orchestrator import ui_language
 from orchestrator.command_registry import RuntimeCommand, RuntimeCallback
 from orchestrator.command_ui import card_title
-from orchestrator.getfile_service import GetFileError, GetFileService
+from orchestrator.getfile_service import MAX_GETFILE_PATH_CHARS, GetFileError, GetFileService
 
 
 def tr(key, **values):
@@ -57,7 +57,7 @@ async def _menu(runtime, update, *, query=None):
     rows.append([InlineKeyboardButton(tr("refresh"), callback_data="getfile:refresh")])
     if service.bind(update)["surface"] != "telegram":
         rows.append([InlineKeyboardButton(tr("path_send"), callback_data=f"getfile:path:{token}",
-            api_kwargs={"hashi_text_input": {"label": tr("path_label"), "value": "", "max_length": 500}})])
+            api_kwargs={"hashi_text_input": {"label": tr("path_label"), "value": "", "max_length": MAX_GETFILE_PATH_CHARS + 2}})])
     lines.extend(["", tr("limits"), tr("usage")])
     markup = InlineKeyboardMarkup(rows)
     if query is not None:
@@ -111,7 +111,7 @@ async def getfile_callback(runtime, update, context):
             result = await _finish(runtime, update, service, token=parts[2], index=int(parts[3]))
         elif len(parts) == 3 and parts[1] == "path":
             path = getattr(query, "input_text", None)
-            if not isinstance(path, str) or not 1 <= len(path) <= 500:
+            if not isinstance(path, str) or not 1 <= len(path) <= MAX_GETFILE_PATH_CHARS + 2:
                 raise GetFileError("invalid_path")
             result = await _finish(runtime, update, service, token=parts[2], raw_path=path)
         else:

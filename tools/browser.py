@@ -183,6 +183,12 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
             )
         return None
 
+    if action in {"get_text", "get_html", "evaluate", "session"}:
+        requested_readiness = args.get("wait_until")
+        if requested_readiness is not None and requested_readiness != "load":
+            return ("Error: the extension browser currently supports only load readiness; "
+                    "choose load or use a standalone Playwright browser.")
+
     audit = project_browser_audit_metadata(bridge_args.get("_audit"))
     bridge_args["_audit"] = audit
     owner = str(
@@ -195,6 +201,14 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
     )
     safety_mode = str(bridge_args.get("safety_mode") or audit.get("safety_mode") or "read_write")
     requested_session_id = bridge_args.get("session_id") or audit.get("session_id")
+    session_transport = dict(transport_kwargs)
+    navigation_actions = {"get_text", "get_html", "evaluate"}
+    navigation_timeout = bridge_args.get("timeout_ms", 30_000)
+    extra_wait = bridge_args.get("wait_ms")
+    extra_wait = extra_wait if type(extra_wait) is int and extra_wait > 0 else 0
+    if (action in navigation_actions or (action == "session" and "timeout_ms" in bridge_args)):
+        if type(navigation_timeout) is int and navigation_timeout > 0:
+            session_transport["timeout_s"] = (navigation_timeout + extra_wait) / 1000 + 5
     try:
         session = await asyncio.to_thread(
             ensure_bridge_session,
@@ -202,7 +216,7 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
             args={**bridge_args, "_audit": audit, "agent_name": owner},
             url=bridge_args.get("url"),
             safety_mode=safety_mode,
-            **transport_kwargs,
+            **session_transport,
         )
         if session.get("session", {}).get("session_id"):
             bridge_args["session_id"] = session["session"]["session_id"]
@@ -238,12 +252,16 @@ async def _maybe_execute_extension_bridge(action: str, args: dict) -> Optional[s
     except BrowserBridgeError as exc:
         return f"Error: extension bridge session failure: {exc}"
 
+    command_transport = dict(transport_kwargs)
+    if (action in navigation_actions and type(navigation_timeout) is int
+            and navigation_timeout > 0):
+        command_transport["timeout_s"] = (navigation_timeout + extra_wait) / 1000 + 5
     try:
         response = await asyncio.to_thread(
             send_bridge_command,
             action,
             bridge_args,
-            **transport_kwargs,
+            **command_transport,
         )
     except BrowserBridgeError as exc:
         return f"Error: extension bridge failure: {exc}"
@@ -608,6 +626,24 @@ async def execute_browser_screenshot(args: dict) -> str:
                 pass
 
 
+def _navigation_options(args: dict) -> tuple[str, int]:
+    readiness = args.get("wait_until", "domcontentloaded")
+    timeout = args.get("timeout_ms", 30_000)
+    if not isinstance(readiness, str) or readiness not in {"commit", "domcontentloaded", "load", "networkidle"}:
+        raise ValueError("wait_until must be commit, domcontentloaded, load, or networkidle")
+    if type(timeout) is not int or timeout <= 0:
+        raise ValueError("timeout_ms must be a positive integer")
+    return readiness, timeout
+
+
+def _selected_text_limit(value: object) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value <= 0:
+        raise ValueError("max_length must be a positive integer")
+    return value
+
+
 async def execute_browser_get_text(args: dict) -> str:
     """
     Navigate to a URL, fully render JS, and return visible text content.
@@ -620,7 +656,11 @@ async def execute_browser_get_text(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
     wait_ms = int(args.get("wait_ms", 1500))
-    max_length = int(args.get("max_length", 15000))
+    try:
+        max_length = _selected_text_limit(args.get("max_length"))
+        readiness, timeout_ms = _navigation_options(args)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     bridge_result = await _maybe_execute_extension_bridge("get_text", args)
     if bridge_result is not None:
@@ -629,19 +669,19 @@ async def execute_browser_get_text(args: dict) -> str:
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until=readiness, timeout=timeout_ms)
 
         if wait_ms > 0:
             await asyncio.sleep(wait_ms / 1000)
 
         text = await page.evaluate("() => document.body.innerText")
         text = text.strip()
-        if len(text) > max_length:
-            text = text[:max_length] + "\n...[truncated]"
+        if max_length is not None and len(text) > max_length:
+            text = text[:max_length] + "\n...[truncated at requested max_length]"
         return text
 
     except Exception as e:
-        return f"Error fetching text from {url}: {e}"
+        return f"Error: fetching text from {url}: {e}"
     finally:
         if pw:
             try:
@@ -661,7 +701,11 @@ async def execute_browser_get_html(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
     wait_ms = int(args.get("wait_ms", 1500))
-    max_length = int(args.get("max_length", 20000))
+    try:
+        max_length = _selected_text_limit(args.get("max_length"))
+        readiness, timeout_ms = _navigation_options(args)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     bridge_result = await _maybe_execute_extension_bridge("get_html", args)
     if bridge_result is not None:
@@ -670,18 +714,18 @@ async def execute_browser_get_html(args: dict) -> str:
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until=readiness, timeout=timeout_ms)
 
         if wait_ms > 0:
             await asyncio.sleep(wait_ms / 1000)
 
         html = await page.content()
-        if len(html) > max_length:
-            html = html[:max_length] + "\n<!-- truncated -->"
+        if max_length is not None and len(html) > max_length:
+            html = html[:max_length] + "\n<!-- truncated at requested max_length -->"
         return html
 
     except Exception as e:
-        return f"Error fetching HTML from {url}: {e}"
+        return f"Error: fetching HTML from {url}: {e}"
     finally:
         if pw:
             try:
@@ -1156,6 +1200,10 @@ async def execute_browser_session(args: dict) -> str:
 
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
+    try:
+        readiness, timeout_ms = _navigation_options(args)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     bridge_result = await _maybe_execute_extension_bridge("session", args)
     if bridge_result is not None:
@@ -1169,7 +1217,7 @@ async def execute_browser_session(args: dict) -> str:
 
         # Navigate to initial URL if provided
         if url:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(url, wait_until=readiness, timeout=timeout_ms)
             results.append(f"[goto] {url}")
 
         for i, step in enumerate(steps):
@@ -1177,7 +1225,8 @@ async def execute_browser_session(args: dict) -> str:
             try:
                 if action == "goto":
                     dest = str(step["url"])
-                    await page.goto(dest, wait_until="domcontentloaded", timeout=30000)
+                    step_readiness, step_timeout = _navigation_options({**args, **step})
+                    await page.goto(dest, wait_until=step_readiness, timeout=step_timeout)
                     results.append(f"[goto] {dest}")
 
                 elif action == "click":
@@ -1254,8 +1303,11 @@ async def execute_browser_session(args: dict) -> str:
 
                 elif action == "get_text":
                     text = await page.evaluate("() => document.body.innerText")
-                    max_len = int(step.get("max_length", 5000))
-                    results.append(f"[get_text] {text.strip()[:max_len]}")
+                    max_len = _selected_text_limit(step.get("max_length"))
+                    text = text.strip()
+                    if max_len is not None and len(text) > max_len:
+                        text = text[:max_len] + "\n...[truncated at requested max_length]"
+                    results.append(f"[get_text] {text}")
 
                 elif action == "evaluate":
                     script = str(step["script"])
@@ -1314,6 +1366,10 @@ async def execute_browser_evaluate(args: dict) -> str:
     cdp_url = args.get("cdp_url")
     headed = bool(args.get("headed", False))
     wait_ms = int(args.get("wait_ms", 1000))
+    try:
+        readiness, timeout_ms = _navigation_options(args)
+    except ValueError as exc:
+        return f"Error: {exc}"
 
     bridge_result = await _maybe_execute_extension_bridge("evaluate", args)
     if bridge_result is not None:
@@ -1322,7 +1378,7 @@ async def execute_browser_evaluate(args: dict) -> str:
     pw = browser = context = page = None
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until=readiness, timeout=timeout_ms)
 
         if wait_ms > 0:
             await asyncio.sleep(wait_ms / 1000)
@@ -1331,7 +1387,7 @@ async def execute_browser_evaluate(args: dict) -> str:
         return str(result)
 
     except Exception as e:
-        return f"Error evaluating script on {url}: {e}"
+        return f"Error: evaluating script on {url}: {e}"
     finally:
         if pw:
             try:

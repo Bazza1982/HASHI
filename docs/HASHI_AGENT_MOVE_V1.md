@@ -64,7 +64,8 @@ Clone captures ordinary files into checked stable copies and databases through
 SQLite backup. Its inventory and size/file-count limits cover the portable
 payload, not excluded software/cache trees. Exclusion reasons remain visible;
 those trees are not scanned for Move's source-deletion disclosure. Move keeps
-its whole-workspace inventory and limit. File-size limits, stability, checksums and archive/path
+its whole-workspace deletion inventory, but charges only the portable payload
+against the transfer limit. File-size limits, stability, checksums and archive/path
 validation still apply. Later source edits, new files or eligible conversation
 messages cannot veto this frozen clone snapshot. Move's deletion/freshness rules
 remain separate. Clone preparation does not upgrade or write the source Agent's
@@ -79,6 +80,8 @@ every newer receiver. A transport/discovery error is not misreported as proof
 that the receiver requires a restart.
 
 An upload retry reuses the exact package ID/bytes and receiver reservation.
+When the staged journal records source and destination instances, retries must
+also address the same instances; a different target cannot reuse that receipt.
 Definitive import-preflight rejection is different: after correcting source
 configuration, retry builds a fresh snapshot rather than replaying stale invalid
 metadata. Remote carries this distinction in a signed error code for JSON and
@@ -110,25 +113,72 @@ the same-instance clone path does not require restarting Remote.
 
 ## Stable owner and Clone qualification (2026-10-29)
 
-PAO owns this Functions-layer repair. A replaceable Telegram account is not the
-stable conversation owner. Source export, receiver staging/import and source
-retirement share `configured_conversation_owner_id`, which uses the canonical
-`telegram_identity` resolvers and honours `global.owner_scope_id`. An explicit
-stable scope does not require Telegram to be configured. Legacy configuration
-without a stable scope retains the canonical Telegram-owner compatibility order.
+PAO owns conversation identity and transfer in the Functions layer. A Telegram
+account is a connector identity, not the transfer credential. Within the
+personal-instance trust boundary, the existing shared-token authentication and
+encrypted package authorize the transfer; the source and destination need not
+use the same local owner ID. Source export is scoped to the established source
+owner and Agent. The target records an internal source-to-destination binding
+with the staged package, then imports history under its own owner while retaining
+the source owner and message origin as provenance. This mapping is not another
+credential, pairing operation or approval.
 
-SessionStore exports by exact instance, Agent and configured owner. A second
-scope, including a technical empty Session under a replacement account ID, does
-not prove a second human owner and cannot veto that export. Empty owner-scoped
-history is valid. An explicit foreign owner, unknown configured ownership and
-receiver owner mismatch still fail; histories are never merged across scopes.
+When a Workbench command has an authenticated principal, source preview,
+packaging and clone retry select that principal's history, including when it
+differs from legacy local configuration. The command context is bound to the
+source instance and expires when dispatch ends; an untrusted explicit owner does
+not grant access. The configured legacy `owner_scope_id` and Telegram-derived
+values remain compatibility inputs when there is no authenticated frontend
+command context. A Workbench-only instance uses its SessionStore local default
+without requiring a Telegram account. Empty history is valid. For a personal
+Clone, when the local default owner has no history but other unbound history
+exists, preview and the staged package warn that the other history remains on
+the source and was not copied. They do not guess its owner or block the Clone.
+Move cleanup is scoped to the established source owner; it does not delete
+unidentified history belonging to other local owners.
+For a real Telegram management command, source selection uses the actor's
+established Session owner and current Telegram grant, including a global
+delegate's separate history. A same-instance Clone imports back into that same
+owner. The live command context expires when dispatch ends; an already staged
+transaction may finish from its saved, authenticated binding. These Telegram
+checks apply only to Telegram commands, not to Workbench or Remote.
+Governed multi-user destination mapping remains separate and has not been
+qualified by this change.
+
+Shared Functions handoff carries the retiring personal runtime's data binding
+as internal continuity data. A replacement, recovery or restore defers
+establishing that binding until handoff; a conflicting persisted binding is not
+overwritten. If the live Session API and shared runtime disagree about their
+personal data key, the handoff is refused rather than guessing which data to
+adopt. The binding identifies existing local data and does not authorize a
+transfer. A legacy retiring generation may omit this field; its current
+fallback still derives the binding from disk after quiescence. That fallback
+cannot prove an older in-memory owner if configuration changed while it was
+running and therefore needs separate compatibility work and verification.
+Package identity, source and
+target instance, capsule digest, Agent, target owner, transfer ID and history
+mode remain bound across the staged import and retries. For a personal target,
+the persisted local data binding independently checks the staged destination,
+including when both copies in the transaction journal change together. A missing
+binding for a newly staged transfer is reported before importing; an older
+journal without the field can establish its target binding once. This local
+consistency check is not a source/destination owner comparison or authorization.
+For a Move, the
+outbound journal freezes the source owner from the packaged capsule; source
+cleanup retires that owner's Sessions even if local account configuration
+subsequently changes. Older journals resolve existing ownership and refuse to
+infer an unrelated owner's history.
 
 Clone can snapshot an inactive Agent, and pending messages or a busy source do
 not trigger Move's drain preflight. Package consistency checks remain in force;
 cloning never drains or disables source execution. A source already in Move
-cutover remains fenced. Clone always strips the Telegram credential, even when
-a direct caller leaves Move-oriented defaults unchanged. Move's active-source,
-last-active-Agent and source-stop gates are unchanged. Authentication, encryption,
+cutover remains fenced. Ordinary Clone does not install the source Telegram
+credential. An explicitly inactive backup Clone can retain an encrypted copy
+without installing or starting that connector. A Move can snapshot an
+ordinary inactive Agent without starting it; its target remains inactive. The
+already-moved source fence and the source-stop check still apply, and the last
+active Agent may also be moved.
+Authentication, encryption,
 target-ID reservations, size/path/integrity checks, disabled imported schedules,
 and explicit-cancellation safeguards remain mandatory. Offline checks and adoption are
 separate; this repair does not require a production restart as a test.
@@ -143,6 +193,19 @@ qualification gate for a new Move: it verifies the package, compatibility,
 credentials, target policy and target ID, and reserves that ID. Explicit
 confirmation then durably records forward-only intent before cutover begins.
 
+The staged result reports the source and effective destination access scopes.
+A malformed source scope or destination maximum is an error. The source checks
+for a changed destination maximum before recording forward intent; the receiver
+also compares the staged scope decision with the current destination policy at
+commit. If policy changes or becomes invalid after forward intent, the receiver
+returns an authenticated rejection before publication. The source journals an
+abort request; the receiver can abort only while the target is still staged.
+Only an authenticated staged-abort receipt releases the source guard and marks
+the transfer cancelled for a fresh preview. Lost receipts are reconciled and
+retried. If the target already committed, the same Move continues forward instead.
+An invalid target policy is reported while its authenticated recovery endpoint
+remains reachable; it is never silently coerced to a different access scope.
+
 After that intent exists, neither peer requalifies the transfer by hashing live
 source or target files. Normal runtime changes such as Memory+ index rollover,
 configuration publication, schedule state or transaction-marker cleanup cannot
@@ -150,9 +213,11 @@ veto the Move. Target online status is an execution receipt: an unavailable
 runtime leaves the transaction pending and retries forward; it does not make the
 already accepted package invalid.
 
-A new Move cannot be cancelled after forward intent. Network, process-start and
-cleanup failures remain in the durable manager and retry idempotently without
-reactivating the source or rolling back the target. If the Agent must return, the
+A new Move cannot ordinarily be cancelled after forward intent. The staged-only
+policy-change recovery above is permitted only with the target's authenticated
+proof that no target commit occurred. Network, process-start and cleanup failures
+remain in the durable manager and retry idempotently without reactivating the
+source or rolling back a committed target. If the Agent must return, the
 operator completes this Move and starts a separate reverse Move. Historical
 legacy-transfer rollback is unchanged; Clone now follows its retry/cancellation
 decision above.
@@ -168,7 +233,7 @@ Cold WAL-mode memory databases reproduce the failure without a concurrent
 writer: the read-only SQLite backup itself creates a WAL-index and empty WAL,
 so comparing the complete raw file list invalidates its own preparation.
 Only disposable reader files of successfully backed-up databases are excluded
-from derived freshness. Complete inventory, size, deletion disclosure, durable
+from derived freshness. Complete inventory, deletion disclosure, durable
 snapshot checksums and real-change rejection remain in force.
 
 Regression checks cover both transfer modes, extraction of real SQLite memory,
@@ -253,13 +318,14 @@ boundary; the mutation is never written to product files.
   read-only backup can create, resize or remove a SQLite `-shm` file and an
   empty `-wal`. For successfully backed-up databases only, those reader files
   are omitted from the derived freshness comparison, not from the complete
-  deletion disclosure or 1 GB size inventory. Nonempty WALs, database edits,
+  deletion disclosure. Nonempty WALs, database edits,
   links and unrelated similarly named files remain fenced; snapshot checksums
   detect durable memory edits across preparation and confirmation;
 - the Agent's schedules, imported disabled for review;
 - Agent-owned secret keys, encrypted with the paired HASHI Remote shared
-  secret. A move includes its Telegram credential for a single-consumer
-  cutover; a clone always excludes every Telegram credential;
+  secret. A move can include its Telegram credential for a single-consumer
+  cutover. An ordinary clone excludes it; an explicitly inactive backup clone
+  may retain it encrypted in quarantine, separate from the live connector;
 - the Agent-owned capability/tool/permission declaration;
 - owned Telegram delivery state, but only for a Move whose instance,
   `agent_lifecycle_id`, and actual Bot fingerprint are verifiable;
@@ -306,16 +372,23 @@ delivery state. The receiver validates the transferred credential, rebinds only
 the instance component, and publishes the state before activation. Clone always
 creates a fresh lifecycle ID and removes any inherited nested lifecycle shadow
 from its target configuration, retaining other settings and the source row.
-It excludes Telegram credentials, pending recovery
-state, and `undelivered/` content. A Move with referenced undelivered business
-responses must use full-workspace mode; identity-memory mode fails before
-source mutation. Rollback and verified source cleanup retire only the exact
-incarnation, so retry/continue cannot resurrect a stale same-name event.
+It excludes the live Telegram credential, pending recovery
+state, and `undelivered/` content; an explicitly selected inactive backup may
+retain an encrypted credential in quarantine. A full-workspace Move carries owned
+undelivered responses and their recovery state. A narrower Move keeps them on
+the source: its complete workspace and the exact owner-bound delivery record
+are retained before retiring the source record. The preview and completion
+report that pending responses remain on the source; the destination does not
+automatically deliver them. If the source workspace was already missing, the
+journal preserves the available record but does not claim the content exists.
+Rollback and verified source cleanup retire only the exact incarnation, so
+retry/continue cannot resurrect a stale same-name event.
 
 Every preview reports included file count, package size, and excluded-path
-count. Explicit `workspace` transfers inspect the complete logical workspace
-inventory before compression and reject more than 1,000,000,000 bytes (1 GB).
-Equality is accepted. Required archive/control overhead is budgeted separately;
+count. Explicit `workspace` Moves inspect the complete source workspace for
+deletion disclosure, while the default 1,000,000,000 byte (1 GB) limit applies
+to portable content rather than excluded files. The limit is configurable and
+negotiated as described below. Equality is accepted. Required archive/control overhead is budgeted separately;
 the receiver no longer imposes an independent 256 MiB package cap. Historical
 schema 1–3 packages retain their existing bounded 2 GiB expansion guard.
 
@@ -328,15 +401,24 @@ this mode. Root `AGENT.md` is excluded in this mode and preserved as the existin
 non-authoritative attachment in `workspace` mode. Nested project documents,
 including nested `agent.md`, are ordinary files in full-workspace mode; a `.git`
 marker no longer excludes the containing project. External links remain excluded.
+An in-workspace file link is materialized as a regular file only when both its
+selected name and resolved target satisfy the existing workspace exclusion rules.
+This prevents an ordinary-looking alias from carrying a credential, reserved root Agent identity,
+or a file inside an excluded directory. Directory links and junctions are still
+excluded; their safe materialization is not yet implemented.
 
 `/move <agent> <target>` opens the explicit scope picker. `--identity-memory` or
 `--workspace` chooses the scope directly; `--dry-run` previews that choice.
 The compatibility CLI uses `--transfer-mode identity_memory|workspace`.
 Preview/prepared state exposes `transfer_mode`, `workspace_inventory`,
-`discarded_files`, and `total_workspace_bytes`. Confirmation warns that successful
-Move deletes the entire source workspace, including excluded files. Clone keeps
-its source and defaults to the same explicit full-workspace scope and 1 GB
-preflight; legacy schema export requires an explicit compatibility request. Changing scope requires a fresh preparation and confirmation.
+`discarded_files`, and `total_workspace_bytes`. After a verified Move, the
+entire source workspace is retained in a uniquely named sibling directory,
+including excluded and subsequently changed files. Its path is returned in the
+completion receipt. If that filesystem cannot safely rename the directory without
+replacement, it stays in its original location; if the directory is already
+missing, the receipt reports this. Interrupted retention resumes from its journal.
+Clone keeps its source and defaults to the same explicit full-workspace scope and 1 GB
+portable-payload limit; legacy schema export requires an explicit compatibility request. Older receivers may still enforce their own whole-inventory limit. Changing scope requires a fresh preparation and confirmation.
 Source freshness covers the selected content and deletion inventory, retaining
 the existing exclusion for the command audit. Files changing during packaging
 cause preparation to fail without publishing a new package. SQLite snapshots
@@ -365,13 +447,23 @@ idle scan.
 
 ## Conversation continuity
 
-Move schema 5 always uses `history_mode=move`: the exact configured owner's
-eligible history is imported before target activation. Existing target messages
-are retained after the imported prefix, shared Workbench/Telegram bindings stay
-shared, and independently bound source Sessions remain independent even when
-the target previously pointed both surfaces at one Session. Source Sessions are
-archived and unbound only after target activation and verification; the source
-rows remain recoverable rather than being deleted.
+Move schema 5 defaults to `history_mode=move`: the selected source owner's
+eligible history is imported before target activation, with source and target
+owners mapped by the authenticated transfer. Existing target messages remain
+after the imported prefix, and source Sessions are archived and unbound only
+after the selected target state is verified; their rows remain recoverable.
+
+An explicit `history_mode=retain_source` archives and unbinds source Sessions
+without deleting messages or attachments, retaining each original owner
+partition and importing no conversation history to the target. This prevents a
+later same-name Agent from automatically inheriting those Sessions. The decision is included in the
+package, receiver capability negotiation, preview and transaction journal before
+confirmation; the source cleanup journal rejects changing it on retry. It does
+not require a source history owner to export a capsule. The owner-scoped history API
+and a compatible Workbench can discover and read those retained conversations,
+even after the Agent has departed; other owners cannot discover or read them.
+This option does not copy pending replies or relax the separate
+delivery, transaction, scheduler and single-consumer safeguards.
 
 Clone defaults to `history_mode=none`, yielding a fresh active conversation.
 The explicit alternatives are:
@@ -411,8 +503,9 @@ not synthesize a pass by falling back to legacy workspace `transcript.jsonl`.
    schema-5 receiver validates the continuity owner, mode, digest, summary, and
    provenance before accepting the stage.
 4. An explicit operator confirmation durably commits forward-only execution
-   intent before any cutover action. Cancellation remains available only while
-   the transaction is still staged and has no forward intent.
+   intent before any cutover action. Before that intent, a failed preparation
+   can be cancelled when it was not uploaded; a lost upload acknowledgement
+   requires reconciliation with the target before rollback.
 5. The shared Functions manager atomically imports target
    configuration/workspace and the continuity batch while the target Agent
    remains inactive. The staged target ID is a reservation, so another
@@ -423,8 +516,13 @@ not synthesize a pass by falling back to legacy workspace `transcript.jsonl`.
 7. For a move, the source registry entry and schedules are disabled first. The
    target remains inactive until the source Worker and Telegram ingress are
    demonstrably stopped. The background manager then continues the transaction
-   to activate and hot-start the target.
-8. The receiver requires a live Workbench runtime receipt, then removes its
+   to activate and hot-start an active target. An inactive source instead carries
+   an immutable inactive target choice, advertised as a receiver capability.
+8. The receiver requires a live Workbench runtime receipt for an active target.
+   For an inactive target it verifies both the transaction-owned inactive
+   configuration and the health report's complete runtime-presence list,
+   including Workers still starting or failing startup. Unknown presence cannot
+   be mistaken for an offline receipt. It then removes its
    transaction markers. It does not compare mutable target workspace, PCM,
    memory, configuration, credential or schedule hashes after activation.
    Lifecycle/Bot ownership is established during import before delivery state
@@ -458,9 +556,9 @@ moves clean the verified source instead. Any active, unrelated, or unproven
 Agent-ID/workspace collision remains a hard error; HASHI never guesses at
 memory merges.
 
-Each instance must retain at least one active Agent. A move of the last active
-Agent fails before packaging or target mutation and directs the user to create
-or clone another Agent. Clone remains allowed. Target IDs are resolved
+An instance may move its last active Agent. Transfer coordination and recovery
+remain available independently of that Agent; target activation still waits
+until the source Worker has stopped. Target IDs are resolved
 case-insensitively against both registry and workspaces: the first collision
 uses `_1`, then `_2`, and so on, while `--as` accepts a legal explicit free ID.
 `local` has no special meaning; omitted clone target means the current instance,
@@ -526,8 +624,9 @@ The tombstone is audit/routing metadata, not a retained Agent copy.
   and disable the source registry entry.
 - `python scripts/move_agent.py --continue <move-id>` — after the source Worker
   stops, activate, verify, and finish cleanup.
-- `python scripts/move_agent.py --cancel <move-id>` — roll back only a staged
-  move that has not recorded forward intent.
+- `python scripts/move_agent.py --cancel <move-id>` — cancel a definitively
+  unpublished failure, or roll back a staged move without forward intent after
+  reconciling any uncertain upload.
 
 Legacy `--sync` is rejected. `--keep-source` produces a compatibility message
 directing users to `/clone` and prepares nothing. Plaintext direct-move
@@ -541,15 +640,16 @@ its existing, separate workflow.
 used by `/remote list`. Connected peers automatically become destinations;
 no separately configured `instances.json` is required. Resolved Remote hosts,
 ports, receiver capabilities and connection status come from that view.
-The local instance is excluded. Menus omit disconnected peers; `/move list`
-labels disconnected and unsupported receivers. Selecting or executing a target
-refreshes the view before any package is staged. The migration coordinator still
-performs its authenticated identity/capability checks and explicit confirmation.
+The local instance is excluded from Move. Menus show known peers even if their
+last check was unavailable, with a status label; cached liveness or capability
+flags do not reject the user's choice. Before staging, the migration coordinator
+verifies the actual receiver's identity and required capabilities over the
+authenticated connection. Confirmation remains separate from that verification.
 Recovery callbacks retain disconnected routes and retry/cancel buttons.
 
 English and Chinese notices distinguish local Remote unavailability, an
-untrusted peer view, no connected targets, a disconnected target and an
-unsupported receiver. No UI asks the user to maintain a second target list.
+untrusted peer view and no known target. A genuine unreachable or incompatible
+receiver is reported when contacted. No UI asks the user to maintain a second target list.
 
 This supersedes the earlier configuration-file-only fix: that fix repaired
 path resolution but did not integrate Remote discovery, so its empty-directory
@@ -615,9 +715,27 @@ inside the journaled config transaction to remove local group membership and
 broadcast exclusions. It preserves dynamic selectors, qualified remote addresses,
 and descriptive text. Credential protection checks declared Telegram token keys
 and the canonical backend secret lookup order of remaining Agents, including
-inactive Agents. A real consumer blocks cleanup before configuration or workspace
-deletion; an ordinary string equal to the moved Agent ID does not. Retrying cleanup
-uses the existing source journal and remains idempotent.
+inactive Agents. Credentials used by another Agent are retained without blocking
+the completed move; an ordinary string equal to the moved Agent ID is not a
+consumer. Retrying cleanup uses the existing source journal and remains idempotent.
+
+The source's listed credential keys are an inventory, not proof that each one is
+required to start the selected Agent. Staging reports absent credentials as
+warnings rather than rejecting the whole move. On verified source cleanup, a
+credential is removed only if its current value matches the value actually
+present in the protected transfer archive. Omitted credentials, later changes,
+and credentials whose transfer cannot be established are retained on the
+source. Startup and connector readiness still need their own truthful checks;
+this inventory does not establish those checks by itself.
+
+Schedule packaging records each original enabled state and source row separately
+while keeping the imported task disabled. After verified target completion, source
+cleanup removes a schedule only when the verified package and source journal prove
+it is the transferred, unchanged task. New, edited, legacy-unproven or otherwise
+unverifiable source schedules remain disabled on the source, with their original
+rows recorded in the source journal and retained IDs reported in the move result.
+The target does not automatically resume imported schedules yet; safe automated
+handoff and recovery remain to be implemented.
 
 ### Authenticated streaming upload
 
@@ -693,20 +811,37 @@ python scripts/backfill_agent_history.py export --source-root <source-root> \
   --source-instance <instance> --manifest <manifest.json> \
   --capsule-dir <private-capsule-dir>
 python scripts/backfill_agent_history.py dry-run --target-root <target-root> \
-  --manifest <manifest.json> --capsule-dir <private-capsule-dir>
+  --manifest <manifest.json> --capsule-dir <private-capsule-dir> > <plan.json>
 python scripts/backfill_agent_history.py apply --target-root <target-root> \
   --manifest <manifest.json> --capsule-dir <private-capsule-dir> \
-  --expected-plan-digest <dry-run-digest> --backup-dir <new-backup-dir>
+  --plan-file <plan.json> --backup-dir <new-backup-dir>
 ```
 
-The manifest binds the exact owner, target instance, expected entry count and
+The manifest binds the exact source owner, target instance, expected entry count and
 one-to-one source-instance/source-Agent/source-lifecycle/target-Agent/
 target-lifecycle mappings. Source and target must carry the same lifecycle ID;
 missing or changed lifecycle IDs fail closed. This
-operator has no legacy name-only exception. Deterministic transfer IDs and
+operator has no legacy name-only exception. Schema 1 uses one owner_id for
+all sources. Schema 2 replaces that field with source_owners, an object
+mapping every named source instance to its own established owner; source
+instances may use different local owner strings. Each source checks its
+mapping against its authenticated command principal, or its established local
+owner for the offline operator, before export. The source owner is bound to the
+schema-2 transfer identity and target plan digest. A manifest value alone does
+not grant access to a source partition. Deterministic transfer IDs and
 capsule names derive from that batch and mapping. Apply holds the target's
 existing instance process lock, repeats target identity/lifecycle validation,
-checks every owner's Runs, and requires the dry-run digest. The original target
+checks every owner's Runs, and requires the dry-run digest. The plan binds the
+independently resolved target owner and target-state digest; the source and
+target owner IDs may differ. A live authenticated command selects its own
+target owner for planning, apply, status and rollback. An authenticated caller
+cannot apply or roll back a different owner's plan. The offline operator can
+resume from the saved plan. The full dry-run JSON keeps that selected target
+when a legacy owner setting changes; apply recomputes the digest and checks the
+current target state before writing. Older digest-only invocations remain
+supported and resolve the current target owner. The plan is not an
+authentication credential. Status and rollback check the imported batch's
+source and destination ownership before acting. The original target
 database and Session workspaces are privately backed up before a live
 SessionStore is initialized. The backup is additive evidence; it is never
 restored over newer target work. Symlinks, junctions, other reparse points,
@@ -730,6 +865,83 @@ The following operational constraints were relocated intact from the prior boots
 
 ### FYI v1 017 Move confirmation and Clone retry boundaries
 
-- Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
+- Move: staging checks and forward-only confirmation, with the separately
+  documented authenticated staged-only policy-change recovery. Clone: PAO-owner
   snapshots, resumable retries; no Move-only gates/source lifecycle writes.
   [Move/Clone](HASHI_AGENT_MOVE_V1.md).
+
+### Archive member capacity (source changes, 2026-11-18)
+
+A receiver can configure its archive member budget with the positive integer
+`HASHI_AGENT_MOVE_MAX_ARCHIVE_MEMBERS`; the default is 100,000. The receiver
+advertises this value in its authenticated capabilities. New senders use the
+advertised value during preview, packaging and upload; for a receiver without
+the new field they retain the historical 100,000-member compatibility limit.
+The error reports the actual member count and the limit before package output
+is replaced or a source cutover begins.
+
+A newly staged target records the accepted member count with its package
+journal. Later revalidation uses that accepted count, so lowering the setting
+does not invalidate an already staged package. Older staged journals retain
+their historical acceptance bound. Package checksums, identity checks,
+containment and archive validation still apply.
+
+Move's source workspace inventory is separate from archive members: files
+that are excluded from the portable payload no longer consume the receiver's
+member allowance. An operator may set `HASHI_AGENT_MOVE_MAX_INVENTORY_ENTRIES`
+to an explicit positive source-side bound; it is unset by default and does not
+apply to Clone.
+
+The receiver's compressed package budget is configurable with the positive
+integer `HASHI_AGENT_MOVE_MAX_PACKAGE_BYTES`. It is advertised through the
+same authenticated capability response and enforced consistently by the
+streaming receiver, legacy receiver and target staging. The sender stops writing
+the temporary archive when the receiver's byte budget would be exceeded and
+preserves any previous output. These are limits on compressed package bytes;
+the encrypted streaming envelope has its separately accounted fixed overhead.
+
+The receiver also advertises its expanded archive budget, configurable by the
+positive integer `HASHI_AGENT_MOVE_MAX_UNPACKED_BYTES`. The sender counts
+uncompressed bytes across all archive members as it writes, and the receiver
+checks the complete member sizes before validation/import. Existing staged
+transactions retain their accepted expanded size if the setting is later
+lowered; old journals retain the previous compatibility bound.
+
+For modern transfer modes, the receiver also advertises the workspace payload
+budget, configurable with the positive integer `HASHI_AGENT_MOVE_MAX_WORKSPACE_BYTES`.
+It includes the live Agent identity and portable workspace files, not excluded
+source inventory. Scanning and frozen copies use the target budget, including
+the remaining space after each captured file; SQLite backup size is checked
+after that snapshot completes. A previously staged package retains its
+accepted workspace size when the setting is later lowered. Legacy packages
+continue to use their existing compatibility rules.
+
+Control JSON members are emitted to the archive in bounded UTF-8 byte chunks,
+with the same canonical member content and SHA-256 values. The continuity and
+snapshot digests are also updated incrementally rather than creating a second
+encoded copy of the complete document.
+
+The source still assembles its history capsule and workspace inventory in
+memory, the JSON encoder can construct a large fragment for one large string,
+and the receiver still reads control documents and its archive index into
+memory. Individual control-member and continuity-history limits remain
+separate and unchanged. Legacy JSON/base64 transfer still buffers its envelope;
+use the negotiated streaming transport when available. This increment does not
+by itself provide bounded-memory history import, resumable history chunks,
+complete resource negotiation or proof for arbitrarily large workspaces.
+
+
+## Clone Telegram credential reference
+
+Each clone receives a fresh unbound Telegram secret reference. Existing target
+credentials and references are preserved even if their names match the new
+Agent; a concurrent write to the conventional Agent-name key cannot be
+accidentally adopted by the clone. A manager can later set the clone's own
+verified credential through the normal Telegram setup. An inactive encrypted
+backup stays quarantined and does not itself start a consumer.
+
+The backup retains its package encryption and therefore depends on the
+corresponding transfer secret remaining available. A complete recovery and
+controlled cross-instance single-consumer handoff are still being implemented;
+the presence of an encrypted backup does not establish that the original Bot is
+safe to activate on the target.

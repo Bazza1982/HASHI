@@ -524,3 +524,289 @@ async def test_openrouter_mixed_image_audio_routes_each_attachment_separately(
         ("attachment-image", "native"),
         ("attachment-audio", "local_fallback"),
     ]
+
+
+
+def test_live_camera_samples_follow_model_capacity_without_failing_voice(tmp_path):
+    from orchestrator.multimodal_contract import InputCapability, MultimodalContractError
+
+    adapter = _adapter(tmp_path)
+    frames = [
+        {
+            "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABAA/9k=",
+            "frame_sequence": index,
+            "captured_at": f"2026-11-17T18:00:0{index}+00:00",
+        }
+        for index in range(1, 6)
+    ]
+
+    def capability(**limits):
+        return InputCapability(
+            provider="test", model="visual", input_modalities=frozenset({"text", "image"}),
+            input_transports={"image": ("data_url",)}, limits=limits,
+        )
+
+    adapter.resolve_input_capability = lambda: capability(item_count=2)
+    result = adapter._append_transient_images([{"role": "user", "content": "What changed?"}], frames)
+    parts = result[-1]["content"]
+    assert len([part for part in parts if part["type"] == "image_url"]) == 2
+    text = " ".join(part["text"] for part in parts if part["type"] == "text")
+    assert "2 of 5" in text and "frame_sequence=1" in text and "frame_sequence=5" in text
+    assert "sample" in text.lower()
+
+    # A small aggregate limit can still use a valid subset.
+    adapter.resolve_input_capability = lambda: capability(item_count=5, total_bytes=14)
+    result = adapter._append_transient_images([{"role": "user", "content": "Keep talking."}], frames)
+    parts = result[-1]["content"]
+    assert len([part for part in parts if part["type"] == "image_url"]) == 1
+    assert any("1 of 5" in part.get("text", "") for part in parts)
+
+    # Native attachments consume the same count and aggregate capacity.
+    adapter.resolve_input_capability = lambda: capability(item_count=2, total_bytes=28)
+    existing = [{"type": "text", "text": "Compare."},
+                {"type": "image_url", "image_url": {"url": frames[0]["data_url"]}}]
+    result = adapter._append_transient_images([{"role": "user", "content": existing}], frames)
+    parts = result[-1]["content"]
+    assert len([part for part in parts if part["type"] == "image_url"]) == 2
+    assert any("1 of 5" in part.get("text", "") for part in parts)
+
+    # When evenly spaced candidates are too large, smaller candidates can
+    # still preserve the maximum number that fits the aggregate budget.
+    import base64
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    varied = [
+        {**frame, "data_url": "data:image/jpeg;base64," + base64.b64encode(
+            jpeg + (b"x" * 10 if index % 2 == 0 else b"")
+        ).decode()}
+        for index, frame in enumerate(frames)
+    ]
+    adapter.resolve_input_capability = lambda: capability(item_count=2, total_bytes=28)
+    result = adapter._append_transient_images([{"role": "user", "content": "Inspect."}], varied)
+    parts = result[-1]["content"]
+    assert len([part for part in parts if part["type"] == "image_url"]) == 2
+    text = " ".join(part["text"] for part in parts if part["type"] == "text")
+    assert "frame_sequence=2" in text and "frame_sequence=4" in text
+
+    # Nothing fits the selected image budget: keep the spoken request and say
+    # that no camera frame could be included instead of failing the whole turn.
+    adapter.resolve_input_capability = lambda: capability(item_bytes=1)
+    result = adapter._append_transient_images([{"role": "user", "content": "Keep talking."}], frames)
+    parts = result[-1]["content"]
+    assert not [part for part in parts if part["type"] == "image_url"]
+    assert any("0 of 5" in part.get("text", "") for part in parts)
+    assert any("Keep talking." in part.get("text", "") for part in parts)
+
+    # Normalized timestamps are a conservative bound, not an exact capture time.
+    adapter.resolve_input_capability = lambda: capability()
+    normalized = {**frames[0], "capture_clock": {
+        "basis": "server_roundtrip_lower_bound",
+        "client_captured_at": "2026-11-17T18:02:01+00:00",
+        "uncertainty_ms": 400,
+    }}
+    result = adapter._append_transient_images([{"role": "user", "content": "Inspect."}], [normalized])
+    text = " ".join(part["text"] for part in result[-1]["content"] if part["type"] == "text")
+    assert "earliest_possible_capture_at=" in text and "capture_time_uncertainty_ms=400" in text
+
+    # An invalid frame is never silently presented as a legitimate omission.
+    with pytest.raises(MultimodalContractError):
+        adapter._append_transient_images(
+            [{"role": "user", "content": "Test."}],
+            [{**frames[0], "data_url": "data:image/jpeg;base64,not-base64!"}],
+        )
+
+
+def test_live_camera_checkpoint_omits_only_transient_images_and_preserves_tool_context(tmp_path):
+    adapter = _adapter(tmp_path)
+    image = "data:image/jpeg;base64,/9j/wAAICAAQABAA/9k="
+    frame = {"data_url": image, "frame_sequence": 1, "captured_at": "2026-11-17T18:00:00+00:00"}
+    messages = [
+        {"role": "system", "content": "Assist."},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Compare with this uploaded image."},
+            {"type": "image_url", "image_url": {"url": image}},
+        ]},
+    ]
+    adapter._append_transient_images(messages, [frame])
+    messages.extend([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tool-1", "type": "function",
+             "function": {"name": "file_read", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "tool-1", "content": "already completed"},
+    ])
+    checkpoints = []
+    adapter.set_provider_context_observer(checkpoints.append)
+
+    adapter._observe_provider_context(
+        boundary="completed_tool_batch", messages=messages, request_id="request-1",
+        result=_APIResult("", None, "stop"), provider_request_id="provider-1",
+    )
+
+    checkpoint = checkpoints[0]
+    parts = checkpoint["messages"][1]["content"]
+    assert len([part for part in parts if part.get("type") == "image_url"]) == 1
+    assert any("unavailable" in part.get("text", "").lower() for part in parts)
+    assert checkpoint["ephemeral_media_omitted"] is True
+    assert checkpoint["messages"][2:] == messages[2:]
+    assert len([part for part in messages[1]["content"] if part.get("type") == "image_url"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_camera_expiring_during_provider_preflight_is_not_sent(tmp_path):
+    import asyncio
+    from datetime import datetime, timezone
+    from orchestrator.frontend_call.transient_live_media import bind_live_frames, live_frames_for
+
+    now = datetime.now(timezone.utc)
+    frame = {
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABAA/9k=",
+        "frame_sequence": 1,
+        "captured_at": now.isoformat(),
+    }
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-camera-expiry", [frame], freshness_seconds=1)
+    frames = live_frames_for(runtime, "request-camera-expiry", now=now)
+    adapter = _adapter(tmp_path)
+    async def slow_preflight(payload, *, request_id, provider_calls):
+        del payload, request_id, provider_calls
+        await asyncio.sleep(1.2)
+    adapter._prepare_payload_capacity = slow_preflight
+    adapter._call_api_once = AsyncMock(return_value=_APIResult("Voice continues.", None, "stop"))
+
+    response = await adapter.generate_response(
+        "Keep speaking.", "request-camera-expiry", transient_images=frames,
+    )
+
+    assert response.is_success
+    parts = adapter._call_api_once.call_args.args[0]["messages"][1]["content"]
+    assert not any(part.get("type") == "image_url" for part in parts)
+    assert any("expired" in part.get("text", "").lower() for part in parts)
+    assert any("Keep speaking." in part.get("text", "") for part in parts)
+
+
+@pytest.mark.asyncio
+async def test_camera_expiring_during_tool_execution_is_not_resent(tmp_path):
+    import asyncio
+    from datetime import datetime, timezone
+    from orchestrator.frontend_call.transient_live_media import bind_live_frames, live_frames_for
+
+    now = datetime.now(timezone.utc)
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-tool-camera", [{
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABAA/9k=",
+        "frame_sequence": 1, "captured_at": now.isoformat(),
+    }], freshness_seconds=1)
+    frames = live_frames_for(runtime, "request-tool-camera", now=now)
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = _FallbackRegistry()
+    call = {"id": "one-tool", "type": "function",
+            "function": {"name": "vision_inspect", "arguments": "{}"}}
+    adapter._call_api_once = AsyncMock(side_effect=[
+        _APIResult("", [call], "tool_calls"),
+        _APIResult("Finished.", None, "stop"),
+    ])
+    executed = []
+    async def slow_tool(calls, messages, callback, **kwargs):
+        del callback
+        if callable(kwargs.get("before_tool_dispatch")):
+            kwargs["before_tool_dispatch"]()
+        executed.extend(calls)
+        await asyncio.sleep(1.2)
+        messages.append({"role": "tool", "tool_call_id": "one-tool", "content": "completed"})
+        return ()
+    adapter._run_tool_calls = slow_tool
+
+    response = await adapter.generate_response(
+        "Keep speaking.", "request-tool-camera", transient_images=frames,
+    )
+
+    assert response.is_success
+    assert len(executed) == 1
+    first = adapter._call_api_once.call_args_list[0].args[0]["messages"][1]["content"]
+    second = adapter._call_api_once.call_args_list[1].args[0]["messages"][1]["content"]
+    assert any(part.get("type") == "image_url" for part in first)
+    assert not any(part.get("type") == "image_url" for part in second)
+    assert any("expired" in part.get("text", "").lower() for part in second)
+    assert adapter._call_api_once.call_args_list[1].args[0]["messages"][-1]["content"] == "completed"
+
+
+def test_live_camera_wire_evidence_omits_camera_bytes_but_keeps_upload_and_original_digest(tmp_path):
+    import base64
+    from adapters.openrouter_api import _request_wire_evidence
+
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    ordinary = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"ordinary-upload").decode()
+    camera = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"camera-canary").decode()
+    adapter = _adapter(tmp_path)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Compare."},
+        {"type": "image_url", "image_url": {"url": ordinary}},
+    ]}]
+    adapter._append_transient_images(messages, [{
+        "data_url": camera, "captured_at": "2026-11-17T18:00:00+00:00", "frame_sequence": 1,
+    }])
+    payload = {"model": "visual", "messages": messages}
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    captured = []
+    adapter._provider_protocol_forensic_sink = lambda kind, value: captured.append(value) or "private:wire"
+
+    wire = _request_wire_evidence(payload, SimpleNamespace(content=raw))
+    adapter._record_provider_wire_evidence(
+        "request_prepared", request_id="camera", call_serial=1, payload={"body": payload},
+    )
+
+    assert wire["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert wire["body_is_exact"] is False
+    assert wire["transient_camera_images_omitted"] == 1
+    assert camera not in json.dumps(wire)
+    assert ordinary in json.dumps(wire)
+    assert camera not in json.dumps(captured)
+    assert ordinary in json.dumps(captured)
+    assert camera in raw.decode(), "the actual provider request remains unchanged"
+
+    ordinary_payload = {"messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": ordinary}},
+    ]}]}
+    ordinary_raw = json.dumps(ordinary_payload).encode()
+    untouched = _request_wire_evidence(ordinary_payload, SimpleNamespace(content=ordinary_raw))
+    assert untouched["body"] == ordinary_raw.decode()
+    assert untouched["sha256"] == hashlib.sha256(ordinary_raw).hexdigest()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_camera_is_not_retained_in_provider_http_failure_diagnostics(tmp_path, streaming):
+    import base64
+    from adapters.openrouter_api import _provider_http_failure_diagnostics
+
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    ordinary = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"upload-canary").decode()
+    camera = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"camera-canary").decode()
+    adapter = _adapter(tmp_path)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Compare."},
+        {"type": "image_url", "image_url": {"url": ordinary}},
+    ]}]
+    adapter._append_transient_images(messages, [{
+        "data_url": camera, "captured_at": "2026-11-17T18:00:00+00:00", "frame_sequence": 1,
+    }])
+    payload = {"model": "visual", "messages": messages}
+
+    async def fail(request):
+        raise httpx.ConnectError("synthetic failure", request=request)
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(fail))
+    with pytest.raises(httpx.ConnectError) as raised:
+        if streaming:
+            await adapter._stream_api_once(payload, {}, None)
+        else:
+            await adapter._call_api_once(payload, {}, None)
+    diagnostics = _provider_http_failure_diagnostics(raised.value)
+    evidence = diagnostics["request"]
+    assert evidence["body_is_exact"] is False
+    assert evidence["transient_camera_images_omitted"] == 1
+    assert evidence["body_sha256"] == hashlib.sha256(raised.value.request.content).hexdigest()
+    assert camera not in json.dumps(evidence)
+    assert ordinary in json.dumps(evidence)
+    assert camera in raised.value.request.content.decode()
+    await adapter.client.aclose()

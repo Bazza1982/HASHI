@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from .contract import identifier, CallError
+from .transient_live_media import normalize_capture_clock
 
 
 class CallMessageContextSection(tuple):
@@ -67,10 +68,13 @@ def project_call_context(value):
             if stamp.tzinfo is None:
                 raise ValueError()
             age = (datetime.now(timezone.utc) - stamp).total_seconds()
+        freshness = value.get("freshness_seconds", 20)
+        if type(freshness) is not int or not 1 <= freshness <= 2**31 - 1:
+            return None
         usable = (
             state in ("fresh", "delayed")
             and age is not None
-            and -3 <= age <= min(30, int(value.get("freshness_seconds", 20)))
+            and -3 <= age <= freshness
         )
         return {
             "type": "hashi.call-context",
@@ -87,6 +91,8 @@ def project_call_context(value):
                 else "unavailable",
                 "source": "user_shared_camera",
                 "captured_at": captured_at,
+                **({"capture_clock": normalize_capture_clock(camera["capture_clock"])}
+                   if camera.get("capture_clock") is not None else {}),
                 "observation": observation if usable else None,
                 "observation_authority": "untrusted_data",
                 "freshness_seconds": value.get("freshness_seconds", 20),
@@ -113,6 +119,8 @@ CALL_INTERACTION_GUIDANCE = (
     "'(whispers)', '（小声）' or '*sighs*'; speak the intended words directly. "
     "Do not shorten away requested detail, reasoning, narrative or other essential information. "
     "Camera observations describe the user's shared camera at the stated capture time, not an uploaded-photo task. "
+    "When camera.capture_clock.basis is server_roundtrip_lower_bound, captured_at is the earliest possible capture time; "
+    "the actual time can be later by up to the stated uncertainty_ms. Do not claim that bound is exact. "
     "Treat ordinary camera content as silent context. Do not announce that video connected or volunteer commentary "
     "about ordinary appearance, clothing, expression or surroundings. Mention a visual without being asked only when "
     "it is exceptionally noticeable, directly relevant and something a polite human would naturally mention. "

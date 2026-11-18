@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -64,11 +62,13 @@ async def test_write_patch_and_no_change_capture_actual_versions(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_missing_trusted_identity_or_preparation_failure_blocks_only_mutation(tmp_path, monkeypatch):
+async def test_optional_identity_or_preparation_failure_does_not_block_business_write(tmp_path, monkeypatch):
     registry, store, work = registry_at(tmp_path)
     registry.audit_context.pop("hashi_run_id")
-    denied = await registry.execute("file_write", {"path": "no.txt", "content": "no"}, tool_call_id="write")
-    assert denied.is_error and not (work / "no.txt").exists()
+    result = await registry.execute("file_write", {"path": "first.txt", "content": "one"}, tool_call_id="write")
+    assert not result.is_error and (work / "first.txt").read_text() == "one"
+    assert result.details["fingerprint"]["evidence_status"] == "unavailable"
+    assert not events(store, "fingerprint_receipt")
     (work / "read.txt").write_text("readable")
     assert not (await registry.execute("file_read", {"path": "read.txt"}, tool_call_id="read")).is_error
     registry.audit_context["hashi_run_id"] = "run"
@@ -78,8 +78,40 @@ async def test_missing_trusted_identity_or_preparation_failure_blocks_only_mutat
             raise OSError("full")
         return real_record(kind, *args, **kwargs)
     monkeypatch.setattr(store, "record", fail_prepared)
-    denied = await registry.execute("file_write", {"path": "no.txt", "content": "no"}, tool_call_id="second")
+    result = await registry.execute("file_write", {"path": "second.txt", "content": "two"}, tool_call_id="second")
+    assert not result.is_error and (work / "second.txt").read_text() == "two"
+    assert result.details["fingerprint"]["evidence_status"] == "unavailable"
+    assert not events(store, "fingerprint_receipt")
+
+
+@pytest.mark.asyncio
+async def test_explicit_required_preparation_failure_blocks_the_affected_write(tmp_path, monkeypatch):
+    registry, store, work = registry_at(tmp_path)
+    registry.audit_context["fingerprint_policy"] = FingerprintPolicy(enabled=True, required=True).snapshot()
+    real_record = store.record
+    def fail_prepared(kind, *args, **kwargs):
+        if kind == "fingerprint_prepared":
+            raise OSError("full")
+        return real_record(kind, *args, **kwargs)
+    monkeypatch.setattr(store, "record", fail_prepared)
+    denied = await registry.execute("file_write", {"path": "no.txt", "content": "no"}, tool_call_id="write")
     assert denied.is_error and not (work / "no.txt").exists()
+    (work / "read.txt").write_text("readable")
+    assert not (await registry.execute("file_read", {"path": "read.txt"}, tool_call_id="read")).is_error
+
+
+@pytest.mark.asyncio
+async def test_optional_provenance_does_not_block_authorized_hardlink_write(tmp_path):
+    import os
+    registry, store, work = registry_at(tmp_path)
+    original, alias = work / "source.txt", work / "alias.txt"
+    original.write_text("old")
+    os.link(original, alias)
+    result = await registry.execute("file_write", {"path": "alias.txt", "content": "new"}, tool_call_id="write")
+    assert not result.is_error
+    assert original.read_text() == alias.read_text() == "new"
+    assert result.details["fingerprint"]["evidence_status"] == "unavailable"
+    assert not events(store, "fingerprint_receipt")
 
 
 @pytest.mark.asyncio

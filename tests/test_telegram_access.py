@@ -55,8 +55,8 @@ def test_global_and_agent_grants_are_additive_and_revisioned(tmp_path):
     assert saved["unrelated"] == {"preserve": True}
 
 
-def test_removal_respects_independent_grants_and_cannot_remove_primary(tmp_path):
-    service, _config_path, _secrets_path = _instance(tmp_path, global_users=[100])
+def test_removal_respects_independent_grants_and_does_not_require_primary(tmp_path):
+    service, config_path, secrets_path = _instance(tmp_path, global_users=[100])
     first = service.status("lily")
     added = service.change("lily", expected_revision=first["revision"],
                            scope="agent", action="add", user_id="100")
@@ -64,13 +64,18 @@ def test_removal_respects_independent_grants_and_cannot_remove_primary(tmp_path)
                             scope="global", action="remove", user_id="100")
     assert result["global_user_ids"] == ["42"]
     assert result["agent_user_ids"] == ["75", "100"]
-    with pytest.raises(TelegramAccessError) as caught:
-        service.change("lily", expected_revision=result["revision"],
-                       scope="global", action="remove", user_id="42")
-    assert caught.value.error_code == "telegram_access_primary_required"
+    secrets_before = secrets_path.read_bytes()
+    result = service.change("lily", expected_revision=result["revision"],
+                            scope="global", action="remove", user_id="42")
+    assert result["primary_user_id"] is None
+    assert result["global_user_ids"] == []
+    assert result["agent_user_ids"] == ["75", "100"]
+    assert service.status("lily")["primary_user_id"] is None
+    assert read_config_json(config_path)["global"]["owner_scope_id"] == "user:42"
+    assert secrets_path.read_bytes() == secrets_before
 
 
-def test_first_global_user_preserves_existing_owner_scope(tmp_path):
+def test_global_delegates_do_not_require_or_create_a_primary(tmp_path):
     service, config_path, secrets_path = _instance(tmp_path, owner=None)
     before = secrets_path.read_bytes()
     state = service.status("lily")
@@ -78,10 +83,10 @@ def test_first_global_user_preserves_existing_owner_scope(tmp_path):
     assert state["global_user_ids"] == []
     result = service.change("lily", expected_revision=state["revision"],
                             scope="global", action="add", user_id="9001")
-    assert result["primary_user_id"] == "9001"
+    assert result["primary_user_id"] is None
     assert result["global_user_ids"] == ["9001"]
     config = read_config_json(config_path)
-    assert config["global"]["telegram_owner_id"] == 9001
+    assert "telegram_owner_id" not in config["global"]
     assert config["global"]["owner_scope_id"] == "user:0"
     assert secrets_path.read_bytes() == before
 
@@ -258,3 +263,46 @@ def test_removing_a_legacy_grant_also_removes_a_duplicate_new_grant(tmp_path):
     extra = read_config_json(config_path)["agents"][0]["extra"]
     assert extra["authorized_telegram_ids"] == []
     assert extra["scoped_telegram_user_ids"] == [300]
+
+
+
+def test_telegram_ingress_does_not_depend_on_management_capacity(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    _service, config_path, secrets_path = _instance(tmp_path)
+    document = read_config_json(config_path)
+    document["global"]["telegram_scoped_access_version"] = 1
+    document["global"]["telegram_users_per_scope_max"] = 0
+    write_config_json(config_path, document)
+    runtime = SimpleNamespace(
+        name="lily",
+        global_config=SimpleNamespace(config_path=config_path, secrets_path=secrets_path),
+        _authorized_telegram_ids=set(),
+    )
+    assert FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+    assert FlexibleAgentRuntime._is_authorized_user(runtime, 75)
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 999)
+    # A malformed grant remains denied; only the management budget is ignored.
+    document = read_config_json(config_path)
+    document["agents"][0]["extra"]["authorized_telegram_ids"] = ["invalid"]
+    write_config_json(config_path, document)
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+
+
+
+def test_primary_removal_preserves_conflicting_legacy_data_key(tmp_path):
+    from orchestrator.personal_data_owner import read_personal_data_binding, resolve_personal_data_owner
+
+    service, config_path, _ = _instance(tmp_path, global_users=[100])
+    assert resolve_personal_data_owner(tmp_path, {}, 42, establish=True) == "user:42"
+    config = read_config_json(config_path)
+    config["global"]["owner_scope_id"] = "legacy:other"
+    write_config_json(config_path, config)
+    before = service.status("lily")
+    result = service.change("lily", expected_revision=before["revision"],
+                            scope="global", action="remove", user_id="42")
+    assert result["primary_user_id"] is None
+    assert result["global_user_ids"] == ["100"]
+    assert read_config_json(config_path)["global"]["owner_scope_id"] == "legacy:other"
+    assert read_personal_data_binding(tmp_path) == ("user:42", True)

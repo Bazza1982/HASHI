@@ -135,6 +135,13 @@ def _configure(root):
     )
 
 
+def _select_confirmation_policy(root):
+    path = root / "agents.json"
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["global"]["hchat_request_age_policy"] = {"mode": "confirm", "max_age_seconds": 60}
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+
 def _evidence(root, delivery):
     welcome = {
         "epoch": delivery["recipient_epoch"],
@@ -273,6 +280,7 @@ def test_service_persists_before_scheduling_and_preserves_verified_identity(
 
 def test_exchange_60_second_confirmation_boundary_and_exact_release(tmp_path):
     _configure(tmp_path)
+    _select_confirmation_policy(tmp_path)
     now = time.time()
     store = SessionStore(
         tmp_path / "state" / "sessions.sqlite3",
@@ -338,6 +346,7 @@ def test_exchange_60_second_confirmation_boundary_and_exact_release(tmp_path):
 
 def test_exchange_discard_projects_terminal_status_to_sender(tmp_path):
     _configure(tmp_path)
+    _select_confirmation_policy(tmp_path)
     now = time.time()
     store = SessionStore(
         tmp_path / "state" / "sessions.sqlite3",

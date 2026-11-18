@@ -81,6 +81,93 @@ async def test_model_finds_and_reveals_tools_without_changing_authority(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_on_demand_view_keeps_scoped_long_result_continuation(tmp_path, monkeypatch):
+    original = "first section " * 3000 + "final sentinel"
+    registry = ToolRegistry(
+        ["tool_find", "file_read"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, audit_context={
+            "instance_id": "i", "agent_name": "agent", "owner_id": "owner",
+            "hashi_session_id": "session", "hashi_run_id": "run", "request_id": "request",
+        },
+    )
+    dispatch = registry._dispatch
+
+    async def fixture(name, arguments, *, tool_call_id=""):
+        if name == "file_read":
+            return original
+        return await dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(registry, "_dispatch", fixture)
+    view = OnDemandToolView(registry)
+    names = {item["function"]["name"] for item in view.get_tool_definitions(tiers=["core"])}
+    assert {"tool_find", "tool_catalog", "tool_output_read"} <= names
+
+    result = await view.execute("file_read", {"path": "synthetic.txt"}, "read")
+    reference = result.details["output_continuation"]
+    offset, parts = 0, []
+    while True:
+        page = await view.execute("tool_output_read", {"reference": reference, "offset": offset}, "page")
+        assert not page.is_error
+        decoded = json.loads(page.output)
+        parts.append(decoded["text"])
+        if decoded["complete"]:
+            break
+        assert decoded["next_offset"] > offset
+        offset = decoded["next_offset"]
+    assert "".join(parts) == original
+
+    denied = await view.execute_with_audit_context(
+        "tool_output_read", {"reference": reference, "offset": 0}, "other",
+        audit_context={"hashi_run_id": "different-run", "request_id": "different-request"},
+    )
+    assert denied.is_error
+
+
+def test_on_demand_view_reflects_live_continuation_binding(tmp_path):
+    registry = ToolRegistry(
+        ["tool_find", "file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+    )
+    view = OnDemandToolView(registry)
+    def names():
+        return {item["function"]["name"] for item in view.get_tool_definitions()}
+    assert "tool_output_read" not in names()
+    registry.audit_context.update({"hashi_run_id": "run", "request_id": "request"})
+    assert "tool_output_read" in names()
+    registry.audit_context.clear()
+    assert "tool_output_read" not in names()
+
+
+
+@pytest.mark.asyncio
+async def test_on_demand_discovery_does_not_forget_earlier_authorized_tools():
+    from tools.registry import ToolResult
+
+    class Registry:
+        def __init__(self):
+            self.names = {"tool_find", *(f"fixture_{index:02}" for index in range(60))}
+
+        def get_tool_definitions(self, tiers=None):
+            return [{"function": {"name": name}} for name in sorted(self.names)]
+
+        async def execute(self, _tool, _arguments, call_id):
+            return ToolResult(tool_call_id=call_id, output='{"ok": true}')
+
+    base = Registry()
+    view = OnDemandToolView(base)
+    for start in range(0, 60, 20):
+        await view.execute("tool_find", {
+            "names": [f"fixture_{index:02}" for index in range(start, start + 20)],
+            "limit": 20,
+        }, f"find-{start}")
+    names = {item["function"]["name"] for item in view.get_tool_definitions()}
+    assert {f"fixture_{index:02}" for index in range(60)} <= names
+    base.names.remove("fixture_00")
+    names = {item["function"]["name"] for item in view.get_tool_definitions()}
+    assert "fixture_00" not in names
+
+
+
+@pytest.mark.asyncio
 async def test_project_locate_uses_repo_name_and_bounded_root(tmp_path):
     root = tmp_path / "Projects"
     target = root / "content_generation"
@@ -287,7 +374,6 @@ async def test_code_search_never_reads_protected_descendants(tmp_path, monkeypat
 
     # Real ripgrep when available: the guard inventory must exclude the
     # protected directory before rg opens anything.
-    import tools.developer_toolkit as toolkit
     monkeypatch.undo()
     if shutil.which("rg"):
         rg_hit = await _run(registry, "code_search", {
@@ -566,3 +652,4 @@ async def test_text_replace_detects_concurrent_change(tmp_path, monkeypatch):
     assert payload["ok"] is False, payload
     assert payload["error"]["code"] == "concurrent_change", payload
     assert target.read_text(encoding="utf-8") == "external edit\n"
+# HASHI-Fingerprint: hfp_c7cbfa1a3f474171ae633577f172a78d

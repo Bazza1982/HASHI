@@ -19,6 +19,7 @@ logger = logging.getLogger("HASHI.TelegramCredentialActivation")
 class _Activation:
     agent_id: str
     revision: str
+    binding: str | None
     lifecycle_id: str
     stop_epoch: int
     owner_id: str
@@ -56,7 +57,12 @@ class TelegramCredentialActivation:
         return lifecycle, epoch
 
     def _matches(self, entry, status, metadata):
-        return (entry.revision == status["credential_revision"]
+        same_credential = (
+            entry.binding == status.get("_activation_binding")
+            if entry.binding is not None
+            else entry.revision == status["credential_revision"]
+        )
+        return (same_credential
                 and (not entry.lifecycle_id or self._identity(metadata)
                      == (entry.lifecycle_id, entry.stop_epoch)))
 
@@ -147,7 +153,8 @@ class TelegramCredentialActivation:
             return {**self.project(status), "activation_error_code": "telegram_activation_unavailable",
                     "activation_retry_allowed": False}
         lifecycle, epoch = self._identity(metadata)
-        entry = _Activation(status["agent_id"], revision, lifecycle, epoch, str(owner_id),
+        entry = _Activation(status["agent_id"], revision, status.get("_activation_binding"),
+                            lifecycle, epoch, str(owner_id),
                             time.monotonic() + self.wait_seconds)
         self._entries[entry.agent_id] = entry
         busy = self._busy(metadata)

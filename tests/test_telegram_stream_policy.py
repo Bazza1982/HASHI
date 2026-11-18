@@ -801,6 +801,55 @@ async def test_her_compaction_start_and_failure_are_both_visible_with_verbose(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [("en", "2 activity updates omitted"), ("zh-CN", "\u6709 2 \u6761\u6d3b\u52a8\u66f4\u65b0\u672a\u663e\u793a")],
+)
+async def test_verbose_saturation_reports_omissions_without_blocking_commentary(tmp_path, monkeypatch, locale, expected):
+    from orchestrator import ui_language
+
+    monkeypatch.setattr(ui_language, "preferred_locale", lambda *_args, **_kwargs: locale)
+    edits = []
+
+    class Bot:
+        async def edit_message_text(self, **kwargs):
+            edits.append(kwargs)
+
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "fixture"
+    runtime.workspace_dir = tmp_path / "workspaces" / "fixture"
+    runtime.workspace_dir.mkdir(parents=True)
+    runtime.config = SimpleNamespace(active_backend="codex-cli", extra={})
+    runtime.telegram_connected = True
+    runtime.app = SimpleNamespace(bot=Bot())
+    runtime.logger = SimpleNamespace(debug=lambda _message: None)
+    runtime.telegram_logger = SimpleNamespace(info=lambda _message: None, warning=lambda _message: None)
+    runtime._verbose = True
+    runtime._commentary = True
+    queue = asyncio.Queue(maxsize=1)
+    commentary = []
+    callback = FlexibleAgentRuntime._make_stream_callback(
+        runtime, event_queue=queue, commentary_buffer=commentary,
+    )
+    await callback(StreamEvent(kind=KIND_PROGRESS, summary="one"))
+    await callback(StreamEvent(kind=KIND_PROGRESS, summary="two"))
+    await callback(StreamEvent(kind=KIND_PROGRESS, summary="three"))
+    await callback(StreamEvent(kind=KIND_COMMENTARY, summary="independent update"))
+    assert queue.qsize() == 1
+    assert commentary == ["independent update"]
+
+    stop = asyncio.Event()
+    stop.set()
+    await FlexibleAgentRuntime._streaming_display_loop(
+        runtime, 123, SimpleNamespace(message_id=77), "req-overflow", stop, queue,
+    )
+    assert any(expected in edit["text"] for edit in edits)
+
+    runtime_pipeline._drain_stream_queue(queue)
+    assert getattr(queue, "_hashi_omitted", 0) == 0
+
+
+@pytest.mark.asyncio
 async def test_verbose_and_think_receive_disjoint_event_classes():
     runtime = object.__new__(FlexibleAgentRuntime)
     runtime.config = SimpleNamespace(active_backend="codex-cli")

@@ -27,6 +27,7 @@ import ssl
 import sys
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,12 +49,13 @@ from remote.internet_address import (  # noqa: E402
     parse_hchat_address,
 )
 from remote.security.client_auth import build_client_auth_headers  # noqa: E402
+from remote.security.shared_token import HEADER_NONCE, verify_response_auth  # noqa: E402
 from orchestrator.hchat_submit_result import (  # noqa: E402
-    HChatSubmission, begin_hchat_dispatch, capture_hchat_submission, record_hchat_failure,
-    record_hchat_transport_failure, record_hchat_response, record_hchat_rejection, record_hchat_group,
+    HChatSubmission, begin_hchat_dispatch, capture_hchat_submission, hchat_transport_definitely_unsent,
+    record_hchat_failure, record_hchat_transport_failure, record_hchat_response, record_hchat_rejection, record_hchat_group,
 )
 from orchestrator.hchat_delivery_status import (  # noqa: E402
-    default_hchat_conversation_id,
+    default_hchat_conversation_id, group_member_message_id,
 )
 from orchestrator.runtime_defaults import (  # noqa: E402
     DEFAULT_HASHI_REMOTE_PORT,
@@ -777,21 +779,6 @@ def _probe_workbench_health(
     return bool(expected and actual == expected and endpoint_owner in {None, expected})
 
 
-def _workbench_supports_message_freshness(host: str, port: int) -> bool:
-    health = _read_http_json(f"http://{host}:{port}/api/health")
-    capabilities = {
-        str(value) for value in (health or {}).get("capabilities") or ()
-    }
-    return bool(
-        isinstance(health, dict)
-        and {
-            "message_freshness_v1",
-            "hchat_delivery_status_v1",
-        }
-        <= capabilities
-    )
-
-
 def _probe_workbench(host: str, port: int, expected_instance: str) -> bool:
     return _probe_workbench_health(host, port, expected_instance)
 
@@ -1392,13 +1379,6 @@ def _send_via_workbench(
             file=sys.stderr,
         )
         return record_hchat_failure(reason="authentication_rejected", phase="validate")
-    if not _workbench_supports_message_freshness(host, port):
-        print(
-            "❌ Hchat Workbench peer does not support complete freshness/status protection; "
-            "update the peer before sending.",
-            file=sys.stderr,
-        )
-        return record_hchat_failure(reason="capability_missing", phase="validate")
     url = f"http://{host}:{port}/api/chat"
     full_text = (
         text
@@ -1560,21 +1540,6 @@ def _send_via_remote(
             file=sys.stderr,
         )
         return record_hchat_failure(reason="authentication_rejected", phase="validate")
-    protocol_status = _read_http_json(f"{scheme}://{host}:{port}/protocol/status")
-    protocol_capabilities = {
-        str(value)
-        for value in (protocol_status or {}).get("capabilities") or ()
-    }
-    if not isinstance(protocol_status, dict) or not {
-        "message_freshness_v1",
-        "hchat_delivery_status_v1",
-    } <= protocol_capabilities:
-        print(
-            "❌ Hchat Remote peer does not support complete freshness/status protection; "
-            "update the peer before sending.",
-            file=sys.stderr,
-        )
-        return record_hchat_failure(reason="capability_missing", phase="validate")
     for url in (f"{scheme}://{host}:{port}/hchat",):
         req = urllib_request.Request(
             url,
@@ -1702,6 +1667,127 @@ def _deliver_remote_route(
     return False
 
 
+def _authenticated_remote_group_members(source_instance: str, target_instance: str) -> list[str]:
+    """Read the target's active directory with a nonce-bound shared-token proof."""
+    instances = _load_instances()
+    entry = instances.get(target_instance.lower()) if isinstance(instances, dict) else None
+    if not isinstance(entry, dict):
+        raise ValueError("Remote group instance is not configured")
+    token = _shared_token_for_protocol()
+    if not token:
+        raise ValueError("Remote group directory authentication is unavailable")
+    port = entry.get("remote_port") or entry.get("port")
+    try:
+        port = int(port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Remote group directory endpoint is unavailable") from exc
+    if not 0 < port < 65536:
+        raise ValueError("Remote group directory endpoint is unavailable")
+    host = _preferred_host(entry, for_remote=True)
+    url = f"http://{host}:{port}/protocol/directory"
+    headers = build_client_auth_headers(
+        url=url, method="GET", data=b"", token=None, shared_token=token,
+        from_instance=source_instance, normalize_instance=_normalize_instance_id,
+    )
+    nonce = next((value for key, value in headers.items() if key.lower() == HEADER_NONCE.lower()), "")
+    req = urllib_request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=10) as response:
+            status = int(getattr(response, "status", 200))
+            body = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, ValueError, UnicodeError) as exc:
+        raise ValueError("Remote group directory could not be read") from exc
+    if not isinstance(body, dict) or status != 200:
+        raise ValueError("Remote group directory was unavailable")
+    unsigned = {key: value for key, value in body.items() if key != "response_auth"}
+    if (
+        not body.get("ok")
+        or _normalize_instance_id(body.get("instance_id")) != target_instance
+        or not nonce
+        or not verify_response_auth(
+            shared_token=token, request_nonce=nonce, payload=unsigned,
+            response_auth=body.get("response_auth"),
+        )
+    ):
+        raise ValueError("Remote group directory identity could not be verified")
+    agents = body.get("agents")
+    if not isinstance(agents, list):
+        raise ValueError("Remote group directory is incomplete")
+    state = str((body.get("agent_directory") or {}).get("directory_state") or "")
+    if state != "fresh":
+        if not agents:
+            raise ValueError("Remote active group directory is unavailable")
+        print(
+            "⚠️ Remote group directory is not fresh; attempting its known active members.",
+            file=sys.stderr,
+        )
+    result = []
+    for agent in agents:
+        if not isinstance(agent, dict):
+            raise ValueError("Remote group directory contains an invalid member")
+        if agent.get("is_active", True) is False:
+            continue
+        name = str(agent.get("agent_name") or agent.get("name") or agent.get("id") or "").strip()
+        if not name:
+            raise ValueError("Remote group directory contains an unnamed member")
+        parsed = parse_hchat_address(name, allow_group=False)
+        if isinstance(parsed, PublicAddress) or parsed.instance_id:
+            raise ValueError("Remote group directory contains an invalid member address")
+        result.append(parsed.agent)
+    return result
+
+
+def _resolve_group_targets(
+    cfg: dict, group_name: str, *, source_instance: str,
+    selected_instance: str | None, from_agent: str,
+) -> list[str]:
+    """Freeze exact configured recipients before sending any group message."""
+    groups = cfg.get("groups", {})
+    group = groups.get(group_name) if isinstance(groups, dict) else None
+    if not isinstance(group, dict):
+        return []
+    source = _normalize_instance_id(source_instance)
+    selected = _normalize_instance_id(selected_instance)
+    members = group.get("members", [])
+    if members != "@active" and (
+        not isinstance(members, list) or any(not isinstance(item, str) for item in members)
+    ):
+        raise ValueError("Group membership is invalid")
+    if members == "@active" and selected and selected != source:
+        excluded = {str(item).casefold() for item in group.get("exclude_from_broadcast", [])}
+        raw_members = [
+            name for name in _authenticated_remote_group_members(source, selected)
+            if name.casefold() not in excluded
+        ]
+    else:
+        raw_members = _resolve_group_members(cfg, group_name)
+    result = []
+    seen = set()
+    for member in raw_members:
+        if not isinstance(member, str):
+            raise ValueError("Group member is not an address")
+        parsed = parse_hchat_address(member, allow_group=False)
+        if isinstance(parsed, PublicAddress):
+            if selected:
+                raise ValueError("Group member conflicts with the selected instance")
+            canonical = parsed.canonical
+        else:
+            explicit = _normalize_instance_id(parsed.instance_id)
+            if selected and explicit and explicit != selected:
+                raise ValueError("Group member conflicts with the selected instance")
+            instance = explicit or selected or source
+            if not instance:
+                raise ValueError("Group member instance is unavailable")
+            if parsed.agent.casefold() == from_agent.casefold() and instance == source:
+                continue
+            canonical = f"{parsed.agent}@{instance}"
+        key = canonical.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(canonical)
+    return result
+
+
 def _send_via_exchange(
     exchange_route: dict,
     to_agent: str,
@@ -1725,7 +1811,7 @@ def _send_via_exchange(
         host,
         int(workbench_port),
         exchange_instance,
-    ) and _workbench_supports_message_freshness(host, int(workbench_port)):
+    ):
         url = f"http://{host}:{workbench_port}/api/bridge/hchat-exchange"
         payload = {
             "to_agent": to_agent.lower(),
@@ -1747,9 +1833,14 @@ def _send_via_exchange(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        phase = "request"
+        begin_hchat_dispatch()
         try:
             with urllib_request.urlopen(req, timeout=10) as resp:
+                phase = "read"
                 result = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(result, dict):
+                    return record_hchat_failure(reason="response_invalid", phase="read", accepted=None)
                 if result.get("ok"):
                     return _print_hchat_result_receipt(
                         result,
@@ -1761,11 +1852,21 @@ def _send_via_exchange(
                         target=f"{to_agent}@{target_instance}",
                         text=text,
                     )
-        except Exception as e:
-            print(
-                f"⚠️ {exchange_instance} exchange API failed ({host}:{workbench_port}): {e}",
-                file=sys.stderr,
-            )
+                return record_hchat_rejection(result, status=int(getattr(resp, "status", 0)))
+        except HTTPError as exc:
+            try:
+                result = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                result = {}
+            return record_hchat_rejection(result if isinstance(result, dict) else {}, status=exc.code)
+        except (URLError, TimeoutError, OSError) as exc:
+            definitely_unsent = hchat_transport_definitely_unsent(exc, phase=phase)
+            # An uncertain write/read stops routing even without a capture context.
+            record_hchat_transport_failure(exc, phase=phase)
+            if not definitely_unsent:
+                return False
+        except (ValueError, UnicodeError):
+            return record_hchat_failure(reason="response_invalid", phase=phase, accepted=None)
 
     if host and port:
         return _send_via_remote(
@@ -1805,10 +1906,12 @@ def _send_hchat(
     in_reply_to: str | None = None,
     originated_at: str | None = None,
     idempotency_key: str | None = None,
+    _group_origin=None,
 ) -> bool:
     if not message_id:
         message_id = f"hchat-{uuid.uuid4().hex[:20]}"
-    conversation_id = str(conversation_id or "").strip() or (
+    explicit_conversation_id = str(conversation_id or "").strip()
+    conversation_id = explicit_conversation_id or (
         default_hchat_conversation_id(message_id)
     )
     if not originated_at:
@@ -1882,37 +1985,85 @@ def _send_hchat(
         authorization_kwargs["authorization_resources"] = authorization_resources
 
     if to_agent.startswith("@"):
-        if selected_attachments:
-            print(
-                "❌ HChat attachments require one explicit cross-instance target.",
-                file=sys.stderr,
+        from orchestrator.hchat_group_attachments import snapshot_group_attachments
+
+        group_started = False
+        try:
+            with snapshot_group_attachments(selected_attachments) as (snapshot_paths, attachment_manifest):
+                group_name = to_agent[1:]
+                try:
+                    snapshot = None
+                    if _group_origin is not None:
+                        _group_origin.assert_request(
+                            parent_message_id=message_id, source_instance=source_instance,
+                            from_agent=from_agent, target=to_agent, text=text,
+                        )
+                        snapshot = _group_origin.prepare(None, attachment_manifest=attachment_manifest)
+                    if snapshot is None:
+                        members = _resolve_group_targets(
+                            cfg, group_name, source_instance=source_instance,
+                            selected_instance=target_instance, from_agent=from_agent,
+                        )
+                        if not members:
+                            print(f"❌ Group '{group_name}' not found or has no members.", file=sys.stderr)
+                            return record_hchat_failure(reason="target_not_found", phase="scope")
+                        if _group_origin is not None:
+                            snapshot = _group_origin.prepare(members, attachment_manifest=attachment_manifest)
+                        else:
+                            snapshot = [
+                                {
+                                    "recipient": member,
+                                    "message_id": group_member_message_id(
+                                        message_id, source_instance, from_agent, member,
+                                    ),
+                                    "originated_at": originated_at,
+                                }
+                                for member in members
+                            ]
+                except (AddressError, TypeError, ValueError) as exc:
+                    print(f"❌ Group membership could not be resolved: {exc}", file=sys.stderr)
+                    return record_hchat_failure(exc, reason="route_unavailable", phase="validate")
+                results = []
+                for entry in snapshot:
+                    member = entry["recipient"]
+                    child_id = entry["message_id"]
+                    group_started = True
+                    result = _group_origin.begin(member) if _group_origin is not None else None
+                    if result is None:
+                        result = send_hchat_result(
+                            member, from_agent, text,
+                            attachments=snapshot_paths,
+                            source_instance=source_instance,
+                            reply_route_override=reply_route_override,
+                            message_id=child_id,
+                            idempotency_key=f"hchat:{child_id}",
+                            conversation_id=explicit_conversation_id or default_hchat_conversation_id(child_id),
+                            originated_at=entry["originated_at"],
+                            message_type=message_type,
+                            in_reply_to=in_reply_to,
+                            **authorization_kwargs,
+                        )
+                        if _group_origin is not None:
+                            try:
+                                _group_origin.finish(member, result)
+                            except Exception as exc:
+                                from orchestrator.operation_failures import operation_failure
+                                failure = operation_failure(
+                                    exc, operation="hchat", phase="persist", unconfirmed=True,
+                                )
+                                result = HChatSubmission(False, "unconfirmed", None, failure)
+                    results.append(replace(result, recipient=member, message_id=child_id))
+                record_hchat_group(results)
+                accepted = sum(item.accepted is True for item in results)
+                print(f"📢 Group @{group_name}: {accepted}/{len(snapshot)} accepted.")
+                return any(item.handled for item in results)
+
+        except (OSError, ValueError) as exc:
+            print(f"❌ Group attachment or dispatch state is unavailable: {type(exc).__name__}", file=sys.stderr)
+            return record_hchat_failure(
+                exc, phase="persist" if group_started else "prepare",
+                accepted=None if group_started else False,
             )
-            return record_hchat_failure(reason="capability_missing", phase="validate")
-        if target_instance:
-            print("❌ Group delivery does not support cross-instance routing. Use local @group only.", file=sys.stderr)
-            return record_hchat_failure(reason="capability_missing", phase="validate")
-        group_name = to_agent[1:]
-        members = _resolve_group_members(cfg, group_name, exclude_self=from_agent)
-        if not members:
-            print(f"❌ Group '{group_name}' not found or has no members.", file=sys.stderr)
-            return record_hchat_failure(reason="target_not_found", phase="scope")
-        results = [
-            send_hchat_result(
-                member,
-                from_agent,
-                text,
-                target_instance=target_instance,
-                originated_at=originated_at,
-                message_type=message_type,
-                in_reply_to=in_reply_to,
-                **authorization_kwargs,
-            )
-            for member in members
-        ]
-        record_hchat_group(results)
-        succeeded = sum(item.handled for item in results)
-        print(f"📢 Group @{group_name}: {succeeded}/{len(members)} queued.")
-        return succeeded > 0
 
     if not _hchat_channel_egress_allowed(
         cfg,
@@ -2239,26 +2390,47 @@ def check_hchat_route(
     }
 
     if to_agent.startswith("@"):
-        if target_instance:
-            result["error"] = "group delivery does not support cross-instance routing"
-            return result
         group_name = to_agent[1:]
-        members = _resolve_group_members(cfg, group_name, exclude_self=from_agent)
-        result["members"] = members
+        try:
+            members = _resolve_group_targets(
+                cfg, group_name, source_instance=source_instance,
+                selected_instance=target_instance, from_agent=from_agent,
+            )
+        except (AddressError, TypeError, ValueError) as exc:
+            result["error"] = str(exc)
+            return result
         if not members:
+            result["members"] = []
             result["error"] = f"group '{group_name}' not found or empty"
             return result
-        host = _first_reachable_workbench(
-            _local_workbench_hosts(cfg),
-            local_port,
-            instance_id,
+        local_only = all(
+            not isinstance(parsed := parse_hchat_address(member), PublicAddress)
+            and parsed.instance_id == instance_id.upper()
+            for member in members
         )
+        if local_only and not target_instance:
+            host = _first_reachable_workbench(
+                _local_workbench_hosts(cfg), local_port, instance_id,
+            )
+            result.update(
+                ok=bool(host), route_type="local_group_workbench",
+                members=[parse_hchat_address(member).agent for member in members],
+                host=host, port=local_port,
+                error=None if host else "local backend API unreachable",
+            )
+            return result
+        routes = [
+            check_hchat_route(member, from_agent, source_instance=source_instance)
+            for member in members
+        ]
+        available = sum(route["ok"] is True for route in routes)
         result.update(
-            ok=bool(host),
-            route_type="local_group_workbench",
-            host=host,
-            port=local_port,
-            error=None if host else "local backend API unreachable",
+            ok=available > 0, route_type="group_per_recipient", members=members,
+            member_routes=routes,
+            error=None if available == len(routes) else (
+                "some group recipient routes are unavailable" if available
+                else "all group recipient routes are unavailable"
+            ),
         )
         return result
 

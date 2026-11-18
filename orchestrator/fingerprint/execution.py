@@ -46,10 +46,12 @@ def observe(path: Path) -> Observation:
                 parts.append(block)
         after = os.fstat(stream.fileno())
     current = path.stat(follow_symlinks=False)
-    keys = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    def keys(s):
+        return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     # Python 3.12 Windows stat() exposes creation time as ctime, while fstat()
     # can expose change time. Compare ctime only within the same API.
-    path_keys = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+    def path_keys(s):
+        return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
     if keys(before) != keys(after) or path_keys(after) != path_keys(current):
         return Observation(FileVersion("conflict"))
     return Observation(FileVersion("present", digest.hexdigest(), after.st_size),
@@ -77,6 +79,9 @@ def output_facts(result):
     output = result.output if isinstance(result, BuiltinExecutionResult) else str(result)
     details = dict(result.details) if isinstance(result, BuiltinExecutionResult) else {}
     failed = output.startswith("Error") or details.get("exit_code", 0) not in {0, None}
+    # Preserve the actual business failure in ToolRegistry's result contract.
+    if failed and not output.startswith("Error:"):
+        output = "Error: " + output
     return output, details, "failed" if failed else "completed"
 
 
@@ -112,6 +117,25 @@ async def finish_owned(coroutine):
     return task.result(), cancellation
 
 
+async def dispatch_without_optional_evidence(registry, tool_name, arguments, *, tool_call_id):
+    """Run the admitted operation exactly once and honestly report the evidence gap."""
+    from tools.builtins import BuiltinExecutionResult
+
+    gap = {"evidence_status": "unavailable", "reason": "preparation_unavailable"}
+    try:
+        result = await registry._dispatch_observed(tool_name, arguments, tool_call_id=tool_call_id)
+    except BaseException as exc:
+        try:
+            exc.hashi_tool_details = {**getattr(exc, "hashi_tool_details", {}),
+                                      "fingerprint": {**gap, "business_status": "unknown"}}
+        except Exception:
+            pass
+        raise
+    output, details, business = output_facts(result)
+    details["fingerprint"] = {**gap, "business_status": business}
+    return BuiltinExecutionResult(output, details)
+
+
 async def dispatch_controlled(registry, tool_name, arguments, *, tool_call_id):
     """Called only AFTER admission and INSIDE tool_resource; OFF is a no-op."""
     context = registry._effective_audit_context()
@@ -126,31 +150,34 @@ async def dispatch_controlled(registry, tool_name, arguments, *, tool_call_id):
     from tools.builtins import BuiltinExecutionResult
     started = time.monotonic()
     audit = FingerprintAudit(registry.canonical_audit)
-    identity = context_identity(context)
-    audit.validate_identity(identity)
     call_id = tool_call_id or uuid.uuid4().hex
-    path, root, relative, root_id, artifact_id = target_for(registry, arguments)
-    if ".hashi-fingerprint" in path.parts or path.name.endswith(".hashi.json"):
-        # Derived evidence is never recursively fingerprinted or overwritten as business data.
-        raise FingerprintUnavailable("fingerprint evidence namespace is system-derived")
-    before = await asyncio.to_thread(observe, path)
-    if before.version.state == "conflict":
-        raise FingerprintUnavailable("target changed during preparation")
     try:
-        from .manifest import existing_artifact
-        artifact_id = await asyncio.to_thread(existing_artifact, root, relative, before, artifact_id)
+        identity = context_identity(context)
+        audit.validate_identity(identity)
+        path, root, relative, root_id, artifact_id = target_for(registry, arguments)
+        if ".hashi-fingerprint" in path.parts or path.name.endswith(".hashi.json"):
+            raise FingerprintUnavailable("fingerprint evidence namespace is system-derived")
+        before = await asyncio.to_thread(observe, path)
+        if before.version.state == "conflict":
+            raise FingerprintUnavailable("target changed during preparation")
+        try:
+            from .manifest import existing_artifact
+            artifact_id = await asyncio.to_thread(existing_artifact, root, relative, before, artifact_id)
+        except Exception:
+            pass  # Unknown/colliding evidence must not block the authorized business write.
+        operation_id = uuid.uuid4().hex
+        begun = utc_now()
+        prepared = {
+            "schema": 1, "operation_id": operation_id, "identity": asdict(identity),
+            "tool_call_id": call_id, "tool_name": tool_name, "artifact_id": artifact_id,
+            "root_id": root_id, "relative_path": relative, "before": asdict(before.version),
+            "policy_version": policy.version, "started_at": begun,
+        }
+        prepared_id = await asyncio.to_thread(audit.append, "fingerprint_prepared", prepared, request_id=identity.request_id)
     except Exception:
-        pass  # Unknown/colliding evidence must not block the authorized business write.
-    operation_id = uuid.uuid4().hex
-    begun = utc_now()
-    prepared = {
-        "schema": 1, "operation_id": operation_id, "identity": asdict(identity),
-        "tool_call_id": call_id, "tool_name": tool_name, "artifact_id": artifact_id,
-        "root_id": root_id, "relative_path": relative, "before": asdict(before.version),
-        "policy_version": policy.version, "started_at": begun,
-    }
-    # No business effect may precede this durability barrier.
-    prepared_id = await asyncio.to_thread(audit.append, "fingerprint_prepared", prepared, request_id=identity.request_id)
+        if policy.required:
+            raise
+        return await dispatch_without_optional_evidence(registry, tool_name, arguments, tool_call_id=call_id)
     failure = None
     business_started = time.monotonic()
     try:

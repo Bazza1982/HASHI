@@ -11,7 +11,7 @@ from aiohttp import web
 from orchestrator.voice_manager import VoiceManager
 from .adapters import MediaAdapters
 from .config import CallConfig
-from .contract import CallError, MAX_BODY
+from .contract import CallError, call_media_capacity
 from .ports import HashiPorts
 from .service import CallService
 from .tts import CatalogCallTTS
@@ -182,9 +182,10 @@ def register_call_api(api):
                     raise CallError("call_json_required", 415)
                 stage = "body_read"
                 data, total = [], 0
+                max_body = call_media_capacity()["max_body_bytes"]
                 async for chunk in request.content.iter_chunked(16384):
                     total += len(chunk)
-                    if total > MAX_BODY:
+                    if total > max_body:
                         raise CallError("call_body_limit", 413)
                     data.append(chunk)
                 stage = "json"
@@ -229,6 +230,8 @@ def register_call_api(api):
                     exc, body=body, stage=stage, authenticated=authenticated
                 )
             response = {"ok": False, "error_code": exc.code}
+            if exc.code == "call_turn_capacity" and hasattr(exc, "capacity"):
+                response["turn_queue"] = exc.capacity
             if exc.code.startswith(("call_video_", "call_output_")):
                 from orchestrator import ui_language
 

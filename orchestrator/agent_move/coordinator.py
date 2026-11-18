@@ -21,15 +21,22 @@ from orchestrator.agent_incarnation import ensure_agent_lifecycle_id
 
 from .package import (
     AgentMoveError,
+    AccessScopePreviewChanged,
     CloneImportPreflightError,
+    source_conversation_owner_id,
     create_agent_move_package,
+    decrypt_agent_secrets,
     normalize_agent_id,
     package_sha256,
     read_agent_move_package,
+    receiver_archive_member_limit,
+    receiver_unpacked_byte_limit,
+    receiver_workspace_byte_limit,
     utc_now_iso,
 )
 from .remote_client import connect_agent_move_receiver
 from .service import (
+    abort_staged_agent_move,
     activate_agent_move,
     cleanup_source_agent,
     commit_agent_move,
@@ -45,6 +52,7 @@ from .service import (
 from .source_guard import (
     begin_source_quiesce,
     end_source_quiesce,
+    assert_source_handoff_state,
     source_disabled_for_move,
 )
 
@@ -59,19 +67,28 @@ _ACTIVE_OUTBOUND_STATUSES = {
     "activating_target",
     "move_completed_cleanup_pending",
     "clone_activating",
+    "clone_finalizing",
     "clone_completed_cleanup_pending",
     "clone_failed",
     "cutover_failed",
 }
 
 _CLONE_CONFIRMABLE_STATUSES = frozenset({
-    "staged_remote", "committing_target", "clone_activating",
+    "staged_remote", "committing_target", "clone_activating", "clone_finalizing",
     "clone_completed_cleanup_pending", "clone_failed",
 })
 
 
 class ClonePreparationError(AgentMoveError):
     """Preparation is saved and can be resumed through its exact journal."""
+
+    def __init__(self, message: str, package_id: str) -> None:
+        super().__init__(message)
+        self.package_id = package_id
+
+
+class MovePreparationError(AgentMoveError):
+    """A failed preparation has an exact journal available for cancellation."""
 
     def __init__(self, message: str, package_id: str) -> None:
         super().__init__(message)
@@ -147,11 +164,16 @@ class _LocalAgentTransferClient:
     def rollback(self, package_id: str) -> dict[str, Any]:
         return rollback_agent_move(self.root, package_id)
 
+    def abort_staged(self, package_id: str) -> dict[str, Any]:
+        return abort_staged_agent_move(self.root, package_id)
+
     def status(self, package_id: str) -> dict[str, Any]:
         return get_agent_move_status(self.root, package_id)
 
     def start(self, package_id: str) -> dict[str, Any]:
         state = self.status(package_id)
+        if state.get("desired_target_active") is False:
+            raise AgentMoveError("this transfer selected an inactive target")
         return _local_workbench_lifecycle(
             self.root,
             str(state.get("target_agent_id") or state.get("agent_id") or ""),
@@ -172,7 +194,11 @@ class _LocalAgentTransferClient:
         return finalize_agent_move(
             self.root,
             package_id,
-            runtime_online=target in _local_running_agents(self.root),
+            runtime_online=target in (
+                _local_runtime_presence(self.root)
+                if state.get("desired_target_active") is False
+                else _local_running_agents(self.root)
+            ),
         )
 
 
@@ -184,6 +210,8 @@ def preview_outbound_move(
     *,
     source_instance: str,
     transfer_mode: str | None = None,
+    history_mode: str | None = None,
+    desired_target_active: bool | None = None,
 ) -> dict[str, Any]:
     """Validate both sides and build a disposable package; target is untouched."""
 
@@ -195,6 +223,8 @@ def preview_outbound_move(
         source_instance=source_instance,
         operation="move",
         transfer_mode=transfer_mode,
+        history_mode=history_mode,
+        desired_target_active=desired_target_active,
     )
 
 
@@ -208,6 +238,8 @@ def preview_outbound_clone(
     target_agent_id: str | None = None,
     transfer_mode: str | None = "workspace",
     history_mode: str = "none",
+    desired_target_active: bool | None = None,
+    retain_telegram_backup: bool = False,
 ) -> dict[str, Any]:
     return _preview_outbound_transfer(
         hashi_root,
@@ -219,6 +251,8 @@ def preview_outbound_clone(
         transfer_mode=transfer_mode or "workspace",
         history_mode=str(history_mode or "none").strip().lower(),
         requested_agent_id=target_agent_id,
+        desired_target_active=desired_target_active,
+        retain_telegram_backup=retain_telegram_backup,
     )
 
 
@@ -233,6 +267,8 @@ def _preview_outbound_transfer(
     requested_agent_id: str | None = None,
     transfer_mode: str | None = None,
     history_mode: str | None = None,
+    desired_target_active: bool | None = None,
+    retain_telegram_backup: bool = False,
 ) -> dict[str, Any]:
 
     root = Path(hashi_root).expanduser().resolve()
@@ -269,10 +305,15 @@ def _preview_outbound_transfer(
             include_agent_secrets=True,
             secret_passphrase=token,
             max_package_bytes=_receiver_package_limit(client),
+            max_archive_members=receiver_archive_member_limit(client.capabilities),
+            max_unpacked_bytes=receiver_unpacked_byte_limit(client.capabilities),
+            max_workspace_bytes=receiver_workspace_byte_limit(client.capabilities),
             operation=operation,
             include_telegram_secret=operation == "move",
             transfer_mode=transfer_mode,
             history_mode=history_mode,
+            desired_target_active=desired_target_active,
+            retain_telegram_backup=retain_telegram_backup,
         )
         compatibility_check = getattr(client, "ensure_package_compatible", None)
         if callable(compatibility_check):
@@ -290,6 +331,10 @@ def _preview_outbound_transfer(
             "package_schema": package.manifest.get("schema_version"),
             "transfer_mode": package.manifest.get("transfer_mode"),
             "history_mode": package.manifest.get("history_mode"),
+            "desired_target_active": package.manifest.get("desired_target_active", True),
+            "retain_telegram_backup": package.manifest.get("retain_telegram_backup", False),
+            "telegram_backup_present": bool(package.access_requirements.get("telegram_secret_included")),
+            "source_retained_pending_count": package.access_requirements.get("source_retained_pending_count", 0),
             "conversation_continuity_summary": package.manifest.get(
                 "conversation_continuity_summary"
             ),
@@ -324,6 +369,8 @@ def prepare_outbound_move(
     source_instance: str,
     keep_source: bool = False,
     transfer_mode: str | None = None,
+    history_mode: str | None = None,
+    desired_target_active: bool | None = None,
 ) -> dict[str, Any]:
     """Build and remotely stage a package, ready for explicit confirmation."""
 
@@ -336,6 +383,8 @@ def prepare_outbound_move(
         operation="legacy_move" if keep_source else "move",
         transfer_mode=transfer_mode,
         keep_source=keep_source,
+        history_mode=history_mode,
+        desired_target_active=desired_target_active,
     )
 
 
@@ -349,6 +398,8 @@ def prepare_outbound_clone(
     target_agent_id: str | None = None,
     transfer_mode: str | None = "workspace",
     history_mode: str = "none",
+    desired_target_active: bool | None = None,
+    retain_telegram_backup: bool = False,
 ) -> dict[str, Any]:
     return _prepare_outbound_transfer(
         hashi_root,
@@ -360,6 +411,8 @@ def prepare_outbound_clone(
         transfer_mode=transfer_mode or "workspace",
         history_mode=str(history_mode or "none").strip().lower(),
         requested_agent_id=target_agent_id,
+        desired_target_active=desired_target_active,
+        retain_telegram_backup=retain_telegram_backup,
     )
 
 
@@ -375,6 +428,8 @@ def _prepare_outbound_transfer(
     keep_source: bool = False,
     transfer_mode: str | None = None,
     history_mode: str | None = None,
+    desired_target_active: bool | None = None,
+    retain_telegram_backup: bool = False,
 ) -> dict[str, Any]:
     # A journal or live PID is not evidence of a running preparation. The
     # kernel-held lease is released even when a thread/process fails.
@@ -383,7 +438,9 @@ def _prepare_outbound_transfer(
             hashi_root, instances, agent_id, target_instance,
             source_instance=source_instance, operation=operation,
             requested_agent_id=requested_agent_id, keep_source=keep_source,
-            transfer_mode=transfer_mode, history_mode=history_mode, leases=leases,
+            transfer_mode=transfer_mode, history_mode=history_mode,
+            desired_target_active=desired_target_active,
+            retain_telegram_backup=retain_telegram_backup, leases=leases,
         )
 
 
@@ -391,11 +448,22 @@ def _prepare_outbound_transfer_owned(
     hashi_root: Path | str, instances: Mapping[str, Any], agent_id: str,
     target_instance: str, *, source_instance: str, operation: str,
     requested_agent_id: str | None, keep_source: bool,
-    transfer_mode: str | None, history_mode: str | None, leases: ExitStack,
+    transfer_mode: str | None, history_mode: str | None,
+    desired_target_active: bool | None, retain_telegram_backup: bool, leases: ExitStack,
 ) -> dict[str, Any]:
 
     root = Path(hashi_root).expanduser().resolve()
     name = normalize_agent_id(agent_id)
+    # A clone with history is a different intent when the source data owner
+    # changes. Freeze the source partition before looking for a reusable
+    # journal; this is data selection, not remote transfer authorization.
+    history_source_owner = (
+        source_conversation_owner_id(root, agent_id=name, operation=operation)
+        if (operation == "clone" and (history_mode or "none") != "none")
+        or (operation in {"move", "legacy_move"} and transfer_mode is not None
+            and history_mode != "retain_source")
+        else None
+    )
     if operation == "move":
         _assert_source_can_move(root, name)
     local = str(target_instance).strip().upper() == str(source_instance).strip().upper()
@@ -417,6 +485,9 @@ def _prepare_outbound_transfer_owned(
             target_instance=client.target_instance,
             requested_agent_id=requested_agent_id,
             transfer_mode=transfer_mode, history_mode=history_mode,
+            history_source_owner=history_source_owner,
+            desired_target_active=desired_target_active,
+            retain_telegram_backup=retain_telegram_backup,
         ) if operation == "clone" else None
     )
     resolved = (
@@ -435,6 +506,9 @@ def _prepare_outbound_transfer_owned(
                 target_instance=client.target_instance,
                 requested_agent_id=requested_agent_id,
                 transfer_mode=transfer_mode, history_mode=history_mode,
+                history_source_owner=history_source_owner,
+                desired_target_active=desired_target_active,
+                retain_telegram_backup=retain_telegram_backup,
             ) if operation == "clone" else None
         )
         if previous is not None:
@@ -469,8 +543,20 @@ def _prepare_outbound_transfer_owned(
                 "status": "packaging",
                 "created_at": utc_now_iso(),
                 "history_mode": history_mode,
+                "history_source_owner_id": history_source_owner,
+                "desired_target_active": desired_target_active is not False,
+                "retain_telegram_backup": retain_telegram_backup,
                 "transfer_mode": transfer_mode,
+                "max_archive_members": receiver_archive_member_limit(client.capabilities),
+                "max_unpacked_bytes": receiver_unpacked_byte_limit(client.capabilities),
+                "max_workspace_bytes": receiver_workspace_byte_limit(client.capabilities),
             }
+        if state.get("max_archive_members") is None:
+            state["max_archive_members"] = receiver_archive_member_limit(client.capabilities)
+        if state.get("max_unpacked_bytes") is None:
+            state["max_unpacked_bytes"] = receiver_unpacked_byte_limit(client.capabilities)
+        if state.get("max_workspace_bytes") is None:
+            state["max_workspace_bytes"] = receiver_workspace_byte_limit(client.capabilities)
         state["preparing_pid"] = os.getpid()
         package_path = directory / f"{name}.hashi-agent"
         state_path = directory / "state.json"
@@ -483,7 +569,11 @@ def _prepare_outbound_transfer_owned(
         if resumed and state.get("sha256"):
             # An upload acknowledgement may have been lost. Never rebuild the
             # same package ID with different bytes or allocate another target.
-            package = read_agent_move_package(package_path, verify=True)
+            package = read_agent_move_package(
+                package_path, verify=True, max_archive_members=state.get("max_archive_members"),
+                        max_unpacked_bytes=state.get("max_unpacked_bytes"),
+                        max_workspace_bytes=state.get("max_workspace_bytes")
+            )
             if package.package_id != package_id or package_sha256(package_path) != state["sha256"]:
                 raise AgentMoveError("saved clone package does not match its preparation journal")
         else:
@@ -496,10 +586,16 @@ def _prepare_outbound_transfer_owned(
                 secret_passphrase=token,
                 package_id=package_id,
                 max_package_bytes=_receiver_package_limit(client),
+                max_archive_members=state.get("max_archive_members") or receiver_archive_member_limit(client.capabilities),
+                max_unpacked_bytes=state.get("max_unpacked_bytes") or receiver_unpacked_byte_limit(client.capabilities),
+                max_workspace_bytes=state.get("max_workspace_bytes") or receiver_workspace_byte_limit(client.capabilities),
                 operation="clone" if operation == "clone" else "move",
                 include_telegram_secret=operation != "clone",
                 transfer_mode=transfer_mode,
                 history_mode=history_mode,
+                conversation_owner_id=history_source_owner,
+                desired_target_active=desired_target_active,
+                retain_telegram_backup=retain_telegram_backup,
             )
         compatibility_check = getattr(client, "ensure_package_compatible", None)
         if callable(compatibility_check):
@@ -514,6 +610,14 @@ def _prepare_outbound_transfer_owned(
                 "package_schema": package.manifest.get("schema_version"),
                 "transfer_mode": package.manifest.get("transfer_mode"),
                 "history_mode": package.manifest.get("history_mode"),
+                "desired_target_active": package.manifest.get("desired_target_active", True),
+                "retain_telegram_backup": package.manifest.get("retain_telegram_backup", False),
+                "telegram_backup_present": bool(package.access_requirements.get("telegram_secret_included")),
+                "source_retained_pending_count": package.access_requirements.get("source_retained_pending_count", 0),
+                "history_source_owner_id": (
+                    package.conversation_continuity.get("owner_id")
+                    if package.conversation_continuity is not None else None
+                ),
                 "conversation_continuity_summary": package.manifest.get(
                     "conversation_continuity_summary"
                 ),
@@ -567,9 +671,13 @@ def _prepare_outbound_transfer_owned(
                 "remote_status": remote.get("status"),
                 "target_agent_id": remote_target_agent_id,
                 "credential_status": remote.get("credential_status") or {},
+                "access_scope_plan": remote.get("access_scope_plan"),
                 "retained_identity": remote.get("retained_identity")
                 or state.get("retained_identity"),
-                "warnings": list(remote.get("warnings") or []),
+                "warnings": list(dict.fromkeys(
+                    [str(item) for item in package.manifest.get("warnings", [])]
+                    + [str(item) for item in remote.get("warnings", [])]
+                )),
             }
         )
         state.pop("preparing_pid", None)
@@ -587,6 +695,8 @@ def _prepare_outbound_transfer_owned(
         _atomic_json(state_path, state)
         if operation == "clone":
             raise ClonePreparationError(str(exc), package_id) from exc
+        if operation == "move":
+            raise MovePreparationError(str(exc), package_id) from exc
         raise
 
 
@@ -689,6 +799,7 @@ def _confirm_outbound_move_locked(
                 package_id,
                 target_instance=str(state["target_instance"]),
                 history_mode=state.get("history_mode"),
+                history_source_owner_id=state.get("history_source_owner_id"),
             )
         state["source_disabled"] = True
         _atomic_json(directory / "state.json", state)
@@ -764,12 +875,68 @@ def _confirm_outbound_move_locked(
         raise AgentMoveError(f"Agent move cutover failed: {exc}{suffix}") from exc
 
 
+def _recover_scope_preview_abort(
+    root: Path, directory: Path, state: dict[str, Any], client: Any,
+) -> bool:
+    """Return true only after a signed staged-only abort and safe source release.
+
+    False means an independently authenticated status proves the target already
+    committed; the exact forward transaction must then continue instead.
+    """
+    package_id = str(state["package_id"])
+    agent_id = str(state.get("source_agent_id") or state.get("agent_id") or "")
+    if not state.get("scope_abort_target_confirmed"):
+        try:
+            receipt = client.abort_staged(package_id)
+        except Exception as abort_exc:
+            try:
+                receipt = client.status(package_id)
+            except Exception:
+                raise AgentMoveError(f"staged-only abort outcome is unknown: {abort_exc}") from abort_exc
+            if receipt.get("status") in {
+                "committed_inactive", "activated_pending_reboot", "target_cleanup_pending", "completed",
+            }:
+                state.pop("scope_abort_pending", None)
+                _atomic_json(directory / "state.json", state)
+                return False
+            if receipt.get("status") != "rolled_back" or receipt.get("staged_abort") is not True:
+                raise AgentMoveError(f"staged-only abort is not confirmed: {abort_exc}") from abort_exc
+        if receipt.get("status") != "rolled_back" or receipt.get("staged_abort") is not True:
+            raise AgentMoveError("receiver did not confirm a staged-only abort")
+        state["scope_abort_target_confirmed"] = True
+        _atomic_json(directory / "state.json", state)
+    if state.get("source_disabled") or source_disabled_for_move(root, agent_id, package_id):
+        raise AgentMoveError("source ownership changed; reconcile before releasing its guard")
+    if _state_operation(state) == "move":
+        end_source_quiesce(root, agent_id, package_id)
+    state.pop("commit_intent_at", None)
+    state.update({
+        "status": "cancelled", "cancelled_at": utc_now_iso(),
+        "remote_status": "rolled_back", "rollback_completed": True,
+        "scope_abort_pending": False, "forward_only": False,
+        "source_disabled": False, "target_active": False,
+        "continuation_required": False, "reboot_required": False,
+        "last_error": "target access scope changed after preview; prepare a fresh transfer",
+    })
+    _atomic_json(directory / "state.json", state)
+    return True
+
+
+def _scope_preview_abort_message() -> str:
+    return ("target access scope policy changed after preview; the staged target "
+            "was safely cancelled and the source was left unchanged; prepare a fresh transfer")
+
+
 def _confirm_new_outbound_move_locked(
     root: Path,
     instances: Mapping[str, Any],
     directory: Path,
     state: dict[str, Any],
 ) -> dict[str, Any]:
+    if state.get("scope_abort_pending"):
+        recovery_client = _connect_for_state(root, instances, state)
+        if _recover_scope_preview_abort(root, directory, state, recovery_client):
+            raise AgentMoveError(_scope_preview_abort_message())
     if state.get("status") in {
         "source_disabled_target_committed",
         "activating_target",
@@ -786,7 +953,12 @@ def _confirm_new_outbound_move_locked(
         raise AgentMoveError(
             f"outbound move is not ready (status={state.get('status')!r})"
         )
+    client = None
     if not state.get("commit_intent_at"):
+        # Catch a changed preview before making the transaction forward-only,
+        # so the user may cancel and prepare a new transfer safely.
+        client = _connect_for_state(root, instances, state)
+        _verify_access_scope_preview(state, client)
         state.update(
             {
                 "commit_intent_at": utc_now_iso(),
@@ -795,7 +967,8 @@ def _confirm_new_outbound_move_locked(
         )
         _atomic_json(directory / "state.json", state)
     try:
-        client = _connect_for_state(root, instances, state)
+        if client is None:
+            client = _connect_for_state(root, instances, state)
         begin_source_quiesce(
             root,
             str(state["agent_id"]),
@@ -808,7 +981,9 @@ def _confirm_new_outbound_move_locked(
             remote = client.commit(str(state["package_id"]))
             state["remote_status"] = remote.get("status")
             state["credential_status"] = remote.get("credential_status") or {}
-            state["warnings"] = list(remote.get("warnings") or [])
+            state["warnings"] = list(dict.fromkeys(
+                list(state.get("warnings") or []) + list(remote.get("warnings") or [])
+            ))
 
         already_disabled = source_disabled_for_move(
             root,
@@ -824,6 +999,7 @@ def _confirm_new_outbound_move_locked(
                 str(state["package_id"]),
                 target_instance=str(state["target_instance"]),
                 history_mode=state.get("history_mode"),
+                history_source_owner_id=state.get("history_source_owner_id"),
             )
         state.update(
             {
@@ -848,6 +1024,17 @@ def _confirm_new_outbound_move_locked(
                 str(state.get("package_id") or ""),
             )
         )
+        if isinstance(exc, AccessScopePreviewChanged) and not source_disabled:
+            state["scope_abort_pending"] = True
+            _atomic_json(directory / "state.json", state)
+            try:
+                aborted = _recover_scope_preview_abort(root, directory, state, client)
+            except Exception as recovery_exc:
+                exc = AgentMoveError(f"scope policy change recovery is pending: {recovery_exc}")
+            else:
+                if aborted:
+                    raise AgentMoveError(_scope_preview_abort_message()) from exc
+                exc = AgentMoveError("target already committed; retry the same forward transfer")
         state.update(
             {
                 "status": (
@@ -876,6 +1063,11 @@ def _confirm_outbound_clone_locked(
     directory: Path,
     state: dict[str, Any],
 ) -> dict[str, Any]:
+    desired_active = state.get("desired_target_active") is not False
+    if state.get("scope_abort_pending"):
+        recovery_client = _connect_for_state(root, instances, state)
+        if _recover_scope_preview_abort(root, directory, state, recovery_client):
+            raise AgentMoveError(_scope_preview_abort_message())
     if state.get("status") == "completed":
         return _public_outbound(state)
     if state.get("status") == "clone_completed_cleanup_pending":
@@ -885,7 +1077,7 @@ def _confirm_outbound_clone_locked(
                 "status": "completed",
                 "completed_at": state.get("completed_at") or utc_now_iso(),
                 "source_disabled": False,
-                "target_active": True,
+                "target_active": desired_active,
                 "target_verified": True,
                 "reboot_required": False,
             }
@@ -897,12 +1089,15 @@ def _confirm_outbound_clone_locked(
         "staged_remote",
         "committing_target",
         "clone_activating",
+        "clone_finalizing",
         "clone_failed",
     }:
         raise AgentMoveError(
             f"outbound clone is not ready (status={state.get('status')!r})"
         )
     client = _connect_for_state(root, instances, state)
+    if state.get("status") == "staged_remote":
+        _verify_access_scope_preview(state, client)
     target_finalized = False
     try:
         if state.get("status") in {"staged_remote", "committing_target", "clone_failed"}:
@@ -911,16 +1106,22 @@ def _confirm_outbound_clone_locked(
             remote = client.commit(str(state["package_id"]))
             state["remote_status"] = remote.get("status")
             state["credential_status"] = remote.get("credential_status") or {}
-        state["status"] = "clone_activating"
+        state["status"] = "clone_activating" if desired_active else "clone_finalizing"
         _atomic_json(directory / "state.json", state)
-        client.activate(str(state["package_id"]))
-        state["target_active"] = True
-        _atomic_json(directory / "state.json", state)
-        client.start(str(state["package_id"]))
+        if desired_active:
+            client.activate(str(state["package_id"]))
+            state["target_active"] = True
+            _atomic_json(directory / "state.json", state)
+            client.start(str(state["package_id"]))
+        else:
+            state["target_active"] = False
         remote = client.finalize(str(state["package_id"]))
-        target_finalized = remote.get("status") == "completed"
+        target_finalized = _move_target_verified(state, remote)
         if not target_finalized:
             raise AgentMoveError("target clone did not complete final verification")
+        state["telegram_backup_confirmed"] = bool(
+            state.get("retain_telegram_backup") and state.get("telegram_backup_present")
+        )
         _remove_outbound_package(directory, state)
         state.update(
             {
@@ -930,20 +1131,32 @@ def _confirm_outbound_clone_locked(
                 "target_verification": remote.get("target_verification") or {},
                 "completed_at": utc_now_iso(),
                 "source_disabled": False,
-                "target_active": True,
+                "target_active": desired_active,
                 "reboot_required": False,
             }
         )
         _atomic_json(directory / "state.json", state)
         return _public_outbound(state)
     except Exception as exc:
+        if isinstance(exc, AccessScopePreviewChanged):
+            state["scope_abort_pending"] = True
+            _atomic_json(directory / "state.json", state)
+            try:
+                aborted = _recover_scope_preview_abort(root, directory, state, client)
+            except Exception as recovery_exc:
+                raise AgentMoveError(f"scope policy change recovery is pending: {recovery_exc}") from recovery_exc
+            if aborted:
+                raise AgentMoveError(_scope_preview_abort_message()) from exc
         target_status: dict[str, Any] = {}
         try:
             target_status = client.status(str(state["package_id"]))
-            target_finalized = target_status.get("status") == "completed"
+            target_finalized = _move_target_verified(state, target_status)
         except Exception:
             pass
         if target_finalized:
+            state["telegram_backup_confirmed"] = bool(
+                state.get("retain_telegram_backup") and state.get("telegram_backup_present")
+            )
             try:
                 _remove_outbound_package(directory, state)
                 state.update(
@@ -958,7 +1171,7 @@ def _confirm_outbound_clone_locked(
                         or {},
                         "completed_at": utc_now_iso(),
                         "source_disabled": False,
-                        "target_active": True,
+                        "target_active": desired_active,
                         "reboot_required": False,
                     }
                 )
@@ -970,7 +1183,7 @@ def _confirm_outbound_clone_locked(
                     {
                         "status": "clone_completed_cleanup_pending",
                         "last_error": str(cleanup_exc),
-                        "target_active": True,
+                        "target_active": desired_active,
                         "target_verified": True,
                         "source_disabled": False,
                         "reboot_required": False,
@@ -984,10 +1197,10 @@ def _confirm_outbound_clone_locked(
         if target_status.get("status") == "target_cleanup_pending":
             state.update(
                 {
-                    "status": "clone_activating",
+                    "status": "clone_activating" if desired_active else "clone_finalizing",
                     "remote_status": "target_cleanup_pending",
                     "last_error": str(exc),
-                    "target_active": True,
+                    "target_active": desired_active,
                     "target_verified": bool(target_status.get("target_verified")),
                     "source_disabled": False,
                     "reboot_required": False,
@@ -1034,6 +1247,18 @@ def continue_outbound_move(
             return _public_outbound(state)
         if state.get("status") == "move_completed_cleanup_pending":
             return _finish_source_cleanup(root, directory, state)
+        if state.get("status") == "activating_target" and state.get("target_verified") is True:
+            # The target was already verified before an interruption in source
+            # cleanup. Reuse that receipt; never restart the target to recover.
+            recorded_target = {
+                "status": state.get("remote_status"),
+                "target_verified": True,
+                "desired_target_active": state.get("desired_target_active", True),
+                "target_verification": state.get("target_verification"),
+            }
+            if not _move_target_verified(state, recorded_target):
+                raise AgentMoveError("saved target verification is incomplete; review the existing move")
+            return _finish_source_cleanup(root, directory, state)
         if state.get("status") not in {
             "source_disabled_target_committed",
             "activating_target",
@@ -1043,25 +1268,40 @@ def continue_outbound_move(
                 f"outbound move cannot continue from status {state.get('status')!r}"
             )
         source_agent = str(state.get("source_agent_id") or state.get("agent_id") or "")
-        if source_agent in _local_running_agents(root):
+        running = _local_runtime_presence(root)
+        if source_agent in running:
             raise AgentMoveError(
                 f"source Agent '{source_agent}' is still running; stop it or adopt "
                 "the inactive registry change before continuing"
             )
+        assert_source_handoff_state(
+            root, source_agent, package_id, str(state.get("target_instance") or ""),
+        )
 
         client = _connect_for_state(root, instances, state)
         target_finalized = False
+        desired_active = state.get("desired_target_active") is not False
         try:
             state["status"] = "activating_target"
             _atomic_json(directory / "state.json", state)
-            if not state.get("target_active"):
-                remote = client.activate(package_id)
-                state["remote_status"] = remote.get("status")
-                state["target_active"] = True
-                _atomic_json(directory / "state.json", state)
-            client.start(package_id)
+            if desired_active:
+                if not state.get("target_active"):
+                    remote = client.activate(package_id)
+                    state["remote_status"] = remote.get("status")
+                    state["target_active"] = True
+                    _atomic_json(directory / "state.json", state)
+                # The authenticated source can change while the remote
+                # activation request is in flight; recheck before start.
+                assert_source_handoff_state(
+                    root, source_agent, package_id, str(state.get("target_instance") or ""),
+                )
+                if source_agent in _local_runtime_presence(root):
+                    raise AgentMoveError("source Agent became active during the target handoff")
+                client.start(package_id)
+            elif state.get("target_active"):
+                raise AgentMoveError("inactive target was unexpectedly activated")
             remote = client.finalize(package_id)
-            target_finalized = remote.get("status") == "completed"
+            target_finalized = _move_target_verified(state, remote)
             if not target_finalized:
                 raise AgentMoveError("target Agent did not complete final verification")
             state.update(
@@ -1069,7 +1309,7 @@ def continue_outbound_move(
                     "remote_status": remote.get("status"),
                     "target_verified": True,
                     "target_verification": remote.get("target_verification") or {},
-                    "target_active": True,
+                    "target_active": desired_active,
                 }
             )
             _atomic_json(directory / "state.json", state)
@@ -1079,7 +1319,7 @@ def continue_outbound_move(
             if not target_finalized:
                 try:
                     target_status = client.status(package_id)
-                    target_finalized = target_status.get("status") == "completed"
+                    target_finalized = _move_target_verified(state, target_status)
                 except Exception:
                     pass
             if target_finalized:
@@ -1087,7 +1327,7 @@ def continue_outbound_move(
                     {
                         "status": "move_completed_cleanup_pending",
                         "last_error": str(exc),
-                        "target_active": True,
+                        "target_active": desired_active,
                         "source_disabled": True,
                         "reboot_required": False,
                     }
@@ -1102,7 +1342,7 @@ def continue_outbound_move(
                         "status": "activating_target",
                         "remote_status": "target_cleanup_pending",
                         "last_error": str(exc),
-                        "target_active": True,
+                        "target_active": desired_active,
                         "target_verified": bool(
                             target_status.get("target_verified")
                         ),
@@ -1121,7 +1361,7 @@ def continue_outbound_move(
                     "status": "activating_target",
                     "last_error": str(exc),
                     "source_disabled": True,
-                    "target_active": bool(
+                    "target_active": desired_active and bool(
                         state.get("target_active")
                         or target_status.get("status")
                         in {
@@ -1141,13 +1381,66 @@ def continue_outbound_move(
             ) from exc
 
 
+def _move_target_verified(state: Mapping[str, Any], target: Mapping[str, Any]) -> bool:
+    if target.get("status") != "completed":
+        return False
+    if state.get("desired_target_active") is not False:
+        return True
+    verification = target.get("target_verification")
+    if (state.get("operation") == "clone" and state.get("retain_telegram_backup")
+            and state.get("telegram_backup_present")):
+        backup = target.get("retained_telegram_backup")
+        if not (
+            isinstance(backup, Mapping)
+            and backup.get("status") == "quarantined"
+            and backup.get("live_connector") is False
+            and backup.get("target_agent_id") == state.get("target_agent_id")
+            and isinstance(verification, Mapping)
+            and verification.get("telegram_backup_recoverable") is True
+        ):
+            return False
+    return bool(
+        target.get("desired_target_active") is False
+        and target.get("target_verified") is True
+        and isinstance(verification, Mapping)
+        and verification.get("runtime_online") is False
+        and verification.get("runtime_present") is False
+        and verification.get("presence_checked") is True
+        and verification.get("desired_active") is False
+        and verification.get("config_inactive") is True
+    )
+
+
 def _finish_source_cleanup(
     root: Path,
     directory: Path,
     state: dict[str, Any],
 ) -> dict[str, Any]:
     try:
-        cleanup_source_agent(
+        # A missing, corrupt, or no-longer-decryptable source archive cannot
+        # establish that any current source credential was transferred. Preserve
+        # those values instead of deleting them during otherwise verified cleanup.
+        source_secret_snapshot: dict[str, Any] = {}
+        source_schedule_snapshot: Mapping[str, Any] | None = None
+        try:
+            agent_id = str(state.get("source_agent_id") or state.get("agent_id") or "")
+            package_path = directory / f"{agent_id}.hashi-agent"
+            package = read_agent_move_package(
+                package_path, verify=True, max_archive_members=state.get("max_archive_members"),
+                        max_unpacked_bytes=state.get("max_unpacked_bytes"),
+                        max_workspace_bytes=state.get("max_workspace_bytes")
+            )
+            if (package.package_id != str(state["package_id"])
+                    or package.agent_id != agent_id
+                    or package_sha256(package_path) != state.get("sha256")):
+                raise AgentMoveError("source transfer archive no longer matches its journal")
+            source_schedule_snapshot = package.schedules
+            source_secret_snapshot = decrypt_agent_secrets(
+                package, _transfer_passphrase(root, local=False, persist=False)
+            )
+        except (AgentMoveError, OSError, ValueError):
+            pass
+        cleanup = cleanup_source_agent(
             root,
             str(state["package_id"]),
             source_secret_keys=tuple(state.get("source_secret_keys") or ()),
@@ -1155,7 +1448,20 @@ def _finish_source_cleanup(
             target_agent_id=str(
                 state.get("target_agent_id") or state.get("agent_id") or ""
             ),
+            source_secret_snapshot=source_secret_snapshot,
+            source_schedule_snapshot=source_schedule_snapshot,
         )
+        state["preserved_source_secret_keys"] = cleanup.get("preserved_source_secret_keys", [])
+        state["retained_source_workspace"] = cleanup.get("retained_source_workspace")
+        state["source_workspace_retention"] = cleanup.get("workspace_retention") or {}
+        if state.get("transfer_mode") != "workspace":
+            retained_delivery = cleanup.get("retained_source_delivery") or {}
+            state["source_retained_pending_count"] = int(retained_delivery.get("pending_count") or 0)
+        retained_schedules = cleanup.get("preserved_source_schedules") or {}
+        state["preserved_source_schedule_ids"] = {
+            section: [str(row.get("id") or "(unnamed)") for row in retained_schedules.get(section, [])]
+            for section in ("heartbeats", "crons", "nudges")
+        }
         _remove_outbound_package(directory, state)
     except Exception as exc:
         state.update(
@@ -1163,7 +1469,7 @@ def _finish_source_cleanup(
                 "status": "move_completed_cleanup_pending",
                 "last_error": str(exc),
                 "source_disabled": True,
-                "target_active": True,
+                "target_active": state.get("desired_target_active") is not False,
                 "reboot_required": False,
             }
         )
@@ -1177,7 +1483,7 @@ def _finish_source_cleanup(
             "completed_at": utc_now_iso(),
             "source_disabled": True,
             "source_removed": True,
-            "target_active": True,
+            "target_active": state.get("desired_target_active") is not False,
             "reboot_required": False,
             "continuation_required": False,
         }
@@ -1207,15 +1513,43 @@ def _cancel_outbound_move_locked(
     directory, state = _load_outbound(root, package_id)
     if state.get("status") == "cancelled":
         return _public_outbound(state)
-    if _state_operation(state) == "move" and (
-        state.get("forward_only")
-        or state.get("commit_intent_at")
-        or state.get("status") != "staged_remote"
-    ):
+    operation = _state_operation(state)
+    if operation == "move" and (state.get("forward_only") or state.get("commit_intent_at")):
         raise AgentMoveError(
             "Agent move has committed forward intent and must continue forward; "
             "move it back only after this transfer completes"
         )
+    if operation == "move" and state.get("status") == "prepare_failed":
+        agent_id = str(state.get("source_agent_id") or state.get("agent_id") or "")
+        if state.get("source_disabled") or source_disabled_for_move(root, agent_id, package_id):
+            raise AgentMoveError("source ownership changed; reconcile the move before cancellation")
+        remote_status = "not_submitted"
+        if state.get("sha256"):
+            # The upload may have succeeded even when its response was lost.
+            # Never infer absence or roll back an already committed target.
+            try:
+                remote_status = str(_connect_for_state(root, instances, state).status(package_id).get("status") or "")
+            except Exception as exc:
+                raise AgentMoveError("target upload outcome is unknown; reconcile before cancellation") from exc
+            if remote_status == "staged":
+                state["status"] = "staged_remote"
+                state["remote_status"] = remote_status
+                _atomic_json(directory / "state.json", state)
+            elif remote_status != "rolled_back":
+                raise AgentMoveError("target upload outcome is not safely cancellable; reconcile it first")
+        if remote_status in {"not_submitted", "rolled_back"}:
+            end_source_quiesce(root, agent_id, package_id)
+            _remove_outbound_package(directory, state)
+            state.update({
+                "status": "cancelled", "cancelled_at": utc_now_iso(),
+                "remote_status": remote_status, "source_disabled": False,
+                "target_active": False, "rollback_errors": [],
+                "target_stop_required": False, "reboot_required": False,
+            })
+            _atomic_json(directory / "state.json", state)
+            return _public_outbound(state)
+    if operation == "move" and state.get("status") != "staged_remote":
+        raise AgentMoveError(f"this Agent move cannot be cancelled (status={state.get('status')!r})")
     if state.get("status") not in {
         "staged_remote",
         "committing_target",
@@ -1225,6 +1559,7 @@ def _cancel_outbound_move_locked(
         "source_disabled_target_committed",
         "activating_target",
         "clone_activating",
+        "clone_finalizing",
         "clone_failed",
     }:
         raise AgentMoveError(
@@ -1361,30 +1696,22 @@ def _assert_source_can_move(root: Path, agent_id: str) -> None:
     except Exception as exc:
         raise AgentMoveError("source agents.json cannot be read") from exc
     rows = data if isinstance(data, list) else data.get("agents", [])
-    active = [
+    eligible = [
         row
         for row in rows
         if isinstance(row, Mapping)
-        and row.get("is_active", True) is not False
         and row.get("transfer_state") != "moved_out_pending_reboot"
     ]
     selected = next(
         (
             row
-            for row in active
+            for row in eligible
             if str(row.get("name") or row.get("id") or "") == agent_id
         ),
         None,
     )
     if selected is None:
-        raise AgentMoveError(f"source Agent '{agent_id}' is not active")
-    if len(active) <= 1:
-        raise AgentMoveError(
-            f"cannot move Agent '{agent_id}': it is the source instance's last "
-            "active Agent; create or clone another Agent here first"
-        )
-
-
+        raise AgentMoveError(f"source Agent '{agent_id}' is missing or already moved")
 def _connect_transfer_receiver(
     root: Path,
     instances: Mapping[str, Any],
@@ -1566,10 +1893,34 @@ def _local_running_agents(root: Path) -> set[str]:
     return {str(item) for item in health.get("agents", []) or [] if str(item)}
 
 
+def _local_runtime_presence(root: Path) -> set[str]:
+    health = _local_workbench_json(root, "/api/health")
+    presence = health.get("agent_runtime_presence")
+    if not isinstance(presence, list):
+        raise AgentMoveError("source or target runtime presence is unavailable")
+    return {str(item) for item in presence if str(item)}
+
+
 def _remove_outbound_package(directory: Path, state: Mapping[str, Any]) -> None:
     agent_id = str(state.get("source_agent_id") or state.get("agent_id") or "")
     package_path = directory / f"{agent_id}.hashi-agent"
     package_path.unlink(missing_ok=True)
+
+
+def _verify_access_scope_preview(state: Mapping[str, Any], client: Any) -> None:
+    plan = state.get("access_scope_plan")
+    capabilities = getattr(client, "capabilities", {})
+    if isinstance(capabilities, Mapping) and capabilities.get("max_access_scope_error"):
+        raise AgentMoveError(str(capabilities["max_access_scope_error"]))
+    if not isinstance(plan, Mapping) or not isinstance(capabilities, Mapping):
+        return  # Earlier staged transactions have no comparable target preview.
+    current = capabilities.get("max_access_scope")
+    if current is None:
+        return  # Compatibility with older receivers; the target remains authoritative.
+    if str(current).strip().lower() != str(plan.get("target_maximum") or ""):
+        raise AgentMoveError(
+            "target access scope policy changed after preview; cancel and prepare the transfer again"
+        )
 
 
 def _connect_for_state(
@@ -1605,6 +1956,8 @@ def _receiver_package_limit(client: Any) -> int:
 def _matching_pending_clone(
     root: Path, agent_id: str, *, source_instance: str, target_instance: str,
     requested_agent_id: str | None, transfer_mode: str | None, history_mode: str | None,
+    history_source_owner: str | None, desired_target_active: bool | None,
+    retain_telegram_backup: bool,
 ) -> tuple[Path, dict[str, Any]] | None:
     """Find an unfinished identical intent, including pre-idempotency journals."""
     matches = []
@@ -1620,9 +1973,32 @@ def _matching_pending_clone(
             or str(state.get("target_instance") or "").upper() != target_instance.upper()
             or (state.get("history_mode") or "none") != (history_mode or "none")
             or state.get("transfer_mode") != transfer_mode
+            or state.get("desired_target_active", True) != (desired_target_active is not False)
+            or state.get("retain_telegram_backup", False) != retain_telegram_backup
             or state.get("rollback_completed")
         ):
             continue
+        if history_source_owner is not None:
+            recorded_owner = str(state.get("history_source_owner_id") or "").strip()
+            if not recorded_owner and state.get("sha256"):
+                # Older journals may predate the frozen owner field. A verified
+                # saved package can prove which history partition they contain.
+                try:
+                    package_path = directory / f"{agent_id}.hashi-agent"
+                    package = read_agent_move_package(
+                        package_path, verify=True, max_archive_members=state.get("max_archive_members"),
+                        max_unpacked_bytes=state.get("max_unpacked_bytes"),
+                        max_workspace_bytes=state.get("max_workspace_bytes")
+                    )
+                    if (package.package_id == state.get("package_id")
+                            and package_sha256(package_path) == state.get("sha256")):
+                        recorded_owner = str(
+                            (package.conversation_continuity or {}).get("owner_id") or ""
+                        ).strip()
+                except (AgentMoveError, OSError):
+                    continue
+            if recorded_owner != history_source_owner:
+                continue
         requested = str(requested_agent_id or "").strip()
         stored_request = state.get("requested_target_agent_id")
         if "requested_target_agent_id" in state:
@@ -1777,3 +2153,4 @@ def _public_outbound(state: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in state.items() if key not in private} | {
         "ok": True
     }
+# HASHI-Fingerprint: hfp_6491f940fc284d069f4e63d5c55d7c28

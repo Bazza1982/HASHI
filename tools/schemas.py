@@ -62,13 +62,17 @@ TOOL_SCHEMAS = [
                 "cursor when scanner state survives, so decide whether to continue, "
                 "narrow the roots, refine the query, or switch tools. Project profile "
                 "skips dependencies/caches; expanded and include_hidden can include "
-                "them. Shell may be used directly when it is a better fit. Regex is "
-                "currently unavailable; use literal, path glob, or scoped Shell."
+                "them. Shell may be used directly when it is a better fit. "
+                "Path regex uses Python syntax. Content regex is line-oriented and "
+                "uses ripgrep when available, with a cancellable Python fallback. The "
+                "effective engine and unsupported syntax are reported. For large scope "
+                "metadata, read scope_reference with tool_output_read in the same Run; "
+                "long match terms may reference the query and label abbreviated excerpts."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "minLength": 1, "maxLength": 1024},
+                    "query": {"type": "string", "minLength": 1},
                     "mode": {"type": "string", "enum": ["path", "content"]},
                     "roots": {"type": "array", "minItems": 1, "maxItems": 32,
                               "items": {"type": "string"}},
@@ -86,7 +90,15 @@ TOOL_SCHEMAS = [
                     "scope_reason": {"type": "string", "maxLength": 500},
                     "options": {"type": "object", "properties": {
                         "follow_links": {"type": "boolean"},
-                        "cross_filesystems": {"type": "boolean"}}, "additionalProperties": False},
+                        "cross_filesystems": {"type": "boolean"},
+                        "regex_engine": {
+                            "type": "string", "enum": ["auto", "ripgrep", "python"],
+                            "description": "Content regex engine; auto prefers ripgrep and falls back to Python when needed.",
+                        },
+                        "regex_max_line_bytes": {
+                            "type": "integer", "minimum": 0,
+                            "description": "Content regex line byte budget; 0 selects no separate line limit. Omitted derives a budget from available memory.",
+                        }}, "additionalProperties": False},
                 },
                 "required": ["query"], "additionalProperties": False,
             },
@@ -244,7 +256,7 @@ TOOL_SCHEMAS = [
             "name": "file_read",
             "description": (
                 "Read a file from disk and return its contents. "
-                "Supports optional offset (start line) and limit (max lines)."
+                "Supports line offsets, page limits and continuation cursors, including within long lines."
             ),
             "parameters": {
                 "type": "object",
@@ -260,6 +272,10 @@ TOOL_SCHEMAS = [
                     "limit": {
                         "type": "integer",
                         "description": "Maximum lines to return (default 500).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from a prior read of the same unchanged file; overrides offset.",
                     },
                 },
                 "required": ["path"],
@@ -310,6 +326,23 @@ TOOL_SCHEMAS = [
                             "All are eligible by default; script detection narrows each run."
                         ),
                     },
+                    "image_region": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "integer", "minimum": 0},
+                            "y": {"type": "integer", "minimum": 0},
+                            "width": {"type": "integer", "minimum": 1},
+                            "height": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["x", "y", "width", "height"],
+                        "additionalProperties": False,
+                        "description": "Optional region in oriented source-image pixels; use adjacent regions to inspect large images at higher detail.",
+                    },
+                    "ocr_timeout_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description": "Optional timeout per OCR engine or detection step in seconds; overrides the configured default.",
+                    },
                     "pdf_pages": {
                         "type": "string",
                         "enum": ["auto", "all", "none"],
@@ -318,11 +351,35 @@ TOOL_SCHEMAS = [
                             "(default), all renders every page, none extracts text only."
                         ),
                     },
+                    "pdf_cursor": {
+                        "type": "string",
+                        "description": "PDF continuation from an earlier media_read on the same unchanged file.",
+                    },
+                    "page_start": {
+                        "type": "integer", "minimum": 1,
+                        "description": "First PDF page to read, one-based; defaults to 1.",
+                    },
+                    "page_end": {
+                        "type": "integer", "minimum": 1,
+                        "description": "Last PDF page to read, inclusive; omit to continue toward the end.",
+                    },
                     "video_frames": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 6,
                         "description": "Number of deterministic video frames (default 3, maximum 6).",
+                    },
+                    "audio_cursor": {
+                        "type": "string",
+                        "description": "Continue audio transcription from a prior media_read on the same unchanged source.",
+                    },
+                    "start_seconds": {
+                        "type": "number", "minimum": 0,
+                        "description": "Optional start of the audio/video time range in seconds.",
+                    },
+                    "end_seconds": {
+                        "type": "number", "minimum": 0,
+                        "description": "Optional exclusive end of the audio/video time range in seconds.",
                     },
                     "transcribe_audio": {
                         "type": "boolean",
@@ -779,6 +836,8 @@ TOOL_SCHEMAS = [
             "description": (
                 "Make an HTTP request (GET, POST, PUT, DELETE, PATCH) to any URL. "
                 "Returns status code, headers summary, and response body. "
+                "An instance-selected response budget is reported explicitly; long retained "
+                "results can be read in pages. A partial response does not undo a request. "
                 "Use for calling external APIs or posting data."
             ),
             "parameters": {
@@ -1206,7 +1265,7 @@ TOOL_SCHEMAS = [
                     "cdp_url": {"type": "string", "description": "CDP endpoint for attaching to existing browser."},
                     "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
                     "wait_ms": {"type": "integer", "description": "Extra wait in ms after load. Default 1500."},
-                    "max_length": {"type": "integer", "description": "Max characters to return. Default 15000."},
+                    "max_length": {"type": "integer", "description": "Optional requested character limit; omitted returns the full visible text."},
                 },
                 "required": ["url"],
             },
@@ -1227,7 +1286,7 @@ TOOL_SCHEMAS = [
                     "cdp_url": {"type": "string", "description": "CDP endpoint for attaching to existing browser."},
                     "headed": {"type": "boolean", "description": "Visible browser (standalone only). Default false."},
                     "wait_ms": {"type": "integer", "description": "Extra wait in ms after load. Default 1500."},
-                    "max_length": {"type": "integer", "description": "Max characters to return. Default 20000."},
+                    "max_length": {"type": "integer", "description": "Optional requested character limit; omitted returns the full rendered HTML."},
                 },
                 "required": ["url"],
             },
@@ -2150,7 +2209,7 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                         ),
                     },
                 },
-                "required": ["kind", "job_id", "authorization"],
+                "required": ["kind", "job_id"],
                 "additionalProperties": False,
             },
         },
@@ -2277,7 +2336,7 @@ HASHI_SCHEDULER_TOOL_SCHEMAS = [
                         "description": "Intent marker only; never substitutes for the trusted PAO owner decision.",
                     },
                 },
-                "required": ["kind", "job_id", "authorization"],
+                "required": ["kind", "job_id"],
                 "additionalProperties": False,
             },
         },
@@ -2365,8 +2424,7 @@ HASHI_SUPERLOOP_TOOL_SCHEMAS = [
             "description": (
                 "Delete an owned Superloop. The loop is retained as a deleted audit record "
                 "and will no longer advance. Call only after explicit user authorization. "
-                "The authorization string is an intent marker; scoped Agent execution "
-                "also requires the existing trusted PAO owner decision."
+                "Scoped Agent execution also requires the existing trusted PAO owner decision."
             ),
             "parameters": {
                 "type": "object",
@@ -2377,7 +2435,7 @@ HASHI_SUPERLOOP_TOOL_SCHEMAS = [
                         "enum": ["explicit_user_authorization"],
                     },
                 },
-                "required": ["loop_id", "authorization"],
+                "required": ["loop_id"],
                 "additionalProperties": False,
             },
         },
@@ -2443,6 +2501,29 @@ for _tool_name in [
     if _tool_name in {s["function"]["name"] for s in TOOL_SCHEMAS}:
         fn = next(s["function"] for s in TOOL_SCHEMAS if s["function"]["name"] == _tool_name)
         fn["parameters"]["properties"].update(_BROWSER_EXTRA_FIELDS)
+
+# Navigation controls are exposed only for operations that use them.
+for _tool_name in ("browser_get_text", "browser_get_html", "browser_evaluate", "browser_session"):
+    _fn = next(s["function"] for s in TOOL_SCHEMAS if s["function"]["name"] == _tool_name)
+    _fn["parameters"]["properties"].update({
+        "timeout_ms": {
+            "type": "integer", "minimum": 1,
+            "description": "Requested navigation timeout in milliseconds; default 30000.",
+        },
+        "wait_until": {
+            "type": "string", "enum": ["commit", "domcontentloaded", "load", "networkidle"],
+            "description": ("Standalone browser navigation readiness; default domcontentloaded. "
+                            "The extension currently supports explicit load only."),
+        },
+    })
+
+for _spec in TOOL_SCHEMAS:
+    _fn = _spec.get("function", {})
+    if str(_fn.get("name", "")).startswith("desktop_"):
+        _fn["parameters"]["properties"]["timeout_s"] = {
+            "type": "number", "exclusiveMinimum": 0,
+            "description": "Optional timeout in seconds for each desktop subprocess.",
+        }
 
 # Map tool name -> schema for quick lookup
 TOOL_SCHEMAS.extend(
@@ -2557,8 +2638,10 @@ TOOL_SCHEMAS.extend(
                 "description": (
                     "Read workspace snapshots, git status/diff, bounded search, and file "
                     "or artifact hashes without writing files. A stable snapshot only shows "
-                    "that state did not change; it does not prove correctness. Use "
-                    "verification_run to test correctness."
+                    "that state did not change; it does not prove correctness. Filesystem "
+                    "snapshot exclusions and partial Python search are reported; full long "
+                    "omission lists can be paged with tool_output_read in the same Run. "
+                    "file_search can continue paged searches. Use verification_run to test correctness."
                 ),
                 "parameters": {
                     "type": "object",
@@ -2688,6 +2771,47 @@ for _schema in TOOL_SCHEMAS:
         _properties["browser_target"] = {"type": "string", "description": "Use embedded for a live desktop-browser handoff, extension for the connected browser provider, or a connected browser ID/name/capability_id. HASHI keeps the selected browser fixed for this task. Repeat embedded on every handoff call."}
         _properties["handoff_id"] = {"type": "string", "description": "Exact local live-tab handoff ID; required for embedded browser actions."}
         _properties.setdefault("tab_id", {"type": "string", "description": "Exact browser tab identity supplied by a live handoff. Never substitute another active tab."})
+
+
+# A continuation is a projection of a result already authorized in this Run.
+TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "tool_output_read",
+        "description": (
+            "Read a retained oversized tool result in the same Run. "
+            "Follow next_offset until complete; retention lasts for the Registry lifetime. Screenshot pages return image blocks."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reference": {"type": "string", "description": "Exact reference from a truncated tool result."},
+                "offset": {"type": "integer", "minimum": 0, "description": "For text, character offset; for screenshot references, source frame index. Start at 0."},
+                "limit": {"type": "integer", "minimum": 1, "description": "Optional maximum characters for text, or maximum source frames for screenshot pages."},
+            },
+            "required": ["reference"],
+            "additionalProperties": False,
+        },
+    },
+})
+
+
+# Discovery exposes only the current request's already-authorized capabilities.
+TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "tool_catalog",
+        "description": "Find already-authorized tools by name or description. Results are paged; use next_offset to continue.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Words or a tool name to find; omit to list all."},
+                "offset": {"type": "integer", "minimum": 0, "description": "Continue from next_offset."},
+            },
+            "additionalProperties": False,
+        },
+    },
+})
 
 
 # Office schemas have one owner; permission/runtime filtering stays in ToolRegistry.

@@ -100,6 +100,11 @@ def test_disabled_remote_skips_scheduler_principal_lookup(tmp_path, monkeypatch)
     )
 
     assert workbench_auth.resolve_remote_runtime_sids(tmp_path) == ()
+    from orchestrator.agent_move.service import _credential_publication_options
+
+    assert _credential_publication_options(tmp_path / "secrets.json") == {
+        "private_full_control_sids": (),
+    }
 
 
 @pytest.mark.parametrize("case", ["denied", "empty", "invalid", "foreign"])
@@ -156,4 +161,26 @@ def test_malformed_query_result_fails_before_credential_publication(tmp_path, mo
     with pytest.raises(RuntimeError, match="invalid SID"):
         workbench_auth.ensure_local_api_credential(read_config_json(path), profile="personal")
     assert path.read_bytes() == original
+
+def test_optional_remote_acl_repair_preserves_secret_and_grants_only_selected_sid(tmp_path, monkeypatch):
+    from tools.private_files import protect_private_file
+
+    path = tmp_path / "secrets.json"
+    path.write_text('{"fixture":"keep"}', encoding="utf-8")
+    before = path.read_bytes()
+    protect_private_file(path)
+
+    def acl():
+        return subprocess.run(
+            ["icacls.exe", str(path)], capture_output=True, text=True, check=True,
+        ).stdout
+
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" not in acl()
+    monkeypatch.setattr(workbench_auth, "resolve_remote_runtime_sids",
+                        lambda root: ("S-1-5-19",) if root == tmp_path else pytest.fail("wrong root"))
+    workbench_auth.ensure_remote_runtime_access(path, tmp_path)
+    assert "NT AUTHORITY\\LOCAL SERVICE:(F)" in acl()
+    assert "Everyone:(F)" not in acl()
+    assert path.read_bytes() == before
+
 # HASHI-Fingerprint: hfp_2e994ff6fd124df0aa95cff7985f66f4

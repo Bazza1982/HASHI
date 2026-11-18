@@ -194,8 +194,10 @@ def test_config_reads_do_not_repeat_local_api_credential_maintenance(tmp_path, m
     )
     maintenance_calls = []
 
-    def observe_maintenance(document, *, profile, remote_runtime_sids=None):
-        maintenance_calls.append((profile, remote_runtime_sids))
+    def observe_maintenance(
+        document, *, profile, remote_runtime_sids=None, defer_missing_remote=False,
+    ):
+        maintenance_calls.append((profile, remote_runtime_sids, defer_missing_remote))
         return document
 
     monkeypatch.setattr(
@@ -208,7 +210,7 @@ def test_config_reads_do_not_repeat_local_api_credential_maintenance(tmp_path, m
     manager.load()
     assert maintenance_calls == []
     manager.load(bootstrap_local_api_credential=True)
-    assert maintenance_calls == [("personal", None)]
+    assert maintenance_calls == [("personal", None, True)]
 
 
 @pytest.mark.asyncio

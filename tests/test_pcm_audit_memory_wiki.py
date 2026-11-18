@@ -601,6 +601,12 @@ def test_cross_agent_memory_requires_exact_authorization_purpose_and_provenance(
     )
     assert [item["agent_id"] for item in result["results"]] == ["arale"]
     assert result["results"][0]["provenance"]["scope"]["purpose"]
+    refined = authorized_service.search(
+        {"query": "decision", "source": "central", "scope": "cross_agent",
+         "instance_id": "HASHI2", "agent_id": "arale",
+         "purpose": "user-requested audit comparison", "limit": 1}
+    )
+    assert [item["agent_id"] for item in refined["results"]] == ["arale"]
 
 
 @pytest.mark.asyncio
@@ -624,6 +630,8 @@ async def test_memory_raw_command_binds_exact_cross_agent_authority_to_request()
 
     kwargs = runtime.enqueue_request.await_args.kwargs
     assert kwargs["source"] == "memory:raw-search"
+    assert "exactly once" not in kwargs["prompt"].casefold()
+    assert "as needed" in kwargs["prompt"].casefold()
     assert kwargs["request_metadata"]["memory_search_authorization"] == {
         "authorization": "explicit_user_authorization",
         "instance_id": "HASHI2",
@@ -836,3 +844,27 @@ async def test_wiki_derived_request_rejects_missing_transport_and_stale_session_
     assert result["error_code"] == "command_derived_binding_invalid"
     assert result["request_outcome"] == "not_admitted"
     runtime.enqueue_request.assert_not_awaited()
+
+def test_buffered_audit_preserves_all_deltas_across_thresholds_and_close(tmp_path):
+    store = CanonicalAuditStore(tmp_path, instance_id="HASHI1", agent_id="zhaojun")
+    writer = BufferedCanonicalAuditWriter(store, coalesce_window_s=30)
+    deltas = [f"{index:04d}:" + "x" * 595 for index in range(260)]
+    try:
+        for delta in deltas:
+            writer.record_thinking(
+                {"kind": "thinking", "raw_delta": delta, "summary": "", "detail": ""},
+                request_id="req-threshold", provenance={"source": "fixture"},
+            )
+    finally:
+        writer.close()
+    events = store.read_events(RAW_AUTH)
+    stream = [event["payload"] for event in events if event["event_type"] == "provider_stream_event"]
+    reasoning = [event["payload"] for event in events if event["event_type"] == "provider_reasoning"]
+    def expand(payload):
+        value = payload["raw_delta"]
+        return store.read_artifact(value, RAW_AUTH).decode("utf-8") if isinstance(value, dict) else value
+
+    assert len(stream) >= 3
+    assert "".join(map(expand, stream)) == "".join(deltas)
+    assert "".join(map(expand, reasoning)) == "".join(deltas)
+    assert sum(event["coalesced_delta_count"] for event in stream) == len(deltas)

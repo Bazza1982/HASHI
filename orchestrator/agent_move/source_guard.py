@@ -71,6 +71,36 @@ def end_source_quiesce(
     path.unlink()
 
 
+def scope_abort_released(hashi_root: Path | str, agent_id: str, package_id: str) -> bool:
+    """Observe the exact coordinator's confirmed staged-only cancellation."""
+    if not package_id:
+        return False
+    try:
+        from .coordinator import get_outbound_move
+        state = get_outbound_move(hashi_root, package_id)
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(
+        state.get("status") == "cancelled"
+        and state.get("scope_abort_target_confirmed") is True
+        and str(state.get("source_agent_id") or state.get("agent_id") or "") == agent_id
+    )
+
+
+def runtime_move_guard(runtime: Any, hashi_root: Path | str | None, agent_id: str) -> dict[str, Any] | None:
+    """Release the in-memory guard only for its own confirmed staged abort."""
+    if getattr(runtime, "_agent_move_quiesced", False):
+        package_id = str(getattr(runtime, "_agent_move_quiesce_package_id", "") or "")
+        if hashi_root is not None and scope_abort_released(hashi_root, agent_id, package_id):
+            runtime._agent_move_quiesced = False
+        else:
+            return {
+                "status": "cutover_quiesce",
+                "target_instance": str(getattr(runtime, "_agent_move_target_instance", "") or ""),
+            }
+    return source_move_guard_state(hashi_root, agent_id) if hashi_root is not None else None
+
+
 def source_move_guard_state(
     hashi_root: Path | str,
     agent_id: str,
@@ -126,6 +156,45 @@ def source_disabled_for_move(
         and row.get("transfer_package_id") == package_id
         for row in rows
     )
+
+
+def assert_source_handoff_state(
+    hashi_root: Path | str, agent_id: str, package_id: str, target_instance: str,
+) -> None:
+    """Check the recorded source incarnation before starting the target.
+
+    A source already removed by the user is valid: no configured source Agent
+    remains to start. An existing source must still be the disabled incarnation
+    belonging to this transfer. Runtime absence is checked separately.
+    """
+    root = Path(hashi_root).expanduser().resolve()
+    try:
+        journal = _read_json(root / "state" / "agent_moves" / "source" / f"{package_id}.json")
+        data = _read_json(root / "agents.json", require_object=False)
+        rows = data if isinstance(data, list) else data.get("agents")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("invalid Agent configuration")
+        if (journal.get("package_id") != package_id or journal.get("agent_id") != agent_id
+                or str(journal.get("target_instance") or "").upper() != str(target_instance).upper()
+                or journal.get("status") != "source_disabled_pending_reboot"):
+            raise ValueError("source transfer journal changed")
+        matches = [row for row in rows if str(row.get("name") or row.get("id") or "") == agent_id]
+        if not matches:
+            return
+        if len(matches) != 1:
+            raise ValueError("source Agent is not unique")
+        row = matches[0]
+        lifecycle = str(journal.get("source_agent_lifecycle_id") or "").strip().casefold()
+        if (row.get("is_active") is not False
+                or row.get("transfer_state") != "moved_out_pending_reboot"
+                or row.get("transfer_package_id") != package_id
+                or str(row.get("transfer_target") or "").upper() != str(target_instance).upper()
+                or (lifecycle and str(row.get("agent_lifecycle_id") or "").strip().casefold() != lifecycle)):
+            raise ValueError("source Agent state changed")
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        from .package import AgentMoveError
+
+        raise AgentMoveError("source Agent handoff state changed; review the existing move before continuing") from exc
 
 
 def _quiesce_path(root: Path, agent_id: str) -> Path:

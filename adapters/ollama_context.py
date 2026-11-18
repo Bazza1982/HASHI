@@ -91,7 +91,10 @@ def project_pcm_payload(adapter, payload, *, render_prompt):
     if not callable(render_prompt):
         raise ValueError("Typed PCM reference projection requires its owning renderer")
     capacity = adapter._native_capacity()
-    char_limit = adapter._model_context_options().get("ollama_max_input_chars")
+    if capacity is None:
+        # With no qualified capacity, do not project away completed history.
+        return payload
+    char_limit = adapter._qualified_model_context_options().get("ollama_max_input_chars")
     if char_limit is not None and (type(char_limit) is not int or char_limit < 1):
         raise ValueError("Ollama input character limit must be a positive integer")
     # Leave space for one tool/answer round, including JSON escaping and schemas.

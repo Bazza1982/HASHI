@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -18,9 +19,11 @@ import time
 import tempfile
 from pathlib import Path
 
+from .limits import DEFAULT_BUDGETS, resolve_budgets
+
 PROTOCOL = 1
 MAX_IPC_BYTES = 256 * 1024
-CODE_FILES = ("worker.py", "engine.py", "package_probe.py", "formatting.py")
+CODE_FILES = ("worker.py", "engine.py", "package_probe.py", "formatting.py", "limits.py")
 LOCK = Path(__file__).resolve().parents[2] / "requirements" / "office-runtime-windows-py312.lock"
 
 
@@ -92,7 +95,7 @@ print(json.dumps({'version':list(sys.version_info[:3]),'platform':sys.platform,'
         shutil.copyfile(Path(__file__).parent / name, output)
         files[str(output)] = digest(output)
     manifest = {
-        "protocol": PROTOCOL, "generation": "office-v1",
+        "protocol": PROTOCOL, "generation": "office-v1", "transport_capabilities": ["file-v1", "resource-budgets-v1"],
         "python": str(python), "worker": str(destination / "worker.py"),
         "python_version": inventory["version"], "platform": inventory["platform"],
         "machine": inventory["machine"], "pins": pins,
@@ -131,9 +134,18 @@ class OfficeRuntime:
                 self.options = dict(read_config_json(source))
             except (OSError, ValueError) as exc:
                 self.configuration_error = type(exc).__name__
+        try:
+            self.budgets = resolve_budgets(self.options.get("resource_budgets"))
+        except ValueError as exc:
+            raise RuntimeUnavailable(str(exc)) from exc
         self.manifest_path = Path(str(self.options.get("manifest") or ""))
         self.state_root = Path(str(self.options.get("state_root") or ""))
-        self.timeout = min(120.0, max(1.0, float(self.options.get("timeout_seconds", 60))))
+        try:
+            self.timeout = float(self.options.get("timeout_seconds", 60))
+        except (TypeError, ValueError):
+            raise RuntimeUnavailable("Office timeout_seconds must be a positive finite number.") from None
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise RuntimeUnavailable("Office timeout_seconds must be a positive finite number.")
         self._manifest = None
 
     def manifest(self, *, verify=True):
@@ -180,8 +192,7 @@ class OfficeRuntime:
         work_root = Path(str(self.options.get("work_root") or ""))
         if not self.options.get("work_root") or not work_root.is_absolute():
             raise RuntimeUnavailable("Configure an absolute short Office work_root for native libraries.")
-        if os.name == "nt" and len(str(work_root)) > 100:
-            raise RuntimeUnavailable("Office work_root must be at most 100 characters on Windows.")
+        # Let the platform and the configured runtime determine supported path lengths.
         work_root.mkdir(parents=True, exist_ok=True)
         if work_root.is_symlink() or (hasattr(work_root,"is_junction") and work_root.is_junction()):
             raise RuntimeUnavailable("Office work_root cannot be a link.")
@@ -189,7 +200,7 @@ class OfficeRuntime:
             transport = Path(temporary)
             for source in job.iterdir():
                 if source.is_file():
-                    if source.is_symlink() or source.stat().st_size > 32*1024*1024:
+                    if source.is_symlink() or source.stat().st_size > self.budgets["file_bytes"]:
                         raise RuntimeUnavailable("Invalid staging input.")
                     shutil.copyfile(source, transport/source.name)
             value = await self._invoke_staged(operation, arguments, transport)
@@ -203,7 +214,8 @@ class OfficeRuntime:
                 if Path(name).name != name or name in {"",".",".."}:
                     raise RuntimeUnavailable("Worker returned an invalid output name.")
                 source, destination = transport/name, job/name
-                if not source.is_file() or source.is_symlink() or destination.is_symlink() or source.stat().st_size>32*1024*1024:
+                if (not source.is_file() or source.is_symlink() or destination.is_symlink()
+                        or (name != "receipt.json" and source.stat().st_size > self.budgets["file_bytes"])):
                     raise RuntimeUnavailable("Worker returned an invalid output file.")
                 shutil.copyfile(source,destination)
             return value
@@ -215,12 +227,27 @@ class OfficeRuntime:
         if job.is_symlink() or (hasattr(job, "is_junction") and job.is_junction()):
             raise RuntimeUnavailable("Office invocation directory is linked.")
         request_id = hashlib.sha256(canonical([str(job), operation, arguments])).hexdigest()
+        if (self.budgets != DEFAULT_BUDGETS
+                and "resource-budgets-v1" not in manifest.get("transport_capabilities", ())):
+            raise RuntimeUnavailable("Requalify the Office runtime to use configurable resource budgets.")
         request = {"protocol": PROTOCOL, "request_id": request_id, "operation": operation,
                    "deadline": time.time() + self.timeout, "arguments": arguments,
-                   "pins": manifest["pins"], "converter": manifest.get("converter")}
+                   "pins": manifest["pins"], "converter": manifest.get("converter"),
+                   "resource_budgets": self.budgets}
+        supports_file = "file-v1" in manifest.get("transport_capabilities", ())
+        if supports_file:
+            request["response_transport"] = "file-v1"
         encoded = canonical(request)
         if len(encoded) > MAX_IPC_BYTES:
-            raise RuntimeUnavailable("Office request exceeds IPC byte limit.")
+            if not supports_file:
+                raise RuntimeUnavailable("Requalify the Office runtime for large request transport.")
+            name = f"request-{request_id}.json"
+            with (job / name).open("xb") as stream:
+                stream.write(encoded)
+                stream.flush()
+            encoded = canonical({"protocol": PROTOCOL, "request_id": request_id,
+                                 "transport": "file-v1", "file": name, "size": len(encoded),
+                                 "sha256": hashlib.sha256(encoded).hexdigest()})
         # Do not pass provider, Telegram, database or other inherited credentials.
         env = {k: v for k, v in os.environ.items()
                if k.upper() in {"SYSTEMROOT", "WINDIR", "COMSPEC", "NUMBER_OF_PROCESSORS",
@@ -270,11 +297,26 @@ class OfficeRuntime:
             raise RuntimeUnavailable("Office worker exited without a valid receipt.")
         try:
             response = json.loads(stdout)
+            if response.get("transport") == "file-v1":
+                name = f"response-{request_id}.json"
+                source = job / name
+                if (not supports_file or response.get("protocol") != PROTOCOL
+                        or response.get("request_id") != request_id or response.get("file") != name
+                        or type(response.get("size")) is not int or response["size"] < 0
+                        or source.is_symlink() or not source.is_file()
+                        or source.resolve().parent != job.resolve()):
+                    raise ValueError()
+                payload = source.read_bytes()
+                if (len(payload) != response["size"]
+                        or hashlib.sha256(payload).hexdigest() != response.get("sha256")):
+                    raise ValueError()
+                response = json.loads(payload)
             result = response["result"]
             if (response["protocol"] != PROTOCOL or response["request_id"] != request_id or
                     response["sha256"] != hashlib.sha256(canonical(result)).hexdigest()):
                 raise ValueError()
-        except (KeyError, TypeError, ValueError):
+        except (OSError, KeyError, TypeError, ValueError):
             raise RuntimeUnavailable("Office worker receipt is missing or has an invalid checksum.") from None
         (job / "receipt.json").write_bytes(canonical(response))
         return result
+# HASHI-Fingerprint: hfp_4afa9c04e1dd45eeb2937c99d1528a1f

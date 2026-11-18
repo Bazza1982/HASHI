@@ -367,12 +367,21 @@ def workzone_overview_keyboard(state: Mapping[str, Any]) -> InlineKeyboardMarkup
 
 
 def workzone_slot_keyboard(
-    state: Mapping[str, Any], slot_id: str
+    state: Mapping[str, Any], slot_id: str, *, frontend: bool = False
 ) -> InlineKeyboardMarkup:
     normalized = normalize_workzone_state(state)
     slot = normalize_workzone_slot(slot_id)
     item = configured_workzone_slot(normalized, slot)
     revision = int(normalized["revision"])
+    path_options = {}
+    if frontend:
+        from orchestrator.command_interactions import MAX_INPUT_TEXT
+
+        path_options = {"api_kwargs": {"hashi_text_input": {
+            "label": ui_language.tr("workzone.path_placeholder"),
+            "value": str(item["path"]) if item else "",
+            "max_length": MAX_INPUT_TEXT,
+        }}}
     if item is None:
         return InlineKeyboardMarkup(
             [
@@ -380,6 +389,7 @@ def workzone_slot_keyboard(
                     InlineKeyboardButton(
                         ui_language.tr("workzone.button.set_path"),
                         callback_data=f"wz:p:{revision}:{slot}",
+                        **path_options,
                     )
                 ],
                 [
@@ -404,6 +414,7 @@ def workzone_slot_keyboard(
             InlineKeyboardButton(
                 ui_language.tr("workzone.button.replace"),
                 callback_data=f"wz:p:{revision}:{slot}",
+                **path_options,
             ),
             InlineKeyboardButton(
                 ui_language.tr("workzone.button.reload"),
@@ -526,7 +537,9 @@ async def _reply_slot(
         update,
         workzone_slot_text(runtime, state, slot_id, notice=notice),
         parse_mode="HTML",
-        reply_markup=workzone_slot_keyboard(state, slot_id),
+        reply_markup=workzone_slot_keyboard(
+            state, slot_id, frontend=_is_frontend_actor(runtime, update.effective_user.id)
+        ),
     )
 
 
@@ -549,8 +562,16 @@ async def _edit_slot(
     await _safe_edit_message_text(
         query,
         workzone_slot_text(runtime, state, slot_id, notice=notice),
-        reply_markup=workzone_slot_keyboard(state, slot_id),
+        reply_markup=workzone_slot_keyboard(
+            state, slot_id, frontend=_is_frontend_actor(runtime, query.from_user.id)
+        ),
     )
+
+
+def _is_frontend_actor(runtime: Any, actor: Any) -> bool:
+    from orchestrator.frontend_command_context import is_frontend_command_principal
+
+    return is_frontend_command_principal(runtime, actor)
 
 
 async def _safe_edit_message_text(
@@ -567,7 +588,7 @@ async def _safe_edit_message_text(
             raise
 
 
-def _pending_paths(runtime: Any) -> dict[tuple[int, int], dict[str, Any]]:
+def _pending_paths(runtime: Any) -> dict[tuple[Any, ...], dict[str, Any]]:
     pending = getattr(runtime, "_pending_workzone_paths", None)
     if not isinstance(pending, dict):
         pending = {}
@@ -575,11 +596,15 @@ def _pending_paths(runtime: Any) -> dict[tuple[int, int], dict[str, Any]]:
     return pending
 
 
-def _pending_key(update: Any) -> tuple[int, int]:
-    return (
-        int(getattr(getattr(update, "effective_chat", None), "id", 0) or 0),
-        int(getattr(getattr(update, "effective_user", None), "id", 0) or 0),
-    )
+def _pending_key(update: Any) -> tuple[Any, ...]:
+    chat = getattr(getattr(update, "effective_chat", None), "id", 0) or 0
+    user = getattr(getattr(update, "effective_user", None), "id", 0) or 0
+    surface = str(getattr(update, "_hashi_session_surface", "") or "").casefold()
+    if surface and surface != "telegram":
+        session = str(getattr(update, "_hashi_session_id", "") or "")
+        channel = str(getattr(update, "_hashi_session_channel_key", "") or "")
+        return ("frontend", surface, session, channel, str(chat), str(user))
+    return (int(chat), int(user))
 
 
 def _clear_pending_path(runtime: Any, update: Any) -> bool:
@@ -624,9 +649,7 @@ async def _begin_path_reply(
     prompt_message_id = int(getattr(prompt, "message_id", 0) or 0)
     if prompt_message_id <= 0:
         raise RuntimeError("Workzone path prompt delivery was not confirmed")
-    chat_id = int(getattr(getattr(query.message, "chat", None), "id", 0) or 0)
-    user_id = int(getattr(getattr(query, "from_user", None), "id", 0) or 0)
-    _pending_paths(runtime)[(chat_id, user_id)] = {
+    _pending_paths(runtime)[_pending_key(projected)] = {
         "owner_id": str(owner_id),
         "agent_id": str(runtime.name).lower(),
         "slot": slot,
@@ -1196,7 +1219,7 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
             reply_markup=_delete_confirmation_keyboard(state, slot),
         )
         return
-    if action == "p" and slot is not None:
+    if action == "p" and slot is not None and not _is_frontend_actor(runtime, query.from_user.id):
         await _begin_path_reply(
             runtime,
             update,
@@ -1211,6 +1234,26 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         await query.answer(ui_language.tr("workzone.busy"), show_alert=True)
         return
     try:
+        if action == "p" and slot is not None:
+            raw_path = getattr(query, "input_text", None)
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise ValueError(ui_language.tr("workzone.path_missing"))
+            after, deferred = await _save_path(
+                runtime,
+                owner_id=resolved_owner,
+                state=state,
+                slot_id=slot,
+                raw_path=raw_path,
+                expected_revision=expected_revision,
+                enable=None,
+                source="frontend_command_ui",
+            )
+            notice = _mutation_notice(
+                ui_language.tr("workzone.updated"), deferred=deferred
+            )
+            await query.answer(notice)
+            await _edit_slot(runtime, query, after, slot, notice=notice)
+            return
         if action in {"on", "off"} and slot is not None:
             after, deferred = await _set_enabled(
                 runtime,

@@ -363,3 +363,116 @@ async def test_preflight_catalog_has_no_executable_owner_capability(tmp_path):
     finally:
         invocation.close()
 # HASHI-Fingerprint: hfp_5b79a497817c452f879fc4d963a8256d
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["stopped", "metadata_removed"])
+async def test_fixed_cli_waiter_rechecks_live_owner_run_before_dispatch(tmp_path, monkeypatch, ending):
+    from types import SimpleNamespace
+    import adapters.hashi_mcp as hashi_mcp
+    from orchestrator.flexible_backend_manager import FlexibleBackendManager
+    from orchestrator.session_store import SessionStoreError
+
+    audit, workspace, registry = setup(tmp_path)
+    facade = audit["_runtime"].orchestrator
+    queued_audit = _pao_audit(tmp_path, facade, agent="fixture", request_id="queued-request")
+    config = SimpleNamespace(
+        instance_id="HASHI4", project_root=Path(__file__).resolve().parents[1],
+        bridge_home=tmp_path, secrets_path=tmp_path / "secret.json",
+    )
+    registry.audit_context["global_config"] = config
+    monkeypatch.setattr(hashi_mcp, "MAX_ACTIVE_INVOCATIONS_PER_ADAPTER", 1)
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    dispatched = []
+
+    class Backend:
+        _hashi_mcp_enabled = True
+
+        def __init__(self):
+            self.tool_registry = registry
+            self.config = SimpleNamespace(workspace_dir=workspace)
+            self.global_config = config
+
+        async def generate_response(self, _prompt, request_id, **_kwargs):
+            dispatched.append(request_id)
+            entered.set()
+            await release.wait()
+            return request_id
+
+    backend = Backend()
+    runtime = audit["_runtime"]
+    runtime.name = "fixture"
+    runtime.global_config = config
+    runtime.current_request_meta = None
+    keys = ("request_id", "owner_id", "hashi_session_id", "hashi_run_id", "hashi_fencing_token")
+    runtime._request_meta_by_id = {
+        source["request_id"]: {
+            **{key: source[key] for key in keys}, "request_metadata": {},
+        }
+        for source in (audit, queued_audit)
+    }
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.config = SimpleNamespace(active_backend="codex-cli")
+    manager.current_backend = backend
+    manager.runtime = runtime
+    first = asyncio.create_task(manager.generate_response("A", audit["request_id"]))
+    queued = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        queued = asyncio.create_task(manager.generate_response("B", queued_audit["request_id"]))
+        await asyncio.sleep(0)
+        assert not queued.done()
+        if ending == "stopped":
+            runtime.session_store.cancel_run(queued_audit["hashi_run_id"], owner_id="owner")
+        else:
+            runtime._request_meta_by_id.pop(queued_audit["request_id"])
+        release.set()
+        assert await first == audit["request_id"]
+        if ending == "stopped":
+            with pytest.raises((SessionStoreError, ValueError)) as denied:
+                await queued
+            assert "run" in str(denied.value).lower() or "binding" in str(denied.value).lower()
+        else:
+            result = await queued
+            assert result.is_success is False
+            assert result.error_code == "MCP_RUN_CHANGED"
+        assert dispatched == [audit["request_id"]]
+        assert backend._active_hashi_mcp_invocations == {}
+        assert not list((workspace / "backend_state").glob("*-hashi-mcp-*.json"))
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (first, queued) if task), return_exceptions=True)
+        proxy = getattr(backend, "_browser_gateway_proxy", None)
+        if proxy:
+            await asyncio.to_thread(proxy.close)
+
+
+@pytest.mark.asyncio
+async def test_configured_mcp_capacity_above_32_reaches_owner_proxy(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    audit, workspace, registry = setup(tmp_path)
+    config = SimpleNamespace(
+        instance_id="HASHI4", project_root=Path(__file__).resolve().parents[1],
+        bridge_home=tmp_path, secrets_path=tmp_path / "secret.json",
+    )
+    registry.audit_context.update({**audit, "global_config": config})
+    monkeypatch.setenv("HASHI_MCP_MAX_ACTIVE_INVOCATIONS", "40")
+    adapter = SimpleNamespace(
+        tool_registry=registry, config=SimpleNamespace(workspace_dir=workspace),
+        global_config=config,
+    )
+    invocations = []
+    try:
+        for _ in range(33):
+            invocations.append(prepare_hashi_mcp(adapter, backend="codex-cli"))
+        assert len(adapter._active_hashi_mcp_invocations) == 33
+        assert len(adapter._browser_gateway_proxy._scopes) == 33
+        assert adapter._browser_gateway_proxy.max_active_scopes == 40
+    finally:
+        for invocation in reversed(invocations):
+            invocation.close()
+        proxy = getattr(adapter, "_browser_gateway_proxy", None)
+        if proxy:
+            await asyncio.to_thread(proxy.close)

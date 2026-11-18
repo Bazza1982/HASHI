@@ -219,6 +219,25 @@ def _set_level(
     return ui_language.tr("privacy.changed.2")
 
 
+def _explicit_owner_command(runtime: Any, actor_id: Any) -> bool:
+    """Recognize a current owner action without treating a delegate as owner."""
+    from orchestrator.frontend_command_context import is_frontend_command_principal
+    from orchestrator.telegram_actor_scope import runtime_snapshot, scoped_access_enabled
+
+    if is_frontend_command_principal(runtime, actor_id):
+        return True
+    if not isinstance(actor_id, int) or isinstance(actor_id, bool) or actor_id <= 0:
+        return False
+    if scoped_access_enabled(runtime):
+        try:
+            snapshot = runtime_snapshot(runtime)
+            return actor_id == snapshot.primary_user_id and actor_id in snapshot.effective_user_ids
+        except (OSError, ValueError, TypeError, LookupError):
+            return False
+    primary = getattr(getattr(runtime, "global_config", None), "authorized_id", None)
+    return isinstance(primary, int) and not isinstance(primary, bool) and primary == actor_id
+
+
 async def cmd_privacy(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
@@ -252,7 +271,8 @@ async def cmd_privacy(runtime: Any, update: Any, context: Any) -> None:
         )
         return
     current = current_privacy_level(runtime)
-    if requested < current:
+    downgrade = requested < current
+    if downgrade and not _explicit_owner_command(runtime, update.effective_user.id):
         await runtime._reply_text(
             update,
             ui_language.tr(
@@ -273,7 +293,10 @@ async def cmd_privacy(runtime: Any, update: Any, context: Any) -> None:
         return
 
     try:
-        notice = _set_level(runtime, requested)
+        notice = _set_level(
+            runtime, requested, confirmed=downgrade,
+            expected_current_level=int(current) if downgrade else None,
+        )
     except OSError:
         await runtime._reply_text(
             update,

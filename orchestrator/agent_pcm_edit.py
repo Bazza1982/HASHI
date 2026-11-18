@@ -12,35 +12,35 @@ from orchestrator.pcm import (
     update_pcm_text,
 )
 
-MAX_AGENT_PCM_BYTES = 2 * 1024 * 1024
+MAX_AGENT_PCM_BYTES = 8 * 1024 * 1024
 
 
-def read_agent_pcm(workspace_dir: str | Path) -> dict[str, str]:
+def read_agent_pcm(workspace_dir: str | Path, *, max_bytes: int = MAX_AGENT_PCM_BYTES) -> dict[str, str]:
     workspace = Path(workspace_dir).expanduser().resolve()
     path = canonical_agent_md(workspace)
     if path.is_symlink():
         raise PCMValidationError("pcm_symlink_forbidden", "canonical document is not a regular file")
     try:
-        if path.stat().st_size > MAX_AGENT_PCM_BYTES:
+        if path.stat().st_size > max_bytes:
             raise PCMValidationError("pcm_too_large", "canonical document exceeds the editing limit")
         document = load_pcm_document(path, workspace_dir=workspace)
         raw = path.read_bytes()
     except OSError as exc:
         raise PCMValidationError("pcm_unreadable", "canonical document cannot be read") from exc
-    if len(raw) > MAX_AGENT_PCM_BYTES or path.is_symlink():
+    if len(raw) > max_bytes or path.is_symlink():
         raise PCMValidationError("pcm_conflict", "canonical document changed during read")
     if hashlib.sha256(raw).hexdigest() != document.content_sha256:
         raise PCMValidationError("pcm_conflict", "canonical document changed during read")
     return {"content": raw.decode("utf-8"), "revision": document.content_sha256}
 
 
-def replace_agent_pcm(workspace_dir: str | Path, expected_revision: str, content: str) -> dict[str, str]:
+def replace_agent_pcm(workspace_dir: str | Path, expected_revision: str, content: str, *, max_bytes: int = MAX_AGENT_PCM_BYTES) -> dict[str, str]:
     if not isinstance(expected_revision, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_revision):
         raise PCMValidationError("pcm_revision_invalid", "document revision is invalid")
     if not isinstance(content, str):
         raise PCMValidationError("pcm_not_text", "document must be text")
     try:
-        if len(content.encode("utf-8")) > MAX_AGENT_PCM_BYTES:
+        if len(content.encode("utf-8")) > max_bytes:
             raise PCMValidationError("pcm_too_large", "document exceeds the editing limit")
     except UnicodeEncodeError as exc:
         raise PCMValidationError("pcm_invalid_utf8", "document must be valid UTF-8") from exc

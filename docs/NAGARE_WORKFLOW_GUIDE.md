@@ -556,12 +556,13 @@ error_handling:
     message: "Workflow step cannot be recovered: {failed_step_id}. Error: {error}"
 ```
 
-Nagare does not stop recovery because elapsed time or an attempt counter was
-exhausted. A recovered step is re-executed, and a correctable failure returns
-to the Debug Agent with all prior recovery records. A `recovered` result must
-include a diagnosis, evidence, and an applied fix; an exact repeated recovery
-record is rejected. The loop ends for an explicit stop, an infrastructure
-failure, an invalid/repeated recovery result, or explicit `unrecoverable` status.
+There is no default recovery attempt or elapsed-time ceiling. A workflow may
+explicitly set error_handling.recovery.max_attempts. A recovered step is
+re-executed, and a correctable failure returns to the Debug Agent with prior
+recovery records. A recovered result must include diagnosis, evidence and an
+applied fix. An identical description produces a warning, not automatic failure.
+An explicit stop, infrastructure failure, malformed result, unrecoverable
+status, or an owner-selected budget ends recovery.
 
 ### 10.2 Recovery Contract
 

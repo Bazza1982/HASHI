@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -17,7 +19,6 @@ from tools import ocr_worker
 
 
 OCR_MODEL_REVISION = "87416418657359cb625c412a48b6e1d6d41c29bd"
-OCR_MAX_TEXT_CHARS = 50_000
 OCR_DEFAULT_TIMEOUT_SECONDS = 45.0
 PADDLE_OCR_RELEASE = "paddleocr-3.7.0-paddlepaddle-3.3.1"
 PADDLE_DETECTION_MODEL = "PP-OCRv6_medium_det"
@@ -245,12 +246,79 @@ def _tessdata_args(model_root: Path | None) -> list[str]:
     return ["--tessdata-dir", str(model_root)] if model_root is not None else []
 
 
+class OCRCancelled(Exception):
+    """Internal signal raised after a cancelled OCR worker is reaped."""
+
+
+class OCRCleanupUnconfirmed(RuntimeError):
+    """A cancelled OCR worker could not confirm its children have exited."""
+
+
+_ocr_context = threading.local()
+
+
+def _run_ocr_process(command, *, capture_output, timeout, check, **kwargs):
+    cancellation_event = getattr(_ocr_context, "cancellation_event", None)
+    if cancellation_event is None:
+        return subprocess.run(command, capture_output=capture_output, timeout=timeout, check=check, **kwargs)
+    if cancellation_event.is_set():
+        raise OCRCancelled()
+    if not capture_output or check:
+        raise ValueError("unsupported OCR subprocess options")
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if cancellation_event.is_set():
+                raise OCRCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        # Reap the owned process and any children it started before returning cancellation.
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+        children = []
+        if psutil is not None:
+            try:
+                children = psutil.Process(process.pid).children(recursive=True)
+                for child in reversed(children):
+                    try:
+                        child.kill()
+                    except psutil.Error:
+                        pass
+            except psutil.Error:
+                pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.communicate()
+        if psutil is not None and children:
+            # Windows child termination is asynchronous. Reaping only the
+            # launcher can otherwise return while its child is still alive.
+            try:
+                _gone, alive = psutil.wait_procs(children, timeout=5)
+            except psutil.Error as exc:
+                raise OCRCleanupUnconfirmed("OCR child process cleanup could not be checked") from exc
+            if alive:
+                raise OCRCleanupUnconfirmed("OCR child process cleanup was not confirmed")
+        raise
+
+
 def _run_tesseract(
     command: Sequence[str],
     *,
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return _run_ocr_process(
         list(command),
         capture_output=True,
         text=True,
@@ -261,11 +329,11 @@ def _run_tesseract(
     )
 
 
-def _available_languages(binary: str, model_root: Path | None) -> set[str]:
+def _available_languages(binary: str, model_root: Path | None, timeout_seconds: float = OCR_DEFAULT_TIMEOUT_SECONDS) -> set[str]:
     try:
         completed = _run_tesseract(
             [binary, *_tessdata_args(model_root), "--list-langs"],
-            timeout_seconds=10.0,
+            timeout_seconds=timeout_seconds,
         )
     except (OSError, subprocess.TimeoutExpired):
         return set()
@@ -299,7 +367,7 @@ def _detect_script(
         "osd",
     ]
     try:
-        completed = _run_tesseract(command, timeout_seconds=min(10.0, timeout_seconds))
+        completed = _run_tesseract(command, timeout_seconds=timeout_seconds)
     except (OSError, subprocess.TimeoutExpired):
         return None
     output = f"{completed.stdout}\n{completed.stderr}"
@@ -346,7 +414,7 @@ def _paddle_runtime_ready() -> bool:
     python = _paddle_python_override()
     if python:
         try:
-            result = subprocess.run(
+            result = _run_ocr_process(
                 [
                     python, "-I", "-B", "-c",
                     "import importlib.util; "
@@ -448,7 +516,7 @@ def _extract_with_paddle(
         }
     )
     try:
-        completed = subprocess.run(
+        completed = _run_ocr_process(
             command,
             cwd=str(Path(__file__).resolve().parents[1]),
             capture_output=True,
@@ -528,8 +596,6 @@ def _extract_with_paddle(
 def _clean_ocr_text(value: str) -> str:
     lines = [line.rstrip() for line in str(value or "").replace("\x00", "").splitlines()]
     text = "\n".join(lines).strip()
-    if len(text) > OCR_MAX_TEXT_CHARS:
-        text = text[: OCR_MAX_TEXT_CHARS - 1].rstrip() + "…"
     return text
 
 
@@ -630,7 +696,7 @@ def extract_image_text(
     requested = normalize_ocr_languages(languages)
     binary = resolve_tesseract_binary()
     model_root = resolve_ocr_model_root()
-    available = _available_languages(binary, model_root) if binary is not None else set()
+    available = _available_languages(binary, model_root, timeout_seconds) if binary is not None else set()
     detected_script = (
         _detect_script(
             Path(image_path),
@@ -659,7 +725,7 @@ def extract_image_text(
         model_root=model_root,
         available=available,
         detected_script=detected_script,
-        timeout_seconds=min(timeout_seconds, 15.0),
+        timeout_seconds=timeout_seconds,
     )
     if tesseract_result.text:
         return tesseract_result
@@ -673,15 +739,23 @@ def extract_image_bytes(
     *,
     languages: Iterable[str] | None = None,
     timeout_seconds: float = OCR_DEFAULT_TIMEOUT_SECONDS,
+    cancellation_event: threading.Event | None = None,
 ) -> OCRResult:
-    with tempfile.TemporaryDirectory(prefix="hashi-ocr-") as temporary:
-        path = Path(temporary) / "normalized.jpg"
-        path.write_bytes(encoded)
-        return extract_image_text(
-            path,
-            languages=languages,
-            timeout_seconds=timeout_seconds,
-        )
+    previous = getattr(_ocr_context, "cancellation_event", None)
+    _ocr_context.cancellation_event = cancellation_event
+    try:
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise OCRCancelled()
+        with tempfile.TemporaryDirectory(prefix="hashi-ocr-") as temporary:
+            path = Path(temporary) / "normalized.jpg"
+            path.write_bytes(encoded)
+            return extract_image_text(
+                path,
+                languages=languages,
+                timeout_seconds=timeout_seconds,
+            )
+    finally:
+        _ocr_context.cancellation_event = previous
 
 
 def format_ocr_block(result: OCRResult) -> str:

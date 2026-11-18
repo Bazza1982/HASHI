@@ -11,6 +11,8 @@ import copy
 import hashlib
 import json
 import logging
+import os
+import stat
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -29,8 +31,35 @@ from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES, TOOLKIT_READ_ONL
 # Tool tiers — send only what's needed per turn to save context window.
 # Models can still *call* any allowed tool; tiers only control which
 # schemas are included in the API payload.
+def _runtime_policy_source_token(path):
+    """Bounded byte identity for a verified policy source; None means unknown."""
+    if path is None:
+        return None
+    try:
+        initial = path.lstat()
+    except FileNotFoundError:
+        return ("absent",)
+    except OSError:
+        return None
+    if not stat.S_ISREG(initial.st_mode) or path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+        return None
+    try:
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            payload = stream.read(1024 * 1024 + 1)
+            finished = os.fstat(stream.fileno())
+        current = path.lstat()
+    except OSError:
+        return None
+    def identity(value):
+        return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+    if len(payload) > 1024 * 1024 or not (identity(initial) == identity(opened) == identity(finished) == identity(current)):
+        return None
+    return ("sha256", hashlib.sha256(payload).hexdigest())
+
+
 TOOL_TIERS: dict[str, list[str]] = {
-    "core": ["ask_user", "get_user_answer", "tool_find", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "repo_discover", "documentation_read"],
+    "core": ["ask_user", "get_user_answer", "tool_find", "shell", "file_search", "log_query", "file_read", "file_write", "file_list", "repo_discover", "documentation_read", "tool_output_read", "tool_catalog"],
     "development": ["tool_find", "project_locate", "code_search", "git_inspect", "text_replace", "workspace_inspect", "verification_run", "apply_patch", "shell"],
     "daily": ["tool_find", "file_manage", "data_inspect", "file_read", "file_write", "file_list", *OFFICE_TOOL_NAMES],
     "office_basic": list(OFFICE_TOOL_NAMES),
@@ -98,6 +127,8 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "desktop_screenshot",
         "file_list",
         "file_read",
+        "tool_output_read",
+        "tool_catalog",
         *OFFICE_READ_ONLY_TOOLS,
         *TOOLKIT_READ_ONLY_TOOLS,
         "file_search",
@@ -201,16 +232,38 @@ _IMAGE_OUTPUT_TOOLS = frozenset(
 )
 
 
+def _projection_prefix(value: str, max_chars: int) -> str:
+    """Leave space for JSON escaping, the continuation and provider envelope."""
+    low, high = 0, min(len(value), max_chars)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(value[:middle], ensure_ascii=False)) <= 15_000:
+            low = middle
+        else:
+            high = middle - 1
+    return value[:low]
+
+
+def _result_continuation_suffix(reference: str | None) -> str:
+    if reference:
+        return (
+            f"\n[truncated by HASHI; use tool_output_read reference={reference} offset=0; "
+            "retained until the Registry exits]"
+        )
+    return "\n[truncated by HASHI; complete-result retention is unavailable for this Run]"
+
+
 def _bound_structured_text(
     content: list[dict[str, Any]] | None,
-) -> tuple[list[dict[str, Any]] | None, bool]:
+    retain,
+) -> tuple[list[dict[str, Any]] | None, bool, list[dict[str, Any]]]:
     if content is None:
-        return None, False
+        return None, False, []
     remaining = MAX_TEXT_TOOL_OUTPUT_CHARS
     bounded = []
     truncated = False
-    suffix = "\n[truncated by HASHI; narrow the request or read in parts]"
-    for raw in content:
+    continuations = []
+    for index, raw in enumerate(content):
         part = dict(raw)
         holder = part
         key = "text"
@@ -219,13 +272,16 @@ def _bound_structured_text(
             holder = part["resource"]
         value = holder.get(key)
         if isinstance(value, str) and len(value) > remaining:
-            holder[key] = value[:remaining] + suffix
+            reference = retain(value)
+            holder[key] = _projection_prefix(value, remaining) + _result_continuation_suffix(reference)
+            if reference:
+                continuations.append({"index": index, "reference": reference})
             remaining = 0
             truncated = True
         elif isinstance(value, str):
             remaining -= len(value)
         bounded.append(part)
-    return bounded, truncated
+    return bounded, truncated, continuations
 
 
 @dataclass
@@ -234,6 +290,7 @@ class StructuredToolOutput:
 
     output: str
     content: list[dict[str, Any]]
+    details: dict[str, Any] | None = None
 
 
 class ToolRegistry:
@@ -295,9 +352,13 @@ class ToolRegistry:
         self.set_search_scope(search_scope)
         from tools.file_search import Continuations
         self.search_continuations = Continuations()
+        from tools.tool_output_store import ToolOutputStore
+        self._tool_output_store = ToolOutputStore()
         self._hchat_attachment_selections: dict[str, dict[str, Any]] = {}
         self._live_runtime_policy_cache_key: tuple | None = None
         self._live_runtime_policy_cache = None
+        self._live_runtime_verified_snapshot = None
+        self._live_runtime_degraded = ContextVar(f"live_runtime_degraded_{id(self)}", default=None)
         self.canonical_audit = canonical_audit
         self._audit_context_override: ContextVar[dict | None] = ContextVar(
             f"tool_registry_audit_context_{id(self)}",
@@ -316,13 +377,26 @@ class ToolRegistry:
         explicitly_allowed = set(allowed_tools) - {"*"}
         if "*" in allowed_tools:
             self._allowed = set(ALL_TOOL_NAMES)
-            # media_read is injected explicitly into the HER-only gateway
-            # context. A wildcard on other backends must not broaden their
-            # capabilities merely because the schema exists globally.
-            if "media_read" not in explicitly_allowed:
+            # Structured media output is available through the HERV3 provider
+            # path. Other backends keep their explicit compatibility contract.
+            backend = str(self.audit_context.get("backend") or "").strip().casefold()
+            if "media_read" not in explicitly_allowed and backend not in {"her-v2", "her-v3"}:
                 self._allowed.discard("media_read")
-            # Local vision is opt-in and requires explicit provider config.
-            if "vision_inspect" not in explicitly_allowed:
+            # A configured local vision route already has the wildcard grant.
+            # Never infer permission to send media to a remote provider from a
+            # model/endpoint setting alone.
+            vision = self.tool_options.get("vision_inspect") or {}
+            configured_local_vision = False
+            if isinstance(vision, dict) and any(vision.get(key) for key in ("provider", "endpoint", "model")):
+                from tools.vision_inspect import _is_loopback_host
+
+                provider = str(vision.get("provider") or "llama_cpp").strip().casefold()
+                endpoint = urlparse(str(vision.get("endpoint") or "http://127.0.0.1:8081/v1"))
+                configured_local_vision = (provider in {"llama_cpp", "llama.cpp"}
+                                           and endpoint.scheme in {"http", "https"}
+                                           and bool(endpoint.hostname)
+                                           and _is_loopback_host(endpoint.hostname))
+            if "vision_inspect" not in explicitly_allowed and not configured_local_vision:
                 self._allowed.discard("vision_inspect")
             # The small-model toolkit is opt-in presentation tooling. A
             # wildcard must not silently broaden an instance's capabilities
@@ -337,10 +411,18 @@ class ToolRegistry:
             if unknown:
                 self.logger.warning(f"Unknown tool names in config (ignored): {unknown}")
 
+        for name in ("media_read", "vision_inspect"):
+            options = self.tool_options.get(name)
+            if isinstance(options, dict) and options.get("enabled") is False:
+                self._allowed.discard(name)
+
         # ``bash`` remains executable for persisted/provider in-flight calls,
         # while new tool catalogues expose only the platform-honest ``shell``.
         if "bash" in self._allowed or "shell" in self._allowed:
             self._allowed.update({"bash", "shell"})
+        if self._allowed:
+            # Read only results already produced by an allowed tool in this Run.
+            self._allowed.update({"tool_output_read", "tool_catalog"})
 
         self.logger.info(f"ToolRegistry initialized. Allowed: {sorted(self._allowed)}")
         self._obsidian = None  # lazy-initialized on first obsidian_* tool call
@@ -504,6 +586,16 @@ class ToolRegistry:
         finally:
             self._audit_context_override.reset(token)
 
+    def get_tool_definitions_with_audit_context(self, audit_context: dict) -> list[dict]:
+        """Build a catalogue against one frozen Run without mutating the Registry."""
+        scoped_context = dict(self._effective_audit_context())
+        scoped_context.update(dict(audit_context or {}))
+        token = self._audit_context_override.set(scoped_context)
+        try:
+            return self.get_tool_definitions()
+        finally:
+            self._audit_context_override.reset(token)
+
     def get_tool_definitions(self, tiers: list[str] | None = None) -> list[dict]:
         """Return OpenAI-format tool definitions filtered to allowed tools.
 
@@ -512,6 +604,11 @@ class ToolRegistry:
         (backwards-compatible default).
         """
         available = set(self._allowed)
+        from tools.tool_output_store import run_binding
+
+        binding = run_binding(self._effective_audit_context())
+        if binding is None:
+            available.discard("tool_output_read")
         request_allowlist = self._effective_audit_context().get(
             "request_tool_allowlist"
         )
@@ -519,26 +616,45 @@ class ToolRegistry:
             normalized_allowlist = {str(name) for name in request_allowlist}
             if "bash" in normalized_allowlist or "shell" in normalized_allowlist:
                 normalized_allowlist.update({"bash", "shell"})
+            if available.intersection(normalized_allowlist):
+                normalized_allowlist.update({"tool_output_read", "tool_catalog"})
             available.intersection_update(normalized_allowlist)
         if not background_job_start_authorized(self._effective_audit_context()):
             available.discard("background_job_start")
         if "shell" in available:
             available.discard("bash")
         unavailable_browser = False
+        uncertain_capabilities = set()
         for name in tuple(available):
             availability = self.tool_availability(name)
             if availability["available"]:
                 continue
+            if availability.get("reason") == "capability_status_unavailable":
+                uncertain_capabilities.add(name)
+                continue
             available.discard(name)
             unavailable_browser = unavailable_browser or name.startswith("browser_")
+        if not available.difference({"tool_output_read", "tool_catalog"}):
+            available.discard("tool_catalog")
+            if not self._tool_output_store.has_bound(binding):
+                available.discard("tool_output_read")
         if tiers is not None:
             tier_tools = set(resolve_tiers(tiers))
+            if available.intersection(tier_tools):
+                tier_tools.update({"tool_output_read", "tool_catalog"})
             available.intersection_update(tier_tools)
         definitions = [
             copy.deepcopy(TOOL_SCHEMA_MAP[name])
             for name in ALL_TOOL_NAMES
             if name in available
         ]
+        for definition in definitions:
+            function = definition.get("function") or {}
+            if function.get("name") in uncertain_capabilities:
+                function["description"] = (
+                    str(function.get("description") or "").rstrip()
+                    + " Worker status is temporarily unknown; the actual call rechecks availability."
+                )
         # Declare the same frozen-route limits used by attachment preflight/storage.
         # Definitions are deep copies; one HChat request must not change another Session.
         from orchestrator.session_store import frontend_attachment_limits
@@ -627,8 +743,12 @@ class ToolRegistry:
         if facade is not None:
             status = getattr(facade, "capability_status", None)
             if callable(status):
-                value = status()
-                return dict(value) if isinstance(value, dict) else {}
+                try:
+                    value = status()
+                    return dict(value) if isinstance(value, dict) else {}
+                except Exception as exc:
+                    self.logger.warning("Capability catalogue status unavailable (%s)", type(exc).__name__)
+                    return {}
         base_url = str(
             self._effective_audit_context().get("workbench_api_base_url") or ""
         ).strip().rstrip("/")
@@ -666,10 +786,13 @@ class ToolRegistry:
             if getattr(self, "_office_execution_supported", True) is False:
                 return {"available":False,"code":"capability_unavailable",
                         "reason":"office_managed_channel_unqualified",
-                        "next_step":"Office requires a qualified execution channel for this permission level."}
+                        "next_step":"Office requires a qualified execution channel for this permission level.",
+                        "capability_kind":"office", "action":"execute"}
             return self._office_runtime().availability()
         if tool_name == "file_search" and (self.tool_options.get("file_search") or {}).get("enabled") is False:
-            return {"available": False, "code": "capability_unavailable", "reason": "scoped_search_disabled"}
+            return {"available": False, "code": "capability_unavailable", "reason": "scoped_search_disabled",
+                    "capability_kind": "file_search", "action": "search",
+                    "next_step": "Enable scoped search in the selected tool configuration or use an available alternative."}
         requirement = _device_tool_requirement(tool_name)
         if requirement is None:
             return {"available": True, "source": "local_executor"}
@@ -700,7 +823,7 @@ class ToolRegistry:
             or ""
         ).strip().upper()
         observed_instance = str(status.get("instance_id") or "").strip().upper()
-        if not observed_instance:
+        if not observed_instance or not isinstance(status.get("capabilities"), list):
             reason = "capability_status_unavailable"
         elif expected_instance and observed_instance != expected_instance:
             reason = "cross_instance_capability_snapshot"
@@ -755,6 +878,7 @@ class ToolRegistry:
             "next_step": next_step,
             "capability_kind": kind,
             "action": action,
+            "retryable": reason == "capability_status_unavailable",
         }
 
     def _capability_unavailable_result(
@@ -767,8 +891,16 @@ class ToolRegistry:
         availability = self.tool_availability(tool_name)
         if availability["available"]:
             return None
+        availability = dict(availability)
+        availability.setdefault("capability_kind", tool_name)
+        availability.setdefault("action", "execute")
+        availability.setdefault("reason", "unavailable")
+        availability.setdefault("next_step", "Check the capability configuration or use an available alternative.")
         if reason:
             availability["reason"] = reason
+            # An invocation already reached the broker; a later catalogue
+            # failure alone cannot establish whether repeating it is safe.
+            availability["retryable"] = False
         if reason == "bound_browser_disconnected":
             availability["next_step"] = (
                 "Reconnect the selected browser and retry, or start a new "
@@ -788,7 +920,8 @@ class ToolRegistry:
             details={
                 **availability,
                 "control_disposition": "unavailable",
-                "retryable": False,
+                "error_code": str(availability.get("code") or "capability_unavailable"),
+                "retryable": bool(availability.get("retryable", False)),
             },
         )
 
@@ -797,6 +930,7 @@ class ToolRegistry:
     ) -> ToolResult | None:
         """Return an immediate policy denial without executing or auditing."""
 
+        self._live_runtime_degraded.set(None)
         if not self.is_allowed(tool_name):
             return ToolResult(
                 tool_call_id=tool_call_id,
@@ -832,6 +966,20 @@ class ToolRegistry:
             "bash" in normalized_allowlist or "shell" in normalized_allowlist
         ):
             normalized_allowlist.update({"bash", "shell"})
+        if normalized_allowlist is not None and tool_name == "tool_catalog":
+            if self._allowed.intersection(normalized_allowlist - {"tool_catalog", "tool_output_read"}):
+                normalized_allowlist.add("tool_catalog")
+        if normalized_allowlist is not None and tool_name not in normalized_allowlist:
+            from tools.tool_output_store import run_binding
+            authorized_result = (
+                tool_name == "tool_output_read"
+                and self._tool_output_store.source_allowed(
+                    run_binding(self._effective_audit_context()),
+                    arguments.get("reference"), normalized_allowlist,
+                )
+            )
+            if authorized_result:
+                normalized_allowlist.add(tool_name)
         if normalized_allowlist is not None and tool_name not in normalized_allowlist:
             return ToolResult(
                 tool_call_id=tool_call_id,
@@ -893,24 +1041,6 @@ class ToolRegistry:
         )
         if denial is not None:
             return denial
-        smart_admission = self.smart_tools.evaluate_admission(
-            tool_name=tool_name,
-            arguments=arguments,
-            access_roots=self.access_roots,
-        )
-        if smart_admission is not None:
-            admission_data = smart_admission.as_dict()
-            return ToolResult(
-                tool_call_id=tool_call_id,
-                output=f"Error: Smart Tool requires replanning: {smart_admission.message}",
-                is_error=True,
-                details={
-                    "control_disposition": "needs_replan",
-                    "smart_admission": admission_data,
-                    "suggested_tool": smart_admission.suggested_tool,
-                    "tool_executed": False,
-                },
-            )
         return None
 
     def _check_live_runtime_gate(
@@ -928,34 +1058,88 @@ class ToolRegistry:
             evaluate_live_runtime_request,
             load_live_runtime_policy,
             policy_cache_key,
+            policy_path_for,
+            _argument_path,
         )
 
         from orchestrator.runtime_contract import RuntimeContractError
         runtime_prefix = context.get("live_runtime_prefix")
         owner = getattr(context.get("_runtime"), "orchestrator", None)
+        cache_key = None
         try:
             core_runtime = getattr(owner, "core_runtime_fingerprint", None)
-            cache_key = policy_cache_key(global_config, runtime_prefix, core_runtime=core_runtime)
-            if cache_key != self._live_runtime_policy_cache_key:
-                self._live_runtime_policy_cache = load_live_runtime_policy(
+            source = policy_path_for(global_config)
+            before = _runtime_policy_source_token(source)
+            cache_key = (*policy_cache_key(global_config, runtime_prefix, core_runtime=core_runtime), before)
+            if before is None or cache_key != self._live_runtime_policy_cache_key:
+                loaded = load_live_runtime_policy(
                     global_config, runtime_prefix=runtime_prefix, core_runtime=core_runtime,
                     previous_policy=self._live_runtime_policy_cache,
                 )
-                self._live_runtime_policy_cache_key = cache_key
+                after = _runtime_policy_source_token(source)
+                rechecked = (*policy_cache_key(global_config, runtime_prefix, core_runtime=core_runtime), after)
+                if before is not None and (before != after or cache_key != rechecked):
+                    raise RuntimeContractError("Runtime protection source changed during refresh")
+                self._live_runtime_policy_cache = loaded
+                self._live_runtime_policy_cache_key = cache_key if before is not None else None
+                if (loaded is not None and loaded.protection_complete
+                        and not loaded.qualification_error and not loaded.configuration_error
+                        and before is not None and before == after and cache_key == rechecked):
+                    self._live_runtime_verified_snapshot = (cache_key, after, loaded)
+                else:
+                    self._live_runtime_verified_snapshot = None
         except (OSError, ValueError, RuntimeContractError):
-            return ToolResult(
-                tool_call_id=tool_call_id,
-                output="Error: installed runtime protection could not be verified; use controlled recovery.",
-                is_error=True,
-                details={"control_disposition": "denied", "reason": "live_runtime_protection",
-                         "operation": "runtime_qualification_unavailable", "retryable": False,
-                         "error_code": "runtime_integrity_failed", "tool_executed": False,
-                         "runtime_protection": self._runtime_protection_diagnostic(
-                             qualification="failed_before_policy_projection",
-                             error_code="runtime_integrity_failed",
-                             protection_complete=False,
-                         )},
+            prior = self._live_runtime_verified_snapshot
+            prior_key, prior_token, prior_policy = prior if prior is not None else (None, None, None)
+            typed_paths = {"file_read", "log_query", "file_write", "apply_patch"}
+            unchanged = (
+                cache_key is not None and prior_key is not None
+                and cache_key[:5] == prior_key[:5] and cache_key[6] == prior_key[6]
+                and cache_key[7] == prior_token
+                and _runtime_policy_source_token(prior_policy.policy_path) == prior_token
             )
+            if unchanged and tool_name in typed_paths:
+                candidate = _argument_path(arguments.get("path"), self.workspace_dir)
+                try:
+                    linked = candidate is not None and candidate.stat().st_nlink > 1
+                except FileNotFoundError:
+                    linked = False
+                except OSError:
+                    linked = True
+                if not linked:
+                    self._live_runtime_policy_cache = prior_policy
+                    self._live_runtime_degraded.set("previous_verified_snapshot")
+                else:
+                    unchanged = False
+            elif tool_name in {"tool_catalog", "ask_user", "get_user_answer", "web_search", "web_fetch"}:
+                self._live_runtime_degraded.set("failed_before_policy_projection")
+                return None
+            else:
+                unchanged = False
+            if not unchanged:
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    output="Error: runtime protection facts for this operation are unavailable; use controlled recovery.",
+                    is_error=True,
+                    details={"control_disposition": "unavailable", "reason": "live_runtime_protection",
+                             "operation": "runtime_qualification_unavailable", "retryable": False,
+                             "error_code": "runtime_integrity_failed", "tool_executed": False,
+                             "runtime_protection": self._runtime_protection_diagnostic(
+                                 qualification="failed_before_policy_projection",
+                                 error_code="runtime_integrity_failed",
+                                 protection_complete=False,
+                             )},
+                )
+        if tool_name == "file_list" and arguments.get("path"):
+            # Listing a protected root is a read, with the same relative cwd
+            # used by the actual listing operation.
+            candidate = Path(str(arguments["path"])).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(self._read_scope()[2]) / candidate
+            denial = self._check_live_runtime_gate(
+                "file_read", {"path": str(candidate)}, tool_call_id=tool_call_id)
+            if denial is not None:
+                return denial
         if tool_name in {"file_search", "repo_discover"}:
             for root in arguments.get("roots") or []:
                 denial = self._check_live_runtime_gate("file_read", {"path": root}, tool_call_id=tool_call_id)
@@ -1116,6 +1300,17 @@ class ToolRegistry:
             )
             self._record_tool_audit(tool_name, arguments, admission_denial, started)
             return admission_denial
+
+        search_advisory = None
+        if (tool_name in {"bash", "shell"} and self.smart_tools.enabled
+                and self.smart_tools.shell_text_search_guard):
+            try:
+                search_advisory = await asyncio.to_thread(
+                    self.smart_tools.search_advisory,
+                    tool_name=tool_name, arguments=arguments, access_roots=self.access_roots,
+                )
+            except Exception as exc:
+                self.logger.warning("Text search observation unavailable (%s)", type(exc).__name__)
 
         try:
             from orchestrator.execution_resources import tool_resource
@@ -1297,6 +1492,7 @@ class ToolRegistry:
         if isinstance(dispatched, StructuredToolOutput):
             output = dispatched.output
             content = dispatched.content
+            details = dict(dispatched.details or {})
         elif isinstance(dispatched, BuiltinExecutionResult):
             output = dispatched.output
             content = None
@@ -1304,11 +1500,54 @@ class ToolRegistry:
         else:
             output = dispatched
             content = None
-        content, content_truncated = _bound_structured_text(content)
+        if search_advisory is not None:
+            details = {**(details or {}), "smart_search_advisory": search_advisory.as_dict()}
+        from tools.tool_output_store import run_binding
+
+        binding = run_binding(self._effective_audit_context())
+
+        def retain(value: str) -> str | None:
+            try:
+                return self._tool_output_store.retain(binding, tool_name, value)
+            except Exception:
+                # Losing an optional projection must never reverse a completed effect.
+                self.logger.warning("Could not retain complete tool output for continuation")
+                return None
+
+        # Keep the original legacy screenshot result at the authoritative owner.
+        # The MCP projection and each subsequent page use the same Run-bound
+        # store and normal dispatch guard; already-structured content is untouched.
+        if content is None and isinstance(output, str):
+            from tools.legacy_screenshot import LEGACY_SCREENSHOT_TOOLS, legacy_screenshot_page
+            if tool_name in LEGACY_SCREENSHOT_TOOLS:
+                try:
+                    image_page = legacy_screenshot_page(tool_name, output)
+                    if image_page and image_page["next_offset"] is not None:
+                        reference = self._tool_output_store.retain(
+                            binding, tool_name, output, kind="legacy_screenshot",
+                            image_outcomes=image_page["outcomes"],
+                        )
+                        details = {
+                            **(details or {}), "complete_content": False,
+                            "image_continuation": reference,
+                            "image_next_offset": image_page["next_offset"],
+                            "image_total": image_page["total"],
+                            "image_page_count_budget": image_page["page_count_budget"],
+                            "image_page_byte_budget": image_page["page_byte_budget"],
+                            "output_retention": "registry_lifetime" if reference else "unavailable",
+                        }
+                except Exception:
+                    self.logger.warning("Could not retain screenshot continuation", exc_info=True)
+                    details = {**(details or {}), "complete_content": False,
+                               "output_retention": "unavailable"}
+
+        content, content_truncated, content_continuations = _bound_structured_text(content, retain)
+        if content_continuations:
+            details = {**(details or {}), "content_continuations": content_continuations}
         if resource_wait_ms >= 50:
             details = {**(details or {}), "resource_wait_ms":resource_wait_ms}
         if content_truncated:
-            details = {**(details or {}), "content_text_truncated": True}
+            details = {**(details or {}), "content_text_truncated": True, "complete_content": False}
         if (
             tool_name not in _IMAGE_OUTPUT_TOOLS
             and not (
@@ -1318,14 +1557,15 @@ class ToolRegistry:
             and len(output) > MAX_TEXT_TOOL_OUTPUT_CHARS
         ):
             original_chars = len(output)
-            output = (
-                output[:MAX_TEXT_TOOL_OUTPUT_CHARS]
-                + "\n[truncated by HASHI; narrow the query or read the source in parts]"
-            )
+            reference = retain(output)
+            output = _projection_prefix(output, MAX_TEXT_TOOL_OUTPUT_CHARS) + _result_continuation_suffix(reference)
             details = {
                 **(details or {}),
                 "output_truncated": True,
+                "complete_content": False,
                 "output_original_chars": original_chars,
+                "output_continuation": reference,
+                "output_retention": "registry_lifetime" if reference else "unavailable",
             }
         is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
         if tool_name in OFFICE_TOOL_NAMES:
@@ -1357,7 +1597,15 @@ class ToolRegistry:
         from tools.effect_receipts import observe_tool_effect
 
         policy = self._live_runtime_policy_cache
-        if policy is not None and policy.qualification_error:
+        degraded = self._live_runtime_degraded.get()
+        if degraded:
+            result.details = {**(result.details or {}), "runtime_protection":
+                self._runtime_protection_diagnostic(
+                    qualification=degraded,
+                    error_code="runtime_integrity_failed",
+                    protection_complete=False,
+                )}
+        elif policy is not None and policy.qualification_error:
             error_code = ("runtime_protection_context_unavailable"
                 if policy.qualification_error == "missing_core_receipt"
                 else "runtime_integrity_failed")
@@ -1378,6 +1626,8 @@ class ToolRegistry:
             # tool failure. The Phone action will remain unverified instead.
             receipt = None
         if receipt is not None:
+            if (result.details or {}).get("complete_content") is False:
+                receipt = {**receipt, "complete_content": False}
             result.details = {**(result.details or {}), "effect_receipt": receipt}
         if not self.smart_tools.enabled:
             return result
@@ -1407,6 +1657,37 @@ class ToolRegistry:
             details=details,
         )
 
+    def _enterprise_path_roots(self) -> tuple[Path, ...]:
+        """Return explicitly selected roots; project labels alone are not policy."""
+        roots: list[Path] = []
+        for context in (self.audit_context, self._effective_audit_context()):
+            raw = context.get("enterprise_workspace_root")
+            if raw:
+                root = Path(raw).expanduser().resolve()
+                if root not in roots:
+                    roots.append(root)
+        return tuple(roots)
+
+    def _enterprise_read_roots(self, roots: tuple[Path, ...]) -> tuple[Path, ...]:
+        """Intersect selected enterprise roots with the existing read capability."""
+        policies = self._enterprise_path_roots()
+        if not policies:
+            return roots
+        result: list[Path] = []
+        for raw in roots:
+            candidate = Path(raw).expanduser().resolve()
+            for policy in policies:
+                if candidate.is_relative_to(policy):
+                    continue
+                if policy.is_relative_to(candidate):
+                    candidate = policy
+                else:
+                    break
+            else:
+                if candidate not in result:
+                    result.append(candidate)
+        return tuple(result)
+
     def _check_enterprise_path_gate(
         self,
         tool_name: str,
@@ -1417,6 +1698,7 @@ class ToolRegistry:
         if tool_name not in {
             "file_search",
             "file_read",
+            "media_read",
             "file_write",
             "file_list",
             "log_query",
@@ -1428,7 +1710,16 @@ class ToolRegistry:
         context = self._effective_audit_context()
         org_id = str(context.get("org_id") or "").strip()
         project_id = str(context.get("project_id") or "").strip()
-        if not org_id or not project_id:
+        try:
+            roots = self._enterprise_path_roots()
+        except (TypeError, ValueError, OSError) as exc:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"Error: enterprise execution scope check failed: {exc}",
+                is_error=True,
+                details={"control_disposition": "denied"},
+            )
+        if not roots:
             return None
         if tool_name in {"file_search", "repo_discover"}:
             raw_roots = arguments.get("roots")
@@ -1447,20 +1738,18 @@ class ToolRegistry:
             return None
         if not raw_path:
             return None
-        root = (
-            context.get("enterprise_workspace_root")
-            or context.get("project_workspace_root")
-            or self.access_root
-        )
         try:
             from orchestrator.enterprise.execution import ExecutionScope
 
-            scope = ExecutionScope(
-                org_id=org_id,
-                project_id=project_id,
-                workspace_root=Path(root).expanduser().resolve(),
-            )
-            decision = scope.check_path(raw_path)
+            candidate = Path(raw_path).expanduser()
+            if not candidate.is_absolute():
+                cwd = (self.workspace_dir if tool_name in {"file_write", "apply_patch", "media_read", "vision_inspect"}
+                       else self._read_scope()[2])
+                candidate = Path(cwd) / candidate
+            candidate = candidate.resolve()
+            decisions = [ExecutionScope(org_id=org_id, project_id=project_id,
+                                        workspace_root=root).check_path(candidate)
+                         for root in roots]
         except Exception as exc:
             return ToolResult(
                 tool_call_id=tool_call_id,
@@ -1468,7 +1757,8 @@ class ToolRegistry:
                 is_error=True,
                 details={"control_disposition": "denied"},
             )
-        if decision.allowed:
+        decision = next((item for item in decisions if not item.allowed), None)
+        if decision is None:
             return None
         return ToolResult(
             tool_call_id=tool_call_id,
@@ -1483,19 +1773,13 @@ class ToolRegistry:
     def _check_enterprise_shell_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
         if tool_name not in {"bash", "shell", "background_job_start"}:
             return None
-        context = self._effective_audit_context()
-        org_id = str(context.get("org_id") or "").strip()
-        project_id = str(context.get("project_id") or "").strip()
-        if not org_id or not project_id:
-            return None
         bash_opts = self.tool_options.get("bash", {})
         shell_opts = self.tool_options.get("shell", {})
-        enabled = bool(
-            context.get("enterprise_shell_enabled")
-            or shell_opts.get("enterprise_enabled")
-            or bash_opts.get("enterprise_enabled")
-        )
-        if enabled:
+        values = [context.get("enterprise_shell_enabled")
+                  for context in (self.audit_context, self._effective_audit_context())]
+        values.extend(options.get("enterprise_enabled") for options in (shell_opts, bash_opts)
+                      if isinstance(options, dict))
+        if not any(value is False for value in values):
             return None
         return ToolResult(
             tool_call_id=tool_call_id,
@@ -1510,19 +1794,15 @@ class ToolRegistry:
         arguments: dict,
         *,
         tool_call_id: str,
+        vision_options: dict | None = None,
     ) -> ToolResult | None:
-        if tool_name not in {"http_request", "web_fetch", "web_search"}:
+        if tool_name not in {"http_request", "web_fetch", "web_search", "vision_inspect"}:
             return None
-        context = self._effective_audit_context()
-        org_id = str(context.get("org_id") or "").strip()
-        project_id = str(context.get("project_id") or "").strip()
-        if not org_id or not project_id:
-            return None
-        host = self._network_tool_host(tool_name, arguments)
+        host = self._network_tool_host(tool_name, arguments, vision_options=vision_options)
         if not host:
             return None
-        allowed_hosts = self._enterprise_network_allowed_hosts()
-        if _host_allowed(host, allowed_hosts):
+        policies = self._enterprise_network_policies()
+        if all(_host_allowed(host, allowed_hosts) for allowed_hosts in policies):
             return None
         return ToolResult(
             tool_call_id=tool_call_id,
@@ -1534,38 +1814,60 @@ class ToolRegistry:
             details={"control_disposition": "denied"},
         )
 
-    def _network_tool_host(self, tool_name: str, arguments: dict) -> str:
+    def _network_tool_host(
+        self, tool_name: str, arguments: dict, *, vision_options: dict | None = None
+    ) -> str:
         if tool_name == "web_search":
             return "api.search.brave.com"
+        if tool_name == "vision_inspect":
+            import httpx
+
+            options = self.tool_options.get("vision_inspect") if vision_options is None else vision_options
+            options = options if isinstance(options, dict) else {}
+            raw_url = str(options.get("endpoint") or "http://127.0.0.1:8081/v1").strip()
+            try:
+                return str(httpx.URL(raw_url).host or "").strip().casefold()
+            except httpx.InvalidURL:
+                return ""
         raw_url = str((arguments or {}).get("url") or "").strip()
         if not raw_url:
             return ""
-        parsed = urlparse(raw_url)
-        return str(parsed.hostname or "").strip().casefold()
+        try:
+            parsed = urlparse(raw_url)
+            return str(parsed.hostname or "").strip().casefold()
+        except ValueError:
+            return ""
 
-    def _enterprise_network_allowed_hosts(self) -> set[str]:
-        context = self._effective_audit_context()
-        raw_hosts = (
-            context.get("enterprise_network_allow_hosts")
-            or context.get("network_allow_hosts")
-            or self.tool_options.get("network", {}).get("allow_hosts")
-            or []
-        )
-        if isinstance(raw_hosts, str):
-            raw_hosts = [raw_hosts]
-        return {str(host or "").strip().casefold() for host in raw_hosts if str(host or "").strip()}
+    def _enterprise_network_policies(self) -> list[set[str]]:
+        policies: list[set[str]] = []
+        raw_values = []
+        for context in (self.audit_context, self._effective_audit_context()):
+            for key in ("enterprise_network_allow_hosts", "network_allow_hosts"):
+                if key in context and context[key] is not None:
+                    raw_values.append(context[key])
+                    break
+        network = self.tool_options.get("network")
+        if isinstance(network, dict) and "allow_hosts" in network and network["allow_hosts"] is not None:
+            raw_values.append(network["allow_hosts"])
+        for raw in raw_values:
+            if isinstance(raw, str):
+                raw = [raw]
+            if not isinstance(raw, (list, tuple, set, frozenset)):
+                raw = []
+            hosts = {str(host or "").strip().casefold() for host in raw if str(host or "").strip()}
+            if hosts not in policies:
+                policies.append(hosts)
+        return policies
 
     def _check_enterprise_browser_gate(self, tool_name: str, *, tool_call_id: str) -> ToolResult | None:
         if not tool_name.startswith("browser_"):
             return None
-        context = self._effective_audit_context()
-        org_id = str(context.get("org_id") or "").strip()
-        project_id = str(context.get("project_id") or "").strip()
-        if not org_id or not project_id:
-            return None
         browser_opts = self.tool_options.get("browser", {})
-        enabled = bool(context.get("enterprise_browser_enabled") or browser_opts.get("enterprise_enabled"))
-        if enabled:
+        values = [context.get("enterprise_browser_enabled")
+                  for context in (self.audit_context, self._effective_audit_context())]
+        if isinstance(browser_opts, dict):
+            values.append(browser_opts.get("enterprise_enabled"))
+        if not any(value is False for value in values):
             return None
         return ToolResult(
             tool_call_id=tool_call_id,
@@ -1811,7 +2113,9 @@ class ToolRegistry:
                 method="POST",
             )
             try:
-                with urllib_request.urlopen(request, timeout=80.0) as response:
+                from tools.browser_gateway_proxy import browser_proxy_timeout
+                timeout = browser_proxy_timeout(arguments, 80.0, 15)
+                with urllib_request.urlopen(request, timeout=timeout) as response:
                     raw = response.read(48 * 1024 * 1024 + 1)
                 if len(raw) > 48 * 1024 * 1024:
                     return "Error: browser capability result exceeds gateway limit"
@@ -1954,6 +2258,75 @@ class ToolRegistry:
         )
 
         opts = self.tool_options
+        if tool_name == "tool_catalog":
+            query = arguments.get("query", "")
+            offset = arguments.get("offset", 0)
+            if not isinstance(query, str) or type(offset) is not int or offset < 0:
+                return "Error: tool_catalog requires a text query and nonnegative integer offset"
+            words = query.casefold().split()
+            items = []
+            for definition in self.get_tool_definitions():
+                function = definition.get("function") or {}
+                name, description = str(function.get("name") or ""), str(function.get("description") or "")
+                if name == "tool_catalog":
+                    continue
+                haystack = (name + " " + description).casefold()
+                if all(word in haystack for word in words):
+                    items.append({"name": name, "description": description})
+            if offset > len(items):
+                return "Error: tool_catalog offset exceeds matching tools"
+            page = items[offset:offset + 4]
+            next_offset = offset + len(page) if offset + len(page) < len(items) else None
+            return json.dumps({"query": query, "offset": offset, "tools": page,
+                               "next_offset": next_offset, "complete": next_offset is None},
+                              ensure_ascii=False, separators=(",", ":"))
+        if tool_name == "tool_output_read":
+            from tools.tool_output_store import run_binding
+
+            try:
+                binding = run_binding(self._effective_audit_context())
+                reference = arguments.get("reference")
+                item = self._tool_output_store.lookup(binding, reference)
+                if item.kind == "legacy_screenshot":
+                    from tools.legacy_screenshot import continuation_note, legacy_screenshot_page
+
+                    page = legacy_screenshot_page(
+                        item.source_tool, item.text, offset=arguments.get("offset", 0),
+                        limit=arguments.get("limit"),
+                    )
+                    if page is None:
+                        raise ValueError("retained screenshot source is invalid")
+                    all_valid = self._tool_output_store.record_image_outcomes(
+                        binding, reference, page["outcomes"], page["total"],
+                    )
+                    content = page["content"]
+                    if page["next_offset"] is not None:
+                        content.append({"type": "text", "text": continuation_note(
+                            reference, page["next_offset"], page["total"])})
+                    if not content:
+                        content = [{"type": "text", "text": "No screenshot frames remain at this offset."}]
+                    details = {
+                        "complete_content": page["next_offset"] is None and all_valid,
+                        "image_continuation": reference,
+                        "image_next_offset": page["next_offset"],
+                        "image_total": page["total"],
+                        "image_page_count_budget": page["page_count_budget"],
+                        "image_page_byte_budget": page["page_byte_budget"],
+                        "output_retention": "registry_lifetime",
+                    }
+                    summary = json.dumps({
+                        "reference": reference, "offset": page["offset"],
+                        "next_offset": page["next_offset"], "total_frames": page["total"],
+                        "complete": details["complete_content"], "retention": "registry_lifetime",
+                    }, separators=(",", ":"))
+                    if page["is_error"]:
+                        summary = "Error: screenshot page has no decodable images. " + summary
+                    return StructuredToolOutput(output=summary, content=content, details=details)
+                return self._tool_output_store.page(
+                    binding, reference, arguments.get("offset", 0), arguments.get("limit"),
+                )
+            except ValueError as exc:
+                return f"Error: {exc}"
         if tool_name in OFFICE_TOOL_NAMES:
             from tools.office.integration import execute_office
             return await execute_office(self, tool_name, arguments, tool_call_id)
@@ -1965,10 +2338,8 @@ class ToolRegistry:
                                          protected_read_paths=protected_read_paths)
         read_roots, search_scope, read_cwd = self._read_scope()
         context = self._effective_audit_context()
-        roots = read_roots
-        if context.get("org_id") and context.get("project_id"):
-            root = context.get("enterprise_workspace_root") or context.get("project_workspace_root") or self.access_root
-            roots = (Path(root).resolve(),)
+        roots = (self._enterprise_read_roots(read_roots)
+                 if tool_name in {"repo_discover", "file_search"} else read_roots)
         if tool_name == "repo_discover":
             from tools.repo_discover import execute_repo_discover
             policy = self._live_runtime_policy_cache
@@ -1978,11 +2349,14 @@ class ToolRegistry:
                 protected_read_paths=getattr(policy, "protected_read_paths", ()))
         if tool_name == "file_search":
             from tools.file_search import execute_file_search
+            from tools.tool_output_store import run_binding
             policy = self._live_runtime_policy_cache
             return await execute_file_search(arguments, read_roots=roots,
                 cwd=read_cwd, search_scope=search_scope, audit_context=context,
                 continuations=self.search_continuations, options=self._search_options(),
-                protected_read_paths=getattr(policy, "protected_read_paths", ()))
+                protected_read_paths=getattr(policy, "protected_read_paths", ()),
+                retain_scope=lambda value: self._tool_output_store.retain(
+                    run_binding(context), "file_search", value))
 
         if tool_name in {"bash", "shell"}:
             bash_opts = dict(opts.get("bash", {}) or {})
@@ -2014,6 +2388,7 @@ class ToolRegistry:
                 workspace_dir=read_cwd,
                 continuations=self.search_continuations, search_scope=search_scope,
                 audit_context=self._effective_audit_context(), options=self._search_options(),
+                protected_read_paths=getattr(self._live_runtime_policy_cache, "protected_read_paths", ()),
             )
 
         if tool_name == "file_read":
@@ -2031,17 +2406,28 @@ class ToolRegistry:
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
                 media_roots=[*self.media_roots, *self.access_roots[1:]],
+                options=opts.get("media_read", {}),
             )
 
         if tool_name == "vision_inspect":
+            from tools.builtins import BuiltinExecutionResult
             from tools.vision_inspect import execute_vision_inspect
 
+            # Admission can be followed by async preparation. Recheck the
+            # selected endpoint at dispatch, then pass the same frozen options
+            # to the provider so a later config change cannot change the target.
+            vision_options = copy.deepcopy(opts.get("vision_inspect", {}))
+            denial = self._check_enterprise_network_gate(
+                tool_name, arguments, tool_call_id=tool_call_id, vision_options=vision_options
+            )
+            if denial is not None:
+                return BuiltinExecutionResult(denial.output, denial.details or {})
             return await execute_vision_inspect(
                 arguments,
                 access_root=self.access_root,
                 workspace_dir=self.workspace_dir,
                 media_roots=[*self.media_roots, *self.access_roots[1:]],
-                options=opts.get("vision_inspect", {}),
+                options=vision_options,
                 secrets=self.secrets,
             )
 
@@ -2061,6 +2447,7 @@ class ToolRegistry:
                 workspace_dir=read_cwd,
                 continuations=self.search_continuations, search_scope=search_scope,
                 audit_context=self._effective_audit_context(), options=self._search_options(),
+                protected_read_paths=getattr(self._live_runtime_policy_cache, "protected_read_paths", ()),
             )
 
         if tool_name == "apply_patch":
@@ -2072,10 +2459,16 @@ class ToolRegistry:
 
         if tool_name == "workspace_inspect":
             from tools.her_verification import execute_workspace_inspect
+            from tools.tool_output_store import run_binding
 
+            binding = run_binding(self._effective_audit_context())
+            retain_coverage = (
+                lambda value: self._tool_output_store.retain(binding, "workspace_inspect", value)
+            ) if binding is not None else None
             return await execute_workspace_inspect(
                 arguments,
                 workspace_dir=self.workspace_dir,
+                retain_coverage=retain_coverage,
             )
 
         if tool_name == "verification_run":
@@ -2172,7 +2565,12 @@ class ToolRegistry:
             )
 
         if tool_name == "http_request":
-            return await execute_http_request(arguments)
+            http_options = opts.get("http_request") or {}
+            if not isinstance(http_options, dict):
+                return "Error: HTTP tool configuration must be an object"
+            return await execute_http_request(
+                arguments, max_response_bytes=http_options.get("max_response_bytes", 16 * 1024 * 1024)
+            )
 
         if tool_name == "xai_imagine":
             return await execute_xai_imagine(

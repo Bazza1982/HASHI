@@ -74,6 +74,60 @@ def _route(provider: str, model: str):
     }
 
 
+@pytest.mark.asyncio
+async def test_canonical_audit_allows_one_effect_when_both_shadows_fail(tmp_path):
+    from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
+    from orchestrator.her_v2.models import Effort, Stage, StageRequest
+    from tools.registry import ToolResult
+
+    coordinator = HerBackendSessionCoordinator(tmp_path / "canonical")
+    turn = _accept(coordinator, "request-1", "Create one controlled effect")
+    adapter = HERv2Adapter.__new__(HERv2Adapter)
+    adapter._session_coordinator = coordinator
+    adapter._canonical_active_turns = {"hashi-request:request-1": turn}
+
+    class Broken:
+        def append(self, _record):
+            raise OSError("shadow unavailable")
+
+    class Counted:
+        audit_context = {}
+        calls = 0
+        def is_read_only(self, _name):
+            return False
+        async def execute(self, _name, _arguments, tool_call_id):
+            self.calls += 1
+            return ToolResult(tool_call_id, "one effect")
+
+    base = Counted()
+    log = DurableAuditLog(primary_writer=Broken(), fallback_writer=Broken(),
+                          canonical_observer=adapter._observe_canonical_audit)
+    request = StageRequest(turn_id=turn.turn_id, request_ref="hashi-request:request-1",
+                           invocation_id="audit-test", stage=Stage.EXECUTION, role="primary",
+                           attempt=1, goal="Create one controlled effect", classification=None,
+                           effort=Effort.HIGH, allow_tools=True)
+    result = await _EvidenceRecordingToolRegistry(base, request, audit_log=log).execute(
+        "file_write", {"path": "one.txt", "content": "safe"}, "one-call"
+    )
+    assert not result.is_error and base.calls == 1
+    with sqlite3.connect(coordinator.store.path) as connection:
+        events = connection.execute(
+            "SELECT kind FROM her_session_events WHERE kind IN ('runtime_tool_intent', 'runtime_tool_receipt')"
+        ).fetchall()
+    assert sorted(row[0] for row in events) == ["runtime_tool_intent", "runtime_tool_receipt"]
+
+    def missing_canonical(_record):
+        raise OSError("canonical unavailable")
+
+    failing = DurableAuditLog(primary_writer=Broken(), fallback_writer=Broken(),
+                              canonical_observer=missing_canonical)
+    with pytest.raises(OSError, match="canonical unavailable"):
+        await _EvidenceRecordingToolRegistry(base, request, audit_log=failing).execute(
+            "file_write", {"path": "two.txt", "content": "safe"}, "other-call"
+        )
+    assert base.calls == 1
+
+
 def _runtime_event(turn_id: str, event_id: str, event: str, **payload):
     return {
         "event_id": event_id,
@@ -1519,3 +1573,69 @@ def test_legacy_inline_costs_migrate_to_versioned_valuations(tmp_path):
 
     assert summary["total"]["cost_usd"] == 0.123
     assert summary["total"]["pricing_revisions"] == ["legacy-v1"]
+
+
+def test_provider_checkpoint_omits_live_camera_but_preserves_pending_and_completed_tools(tmp_path):
+    import base64
+    from adapters.openrouter_api import OpenRouterAdapter, _APIResult
+    from orchestrator.multimodal_contract import InputCapability
+
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "request-camera-checkpoint", "Compare images and inspect")
+    config = SimpleNamespace(name="camera-test", engine="openrouter-api", model="visual",
+                             workspace_dir=tmp_path, system_md=None, extra={})
+    adapter = OpenRouterAdapter(config, SimpleNamespace(
+        openrouter_url="https://provider.invalid/v1/chat/completions", base_media_dir=tmp_path,
+    ), api_key="test-only")
+    adapter.resolve_input_capability = lambda: InputCapability(
+        provider="test", model="visual", input_modalities=frozenset({"text", "image"}),
+        input_transports={"image": ("data_url",)}, limits={},
+    )
+    attachment = "data:image/jpeg;base64," + base64.b64encode(
+        bytes.fromhex("ffd8ffc00008080010001000ffd9") + b"ordinary-upload"
+    ).decode()
+    camera = "data:image/jpeg;base64," + base64.b64encode(
+        bytes.fromhex("ffd8ffc00008080010001000ffd9") + b"camera-only-canary"
+    ).decode()
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Compare."},
+        {"type": "image_url", "image_url": {"url": attachment}},
+    ]}]
+    adapter._append_transient_images(messages, [{
+        "data_url": camera, "captured_at": "2026-11-17T18:00:00+00:00", "frame_sequence": 1,
+    }])
+    tool_call = {"id": "call-1", "type": "function",
+                 "function": {"name": "file_read", "arguments": "{}"}}
+    messages.append({"role": "assistant", "content": "", "tool_calls": [tool_call]})
+    adapter.set_provider_context_observer(lambda checkpoint: coordinator.record_provider_context_checkpoint(
+        turn, {**checkpoint, "provider": "openrouter-api", "model": "visual", "stage": "execution"},
+    ))
+
+    adapter._observe_provider_context(
+        boundary="pending_tool_batch", messages=messages, request_id="request-camera-checkpoint",
+        result=_APIResult("", [tool_call], "tool_calls"), provider_request_id="provider-1",
+    )
+    pending = coordinator.store.provider_context_for_turn(turn.session_id, turn.turn_id)
+    assert pending["ephemeral_media_omitted"] is True
+    assert pending["messages"][-1]["tool_calls"] == [tool_call]
+    assert attachment in json.dumps(pending["messages"])
+    assert camera not in json.dumps(pending["messages"])
+    assert "unavailable" in json.dumps(pending["messages"]).lower()
+
+    messages.append({"role": "tool", "tool_call_id": "call-1", "content": "already completed"})
+    adapter._observe_provider_context(
+        boundary="completed_tool_batch", messages=messages, request_id="request-camera-checkpoint",
+        result=_APIResult("", None, "stop"), provider_request_id="provider-1",
+    )
+    completed = coordinator.store.provider_context_for_turn(turn.session_id, turn.turn_id)
+    assert completed["ephemeral_media_omitted"] is True
+    assert completed["messages"][-1]["content"] == "already completed"
+    assert attachment in json.dumps(completed["messages"])
+    assert camera not in json.dumps(completed["messages"])
+    with sqlite3.connect(coordinator.store.path) as connection:
+        saved = connection.execute(
+            "SELECT payload_json FROM her_provider_context_items WHERE session_id = ? AND turn_id = ?",
+            (turn.session_id, turn.turn_id),
+        ).fetchall()
+    assert camera not in json.dumps(saved)
+    assert attachment in json.dumps(saved)

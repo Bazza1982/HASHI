@@ -180,7 +180,7 @@ class _FakeMessage:
 class _FakeUpdate:
     def __init__(
         self,
-        user_id: int,
+        user_id: int | str,
         chat_id: int | str,
         store: _CaptureStore,
         text: str,
@@ -309,6 +309,16 @@ def _runtime_agent_name(runtime) -> str:
     return str(getattr(runtime, "name", None) or getattr(getattr(runtime, "config", None), "name", "unknown"))
 
 
+def _command_allowed_for_session(runtime, command_name, session_metadata) -> bool:
+    """Evaluate the existing command policy with the authenticated principal."""
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    check = getattr(runtime, "_is_command_allowed", None)
+    owner = str((session_metadata or {}).get("_hashi_owner_id") or "").strip()
+    with bind_frontend_command_principal(runtime, owner or None):
+        return not callable(check) or bool(check(command_name))
+
+
 async def try_execute_slash_command_text(
     runtime,
     text: str,
@@ -361,8 +371,7 @@ async def try_execute_slash_command_text(
     if not is_supported_slash_command(runtime, command_name):
         return None
 
-    is_allowed = getattr(runtime, "_is_command_allowed", None)
-    if callable(is_allowed) and not is_allowed(command_name):
+    if not _command_allowed_for_session(runtime, command_name, session_metadata):
         local_chat_id = chat_id or runtime.global_config.authorized_id
         actor_id = getattr(runtime.global_config, "authorized_id", None)
         session = SlashCommandAuditSession(
@@ -432,8 +441,7 @@ async def _execute_connector_mirror_command(
     )
     base_result = {"command": connector_id, "args": list(args or [])}
     try:
-        is_allowed = getattr(runtime, "_is_command_allowed", None)
-        if callable(is_allowed) and not is_allowed(connector_id):
+        if not _command_allowed_for_session(runtime, connector_id, session_metadata):
             session.block("command_disabled")
             return {
                 **base_result,
@@ -557,14 +565,13 @@ async def execute_local_command(
     from orchestrator.telegram_actor_scope import refresh_primary_user
 
     try:
-        # The shared command bridge has already bound and checked the actor
-        # before supplying its private capture. Re-resolving that identity
-        # through Telegram policy would mutate the FC permission projection.
-        # Native Worker entry still refreshes current policy and fails closed.
-        actor_id = (
+        # A private Backend/Worker binding already identifies the authenticated
+        # frontend principal. Only compatibility calls without that binding
+        # resolve the legacy Telegram actor.
+        trusted_owner = str((session_metadata or {}).get("_hashi_owner_id") or "").strip()
+        actor_id = trusted_owner or (
             getattr(runtime.global_config, "authorized_id", None)
-            if capture_store is not None
-            else refresh_primary_user(runtime)
+            if capture_store is not None else refresh_primary_user(runtime)
         )
     except (OSError, ValueError, TypeError, LookupError):
         return {"ok": False, "error_code": "command_menu_forbidden",
@@ -584,6 +591,15 @@ async def execute_local_command(
         if not command_name:
             session.fail("empty command")
             return {"ok": False, "error": "empty command"}
+        if trusted_owner and not _command_allowed_for_session(runtime, command_name, session_metadata):
+            session.block("command_disabled")
+            return {
+                "ok": False,
+                "command": command_name,
+                "args": args,
+                "error_code": "command_disabled",
+                "error": f"/{command_name} is disabled for this agent.",
+            }
         try:
             frontend_boundary = normalize_compatibility_command(
                 command_line,
@@ -658,7 +674,7 @@ async def execute_local_command(
                 "backend_api": "workbench", "session_api": "workbench",
             }.get(connector, connector)
         update = _FakeUpdate(
-            runtime.global_config.authorized_id,
+            actor_id,
             local_chat_id,
             store,
             command_line,
@@ -685,8 +701,11 @@ async def execute_local_command(
             if original_send_text is not None:
                 runtime._send_text = publishing_capture.capture_send
             try:
+                from orchestrator.frontend_command_context import bind_frontend_command_principal
+
                 with (
                     _capture_local_output(runtime, publishing_capture),
+                    bind_frontend_command_principal(runtime, trusted_owner or None),
                     ui_language.language_scope(
                         runtime,
                         update,

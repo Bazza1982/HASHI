@@ -13,10 +13,9 @@
   pre-empted; an explicit stop is observed after it returns.
 - Pause/resume uses signal files in a live process. Nagare does not reconstruct an interrupted
   worker or resume a run after process failure.
-- Debug recovery rejects an identical repeated diagnosis/fix record, but it cannot prove that two
-  differently worded actions are semantically distinct. A misbehaving Debug Agent can therefore
-  still prolong a run until an explicit stop; its contract requires an `unrecoverable` result when
-  no safe changed action remains.
+- Debug recovery reports repeated descriptions but cannot prove whether an action
+  actually changed state. An owner may set an explicit recovery budget; without
+  one, a misbehaving Debug Agent can prolong a run until an explicit stop.
 - Free-form `success_criteria` and the top-level `output` block are host-facing metadata. Blocking
   requirements must be expressed as required step artifacts and automatic quality gates.
 - `nagare-viz` preserves raw YAML on no-op export, but structured edits do not yet guarantee

@@ -1309,26 +1309,39 @@ async def dispatch_claimed_telegram_event(
     from orchestrator.frontend_connector_registry import require_connector_event
     from orchestrator.frontend_dispatch import project_claimed_frontend_event
 
-    standard_event = await run_database_work(project_claimed_frontend_event,
-        store,
-        claim,
-        session_id=str(claim["session_id"]),
-        owner_id=str(frontend_owner_id),
-    )
-    require_connector_event("telegram", standard_event)
-    canonical_text, canonical_parse_mode = _render_standard_event_for_telegram(
-        standard_event
-    )
     from orchestrator.frontend_telegram_replay import (
         finish_without_telegram, telegram_replay_decision,
     )
-    # Lifetime belongs to the original output, including its very first claim.
-    # Recovery hints affect presentation/eligibility, never whether expiry runs.
-    decision = await run_database_work(telegram_replay_decision,
-        store, claim, standard_event, owner_id=frontend_owner_id,
-        agent_id=runtime.name, chat_id=chat_id, recovery=recovery,
-        connected_at=getattr(runtime, "_telegram_delivery_connected_at", None),
-    )
+    # This whole preflight is before transport. Its transient storage errors
+    # can safely release the claim to retry the same event.
+    try:
+        standard_event = await run_database_work(project_claimed_frontend_event,
+            store,
+            claim,
+            session_id=str(claim["session_id"]),
+            owner_id=str(frontend_owner_id),
+        )
+        require_connector_event("telegram", standard_event)
+        canonical_text, canonical_parse_mode = _render_standard_event_for_telegram(
+            standard_event
+        )
+        # Lifetime belongs to the original output, including its first claim.
+        decision = await run_database_work(telegram_replay_decision,
+            store, claim, standard_event, owner_id=frontend_owner_id,
+            agent_id=runtime.name, chat_id=chat_id, recovery=recovery,
+            connected_at=getattr(runtime, "_telegram_delivery_connected_at", None),
+        )
+    except Exception as exc:
+        from orchestrator.frontend_database import DatabaseWorkBusy, is_sqlite_busy
+        if isinstance(exc, DatabaseWorkBusy) or is_sqlite_busy(exc):
+            # No transport was attempted: a transient storage failure is a
+            # safe retry of this same claimed event, not a suppressed notice.
+            await run_database_work(
+                store.complete_delivery_outbox, outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]), status="retry",
+                retry_safe=True, error_code="telegram_preflight_database_busy",
+            )
+        raise
     if decision.state != "send":
         await run_database_work(finish_without_telegram, store, claim, owner_id=frontend_owner_id, decision=decision)
         return 0.0, 0

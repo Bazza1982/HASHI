@@ -192,11 +192,13 @@ class UniversalOrchestrator:
         self,
         *,
         bootstrap_local_api_credential: bool = False,
+        defer_personal_data_binding: bool = False,
     ):
         from orchestrator.config import ConfigManager
         cfg_mgr = ConfigManager(self.paths.config_path, self.paths.secrets_path, bridge_home=self.paths.bridge_home, code_root=self.paths.code_root)
         global_cfg, agent_configs, secrets = cfg_mgr.load(
             bootstrap_local_api_credential=bootstrap_local_api_credential,
+            defer_personal_data_binding=defer_personal_data_binding,
         )
         self.global_cfg = global_cfg
         self.secrets = secrets

@@ -29,6 +29,10 @@
       "label": "Gemini 3.8 Flash-Lite TTS (OpenRouter)",
       "model": "google/gemini-3.8-flash-lite-tts",
       "audio_format": "pcm",
+      "pcm_sample_rate_hz": 24000,
+      "pcm_sample_width_bytes": 2,
+      "pcm_channels": 1,
+      "pcm_encoding": "s16le",
       "voices": [
         "Achernar",
         "Achird",

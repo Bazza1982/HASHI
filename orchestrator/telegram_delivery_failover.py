@@ -600,6 +600,9 @@ async def send_runtime_notice(
         in blocked_bots
     }
     retry_delay = 5
+    saw_retryable = False
+    saw_permanent = False
+    attempt_submitted = False
     try:
         async with asyncio.timeout(15):
             for name in names:
@@ -651,6 +654,7 @@ async def send_runtime_notice(
                     else None
                 )
                 transport = "ingress" if active_bot is not None else "fresh_bot"
+                attempt_submitted = False
                 try:
                     async with asyncio.timeout(5):
                         payload = {
@@ -660,9 +664,11 @@ async def send_runtime_notice(
                             "parse_mode": "HTML",
                         }
                         if active_bot is not None:
+                            attempt_submitted = True
                             message = await active_bot.send_message(**payload)
                         else:
                             async with Bot(token) as bot:
+                                attempt_submitted = True
                                 message = await bot.send_message(**payload)
                     bridge_logger.info(
                         "Runtime notice attempt: operation=%s kind=%s source=%s "
@@ -696,6 +702,18 @@ async def send_runtime_notice(
                         failure.error_type,
                         failure.retry_after_s,
                     )
+                    if attempt_submitted and not (
+                        failure.permanent
+                        or failure.code == "retry_after"
+                        or failure.request_not_submitted
+                    ):
+                        # Telegram may have accepted the request before the
+                        # response was lost. Another bot must not repeat it.
+                        return {"sent": False, "delivery_state": "unknown"}
+                    if failure.permanent:
+                        saw_permanent = True
+                    else:
+                        saw_retryable = True
     except TimeoutError:
         bridge_logger.warning(
             "Runtime notice round: operation=%s kind=%s source=%s "
@@ -705,6 +723,9 @@ async def send_runtime_notice(
             source_agent,
             retry_delay,
         )
+        if attempt_submitted:
+            return {"sent": False, "delivery_state": "unknown"}
+        saw_retryable = True
     bridge_logger.warning(
         "Runtime notice round: operation=%s kind=%s source=%s "
         "result=unsent retry_after_s=%s",
@@ -713,7 +734,9 @@ async def send_runtime_notice(
         source_agent,
         retry_delay,
     )
-    return {"sent": False, "retry_after": retry_delay}
+    if saw_permanent and not saw_retryable:
+        return {"sent": False, "delivery_state": "failed"}
+    return {"sent": False, "retry_safe": True, "retry_after": retry_delay}
 
 
 async def _prepare_warning(

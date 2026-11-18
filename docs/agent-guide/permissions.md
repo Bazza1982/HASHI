@@ -9,6 +9,20 @@ PAO owns tool capability, permission admission and recovery in Functions. PCM pr
 ## Distinctions
 Permission levels and model privacy levels are different axes. Identity assurance, relay origin and role names do not grant side effects. An answer to a Run question supplies information, not approval. Unknown commits, private denials and ordinary failures must remain distinct.
 
+Organization and project labels alone do not narrow a Tool grant. An explicitly
+selected enterprise workspace root, shell/browser disable or network host list
+remains effective alongside the normal resource scope and governance policy.
+Request-local metadata can narrow those choices but cannot widen them.
+
+A denied or unavailable managed operation is reported as an error with its
+control disposition. An unsupported channel or a disabled capability does not
+claim execution success. An unknown prior effect remains a separate recovery
+state and must not be treated as proof that retrying is safe.
+When a device capability status probe is temporarily unavailable, its existing
+granted schema remains discoverable with an unknown-status notice. Execution
+still rechecks the owning Worker; a failed pre-dispatch probe is retryable, while
+an unconfirmed result after broker dispatch is not automatically retried.
+
 L0 retains ordinary execution; personal L1 approval does not authenticate a governed L2 decision. The opt-in [governed browser approval path](../permissions/GOVERNED_HUMAN_APPROVAL.md) uses a normal frontend URL button, an independently verified human login, exact issued decisions, and the original Run fence. Its invitation grants nothing. Hard L2 Workzone guarantees apply only to qualified HERV3 execution paths; an independent backend or external Compute executor needs separate qualification. Ordinary approval cannot expand the Workzone.
 
 ## Authoritative documents

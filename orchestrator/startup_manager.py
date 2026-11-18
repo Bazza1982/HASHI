@@ -272,6 +272,17 @@ class StartupManager:
             remote_lifecycle = importlib.import_module(
                 "orchestrator.remote_lifecycle"
             )
+            secrets_path = getattr(global_config, "secrets_path", None)
+            if (
+                root and secrets_path
+                and not remote_lifecycle.read_disabled_state(root)
+                and getattr(global_config, "deployment_profile", "personal") == "personal"
+            ):
+                from orchestrator.workbench_auth import ensure_remote_runtime_access
+
+                # The optional Remote owns this slow OS lookup and ACL repair;
+                # local Functions and the Backend API are already available.
+                await asyncio.to_thread(ensure_remote_runtime_access, secrets_path, root)
             code_root = getattr(global_config, "project_root", None)
             source_options = (
                 {"code_root": code_root}

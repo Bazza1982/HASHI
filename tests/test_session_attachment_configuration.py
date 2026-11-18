@@ -148,10 +148,8 @@ asyncio.run(exercise())
 
 @pytest.mark.parametrize("overrides", [
     {"HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE": "0"},
-    {"HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE": "1025"},
     {"HASHI_SESSION_MAX_ATTACHMENT_BYTES": "-1"},
     {"HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES": "unlimited"},
-    {"HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES": "1073741825"},
 ])
 def test_invalid_attachment_configuration_fails_instead_of_ignoring_override(overrides):
     from orchestrator.session_attachment_limits import load_session_attachment_limits
@@ -239,3 +237,62 @@ asyncio.run(exercise())
     )
     assert result.returncode == 0, result.stdout + result.stderr
 # HASHI-Fingerprint: hfp_79b8319d2b9043b981c3335f0560d9d1
+
+
+
+@pytest.mark.parametrize("limit,allowed", [(512, True), (128, False)])
+def test_native_audio_uses_selected_attachment_budget_in_fresh_process(tmp_path, limit, allowed):
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "BRIDGE_HOME": str(tmp_path / "instance"),
+        "HASHI_SESSION_MAX_ATTACHMENT_BYTES": str(limit),
+    }
+    code = r"""
+import hashlib, sys, wave
+from pathlib import Path
+from orchestrator.audio_assets import AudioAssetError, AudioAssetStore, MAX_AUDIO_ASSET_BYTES
+source = Path(sys.argv[1]) / "voice.wav"
+with wave.open(str(source), "wb") as audio:
+    audio.setnchannels(1)
+    audio.setsampwidth(2)
+    audio.setframerate(16000)
+    audio.writeframes(bytes(320))
+payload = source.read_bytes()
+assert MAX_AUDIO_ASSET_BYTES == int(sys.argv[2])
+store = AudioAssetStore(Path(sys.argv[1]) / "assets")
+try:
+    with source.open("rb") as handle:
+        result = store.create_stream(
+            handle, owner_id="user:7", session_id="ses-1", direction="input",
+            mime_type="audio/wav", audio_format="wav", expected_size=len(payload),
+            expected_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+except AudioAssetError as exc:
+    assert sys.argv[3] == "no" and "configured limit" in str(exc)
+else:
+    assert sys.argv[3] == "yes" and result["size_bytes"] == len(payload)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), str(limit), "yes" if allowed else "no"],
+        cwd=root, env=env, text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+def test_selected_attachment_policy_accepts_larger_supported_limits(tmp_path):
+    from orchestrator.session_attachment_limits import load_session_attachment_limits
+
+    selected = load_session_attachment_limits({
+        "HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE": "1025",
+        "HASHI_SESSION_MAX_ATTACHMENT_BYTES": str(2 * 1024**3),
+        "HASHI_SESSION_MAX_TOTAL_ATTACHMENT_BYTES": str(4 * 1024**3),
+    }, config_path=tmp_path / "absent.json")
+    assert (selected.count, selected.attachment_bytes, selected.total_bytes) == (
+        1025, 2 * 1024**3, 4 * 1024**3,
+    )
+    with pytest.raises(ValueError, match="HASHI_SESSION_"):
+        load_session_attachment_limits({
+            "HASHI_SESSION_MAX_ATTACHMENT_BYTES": str(2**63),
+        }, config_path=tmp_path / "absent.json")

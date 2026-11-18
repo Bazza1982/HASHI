@@ -366,8 +366,11 @@ Current boundaries:
 - Gateway `session_id` caching is disabled for external tool turns; clients must
   send the complete structured conversation.
 - Empty `tools: []` does not change the legacy text-only route.
-- A request may declare at most 128 tools, with a combined serialized tool
-  payload of at most 1 MiB.
+- Tool count and serialized schema bytes have no separate fixed default. The
+  instance can select `max_external_tools` and `max_external_tool_bytes` in the
+  Gateway configuration; errors identify these as local policy. The complete
+  request remains subject to the Gateway transport's request-body budget and
+  the chosen provider may impose its own limits.
 - Function names must match `[A-Za-z0-9_-]{1,64}` and names must be unique.
 - External tool passthrough currently supports `n: 1` only.
 
@@ -697,10 +700,21 @@ tool locally and include the assistant `tool_calls` plus matching
 
 ### Same-model execution capacity (HASHI3 nightly candidate)
 
-`api_gateway_config.json` supports `max_parallel_per_model` (default 2, range
-1..8), published through its existing revision-aware writer. Each engine/model
-pair leases independent adapter/process slots; each slot is exclusively held
-through streaming completion. Slot workspaces are isolated. API Session cache
+Gateway derives its instance and engine capacities from the same
+`global.execution_limits` values used by Function execution. A missing or null
+`api_gateway_config.json` `max_parallel_per_model` adds no separate lower
+default; a stored positive value remains a selected model limit and can be reset
+to null using the existing revision-aware writer. Older stored values are kept
+because their original intent cannot reliably be inferred. The Gateway and
+Function processes currently account for their active slots separately; sharing
+the policy does not yet provide a combined cross-process occupancy limit. Within
+Gateway, instance, engine and model slots are reserved together; a waiting
+request does not hold partial capacity. Health reports the actually loaded
+policy and aggregate local wait reasons. An optional
+`global.execution_limits.queue_wait_seconds` sets a pre-dispatch wait deadline;
+without it there is no default deadline. Each engine/model pair leases independent
+adapter/process slots; each slot is exclusively held through streaming completion.
+Slot workspaces are isolated. API Session cache
 leases still cover history read/append/write, so one cached Session is FIFO.
 Native CLI thread context is cleared between API calls; assembled messages own
 API history and cannot inherit a previous pooled client's thread.

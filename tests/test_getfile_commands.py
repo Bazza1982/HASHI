@@ -1,7 +1,6 @@
 """Production command dispatcher, real runtime and persistence; no Engine work."""
 import hashlib
 import json
-from types import SimpleNamespace as NS
 import pytest
 from orchestrator.config import GlobalConfig, FlexibleAgentConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -11,8 +10,10 @@ from orchestrator import runtime_session
 
 @pytest.fixture
 def runtime(tmp_path):
-    home=tmp_path/"home";home.mkdir()
-    work=home/"workspaces"/"alice";work.mkdir(parents=True)
+    home=tmp_path/"home"
+    home.mkdir()
+    work=home/"workspaces"/"alice"
+    work.mkdir(parents=True)
     (work/"agent.md").write_text("Synthetic command acceptance")
     config=FlexibleAgentConfig(name="alice",workspace_dir=work,system_md=work/"agent.md",
         telegram_token_key="",allowed_backends=[{"engine":"codex-cli","model":"gpt-5.6-sol"}],
@@ -26,7 +27,8 @@ def runtime(tmp_path):
 
 @pytest.mark.asyncio
 async def test_open_menu_click_and_explicit_path_execute_no_llm_and_preserve_bytes(runtime):
-    path=runtime.workspace_dir/"named report.txt";path.write_bytes(b"source\x00bytes")
+    path=runtime.workspace_dir/"named report.txt"
+    path.write_bytes(b"source\x00bytes")
     runtime.canonical_audit.record("tool_call",{"tool_name":"file_write","is_error":False,
         "arguments":{"path":str(path)}},provenance={"workspace_dir":str(runtime.workspace_dir),
         "access_roots":[str(runtime.workspace_dir)],"owner_id":"user:7"})
@@ -43,7 +45,7 @@ async def test_open_menu_click_and_explicit_path_execute_no_llm_and_preserve_byt
     assert "getfile.coverage" not in opened["messages"][-1]["text"]
     menu=opened["messages"][-1]["command_ui"]
     assert menu["rows"][0][0]["disabled"] is False
-    assert menu["rows"][-1][0]["text_input"]["max_length"]==500
+    assert menu["rows"][-1][0]["text_input"]["max_length"]==4098
     from orchestrator.chat_transcript_projection import build_chat_projection
     projection=build_chat_projection(runtime.session_store,
         session=runtime.session_store.get_session(session["session_id"],owner_id="user:7"),
@@ -68,7 +70,13 @@ async def test_open_menu_click_and_explicit_path_execute_no_llm_and_preserve_byt
 async def test_encoded_path_action_uses_existing_wire_without_llm(runtime):
     import base64
     from orchestrator.command_interaction_transport import try_dispatch_command_interaction_transport, TRANSPORT_PREFIX
-    path=runtime.workspace_dir/"wire path.txt";path.write_bytes(b"actual-wire-input")
+    directory = runtime.workspace_dir
+    for index in range(6):
+        directory = directory / (str(index) + "x" * 80)
+    directory.mkdir(parents=True)
+    path=directory/"wire path.txt"
+    path.write_bytes(b"actual-wire-input")
+    assert len(str(path)) > 500
     def wire(op,request,**extra):
         value={"version":1,"op":op,"client_id":"clientabcdefghijkl","request_id":request,
                "connection_binding":"connectionabcdefghijkl","ui_locale":"en",**extra}
@@ -82,8 +90,11 @@ async def test_encoded_path_action_uses_existing_wire_without_llm(runtime):
     result=await try_dispatch_command_interaction_transport(runtime,action,source_channel="workbench_api")
     assert result["ok"],result
     assert result["result"]["getfile"]["sha256"]==hashlib.sha256(path.read_bytes()).hexdigest()
+    reopened=await try_dispatch_command_interaction_transport(runtime,
+        wire("open","request-wire-open-02",command="/getfile"),source_channel="workbench_api")
+    invalid_menu=reopened["messages"][-1]["command_ui"]
     invalid=await try_dispatch_command_interaction_transport(runtime,
-        wire("act","request-wire-long-01",menu_id=menu["menu_id"],revision=menu["revision"],
-             button_id=menu["rows"][-1][0]["button_id"],input_text="x"*501),source_channel="workbench_api")
+        wire("act","request-wire-long-01",menu_id=invalid_menu["menu_id"],revision=invalid_menu["revision"],
+             button_id=invalid_menu["rows"][-1][0]["button_id"],input_text="x"*4099),source_channel="workbench_api")
     assert invalid["error_code"]=="command_menu_input_invalid"
     assert runtime.queue.empty()

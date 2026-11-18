@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from orchestrator.command_interactions import ID_PATTERN, safe_url
+from orchestrator.command_interactions import ID_PATTERN, MAX_INPUT_TEXT, safe_url
 from orchestrator.pcm_forget_session import transcript_blocked
 
 if TYPE_CHECKING:
@@ -207,7 +207,9 @@ def _canonical_projection_row(
             else "message"
         )
     message_ref = f"run:{run_id}:{role}" if run_id else f"message:{message_id}"
-    if role == "assistant" and kind == "deliverable":
+    if role == "assistant" and (kind == "deliverable" or not bool(message.get("history_eligible", True))):
+        # A Run can contain several presentation-only notices before its final.
+        # Each notice must retain its own identity in transcript snapshots.
         message_ref = f"message:{message_id}"
     if command_ui is not None:
         message_ref = "command-ui:" + command_ui["menu_id"]
@@ -232,6 +234,8 @@ def _canonical_projection_row(
         "command_ui": command_ui,
         "canonical": True,
     }
+    if isinstance(context.get("message_age"), dict):
+        row["message_age"] = dict(context["message_age"])
     message_content = message.get("content")
     typed_reply_ids = {
         str(part.get("event_id") or "")
@@ -317,9 +321,13 @@ def _project_command_ui(value: object) -> dict | None:
                 button["url"] = url
             field = raw_button.get("text_input")
             if (button_id is not None and not disabled and isinstance(field, dict)
-                    and isinstance(field.get("label"), str)):
+                    and isinstance(field.get("label"), str)
+                    and isinstance(field.get("value", ""), str)
+                    and len(field.get("value", "")) <= MAX_INPUT_TEXT
+                    and type(field.get("max_length", 500)) is int
+                    and 1 <= field.get("max_length", 500) <= MAX_INPUT_TEXT):
                 button["text_input"] = {"label": field["label"][:100],
-                    "value": str(field.get("value") or "")[:500], "max_length": 500}
+                    "value": field.get("value", ""), "max_length": field.get("max_length", 500)}
             reason = raw_button.get("reason")
             if isinstance(reason, str) and reason:
                 button["reason"] = reason[:100]

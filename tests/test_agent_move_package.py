@@ -6,11 +6,13 @@ import os
 import sqlite3
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.agent_move.package import (
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+    INACTIVE_MOVE_CAPABILITY,
     CONVERSATION_CONTINUITY_ARCHIVE_PATH,
     CONVERSATION_CONTINUITY_CAPABILITY,
     RETAINED_IDENTITY_CAPABILITY,
@@ -210,7 +212,7 @@ def test_clone_package_carries_capabilities_and_safe_secrets_but_never_telegram(
     }
 
 
-def test_owned_pending_delivery_requires_full_move_and_clone_never_inherits_it(
+def test_owned_pending_delivery_move_retains_source_or_copies_and_clone_never_inherits_it(
     tmp_path,
 ):
     root = _source_root(tmp_path)
@@ -246,15 +248,19 @@ def test_owned_pending_delivery_requires_full_move_and_clone_never_inherits_it(
         },
     )
 
-    with pytest.raises(AgentMoveError, match="full workspace transfer mode"):
-        create_agent_move_package(
-            root,
-            "zelda",
-            tmp_path / "identity-only.hashi-agent",
-            source_instance="HASHI1",
-            operation="move",
-            transfer_mode="identity_memory",
-        )
+    identity = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "identity-only.hashi-agent",
+        source_instance="HASHI1",
+        operation="move",
+        transfer_mode="identity_memory",
+    )
+    assert identity.access_requirements["source_retained_pending_count"] == 1
+    assert identity.access_requirements["telegram_delivery_state"] is None
+    assert "workspace/undelivered/req-1.md" not in identity.names
+    assert any("source" in warning and "undelivered" in warning
+               for warning in identity.manifest["warnings"])
 
     moved = create_agent_move_package(
         root,
@@ -379,11 +385,50 @@ def test_schema5_preview_export_does_not_create_or_migrate_source_session_store(
     ] == 0
 
 
-def test_schema5_history_rejects_source_without_configured_authorized_owner(tmp_path):
+@pytest.mark.parametrize("include_history", [False, True])
+def test_schema5_history_uses_workbench_owner_without_telegram(tmp_path, include_history):
     root = _source_root(tmp_path)
     agents = json.loads((root / "agents.json").read_text(encoding="utf-8"))
     agents["global"].pop("authorized_id")
     _write_json(root / "agents.json", agents)
+    if include_history:
+        store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
+        session = store.ensure_default_session(owner_id="user:0", agent_id="zelda")
+        accepted = store.accept_run(
+            session_id=session["session_id"], owner_id="user:0", agent_id="zelda",
+            request_id="workbench-owner", text="owned history", source="workbench",
+            idempotency_key="workbench-owner",
+        )
+        store.mark_request_running(accepted.request_id, worker_id="fixture")
+        store.finish_request(
+            accepted.request_id, success=True, assistant_text="owned reply",
+            assistant_source="fixture",
+        )
+    package = create_agent_move_package(
+        root, "zelda", tmp_path / "workbench-owner.hashi-agent",
+        source_instance="HASHI1", transfer_mode="identity_memory",
+    )
+    assert package.conversation_continuity["owner_id"] == "user:0"
+    assert package.conversation_continuity["summary"]["eligible_message_count"] == (
+        2 if include_history else 0
+    )
+
+
+@pytest.mark.parametrize("binding_established", [False, True])
+@pytest.mark.parametrize("invalid_telegram_owner", [False, True])
+def test_schema5_personal_move_excludes_unidentified_foreign_history(
+    tmp_path, binding_established, invalid_telegram_owner,
+):
+    root = _source_root(tmp_path)
+    agents = json.loads((root / "agents.json").read_text(encoding="utf-8"))
+    agents["global"].pop("authorized_id")
+    if invalid_telegram_owner:
+        agents["global"]["telegram_owner_id"] = "invalid"
+    _write_json(root / "agents.json", agents)
+    if binding_established:
+        from orchestrator.personal_data_owner import resolve_personal_data_owner
+
+        resolve_personal_data_owner(root, agents["global"], None, establish=True)
     store = SessionStore(root / "state" / "sessions.sqlite3", instance_id="HASHI1")
     session = store.ensure_default_session(owner_id="user:7", agent_id="zelda")
     accepted = store.accept_run(
@@ -403,13 +448,25 @@ def test_schema5_history_rejects_source_without_configured_authorized_owner(tmp_
         assistant_source="fixture",
     )
 
-    with pytest.raises(AgentMoveError, match="authorized conversation owner is not configured"):
+    package = create_agent_move_package(
+        root,
+        "zelda",
+        tmp_path / "unknown-owner.hashi-agent",
+        source_instance="HASHI1",
+        transfer_mode="identity_memory",
+    )
+    assert package.conversation_continuity["owner_id"] == "user:0"
+    assert package.conversation_continuity["summary"]["eligible_message_count"] == 0
+    assert "must not cross" not in json.dumps(package.conversation_continuity)
+    assert any("other local conversation history" in warning for warning in package.manifest["warnings"])
+    assert [item["text"] for item in store.messages(session["session_id"], owner_id="user:7")] == [
+        "must not cross an unknown authorization boundary", "must remain local",
+    ]
+    with pytest.raises(AgentMoveError, match="configured authorized owner"):
         create_agent_move_package(
-            root,
-            "zelda",
-            tmp_path / "unknown-owner.hashi-agent",
-            source_instance="HASHI1",
-            transfer_mode="identity_memory",
+            root, "zelda", tmp_path / "foreign-claim.hashi-agent",
+            source_instance="HASHI1", transfer_mode="identity_memory",
+            conversation_owner_id="user:7",
         )
 
 
@@ -445,6 +502,108 @@ def _owner_history(store, owner_id, *, request_id="owned"):
         assistant_source="fixture",
     )
     return session
+
+
+def test_authenticated_frontend_clone_exports_its_owner_not_configured_owner(tmp_path):
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    root = _source_root(tmp_path)
+    store = SessionStore(root / "state/sessions.sqlite3", instance_id="HASHI1")
+    _owner_history(store, "user:7", request_id="configured-private")
+    _owner_history(store, "user:999", request_id="frontend-owned")
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=root, instance_id="HASHI1", deployment_profile="personal"))
+
+    with bind_frontend_command_principal(runtime, "user:999"):
+        package = create_agent_move_package(
+            root, "zelda", tmp_path / "frontend-owner.hashi-agent",
+            source_instance="HASHI1", operation="clone", transfer_mode="workspace",
+            history_mode="copy", conversation_owner_id="user:999",
+        )
+        assert package.conversation_continuity["owner_id"] == "user:999"
+        assert "frontend-owned" in json.dumps(package.conversation_continuity)
+        assert "configured-private" not in json.dumps(package.conversation_continuity)
+        with pytest.raises(AgentMoveError, match="authenticated.*owner"):
+            create_agent_move_package(
+                root, "zelda", tmp_path / "mismatched-owner.hashi-agent",
+                source_instance="HASHI1", operation="clone", transfer_mode="workspace", history_mode="copy",
+                conversation_owner_id="user:7",
+            )
+
+    with pytest.raises(AgentMoveError, match="configured authorized owner"):
+        create_agent_move_package(
+            root, "zelda", tmp_path / "forged-owner.hashi-agent",
+            source_instance="HASHI1", operation="clone", transfer_mode="workspace", history_mode="copy",
+            conversation_owner_id="user:999",
+        )
+
+
+def test_transfer_source_never_falls_back_from_wrong_or_expired_frontend_context(tmp_path):
+    from contextvars import copy_context
+
+    from orchestrator.agent_move.package import source_conversation_owner_id
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    root = _source_root(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    _write_json(other / "agents.json", {
+        "global": {"owner_scope_id": "owner:other"}, "agents": [],
+    })
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=root, deployment_profile="personal",
+    ))
+    with bind_frontend_command_principal(runtime, "owner:actual"):
+        inherited = copy_context()
+        assert source_conversation_owner_id(root) == "owner:actual"
+        with pytest.raises(AgentMoveError, match="different instance"):
+            source_conversation_owner_id(other)
+    with pytest.raises(AgentMoveError, match="expired"):
+        inherited.run(source_conversation_owner_id, root)
+    assert source_conversation_owner_id(other) == "owner:other"
+
+
+def test_transfer_command_owner_is_scoped_to_live_personal_instance(tmp_path):
+    from contextvars import copy_context
+    from orchestrator.frontend_command_context import (
+        bind_frontend_command_principal, personal_command_owner_for_instance,
+    )
+
+    root = tmp_path / "one"
+    other = tmp_path / "two"
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=root, deployment_profile="personal"))
+    with bind_frontend_command_principal(runtime, "owner:one"):
+        inherited = copy_context()
+        assert personal_command_owner_for_instance(root) == "owner:one"
+        assert personal_command_owner_for_instance(other) is None
+    assert inherited.run(personal_command_owner_for_instance, root) is None
+
+    runtime.global_config.deployment_profile = "enterprise"
+    with bind_frontend_command_principal(runtime, "enterprise:one"):
+        assert personal_command_owner_for_instance(root) is None
+
+
+def test_governed_transfer_command_owner_uses_live_authenticated_instance_context(tmp_path):
+    from contextvars import copy_context
+    from orchestrator.frontend_command_context import (
+        bind_frontend_command_principal, command_owner_for_instance,
+    )
+
+    root = tmp_path / "one"
+    other = tmp_path / "two"
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=root, deployment_profile="enterprise"
+    ))
+    with bind_frontend_command_principal(runtime, "enterprise:one"):
+        inherited = copy_context()
+        assert command_owner_for_instance(root) == "enterprise:one"
+        assert command_owner_for_instance(other) is None
+    assert inherited.run(command_owner_for_instance, root) is None
+    with bind_frontend_command_principal(runtime, "local:untrusted"):
+        assert command_owner_for_instance(root) is None
+    with bind_frontend_command_principal(runtime, "enterprise:"):
+        assert command_owner_for_instance(root) is None
 
 
 @pytest.mark.parametrize(
@@ -558,6 +717,63 @@ def test_inactive_agent_can_be_cloned_without_changing_source(tmp_path):
     assert package.manifest["operation"] == "clone"
     assert package.agent_config["is_active"] is False
     assert (root / "agents.json").read_bytes() == before
+
+
+def test_inactive_move_freezes_destination_state_without_starting_source(tmp_path):
+    root = _source_root(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["agents"][0]["is_active"] = False
+    _write_json(root / "agents.json", config)
+    before = (root / "agents.json").read_bytes()
+    package = create_agent_move_package(root, "zelda", tmp_path / "inactive-move.hashi-agent",
+                                        source_instance="HASHI1", operation="move")
+    assert package.manifest["desired_target_active"] is False
+    assert INACTIVE_MOVE_CAPABILITY in package.manifest["required_receiver_capabilities"]
+    assert (root / "agents.json").read_bytes() == before
+    invalid_manifest = dict(package.manifest)
+    invalid_manifest["required_receiver_capabilities"] = [
+        item for item in package.manifest["required_receiver_capabilities"]
+        if item != INACTIVE_MOVE_CAPABILITY
+    ]
+    invalid = tmp_path / "missing-inactive-capability.hashi-agent"
+    _rewrite_archive(package.package_path, invalid,
+                     replacements={"manifest.json": json.dumps(invalid_manifest).encode()})
+    with pytest.raises(AgentMoveError, match="inactive target policy"):
+        read_agent_move_package(invalid)
+    with pytest.raises(AgentMoveError, match="lifecycle support"):
+        create_agent_move_package(root, "zelda", tmp_path / "old.hashi-agent", schema_version=2)
+
+
+@pytest.mark.parametrize("source_active,requested,expected", [
+    (False, None, False), (True, None, True),
+    (False, True, True), (True, False, False),
+])
+def test_move_destination_activation_is_explicit_or_preserves_source(
+    tmp_path, source_active, requested, expected,
+):
+    root = _source_root(tmp_path)
+    config = json.loads((root / "agents.json").read_text())
+    config["agents"][0]["is_active"] = source_active
+    _write_json(root / "agents.json", config)
+    before = (root / "agents.json").read_bytes()
+    package = create_agent_move_package(
+        root, "zelda", tmp_path / "selection.hashi-agent", operation="move",
+        desired_target_active=requested,
+    )
+    assert package.manifest.get("desired_target_active", True) is expected
+    assert (INACTIVE_MOVE_CAPABILITY in package.manifest["required_receiver_capabilities"]) is not expected
+    assert (root / "agents.json").read_bytes() == before
+
+
+def test_destination_activation_rejects_invalid_value_and_allows_inactive_clone(tmp_path):
+    root = _source_root(tmp_path)
+    with pytest.raises(AgentMoveError, match="destination activation"):
+        create_agent_move_package(root, "zelda", tmp_path / "invalid.hashi-agent", desired_target_active="false")
+    package = create_agent_move_package(
+        root, "zelda", tmp_path / "clone.hashi-agent", operation="clone", desired_target_active=False,
+    )
+    assert package.manifest["desired_target_active"] is False
+    assert package.access_requirements["telegram_secret_included"] is False
 
 
 def test_schema5_clone_defaults_empty_and_offers_explicit_read_only_history(tmp_path):
@@ -701,7 +917,7 @@ def test_packaging_fences_eligible_history_not_presentation_counts(
         role="assistant", text="Durable business response", source="fixture",
         idempotency_key="business-response", history_eligible=True,
     )
-    write_bytes = owner._write_bytes
+    write_bytes = owner._write_json_member
 
     def write_then_deliver(archive, name, data, checksums):
         write_bytes(archive, name, data, checksums)
@@ -713,7 +929,7 @@ def test_packaging_fences_eligible_history_not_presentation_counts(
                 history_eligible=history_eligible,
             )
 
-    monkeypatch.setattr(owner, "_write_bytes", write_then_deliver)
+    monkeypatch.setattr(owner, "_write_json_member", write_then_deliver)
     output = tmp_path / "existing.hashi-agent"
     output.write_bytes(b"previous caller output")
     if history_eligible:
@@ -748,7 +964,7 @@ def test_clone_is_a_frozen_snapshot_not_a_source_freshness_fence(tmp_path, monke
         role="assistant", text="Before snapshot", source="fixture",
         idempotency_key="before", history_eligible=True,
     )
-    write = owner._write_bytes
+    write = owner._write_json_member
     memory = root / "workspaces/zelda/memory/continuity.md"
 
     def write_then_continue_source(archive, name, content, checksums):
@@ -764,7 +980,7 @@ def test_clone_is_a_frozen_snapshot_not_a_source_freshness_fence(tmp_path, monke
                 memory.write_text("After snapshot", encoding="utf-8")
                 (memory.parent / "new-file.md").write_text("new live work", encoding="utf-8")
 
-    monkeypatch.setattr(owner, "_write_bytes", write_then_continue_source)
+    monkeypatch.setattr(owner, "_write_json_member", write_then_continue_source)
     result = create_agent_move_package(
         root, "zelda", tmp_path / "frozen.hashi-agent", operation="clone",
         transfer_mode="workspace", history_mode="copy",
@@ -817,7 +1033,7 @@ def test_package_rejects_inactive_retained_source_copy(tmp_path):
     )
     _write_json(root / "agents.json", data)
 
-    with pytest.raises(AgentMoveError, match="inactive"):
+    with pytest.raises(AgentMoveError, match="already moved"):
         create_agent_move_package(
             root,
             "zelda",
@@ -1331,7 +1547,35 @@ def test_packaging_rejects_real_changes_and_keeps_existing_output(
             live_writer.close()
 
 
-def test_cold_wal_reader_files_still_count_toward_whole_workspace_limit(
+def test_full_move_discloses_excluded_cache_without_charging_payload_budget(
+    tmp_path, monkeypatch
+):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    cache = workspace / "node_modules" / "large-cache.bin"
+    cache.parent.mkdir()
+    cache.write_bytes(b"x" * 32768)
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 16384)
+
+    package = create_agent_move_package(
+        root, "zelda", tmp_path / "excluded-cache.hashi-agent", transfer_mode="workspace"
+    )
+
+    assert "workspace/node_modules/large-cache.bin" not in package.names
+    assert package.workspace_metadata["total_workspace_bytes"] > owner.WORKSPACE_LIMIT_BYTES
+    assert {row["path"] for row in package.workspace_metadata["inventory"]} >= {
+        "node_modules/large-cache.bin", "memory/continuity.md"
+    }
+    assert any(
+        row["path"] == "node_modules/large-cache.bin" and row["size"] == 32768
+        for row in package.workspace_metadata["discarded"]
+    )
+    assert cache.read_bytes() == b"x" * 32768
+
+
+def test_cold_wal_reader_files_are_disclosed_without_consuming_payload_budget(
     tmp_path, monkeypatch
 ):
     from contextlib import closing
@@ -1342,15 +1586,18 @@ def test_cold_wal_reader_files_still_count_toward_whole_workspace_limit(
     with closing(sqlite3.connect(workspace / "bridge_memory.sqlite")) as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.commit()
-    initial_bytes = sum(row["size"] for row in owner._workspace_inventory(workspace))
-    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", initial_bytes)
-    with pytest.raises(AgentMoveError, match="1 GB"):
-        create_agent_move_package(
-            root, "zelda", tmp_path / "too-large.hashi-agent", transfer_mode="workspace"
-        )
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 16384)
+    package = create_agent_move_package(
+        root, "zelda", tmp_path / "reader-files.hashi-agent", transfer_mode="workspace"
+    )
+    assert package.workspace_metadata["total_workspace_bytes"] > owner.WORKSPACE_LIMIT_BYTES
+    assert any(
+        row["path"] == "bridge_memory.sqlite-shm"
+        for row in package.workspace_metadata["discarded"]
+    )
 
 
-def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(tmp_path, monkeypatch):
+def test_explicit_transfer_modes_preserve_memory_and_limit_portable_payload(tmp_path, monkeypatch):
     from orchestrator.agent_move import package as owner
     root = _source_root(tmp_path)
     workspace = root / "workspaces" / "zelda"
@@ -1361,30 +1608,35 @@ def test_explicit_transfer_modes_preserve_memory_and_preflight_whole_workspace(t
     project.mkdir()
     (project / ".git").write_text("gitdir: /external")
     (project / "agent.md").write_text("ordinary project document")
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 16384)
     big = workspace / "artifact.bin"
     with big.open("wb") as stream:
-        stream.truncate(1_000_000_001)
+        stream.truncate(16385)
     output = tmp_path / "explicit.hashi-agent"
-    with pytest.raises(AgentMoveError, match="1 GB"):
+    with pytest.raises(AgentMoveError, match="portable move limit"):
         create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
     assert not output.exists()
     memory = create_agent_move_package(root, "zelda", output, transfer_mode="identity_memory")
     assert "workspace/transcript.jsonl" in memory.names
     assert "workspace/memory/memory_plus_state.json" in memory.names
     assert "workspace/artifact.bin" not in memory.names
-    assert any(row["path"] == "artifact.bin" and row["size"] == 1_000_000_001
+    assert any(row["path"] == "artifact.bin" and row["size"] == 16385
                for row in memory.workspace_metadata["discarded"])
     big.unlink()
     full = create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
     assert "workspace/project/agent.md" in full.names
     assert full.manifest["schema_version"] == 5
-    # Boundaries use the complete logical inventory, including excluded runtime
-    # material, with exact equality accepted before any compression begins.
-    total = full.workspace_metadata["total_workspace_bytes"]
+    # The actual transmitted logical content is accepted at the budget and
+    # rejected above it; excluded files remain separately disclosed.
+    with zipfile.ZipFile(output) as archive:
+        total = sum(
+            item.file_size for item in archive.infolist()
+            if item.filename.startswith("workspace/") or item.filename == "identity/agent.md"
+        )
     monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", total)
     create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
     (workspace / "extra").write_bytes(b"x")
-    with pytest.raises(AgentMoveError, match="1 GB"):
+    with pytest.raises(AgentMoveError, match="limit"):
         create_agent_move_package(root, "zelda", output, transfer_mode="workspace")
 
 
@@ -1404,3 +1656,338 @@ def test_package_preserves_hcc_and_injection_preference(tmp_path):
     extract_agent_workspace(package, destination)
     assert load_pcm_document(destination / "agent.md").hcc == "Observed at source; not relabelled after move"
     assert is_hcc_enabled(destination)
+
+
+
+def test_retain_source_move_rejects_manifest_without_receiver_capability(tmp_path):
+    root = _source_root(tmp_path)
+    original = tmp_path / "retain-source.hashi-agent"
+    package = create_agent_move_package(
+        root, "zelda", original, source_instance="HASHI1",
+        transfer_mode="workspace", history_mode="retain_source",
+    )
+    manifest = dict(package.manifest)
+    manifest["required_receiver_capabilities"] = [
+        item for item in manifest["required_receiver_capabilities"]
+        if item != "agent_move_retain_source_history_v1"
+    ]
+    tampered = tmp_path / "missing-capability.hashi-agent"
+    _rewrite_archive(original, tampered, replacements={"manifest.json": json.dumps(manifest).encode()})
+    with pytest.raises(AgentMoveError, match="retain-source history receiver capability"):
+        read_agent_move_package(tampered, verify=True)
+
+
+def test_explicit_inactive_clone_packages_encrypted_bot_backup_only_when_requested(tmp_path):
+    root = _source_root(tmp_path)
+    path = tmp_path / "inactive-backup.hashi-agent"
+    package = create_agent_move_package(
+        root, "zelda", path, source_instance="HASHI1", operation="clone",
+        include_agent_secrets=True, secret_passphrase="shared-secret",
+        desired_target_active=False, retain_telegram_backup=True,
+    )
+    assert package.manifest["desired_target_active"] is False
+    assert package.manifest["retain_telegram_backup"] is True
+    assert package.access_requirements["telegram_secret_included"] is True
+    assert decrypt_agent_secrets(package, "shared-secret")["zelda"] == "telegram-token"
+    assert b"telegram-token" not in path.read_bytes()
+    with pytest.raises(AgentMoveError, match="inactive"):
+        create_agent_move_package(
+            root, "zelda", tmp_path / "active-backup.hashi-agent",
+            source_instance="HASHI1", operation="clone", include_agent_secrets=True,
+            secret_passphrase="shared-secret", retain_telegram_backup=True,
+        )
+    with pytest.raises(AgentMoveError, match="encrypted"):
+        create_agent_move_package(
+            root, "zelda", tmp_path / "unencrypted-backup.hashi-agent",
+            source_instance="HASHI1", operation="clone", desired_target_active=False,
+            retain_telegram_backup=True,
+        )
+
+
+def test_archive_member_budget_honours_receiver_and_preserves_existing_output(tmp_path, monkeypatch):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    for index in range(6):
+        (root / "workspaces/zelda" / f"file-{index}.txt").write_text(str(index))
+    monkeypatch.setattr(owner, "MAX_ARCHIVE_MEMBERS", 8)
+    output = tmp_path / "member-budget.hashi-agent"
+    output.write_bytes(b"prior output")
+    with pytest.raises(AgentMoveError, match="member"):
+        create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    assert output.read_bytes() == b"prior output"
+
+    package = create_agent_move_package(
+        root, "zelda", output, operation="clone", transfer_mode="workspace",
+        max_archive_members=64,
+    )
+    count = len(package.names)
+    assert count > 8
+    assert len(read_agent_move_package(output, max_archive_members=count).names) == count
+    with pytest.raises(AgentMoveError, match="member"):
+        read_agent_move_package(output, max_archive_members=count - 1)
+    with pytest.raises(AgentMoveError, match="member"):
+        create_agent_move_package(root, "zelda", output, max_archive_members=0)
+    assert len(read_agent_move_package(output, max_archive_members=count).names) == count
+
+
+def test_move_inventory_does_not_charge_excluded_entries_to_archive_member_budget(
+    tmp_path, monkeypatch,
+):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    cache = root / "workspaces/zelda/.venv"
+    cache.mkdir()
+    for index in range(30):
+        (cache / f"cache-{index}").write_text("cached")
+    monkeypatch.setattr(owner, "MAX_ARCHIVE_MEMBERS", 16)
+    output = tmp_path / "inventory.hashi-agent"
+    package = create_agent_move_package(
+        root, "zelda", output, operation="move", transfer_mode="workspace",
+        history_mode="retain_source", max_archive_members=16,
+    )
+    assert len(package.names) <= 16
+    assert len(package.workspace_metadata["inventory"]) > 30
+    assert not any(".venv/" in name for name in package.names)
+    assert len(list(cache.iterdir())) == 30
+
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_INVENTORY_ENTRIES", "8")
+    with pytest.raises(AgentMoveError, match="inventory.*8"):
+        create_agent_move_package(root, "zelda", output, operation="move",
+                                  transfer_mode="workspace", history_mode="retain_source",
+                                  max_archive_members=16)
+    assert len(read_agent_move_package(output, max_archive_members=16).names) <= 16
+
+    # A source inventory budget is irrelevant to Clone, which does not inspect
+    # excluded source trees. Even malformed inventory configuration must not
+    # become a new Clone gate.
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_INVENTORY_ENTRIES", "invalid")
+    clone = create_agent_move_package(root, "zelda", tmp_path / "clone.hashi-agent",
+                                      operation="clone", transfer_mode="workspace",
+                                      max_archive_members=16)
+    assert len(clone.names) <= 16
+
+
+def test_remote_client_uses_advertised_member_budget_and_old_peer_fallback(
+    tmp_path, monkeypatch,
+):
+    from orchestrator.agent_move import package as owner
+    from orchestrator.agent_move.remote_client import AgentMoveRemoteClient
+
+    root = _source_root(tmp_path)
+    for index in range(6):
+        (root / "workspaces/zelda" / f"file-{index}.txt").write_text(str(index))
+    monkeypatch.setattr(owner, "MAX_ARCHIVE_MEMBERS", 8)
+    output = tmp_path / "remote-budget.hashi-agent"
+    package = create_agent_move_package(root, "zelda", output, operation="clone",
+                                        transfer_mode="workspace", max_archive_members=64)
+    calls = []
+    def fake_stage(self, path, operation, target_agent_id, timeout):
+        calls.append((path, operation, target_agent_id))
+        return {"ok": True, "status": "staged"}
+    monkeypatch.setattr(AgentMoveRemoteClient, "_stage_stream", fake_stage)
+    capabilities = {
+        "schema_min": 1, "schema_max": 5, "max_package_bytes": 10_000_000,
+        "max_archive_members": len(package.names), "streaming_upload": "authenticated-query-gcm-v1",
+        "capabilities": package.manifest["required_receiver_capabilities"],
+    }
+    client = AgentMoveRemoteClient("https://unused.invalid", "HASHI2", "HASHI1", "fixture", capabilities)
+    assert client.stage(output, operation="clone", target_agent_id="zelda")["status"] == "staged"
+    assert len(calls) == 1
+    old_capabilities = dict(capabilities)
+    old_capabilities.pop("max_archive_members")
+    old_client = AgentMoveRemoteClient("https://unused.invalid", "HASHI2", "HASHI1", "fixture", old_capabilities)
+    with pytest.raises(AgentMoveError, match="member"):
+        old_client.stage(output, operation="clone", target_agent_id="zelda")
+    assert len(calls) == 1, "an old peer cannot receive more than its known legacy limit"
+
+def test_package_byte_budget_stops_during_write_and_preserves_existing_output(tmp_path, monkeypatch):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    (root / "workspaces/zelda/memory/random.bin").write_bytes(os.urandom(512 * 1024))
+    output = tmp_path / "byte-budget.hashi-agent"
+    output.write_bytes(b"prior output")
+    old_write = owner._write_file
+    failed_during_write = []
+    def observe_write(archive, name, source, checksums, *, mode):
+        try:
+            return old_write(archive, name, source, checksums, mode=mode)
+        except AgentMoveError:
+            failed_during_write.append(name)
+            raise
+    monkeypatch.setattr(owner, "_write_file", observe_write)
+    with pytest.raises(AgentMoveError, match="receiver limit"):
+        create_agent_move_package(root, "zelda", output, operation="clone",
+                                  transfer_mode="workspace", max_package_bytes=32 * 1024)
+    assert failed_during_write, "the writer must stop before completing an oversized package"
+    assert output.read_bytes() == b"prior output"
+
+def test_bounded_archive_writer_allows_exact_end_and_rejects_one_byte_below(tmp_path):
+    from orchestrator.agent_move import package as owner
+
+    baseline = tmp_path / "baseline.zip"
+    with owner._write_archive(baseline, None) as archive:
+        archive.writestr("small.txt", b"small synthetic content")
+    size = baseline.stat().st_size
+    exact = tmp_path / "exact.zip"
+    with owner._write_archive(exact, size) as archive:
+        archive.writestr("small.txt", b"small synthetic content")
+    assert exact.stat().st_size == size
+    with pytest.raises(AgentMoveError, match="receiver limit"):
+        with owner._write_archive(tmp_path / "small.zip", size - 1) as archive:
+            archive.writestr("small.txt", b"small synthetic content")
+
+def test_expanded_archive_budget_counts_all_members_while_writing(tmp_path):
+    from orchestrator.agent_move import package as owner
+
+    path = tmp_path / "exact-expanded.zip"
+    with owner._write_archive(path, None, max_unpacked_bytes=9) as archive:
+        archive.writestr("a", b"12345")
+        archive.writestr("b", b"6789")
+    with zipfile.ZipFile(path) as archive:
+        assert sum(info.file_size for info in archive.infolist()) == 9
+    with pytest.raises(AgentMoveError, match="expanded.*8"):
+        with owner._write_archive(tmp_path / "short.zip", None, max_unpacked_bytes=8) as archive:
+            archive.writestr("a", b"12345")
+            archive.writestr("b", b"6789")
+
+
+def test_receiver_expanded_budget_can_exceed_legacy_and_exact_boundary_is_checked(
+    tmp_path, monkeypatch,
+):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    (root / "workspaces/zelda/memory/big.txt").write_text("synthetic history " * 1024)
+    monkeypatch.setattr(owner, "MAX_UNPACKED_BYTES", 2048)
+    output = tmp_path / "expanded.hashi-agent"
+    with pytest.raises(AgentMoveError, match="expanded"):
+        create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    package = create_agent_move_package(root, "zelda", output, operation="clone",
+                                        transfer_mode="workspace", max_unpacked_bytes=128 * 1024)
+    count = package.unpacked_bytes
+    assert count > 2048
+    assert read_agent_move_package(output, max_unpacked_bytes=count).unpacked_bytes == count
+    with pytest.raises(AgentMoveError, match="expanded"):
+        read_agent_move_package(output, max_unpacked_bytes=count - 1)
+
+def test_negotiated_workspace_budget_covers_frozen_files_and_exact_target_check(tmp_path, monkeypatch):
+    from orchestrator.agent_move import package as owner
+
+    root = _source_root(tmp_path)
+    (root / "workspaces/zelda/memory/big.txt").write_text("synthetic work " * 1024)
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 1024)
+    output = tmp_path / "workspace-budget.hashi-agent"
+    with pytest.raises(AgentMoveError, match="workspace.*limit"):
+        create_agent_move_package(root, "zelda", output, operation="clone", transfer_mode="workspace")
+    package = create_agent_move_package(root, "zelda", output, operation="clone",
+                                        transfer_mode="workspace", max_workspace_bytes=128 * 1024)
+    count = package.workspace_bytes
+    assert count > 1024
+    assert read_agent_move_package(output, max_workspace_bytes=count).workspace_bytes == count
+    with pytest.raises(AgentMoveError, match="workspace.*limit"):
+        read_agent_move_package(output, max_workspace_bytes=count - 1)
+
+def test_large_control_json_is_written_in_bounded_utf8_chunks_with_unchanged_digest(tmp_path):
+    from orchestrator.agent_move import package as owner
+
+    value = {"description": "汉字 and emoji 😀 " * 150_000, "nested": [{"n": 1}, {"n": None}]}
+    expected = owner._json_bytes(value)
+    sizes = []
+    archive_path = tmp_path / "streamed-json.zip"
+    with owner._write_archive(archive_path, None) as archive:
+        real_open = archive.open
+        class Writer:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+            def __enter__(self):
+                self.wrapped.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.wrapped.__exit__(*args)
+            def write(self, data):
+                sizes.append(len(data))
+                return self.wrapped.write(data)
+        class Archive:
+            def open(self, name, mode, *, force_zip64):
+                return Writer(real_open(name, mode, force_zip64=force_zip64))
+        checksums = {}
+        owner._write_json_member(Archive(), "control.json", value, checksums)
+    assert max(sizes) <= 64 * 1024
+    with zipfile.ZipFile(archive_path) as stored:
+        assert stored.read("control.json") == expected
+    assert checksums["control.json"] == hashlib.sha256(expected).hexdigest()
+
+
+
+@pytest.mark.parametrize("operation", ["clone", "move"])
+@pytest.mark.parametrize("transfer_mode", [None, "workspace"])
+def test_workspace_symlink_filters_resolved_credential_and_skipped_targets(
+    tmp_path, operation, transfer_mode
+):
+    """An innocuous alias must not bypass the same rules as its real target."""
+    root = _source_root(tmp_path)
+    workspace = root / "workspaces" / "zelda"
+    (workspace / ".env.example").write_text("PLACEHOLDER=example", encoding="utf-8")
+    (workspace / ".git").mkdir()
+    (workspace / ".git" / "config").write_text("synthetic private config", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("synthetic outside", encoding="utf-8")
+    links = {
+        "looks_public.txt": workspace / ".env",
+        "workspace_alias.txt": workspace / "workzone.json",
+        "identity_alias.txt": workspace / "agent.md",
+        "git_config_alias.txt": workspace / ".git" / "config",
+        "sample_alias.txt": workspace / ".env.example",
+        "safe_alias.txt": workspace / "memory" / "continuity.md",
+        "external_alias.txt": outside,
+    }
+    try:
+        for name, target in links.items():
+            (workspace / name).symlink_to(target)
+        (workspace / "chain_alias.txt").symlink_to(workspace / "looks_public.txt")
+    except OSError:
+        pytest.skip("file symlinks unavailable on this platform")
+
+    package = create_agent_move_package(
+        root, "zelda", tmp_path / "synthetic.hashi-agent",
+        source_instance="HASHI1", operation=operation, transfer_mode=transfer_mode,
+    )
+    names = set(package.names)
+    for name in (
+        "looks_public.txt", "chain_alias.txt", "workspace_alias.txt",
+        "identity_alias.txt", "git_config_alias.txt", "external_alias.txt",
+    ):
+        assert f"workspace/{name}" not in names
+    assert "workspace/sample_alias.txt" in names
+    assert "workspace/safe_alias.txt" in names
+    with zipfile.ZipFile(package.package_path) as archive:
+        assert archive.read("workspace/safe_alias.txt") == b"durable memory"
+        assert archive.read("workspace/sample_alias.txt") == b"PLACEHOLDER=example"
+
+
+
+@pytest.mark.parametrize(
+    ("transfer_mode", "include_undelivered", "allowed"),
+    [("workspace", True, True), ("workspace", False, False), (None, False, False)],
+)
+def test_symlink_target_respects_selected_undelivered_policy(
+    tmp_path, transfer_mode, include_undelivered, allowed
+):
+    from orchestrator.agent_move.package import _scan_workspace
+
+    workspace = tmp_path / "workspace"
+    target = workspace / "undelivered" / "pending.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("synthetic pending item", encoding="utf-8")
+    try:
+        (workspace / "pending_alias.txt").symlink_to(target)
+    except OSError:
+        pytest.skip("file symlinks unavailable on this platform")
+    entries, _excluded = _scan_workspace(
+        workspace, max_workspace_bytes=10_000, transfer_mode=transfer_mode,
+        include_undelivered=include_undelivered,
+    )
+    assert any(item.relative_path == "pending_alias.txt" for item in entries) is allowed

@@ -72,18 +72,35 @@ async def test_http_deletion_requires_credentials_even_with_valid_revisions(api)
 
 
 @pytest.mark.asyncio
-async def test_http_authorized_delete_requires_confirmation_and_current_revision(api):
+async def test_authenticated_direct_deletions_use_the_named_target_and_revision_without_magic_marker(api):
+    server, manager, prompts = api
+    async with TestClient(TestServer(server.app)) as client:
+        job = job_payload(manager)
+        job.pop("authorization")
+        response = await client.post("/api/agents/momo/scheduler/jobs/daily/delete-if-unchanged",
+                                     headers=headers(), json=job)
+        assert response.status == 200
+        assert manager.get_job("cron", "daily") is None
+        prompt = prompt_payload(prompts)
+        prompt.pop("authorization")
+        response = await client.post("/api/agents/momo/system-prompts/1/delete-if-unchanged",
+                                     headers=headers(), json=prompt)
+        assert response.status == 200
+        assert prompts.get_slot("1")["text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_http_authorized_delete_requires_current_revision(api):
     server, manager, prompts = api
     async with TestClient(TestServer(server.app)) as client:
         body = job_payload(manager)
         job_url = "/api/agents/momo/scheduler/jobs/daily/delete-if-unchanged"
-        denied = await client.post(job_url, headers=headers(),
-                                   json={"kind": "cron", "expected_revision": body["expected_revision"]})
-        assert denied.status == 403
         assert manager.set_job_enabled("cron", "daily", True)[0]
         stale = await client.post(job_url, headers=headers(), json=body)
         assert stale.status == 409
-        success = await client.post(job_url, headers=headers(), json=job_payload(manager))
+        current_job = job_payload(manager)
+        current_job.pop("authorization")
+        success = await client.post(job_url, headers=headers(), json=current_job)
         assert success.status == 200
         assert manager.get_job("cron", "daily") is None
 
@@ -92,7 +109,9 @@ async def test_http_authorized_delete_requires_confirmation_and_current_revision
         url = "/api/agents/momo/system-prompts/1/delete-if-unchanged"
         stale = await client.post(url, headers=headers(), json=body)
         assert stale.status == 409
-        success = await client.post(url, headers=headers(), json=prompt_payload(prompts))
+        current_prompt = prompt_payload(prompts)
+        current_prompt.pop("authorization")
+        success = await client.post(url, headers=headers(), json=current_prompt)
         assert success.status == 200
         assert prompts.get_slot("1")["text"] == ""
 

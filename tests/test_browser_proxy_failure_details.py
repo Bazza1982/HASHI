@@ -103,3 +103,65 @@ async def test_timeout_keeps_specific_message_but_does_not_claim_remote_action_w
         assert result["failure_phase"] == "dispatch" and len(cancelled) == 1
     finally:
         await asyncio.to_thread(proxy.close)
+
+
+@pytest.mark.asyncio
+async def test_legacy_browser_proxy_respects_larger_requested_deadline(tmp_path, monkeypatch):
+    from tools.registry import ToolResult
+    owner = _registry(tmp_path, {})
+    proxy = BrowserGatewayProxy(owner, asyncio.get_running_loop())
+    waits = []
+
+    class Future:
+        def result(self, *, timeout):
+            waits.append(timeout)
+            return ToolResult(tool_call_id="fixture", output="done")
+
+        def cancel(self):
+            pass
+
+    def dispatch(coroutine, _loop):
+        coroutine.close()
+        return Future()
+
+    monkeypatch.setattr(proxy_module.asyncio, "run_coroutine_threadsafe", dispatch)
+    try:
+        descriptor = proxy.issue({})
+        status, text = await _post(proxy, descriptor, {
+            "tool_name": "browser_get_text",
+            "arguments": {"timeout_ms": 120_000, "wait_ms": 500},
+        })
+        assert status == 200 and json.loads(text)["output"] == "done"
+        assert waits == [130.5]
+    finally:
+        await asyncio.to_thread(proxy.close)
+
+
+@pytest.mark.asyncio
+async def test_legacy_browser_client_respects_larger_requested_deadline(tmp_path, monkeypatch):
+    from tools import registry as registry_module
+    waits = []
+    gateway = _registry(tmp_path, {"browser_gateway_proxy": {
+        "url": "http://127.0.0.1:18888/browser-tool", "token": "fixture",
+    }})
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size):
+            return b'{"output":"done","is_error":false}'
+
+    def open_proxy(_request, *, timeout):
+        waits.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(registry_module.urllib_request, "urlopen", open_proxy)
+    result = await gateway.execute("browser_get_text", {
+        "url": "https://example.invalid", "timeout_ms": 120_000, "wait_ms": 500,
+    })
+    assert not result.is_error and result.output == "done"
+    assert waits == [135.5]

@@ -91,6 +91,38 @@ async def test_clone_reused_transaction_renders_appropriate_next_action(tmp_path
     assert "❌" not in message["text"]
 
 
+@pytest.mark.parametrize("locale, expected", [("en", "Access scope"), ("zh-CN", "访问范围")])
+def test_transfer_prepared_screen_displays_access_scope_before_confirmation(locale, expected):
+    result = {
+        "agent_id": "zelda", "target_agent_id": "zelda_copy",
+        "target_instance": "HASHI2", "package_id": "package",
+        "access_scope_plan": {
+            "requested": "drive", "target_maximum": "project", "effective": "project",
+        },
+    }
+    with runtime_remote.ui_language.language_scope(None, locale=locale):
+        clone = runtime_remote._render_clone_prepared(result)
+        move = runtime_remote._render_move_prepared(result)
+    for text in (clone, move):
+        assert expected in text
+        assert "<code>drive</code> → <code>project</code>" in text
+
+
+def test_move_completion_discloses_retained_source_workspace():
+    from orchestrator.agent_move_ui import render_background_notice
+    result = {
+        "agent_id": "zelda", "target_agent_id": "zelda", "target_instance": "HASHI2",
+        "status": "completed", "operation": "move",
+        "retained_source_workspace": "C:\\retained\\zelda",
+    }
+    for locale in ("en", "zh-CN"):
+        with runtime_remote.ui_language.language_scope(None, locale=locale):
+            direct = runtime_remote._render_move_complete(result)
+        background = render_background_notice({"status": "completed", "locale": locale, "result": result})
+        assert "C:\\retained\\zelda" in direct
+        assert "C:\\retained\\zelda" in background
+
+
 def test_remote_controls_use_instance_home_instead_of_the_code_checkout(tmp_path):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
@@ -193,6 +225,21 @@ async def test_move_show_agent_picker_lists_agents(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_move_picker_includes_inactive_but_not_already_moved_agents(tmp_path):
+    (tmp_path / "agents.json").write_text(json.dumps({"agents": [
+        {"name": "sleeping", "is_active": False},
+        {"name": "moved", "is_active": False, "transfer_state": "moved_out_pending_reboot"},
+    ]}), encoding="utf-8")
+    runtime = _runtime(tmp_path)
+    await runtime_remote.move_show_agent_picker(runtime, SimpleNamespace(), {})
+    buttons = [button for row in runtime.replies[-1]["reply_markup"].inline_keyboard for button in row]
+    assert [button.callback_data for button in buttons] == ["move:agent:sleeping"]
+    assert "inactive" in buttons[0].text.lower()
+    review = runtime_remote._render_move_review_notes({"operation":"move", "desired_target_active":False})
+    assert any("remain inactive" in line for line in review)
+
+
+@pytest.mark.asyncio
 async def test_move_picker_uses_bounded_callback_reference_for_long_agent_id(tmp_path):
     long_name = "a" * 100
     (tmp_path / "agents.json").write_text(
@@ -242,7 +289,21 @@ async def test_move_show_options_edits_callback_message(tmp_path):
     ]
     assert "move:exec:zelda:hashi2:identity_memory" in callbacks
     assert "move:exec:zelda:hashi2:workspace" in callbacks
+    assert "move:exec:zelda:hashi2:workspace:active" in callbacks
+    assert "move:exec:zelda:hashi2:workspace:inactive" in callbacks
     assert "move:cancel" in callbacks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection,expected", [("active", True), ("inactive", False)])
+async def test_move_selection_carries_destination_activation(tmp_path, monkeypatch, selection, expected):
+    runtime = _runtime(tmp_path)
+    runtime._do_move = AsyncMock()
+    monkeypatch.setattr(runtime_remote, "load_move_instances", AsyncMock(return_value={"hashi2": {}}))
+    query = _Query(f"move:exec:zelda:hashi2:workspace:{selection}")
+    await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query), None)
+    assert runtime._do_move.await_args.kwargs["desired_target_active"] is expected
+    assert runtime._do_move.await_args.kwargs["transfer_mode"] == "workspace"
 
 
 @pytest.mark.asyncio
@@ -325,6 +386,33 @@ async def test_clone_snapshot_does_not_require_move_drain_preflight(
     )
     prepare.assert_called_once()
     assert prepare.call_args.kwargs["history_mode"] == "none"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_active", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_clone_attempts_receiver_when_cached_peer_status_is_stale(
+    tmp_path, monkeypatch, cached_active, dry_run
+):
+    runtime = _runtime(tmp_path)
+    result = {
+        "package_id": "clone-test", "agent_id": "zelda", "target_agent_id": "zelda_1",
+        "target_instance": "HASHI9", "history_mode": "none",
+    }
+    prepare = Mock(return_value=result)
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_clone", prepare)
+    monkeypatch.setattr(runtime_remote, "preview_outbound_clone", prepare)
+    instances = {"HASHI9": {
+        "instance_id": "HASHI9", "active": cached_active, "capabilities": [],
+        "host": "127.0.0.1", "remote_port": 1234,
+    }}
+    await runtime_remote.do_clone(
+        runtime, SimpleNamespace(effective_chat=SimpleNamespace(id=1)),
+        "zelda", "HASHI9", instances, dry_run=dry_run,
+    )
+    prepare.assert_called_once()
+    assert prepare.call_args.args[1] == instances
+    assert prepare.call_args.args[3] == "HASHI9"
 
 
 @pytest.mark.asyncio
@@ -544,6 +632,30 @@ async def test_handle_move_callback_rechecks_agent_busy_before_cutover(
 
 
 @pytest.mark.asyncio
+async def test_failed_move_preparation_offers_exact_transaction_cancellation(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.orchestrator = SimpleNamespace(runtimes=[])
+    monkeypatch.setattr(runtime_remote, "_move_preflight", AsyncMock(return_value=(0, False)))
+
+    def fail_prepare(*_args, **_kwargs):
+        raise runtime_remote.MovePreparationError("upload outcome unknown", "move-fixture-123")
+
+    monkeypatch.setattr(runtime_remote, "prepare_outbound_move", fail_prepare)
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
+    await runtime_remote.do_move(
+        runtime, update, "zelda", "hashi2", {"hashi2": {"display_name": "HASHI2"}},
+        transfer_mode="workspace",
+    )
+    callbacks = [
+        button.callback_data
+        for row in runtime.replies[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    assert callbacks == ["move:abort:move-fixture-123"]
+
+
+@pytest.mark.asyncio
 async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     runtime.global_config.bridge_home = tmp_path
@@ -552,8 +664,10 @@ async def test_do_move_dry_run_never_stages_target(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_pending, "delayed_count", AsyncMock(return_value=0))
     calls = []
 
-    def _preview(root, instances, agent_id, target, *, source_instance, transfer_mode):
+    def _preview(root, instances, agent_id, target, *, source_instance, transfer_mode, history_mode, desired_target_active):
         assert transfer_mode == "workspace"
+        assert history_mode is None
+        assert desired_target_active is None
         calls.append((root, instances, agent_id, target, source_instance))
         return {
             "agent_id": agent_id,
@@ -1153,21 +1267,23 @@ async def test_move_discovers_connected_peers_without_legacy_file(tmp_path, monk
             peer["capabilities"] = []
             query = _Query("move:target:zelda:hashi9")
             await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query), context)
-            assert query.edits[-1]["text"] == ui_language.tr("remote.move.target_unsupported", target="hashi9")
+            assert query.edits[-1]["reply_markup"].inline_keyboard
             peer["capabilities"] = ["agent_move_receive_v1"]
             peer["properties"]["live_status"] = "offline"
             query = _Query("move:target:zelda:hashi9")
             await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query), context)
-            assert query.edits[-1]["text"] == ui_language.tr("remote.move.target_unavailable", target="hashi9")
-            prepare = AsyncMock(side_effect=AssertionError("Disconnected target must not be staged"))
+            assert query.edits[-1]["reply_markup"].inline_keyboard
+            prepare = Mock(side_effect=runtime_remote.AgentMoveError("receiver unreachable"))
             monkeypatch.setattr(runtime_remote, "prepare_outbound_move", prepare)
-            query = _Query("move:exec:zelda:hashi9:move")
+            query = _Query("move:exec:zelda:hashi9:workspace")
             await runtime_remote.handle_move_callback(runtime, SimpleNamespace(callback_query=query, effective_chat=update.effective_chat), context)
-            assert runtime.replies[-1]["text"] == ui_language.tr("remote.move.target_unavailable", target="hashi9")
-            prepare.assert_not_called()
+            assert "receiver unreachable" in runtime.replies[-1]["text"]
+            prepare.assert_called_once()
             context.args = ["zelda"]
             await FlexibleAgentRuntime.cmd_move(runtime, update, context)
-            assert runtime.replies[-1]["text"] == ui_language.tr("remote.move.no_targets")
+            button = runtime.replies[-1]["reply_markup"].inline_keyboard[0][0]
+            assert button.callback_data == "move:target:zelda:hashi9"
+            assert ui_language.tr("remote.move.last_check_unavailable") in button.text
             response["peers"] = []
             await FlexibleAgentRuntime.cmd_move(runtime, update, context)
             assert runtime.replies[-1]["text"] == ui_language.tr("remote.move.no_targets")
@@ -1180,3 +1296,210 @@ async def test_move_discovers_connected_peers_without_legacy_file(tmp_path, monk
             assert runtime.replies[-1]["text"] == ui_language.tr("move.remote_unavailable")
     finally:
         await runner.cleanup()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_running", [False, True])
+async def test_remote_on_repairs_exact_consumer_access_before_reporting_success(
+    tmp_path, monkeypatch, already_running,
+):
+    from orchestrator import workbench_auth
+
+    calls, replies = [], []
+    secret = tmp_path / "secrets.json"
+    lifecycle = SimpleNamespace(enabled=True, supervised=True, root=tmp_path, port=8767,
+                                use_tls=False, backend="lan", disabled_path=tmp_path / "off.json")
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "load_settings", lambda _root: lifecycle)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "read_disabled_state", lambda _root: None)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "clear_disabled_state", lambda _root: None)
+    monkeypatch.setattr(workbench_auth, "ensure_remote_runtime_access",
+                        lambda path, root: calls.append(("acl", path, root)))
+
+    async def start(root):
+        calls.append(("start", root))
+        return {"ok": True, "action": "started_supervisor", "port": 8767, "health_host": "127.0.0.1"}
+
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "ensure_remote_started", start)
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda _user_id: True,
+        _remote_config_snapshot=lambda: {"root": tmp_path, "port": 8767, "use_tls": False, "backend": "lan"},
+        _remote_process=SimpleNamespace(returncode=None, pid=42) if already_running else None,
+        global_config=SimpleNamespace(deployment_profile="personal", secrets_path=secret),
+        _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
+    )
+    await runtime_remote.cmd_remote(runtime, SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+                                    SimpleNamespace(args=["on"]))
+    assert calls[0] == ("acl", secret, tmp_path)
+    assert len(calls) == (1 if already_running else 2)
+    assert replies
+
+
+@pytest.mark.asyncio
+async def test_remote_on_reports_consumer_failure_without_starting(tmp_path, monkeypatch):
+    from orchestrator import workbench_auth
+
+    calls, replies = [], []
+    lifecycle = SimpleNamespace(enabled=True, supervised=True, root=tmp_path, port=8767,
+                                use_tls=False, backend="lan", disabled_path=tmp_path / "off.json")
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "load_settings", lambda _root: lifecycle)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "read_disabled_state", lambda _root: None)
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "clear_disabled_state", lambda _root: None)
+    def unavailable(_path, _root):
+        raise RuntimeError("fixture principal unavailable")
+    monkeypatch.setattr(workbench_auth, "ensure_remote_runtime_access", unavailable)
+    async def start(root):
+        calls.append(root)
+        return {"ok": True}
+    monkeypatch.setattr(runtime_remote.remote_lifecycle, "ensure_remote_started", start)
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda _user_id: True,
+        _remote_config_snapshot=lambda: {"root": tmp_path, "port": 8767, "use_tls": False, "backend": "lan"},
+        _remote_process=None,
+        global_config=SimpleNamespace(deployment_profile="personal", secrets_path=tmp_path / "secrets.json"),
+        _reply_text=lambda update, text, **kwargs: _reply(replies, text, kwargs),
+    )
+    await runtime_remote.cmd_remote(runtime, SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+                                    SimpleNamespace(args=["on"]))
+    assert calls == []
+    assert replies and "fixture principal unavailable" in replies[-1]["text"]
+
+# HASHI-Fingerprint: hfp_7e535a0e409a408ab6920abbb7b789b9
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection,expected", [("default", None), ("active", True), ("inactive", False)])
+async def test_move_retain_history_selection_is_visible_and_carried_to_execution(
+    tmp_path, monkeypatch, selection, expected,
+):
+    runtime = _runtime(tmp_path)
+    runtime._do_move = AsyncMock()
+    monkeypatch.setattr(runtime_remote, "load_move_instances", AsyncMock(return_value={"hashi2": {}}))
+    query = _Query()
+    update = SimpleNamespace(callback_query=query)
+    await runtime_remote.move_show_options(runtime, update, "zelda", "hashi2")
+    callbacks = [
+        button.callback_data
+        for row in query.edits[-1]["reply_markup"].inline_keyboard
+        for button in row
+    ]
+    query.data = next(
+        callback for callback in callbacks
+        if callback.endswith(f"workspace:{selection}:retain_source")
+    )
+    await runtime_remote.handle_move_callback(runtime, update, None)
+    assert runtime._do_move.await_args.kwargs["history_mode"] == "retain_source"
+    assert runtime._do_move.await_args.kwargs["desired_target_active"] is expected
+    assert runtime._do_move.await_args.kwargs["transfer_mode"] == "workspace"
+    assert "source" in runtime_remote._render_history_summary({"history_mode": "retain_source"}).lower()
+
+
+@pytest.mark.parametrize("locale", ["en", "zh-CN"])
+def test_move_preview_and_completion_disclose_source_retained_pending_responses(locale):
+    from orchestrator.agent_move_ui import render_background_notice
+
+    result = {
+        "agent_id": "zelda", "target_agent_id": "zelda", "target_instance": "HASHI2",
+        "status": "completed", "operation": "move", "source_retained_pending_count": 2,
+        "retained_source_workspace": r"C:\\retained\\zelda",
+    }
+    with runtime_remote.ui_language.language_scope(None, locale=locale):
+        direct = runtime_remote._render_move_complete(result)
+        preview = runtime_remote._render_move_review_notes(result)
+    background = render_background_notice({"status": "completed", "locale": locale, "result": result})
+    expected = "undelivered" if locale == "en" else "\u672a\u53d1\u9001"
+    assert expected in direct and expected in background
+    assert any(expected in line for line in preview)
+    assert "2" in direct and "2" in background
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,dry", [("backup", False), ("backupdry", True)])
+async def test_inactive_backup_clone_options_carry_intent_and_history(tmp_path, monkeypatch, mode, dry):
+    runtime = _runtime(tmp_path)
+    calls = []
+    async def do_clone(*args, **kwargs):
+        calls.append((args, kwargs))
+    monkeypatch.setattr(runtime_remote, "do_clone", do_clone)
+    monkeypatch.setattr(runtime_remote, "load_clone_instances", AsyncMock(return_value={"hashi2": {}}))
+    update = SimpleNamespace(callback_query=_Query())
+    await runtime_remote.clone_show_options(runtime, update, "zelda", "hashi2", history_mode="copy")
+    buttons = [b.callback_data for row in update.callback_query.edits[-1]["reply_markup"].inline_keyboard for b in row]
+    update.callback_query.data = next(b for b in buttons if b.endswith(f":copy:{mode}"))
+    await runtime_remote.handle_clone_callback(runtime, update, None)
+    assert len(calls) == 1
+    assert calls[0][1]["history_mode"] == "copy"
+    assert calls[0][1]["dry_run"] is dry
+    assert calls[0][1]["desired_target_active"] is False
+    assert calls[0][1]["retain_telegram_backup"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_inactive_clone_preparation_retry_keeps_backup_intent(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    state = {"operation": "clone", "agent_id": "zelda", "target_instance": "hashi2",
+             "history_mode": "copy", "transfer_mode": "workspace",
+             "desired_target_active": False, "retain_telegram_backup": True}
+    monkeypatch.setattr(runtime_remote, "get_outbound_move", lambda *_: state)
+    monkeypatch.setattr(runtime_remote, "load_clone_instances", AsyncMock(return_value={"hashi2": {}}))
+    action = AsyncMock()
+    monkeypatch.setattr(runtime_remote, "do_clone", action)
+    await runtime_remote.handle_clone_callback(
+        runtime, SimpleNamespace(callback_query=_Query("clone:prepare:package")), None
+    )
+    assert action.await_args.kwargs["history_mode"] == "copy"
+    assert action.await_args.kwargs["desired_target_active"] is False
+    assert action.await_args.kwargs["retain_telegram_backup"] is True
+
+
+@pytest.mark.parametrize("locale, inactive, confirmed, absent, unknown", [
+    ("en", "inactive", "target confirmed", "No source", "could not be confirmed"),
+    ("zh-CN", "\u4fdd\u6301\u505c\u7528", "\u76ee\u6807\u5df2\u786e\u8ba4", "\u6765\u6e90\u6ca1\u6709", "\u65e0\u6cd5\u786e\u8ba4"),
+])
+def test_inactive_backup_notices_only_claim_receipted_backup(locale, inactive, confirmed, absent, unknown):
+    from orchestrator.agent_move_ui import render_background_notice
+    result = {"operation": "clone", "agent_id": "zelda", "target_agent_id": "copy",
+              "target_instance": "HASHI2", "package_id": "pkg",
+              "desired_target_active": False, "retain_telegram_backup": True,
+              "telegram_backup_present": True}
+    with runtime_remote.ui_language.language_scope(None, locale=locale):
+        preview = runtime_remote._render_clone_preview(result)
+        prepared = runtime_remote._render_clone_prepared(result)
+        unconfirmed = runtime_remote._render_clone_complete(result)
+        confirmed_text = runtime_remote._render_clone_complete({**result, "telegram_backup_confirmed": True})
+        no_token = runtime_remote._render_clone_complete({**result, "telegram_backup_present": False})
+    bg = render_background_notice({"status": "completed", "locale": locale, "result": result})
+    assert inactive in preview and inactive in prepared
+    assert unknown in unconfirmed and unknown in bg
+    assert confirmed in confirmed_text and confirmed not in unconfirmed
+    assert absent in no_token
+
+
+
+@pytest.mark.parametrize("locale, expected", [
+    ("en", "Other conversation history stays on the source and was not copied."),
+    ("zh-CN", "其他旧对话历史保留在来源实例，本次未复制。"),
+])
+def test_clone_cards_show_history_exclusion_warning(locale, expected):
+    warning = (
+        "The selected owner has no conversation history; other local "
+        "conversation history remains on the source and was not included"
+    )
+    result = {
+        "operation": "clone", "agent_id": "zelda", "target_agent_id": "copy",
+        "target_instance": "HASHI2", "package_id": "pkg", "history_mode": "copy",
+        "warnings": [warning, "A <configured> & unusual note"],
+    }
+    with runtime_remote.ui_language.language_scope(None, locale=locale):
+        cards = [
+            runtime_remote._render_clone_preview(result),
+            runtime_remote._render_clone_prepared(result),
+            runtime_remote._render_clone_complete(result),
+        ]
+    from orchestrator.agent_move_ui import render_background_notice
+
+    cards.append(render_background_notice({
+        "status": "completed", "operation": "clone", "locale": locale, "result": result,
+    }))
+    for card in cards:
+        assert expected in card
+        assert "A &lt;configured&gt; &amp; unusual note" in card

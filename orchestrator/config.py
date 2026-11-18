@@ -23,6 +23,10 @@ from orchestrator.config_json import (
     read_config_json,
 )
 from orchestrator.pathing import resolve_agy_executable, resolve_command_value, resolve_path_value
+from orchestrator.message_freshness import (
+    normalize_hchat_request_age_policy, normalize_session_message_age_policy,
+    normalize_telegram_message_age_policy,
+)
 from orchestrator.pcm import (
     PCMValidationError,
     atomic_write_pcm,
@@ -190,6 +194,13 @@ class GlobalConfig:
     # Stable PAO owner scope.  Telegram account replacement must not fork the
     # same person's Sessions, Workzones, or owner-scoped preferences.
     owner_scope_id: str | None = None
+    session_message_age_policy: dict[str, Any] = field(default_factory=dict)
+    hchat_request_age_policy: dict[str, Any] = field(default_factory=dict)
+    telegram_message_age_policy: dict[str, Any] = field(default_factory=dict)
+    agent_document_max_bytes: int = 8 * 1024 * 1024
+    # A malformed Telegram identity must not prevent non-Telegram startup.
+    # Ingress re-reads its own policy and fails closed until it is repaired.
+    telegram_identity_invalid: bool = False
 
 @dataclass
 class AgentConfig:
@@ -537,6 +548,7 @@ class ConfigManager:
         self,
         *,
         bootstrap_local_api_credential: bool = False,
+        defer_personal_data_binding: bool = False,
     ) -> tuple[GlobalConfig, list[FlexibleAgentConfig], dict]:
         """Load configuration, with credential maintenance only by explicit owner.
 
@@ -570,7 +582,16 @@ class ConfigManager:
         # legacy global field.  ``owner_scope_id`` deliberately remains stable
         # when the Telegram account changes so the same human keeps one PAO
         # Session/Workzone/preference scope.
-        _auth_id = resolve_telegram_owner_id(g_raw, secrets) or 0
+        try:
+            _auth_id = resolve_telegram_owner_id(g_raw, secrets) or 0
+            _telegram_identity_invalid = False
+        except ValueError:
+            _auth_id = 0
+            _telegram_identity_invalid = True
+            config_logger.warning(
+                "Telegram owner configuration is invalid; Telegram ingress will "
+                "revalidate its policy while other connectors remain available."
+            )
         _owner_scope_id = resolve_owner_scope_id(g_raw, _auth_id)
 
         startup_agent_concurrency = g_raw.get("startup_agent_concurrency", 8)
@@ -682,9 +703,23 @@ class ConfigManager:
         if configured_timezone:
             configured_timezone = canonical_timezone_name(configured_timezone)
 
+        document_max_bytes = g_raw.get("agent_document_max_bytes", 8 * 1024 * 1024)
+        if type(document_max_bytes) is not int or document_max_bytes < 1:
+            raise ValueError("agent_document_max_bytes must be a positive integer")
         global_cfg = GlobalConfig(
             authorized_id=_auth_id,
             owner_scope_id=_owner_scope_id,
+            telegram_identity_invalid=_telegram_identity_invalid,
+            session_message_age_policy=normalize_session_message_age_policy(
+                g_raw.get("session_message_age_policy")
+            ),
+            hchat_request_age_policy=normalize_hchat_request_age_policy(
+                g_raw.get("hchat_request_age_policy")
+            ),
+            telegram_message_age_policy=normalize_telegram_message_age_policy(
+                g_raw.get("telegram_message_age_policy")
+            ),
+            agent_document_max_bytes=document_max_bytes,
             deployment_profile=profile_ctx.profile.value,
             organization_id=profile_ctx.organization_id,
             base_logs_dir=resolve_path_value(
@@ -867,8 +902,38 @@ class ConfigManager:
             )
             agents.append(cfg)
 
+        if profile_ctx.profile.value == "personal":
+            from orchestrator.personal_data_owner import (
+                project_legacy_data_owner, resolve_personal_data_owner,
+            )
+
+            establish_data_binding = (
+                bootstrap_local_api_credential and not defer_personal_data_binding
+            )
+            global_cfg.owner_scope_id = resolve_personal_data_owner(
+                bridge_home, g_raw, _auth_id,
+                establish=establish_data_binding,
+            )
+            if establish_data_binding and not project_legacy_data_owner(
+                self.config_path, global_cfg.owner_scope_id,
+            ):
+                config_logger.warning(
+                    "Legacy personal data projection differs or could not be written; "
+                    "older generations require separate compatibility verification."
+                )
         if bootstrap_local_api_credential:
             from orchestrator.workbench_auth import ensure_local_api_credential
-            secrets = ensure_local_api_credential(secrets, profile=profile_ctx.profile.value)
+            if profile_ctx.profile.value == "personal":
+                # Defer Remote-only work when local bootstrap can do so without
+                # replacing an existing secrets document. Remote prepares its
+                # own access separately, including for a different root.
+                secrets = ensure_local_api_credential(
+                    secrets, profile=profile_ctx.profile.value,
+                    defer_missing_remote=True,
+                )
+            else:
+                secrets = ensure_local_api_credential(
+                    secrets, profile=profile_ctx.profile.value, scheduler_root=bridge_home,
+                )
         return global_cfg, agents, secrets
 # HASHI-Fingerprint: hfp_0c64bda3dc654ffabe8cf0faabcaf9fb

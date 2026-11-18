@@ -156,7 +156,10 @@ class PermissionExecutionGate:
                 arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
             ).encode("utf-8")
             if len(encoded) > 1024 * 1024:
-                raise ValueError("arguments exceed the execution limit")
+                return GateResult(
+                    "argument_transport_limit", operation_id,
+                    payload={"actual_bytes": len(encoded), "limit_bytes": 1024 * 1024},
+                )
             frozen_arguments = json.loads(encoded)
             frozen_descriptor = describe_tool(
                 tool_name, frozen_arguments, cwd=self._cwd, read_roots=self._read_roots,
@@ -217,8 +220,10 @@ class PermissionExecutionGate:
                 return await self._verified_receipt(operation_id, descriptor, receipt, replay=True)
             if existing.state != "waiting":
                 return GateResult("permission_changed", operation_id)
-        if not supported or not covered_by_policy:
+        if not supported:
             return GateResult(self._unsupported_state, operation_id)
+        if not covered_by_policy:
+            return GateResult("denied", operation_id, payload={"reason": "outside_selected_policy"})
         try:
             covered = await asyncio.to_thread(
                 self._authority.evaluate, self._context, descriptor.scopes, operation_id=operation_id,

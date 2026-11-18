@@ -54,10 +54,11 @@ def _complete(
     request_id: str,
     question: str,
     answer: str,
+    owner_id: str = OWNER,
 ) -> None:
     store.accept_run(
         session_id=session_id,
-        owner_id=OWNER,
+        owner_id=owner_id,
         agent_id=agent_id,
         request_id=request_id,
         text=question,
@@ -73,7 +74,7 @@ def _complete(
     )
 
 
-def _fixture(tmp_path: Path, *, entry_count: int = 2):
+def _fixture(tmp_path: Path, *, entry_count: int = 2, source_owner: str = OWNER):
     h1_count = min(12, entry_count)
     h1_agents = [f"agent-{index:02d}" for index in range(h1_count)]
     h2_agents = [f"agent-{index:02d}" for index in range(h1_count, entry_count)]
@@ -84,6 +85,11 @@ def _fixture(tmp_path: Path, *, entry_count: int = 2):
     _write_root(h1, "HASHI1", h1_agents)
     _write_root(h2, "HASHI2", h2_agents)
     _write_root(target, "HASHI4", target_agents)
+    if source_owner != OWNER:
+        for source_root in (h1, h2):
+            config = json.loads((source_root / "agents.json").read_text(encoding="utf-8"))
+            config["global"]["owner_scope_id"] = source_owner
+            (source_root / "agents.json").write_text(json.dumps(config), encoding="utf-8")
     entries = []
     for source_root, instance_id, agents in (
         (h1, "HASHI1", h1_agents),
@@ -94,7 +100,7 @@ def _fixture(tmp_path: Path, *, entry_count: int = 2):
             instance_id=instance_id,
         )
         for agent in agents:
-            session = store.ensure_default_session(owner_id=OWNER, agent_id=agent)
+            session = store.ensure_default_session(owner_id=source_owner, agent_id=agent)
             _complete(
                 store,
                 agent_id=agent,
@@ -102,6 +108,7 @@ def _fixture(tmp_path: Path, *, entry_count: int = 2):
                 request_id=f"source-{agent}",
                 question=f"old question {agent}",
                 answer=f"old answer {agent}",
+                owner_id=source_owner,
             )
             entries.append(
                 {
@@ -139,7 +146,7 @@ def _fixture(tmp_path: Path, *, entry_count: int = 2):
         "schema_version": 1,
         "batch_id": "h4-history-backfill-test",
         "target_instance": "HASHI4",
-        "owner_id": OWNER,
+        "owner_id": source_owner,
         "expected_entry_count": entry_count,
         "entries": entries,
     }
@@ -152,6 +159,237 @@ def _fixture(tmp_path: Path, *, entry_count: int = 2):
 
 def _db_sha(root: Path) -> str:
     return hashlib.sha256((root / "state" / "sessions.sqlite3").read_bytes()).hexdigest()
+
+
+def test_backfill_uses_authenticated_target_owner_through_apply_and_rollback(tmp_path):
+    from types import SimpleNamespace
+
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    _h1, _h2, target, store, manifest, capsules, _legacy = _fixture(tmp_path)
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=target, deployment_profile="personal",
+    ))
+    owner = "owner:workbench"
+    session = store.ensure_default_session(owner_id=owner, agent_id="agent-00")
+    _complete(
+        store, agent_id="agent-00", session_id=session["session_id"],
+        request_id="workbench-target", question="my current question",
+        answer="my current answer", owner_id=owner,
+    )
+    with bind_frontend_command_principal(runtime, owner):
+        plan = dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    assert plan["target_owner_id"] == owner
+    before = _db_sha(target)
+    with bind_frontend_command_principal(runtime, "user:7"):
+        with pytest.raises(AgentMoveError, match="authenticated.*owner"):
+            apply_history_backfill(
+                target, manifest, capsule_dir=capsules,
+                expected_plan_digest=plan["plan_digest"], expected_plan=plan,
+                backup_dir=tmp_path / "wrong-owner-backup",
+            )
+    assert _db_sha(target) == before
+    with bind_frontend_command_principal(runtime, owner):
+        apply_history_backfill(
+            target, manifest, capsule_dir=capsules, expected_plan_digest=plan["plan_digest"],
+            expected_plan=plan, backup_dir=tmp_path / "workbench-owner-backup",
+        )
+        statuses = history_backfill_status(target, manifest)
+    assert all(item["status"] == "imported" for item in statuses["entries"])
+    selected = store.resolve_session(
+        owner_id=owner, agent_id="agent-00", surface="workbench", channel_key="default",
+    )
+    assert [row["text"] for row in store.messages(selected["session_id"], owner_id=owner)] == [
+        "old question agent-00", "old answer agent-00", "my current question", "my current answer",
+    ]
+    default = store.resolve_session(
+        owner_id=OWNER, agent_id="agent-00", surface="workbench", channel_key="default",
+    )
+    assert [row["text"] for row in store.messages(default["session_id"], owner_id=OWNER)] == [
+        "new question agent-00", "new answer agent-00",
+    ]
+    with bind_frontend_command_principal(runtime, "user:7"):
+        with pytest.raises(AgentMoveError, match="ownership"):
+            history_backfill_status(target, manifest)
+        with pytest.raises(AgentMoveError, match="ownership"):
+            rollback_history_backfill(target, manifest)
+    with bind_frontend_command_principal(runtime, owner):
+        rollback_history_backfill(target, manifest)
+    assert [row["text"] for row in store.messages(selected["session_id"], owner_id=owner)] == [
+        "my current question", "my current answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_telegram_backfill_target_uses_current_actor_session_owner(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from orchestrator.telegram_actor_scope import (
+        _delegated_owner, process_telegram_update, runtime_snapshot,
+    )
+
+    _h1, _h2, target, store, manifest, capsules, _legacy = _fixture(tmp_path)
+    config_path = target / "agents.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["global"].update(
+        owner_scope_id=OWNER, telegram_owner_id=7, authorized_telegram_user_ids=[100],
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    runtime = SimpleNamespace(
+        name="agent-00", secrets={},
+        global_config=SimpleNamespace(
+            bridge_home=target, config_path=config_path, owner_scope_id=OWNER,
+            authorized_id=7, deployment_profile="personal",
+        ),
+    )
+    owner = _delegated_owner(runtime_snapshot(runtime), 100)
+    completed = []
+
+    class App:
+        async def process_update(self, _update):
+            plan = await asyncio.to_thread(
+                dry_run_history_backfill, target, manifest, capsule_dir=capsules,
+            )
+            assert plan["target_owner_id"] == owner
+            completed.append(await asyncio.to_thread(
+                apply_history_backfill, target, manifest, capsule_dir=capsules,
+                expected_plan_digest=plan["plan_digest"], expected_plan=plan,
+                backup_dir=tmp_path / "telegram-owner-backup",
+            ))
+
+    runtime.app = App()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=100),
+        effective_chat=SimpleNamespace(id=100, type="private"),
+    )
+    assert await process_telegram_update(runtime, update)
+    assert completed and completed[0]["ok"]
+    sessions = store.list_sessions(owner_id=owner, agent_id="agent-00")
+    assert len(sessions) == 1
+    assert [row["text"] for row in store.messages(sessions[0]["session_id"], owner_id=owner)] == [
+        "old question agent-00", "old answer agent-00",
+    ]
+    primary = store.resolve_session(
+        owner_id=OWNER, agent_id="agent-00", surface="workbench", channel_key="default",
+    )
+    assert [row["text"] for row in store.messages(primary["session_id"], owner_id=OWNER)] == [
+        "new question agent-00", "new answer agent-00",
+    ]
+
+
+def test_multi_source_backfill_maps_each_source_owner_without_adopting_other_history(tmp_path):
+    from types import SimpleNamespace
+
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    h1, h2, target, store, old_manifest, _old_capsules, _legacy = _fixture(tmp_path)
+    manifest = json.loads(json.dumps(old_manifest))
+    manifest["schema_version"] = 2
+    manifest.pop("owner_id")
+    manifest["source_owners"] = {"HASHI1": "owner:one", "HASHI2": "owner:two"}
+    manifest["entries"][1]["source_instance"] = "HASHI2"
+    for mapping in (
+        {},
+        {"HASHI1": "owner:one"},
+        {"HASHI1": "owner:one", "HASHI2": "owner:two", "HASHI9": "owner:extra"},
+        {"HASHI1": "owner:one", "hashi1": "owner:other", "HASHI2": "owner:two"},
+        {"HASHI1": "", "HASHI2": "owner:two"},
+    ):
+        invalid = {**manifest, "source_owners": mapping}
+        with pytest.raises(AgentMoveError, match="source owner"):
+            validate_manifest(invalid)
+
+    for root, source, owner, agent in (
+        (h1, "HASHI1", "owner:one", "agent-00"),
+        (h2, "HASHI2", "owner:two", "agent-01"),
+    ):
+        config_path = root / "agents.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["global"]["owner_scope_id"] = owner
+        if source == "HASHI2":
+            first = json.loads((h1 / "agents.json").read_text(encoding="utf-8"))
+            config["agents"] = [row for row in first["agents"] if row["name"] == agent]
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        source_store = SessionStore(root / "state/sessions.sqlite3", instance_id=source)
+        session = source_store.ensure_default_session(owner_id=owner, agent_id=agent)
+        _complete(
+            source_store, agent_id=agent, session_id=session["session_id"],
+            request_id=f"mapped-{agent}", question=f"{owner} question",
+            answer=f"{owner} answer", owner_id=owner,
+        )
+
+    capsules = tmp_path / "mapped-capsules"
+    wrong = json.loads(json.dumps(manifest))
+    wrong["source_owners"]["HASHI1"] = "user:7"
+    with pytest.raises(AgentMoveError, match="source owner"):
+        export_history_capsules(h1, "HASHI1", wrong, tmp_path / "wrong-capsules")
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=h1, deployment_profile="personal",
+    ))
+    with bind_frontend_command_principal(runtime, "user:7"):
+        authorised = export_history_capsules(
+            h1, "HASHI1", wrong, tmp_path / "authenticated-capsules",
+        )
+    assert len(authorised["entries"]) == 1
+    authorised_name = validate_manifest(wrong)["entries"][0]["capsule_name"]
+    authorised_capsule = json.loads(
+        (tmp_path / "authenticated-capsules" / authorised_name).read_text(encoding="utf-8")
+    )
+    assert authorised_capsule["owner_id"] == "user:7"
+    assert "old question agent-00" in json.dumps(authorised_capsule)
+    assert "owner:one question" not in json.dumps(authorised_capsule)
+    export_history_capsules(h1, "HASHI1", manifest, capsules)
+    export_history_capsules(h2, "HASHI2", manifest, capsules)
+    entry = validate_manifest(manifest)["entries"][0]
+    capsule_path = capsules / entry["capsule_name"]
+    original_capsule = capsule_path.read_bytes()
+    tampered = json.loads(original_capsule)
+    tampered["owner_id"] = "owner:other"
+    capsule_path.write_text(json.dumps(tampered), encoding="utf-8")
+    try:
+        with pytest.raises(AgentMoveError, match="capsule is invalid"):
+            dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    finally:
+        capsule_path.write_bytes(original_capsule)
+    plan = dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    assert plan["source_owners"] == manifest["source_owners"]
+    forged_plan = json.loads(json.dumps(plan))
+    forged_plan["source_owners"]["HASHI1"] = "user:7"
+    before = _db_sha(target)
+    with pytest.raises(AgentMoveError, match="plan changed"):
+        apply_history_backfill(
+            target, manifest, capsule_dir=capsules, expected_plan_digest=plan["plan_digest"],
+            expected_plan=forged_plan, backup_dir=tmp_path / "forged-backup",
+        )
+    assert _db_sha(target) == before
+    apply_history_backfill(
+        target, manifest, capsule_dir=capsules, expected_plan_digest=plan["plan_digest"],
+        expected_plan=plan, backup_dir=tmp_path / "mapped-backup",
+    )
+    for agent, owner in (("agent-00", "owner:one"), ("agent-01", "owner:two")):
+        session = store.resolve_session(
+            owner_id=OWNER, agent_id=agent, surface="workbench", channel_key="default",
+        )
+        texts = [row["text"] for row in store.messages(session["session_id"], owner_id=OWNER)]
+        assert texts == [
+            f"{owner} question", f"{owner} answer",
+            f"new question {agent}", f"new answer {agent}",
+        ]
+    replay = dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    apply_history_backfill(
+        target, manifest, capsule_dir=capsules, expected_plan_digest=replay["plan_digest"],
+        expected_plan=replay, backup_dir=tmp_path / "mapped-replay-backup",
+    )
+    assert all(item["status"] == "imported" for item in history_backfill_status(target, manifest)["entries"])
+    rollback_history_backfill(target, manifest)
+    for agent in ("agent-00", "agent-01"):
+        session = store.resolve_session(
+            owner_id=OWNER, agent_id=agent, surface="workbench", channel_key="default",
+        )
+        assert [row["text"] for row in store.messages(session["session_id"], owner_id=OWNER)] == [
+            f"new question {agent}", f"new answer {agent}",
+        ]
 
 
 def test_dry_run_and_apply_twelve_agents_preserve_new_history_and_are_idempotent(
@@ -237,6 +475,151 @@ def test_dry_run_and_apply_twelve_agents_preserve_new_history_and_are_idempotent
     ]
 
 
+def test_backfill_maps_distinct_owners_and_binds_the_destination_to_the_plan(tmp_path):
+    _h1, _h2, target, store, manifest, capsules, _legacy = _fixture(
+        tmp_path, entry_count=1
+    )
+    config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
+    config["global"]["owner_scope_id"] = "owner:target"
+    (target / "agents.json").write_text(json.dumps(config), encoding="utf-8")
+
+    plan = dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    assert plan["owner_id"] == OWNER
+    assert plan["target_owner_id"] == "owner:target"
+
+    config["global"]["owner_scope_id"] = "owner:changed"
+    (target / "agents.json").write_text(json.dumps(config), encoding="utf-8")
+    altered_plan = {**plan, "target_owner_id": "owner:changed"}
+    with pytest.raises(AgentMoveError, match="plan changed"):
+        apply_history_backfill(
+            target, manifest, capsule_dir=capsules,
+            expected_plan_digest=plan["plan_digest"], expected_plan=altered_plan,
+            backup_dir=tmp_path / "blocked-backup",
+        )
+    assert not (tmp_path / "blocked-backup").exists()
+
+    apply_history_backfill(
+        target, manifest, capsule_dir=capsules,
+        expected_plan_digest=plan["plan_digest"], expected_plan=plan,
+        backup_dir=tmp_path / "cross-owner-backup",
+    )
+    imported = store.list_sessions(
+        owner_id="owner:target", agent_id="agent-00", include_archived=True
+    )
+    assert len(imported) == 1
+    assert [m["text"] for m in store.messages(
+        imported[0]["session_id"], owner_id="owner:target"
+    )] == ["old question agent-00", "old answer agent-00"]
+    original = store.resolve_session(
+        owner_id=OWNER, agent_id="agent-00", surface="workbench",
+        channel_key="default",
+    )
+    assert [m["text"] for m in store.messages(
+        original["session_id"], owner_id=OWNER
+    )] == ["new question agent-00", "new answer agent-00"]
+    _complete(
+        store, agent_id="agent-00", session_id=imported[0]["session_id"],
+        request_id="after-backfill", question="later question", answer="later answer",
+        owner_id="owner:target",
+    )
+    config["global"]["owner_scope_id"] = "owner:changed"
+    (target / "agents.json").write_text(json.dumps(config), encoding="utf-8")
+    status = history_backfill_status(target, manifest)
+    assert status["entries"][0]["status"] == "imported"
+    rollback_history_backfill(target, manifest)
+    assert [m["text"] for m in store.messages(
+        imported[0]["session_id"], owner_id="owner:target"
+    )] == ["later question", "later answer"]
+    assert [m["text"] for m in store.messages(
+        original["session_id"], owner_id=OWNER
+    )] == ["new question agent-00", "new answer agent-00"]
+
+
+@pytest.mark.parametrize("source_owner", ["owner:fixture", "owner with spaces", "owner:" + "x" * 300])
+def test_backfill_accepts_opaque_source_owner(tmp_path, source_owner):
+    _h1, _h2, target, store, manifest, capsules, _legacy = _fixture(
+        tmp_path, entry_count=1, source_owner=source_owner
+    )
+    plan = dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    assert plan["owner_id"] == source_owner
+    assert plan["target_owner_id"] == OWNER
+    apply_history_backfill(
+        target, manifest, capsule_dir=capsules,
+        expected_plan_digest=plan["plan_digest"],
+        backup_dir=tmp_path / "nonnumeric-owner-backup",
+    )
+    session = store.resolve_session(
+        owner_id=OWNER, agent_id="agent-00", surface="workbench",
+        channel_key="default",
+    )
+    assert [m["text"] for m in store.messages(
+        session["session_id"], owner_id=OWNER
+    )] == [
+        "old question agent-00", "old answer agent-00",
+        "new question agent-00", "new answer agent-00",
+    ]
+
+
+def test_backfill_cli_applies_saved_plan_after_legacy_owner_changes(tmp_path, capsys):
+    from scripts import backfill_agent_history
+
+    _h1, _h2, target, store, manifest, capsules, _legacy = _fixture(tmp_path, entry_count=1)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert backfill_agent_history.main([
+        "dry-run", "--target-root", str(target), "--manifest", str(manifest_path),
+        "--capsule-dir", str(capsules),
+    ]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
+    config["global"]["owner_scope_id"] = "owner:changed"
+    (target / "agents.json").write_text(json.dumps(config), encoding="utf-8")
+    assert backfill_agent_history.main([
+        "apply", "--target-root", str(target), "--manifest", str(manifest_path),
+        "--capsule-dir", str(capsules), "--plan-file", str(plan_path),
+        "--backup-dir", str(tmp_path / "cli-backup"),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    session = store.resolve_session(
+        owner_id=OWNER, agent_id="agent-00", surface="workbench", channel_key="default"
+    )
+    assert [row["text"] for row in store.messages(session["session_id"], owner_id=OWNER)] == [
+        "old question agent-00", "old answer agent-00",
+        "new question agent-00", "new answer agent-00",
+    ]
+
+
+def test_backfill_rollback_checks_all_recorded_owners_before_removing_anything(tmp_path):
+    import sqlite3
+
+    _h1, _h2, target, store, manifest, capsules, _legacy = _fixture(tmp_path)
+    plan = dry_run_history_backfill(target, manifest, capsule_dir=capsules)
+    apply_history_backfill(
+        target, manifest, capsule_dir=capsules, expected_plan_digest=plan["plan_digest"],
+        backup_dir=tmp_path / "mixed-owner-backup",
+    )
+    entries = validate_manifest(manifest)["entries"]
+    session = store.resolve_session(
+        owner_id=OWNER, agent_id="agent-00", surface="workbench", channel_key="default"
+    )
+    before = [row["text"] for row in store.messages(session["session_id"], owner_id=OWNER)]
+    with sqlite3.connect(target / "state/sessions.sqlite3") as db:
+        db.execute(
+            "UPDATE conversation_continuity_batches SET owner_id=? WHERE transfer_id=?",
+            ("owner:foreign", entries[1]["transfer_id"]),
+        )
+    with pytest.raises(AgentMoveError, match="ownership"):
+        history_backfill_status(target, manifest)
+    with pytest.raises(AgentMoveError, match="ownership"):
+        rollback_history_backfill(target, manifest)
+    assert [row["text"] for row in store.messages(
+        session["session_id"], owner_id=OWNER
+    )] == before
+    assert store.conversation_continuity_import_status(entries[0]["transfer_id"]) is not None
+
+
 def test_apply_rejects_running_instance_and_nonterminal_run(tmp_path):
     _h1, _h2, target, store, manifest, capsule_dir, _legacy = _fixture(tmp_path)
     plan = dry_run_history_backfill(target, manifest, capsule_dir=capsule_dir)
@@ -294,6 +677,12 @@ def test_plan_binds_channels_and_apply_backs_up_before_live_store_init(
     )
     changed = dry_run_history_backfill(target, manifest, capsule_dir=capsule_dir)
     assert changed["plan_digest"] != plan["plan_digest"]
+    with pytest.raises(AgentMoveError, match="plan changed"):
+        apply_history_backfill(
+            target, manifest, capsule_dir=capsule_dir, expected_plan=plan,
+            expected_plan_digest=plan["plan_digest"], backup_dir=tmp_path / "stale-plan-backup",
+        )
+    assert not (tmp_path / "stale-plan-backup").exists()
 
     backup = tmp_path / "binding-backup"
     original_init = SessionStore.__init__
@@ -454,7 +843,7 @@ def test_manifest_owner_source_and_shape_fail_closed_before_target_write(tmp_pat
 
     wrong_owner = dict(manifest)
     wrong_owner["owner_id"] = "user:8"
-    with pytest.raises(AgentMoveError, match="target owner"):
+    with pytest.raises(AgentMoveError, match="capsule is invalid"):
         dry_run_history_backfill(target, wrong_owner, capsule_dir=capsule_dir)
 
     target_config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
@@ -511,3 +900,4 @@ def test_backup_inventory_permission_failure_is_fail_closed(tmp_path, monkeypatc
             expected_plan_digest=plan["plan_digest"],
             backup_dir=tmp_path / "denied-backup",
         )
+# HASHI-Fingerprint: hfp_6889ef80bdb24a24bb1260bef9113b25

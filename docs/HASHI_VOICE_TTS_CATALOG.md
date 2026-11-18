@@ -102,6 +102,10 @@ conversion. Saved Agent state contains service and voice identifiers, not
 endpoint URLs or credentials. Provider failures remain explicit and use the
 existing bounded fallback and audit path.
 
+A configured LAN speech service may use a hostname. Each request connects only
+to a resolved private LAN address and retains the configured host for HTTP and
+TLS; public and known metadata destinations cannot be relabelled as LAN.
+
 Voice reply consumers preserve separate synthesis, asset preparation, publication,
 and delivery outcomes. `/say` renders the safe cause and diagnostic reference;
 a receipt from another endpoint cannot confirm this delivery. If publication or

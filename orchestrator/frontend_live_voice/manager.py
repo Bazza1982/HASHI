@@ -3062,6 +3062,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                            "phone": phone, "configuration_error": configuration_error,
                            "media": resolved_phone["media"] if phone else None,
                            "heartbeat_interval_seconds": 10, "lease_expiry_seconds": 45,
+                           "manual_resume_after_budget": True,
                            "provider_session_max_duration_seconds": (resolved_phone["adapter"].capabilities.max_session_seconds if phone else None)},
         }
 
@@ -3423,13 +3424,39 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 count += 1
         return count
 
+    @staticmethod
+    def _resume_outcome_unsettled(connection: sqlite3.Connection, call_id: str) -> bool:
+        """Never create a second provider session when an earlier creation is unknown."""
+        rows = connection.execute(
+            "SELECT state, outcome_json FROM live_call_attempts WHERE call_id = ?",
+            (call_id,),
+        ).fetchall()
+        for row in rows:
+            if row["state"] in {"reserved", "provider_created", "unknown"}:
+                return True
+            if row["state"] == "failed":
+                try:
+                    outcome = json.loads(row["outcome_json"] or "{}")
+                except (TypeError, ValueError):
+                    return True
+                if not isinstance(outcome, Mapping) or outcome.get("error_code") in {
+                    "live_provider_create_unknown", "live_provider_answer_invalid",
+                }:
+                    return True
+        return False
+
     async def _op_resume(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Replace only the provider/browser transport while preserving one logical call."""
         binding, _current = self._call_binding(owner_id, payload)
+        if str(_current["phase"]) in TERMINAL_PHASES | {"ending"}:
+            raise LiveVoiceError("live_call_not_recovering", 409)
         sdp = payload.get("sdp")
         if not isinstance(sdp, str) or not sdp.strip():
             raise LiveVoiceError("live_sdp_invalid", 400)
         attempt_id = identifier(payload.get("idempotency_key"))
+        manual_retry = payload.get("manual_retry", False)
+        if not isinstance(manual_retry, bool):
+            raise LiveVoiceError("live_field_invalid", 400)
         digest = stable_digest(dict(payload))
         with self.session_store._lock, self.session_store._connection() as connection:
             prior = connection.execute(
@@ -3454,16 +3481,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             raise LiveVoiceError("live_call_not_recovering", 409)
         with self.session_store._lock, self.session_store._connection() as connection:
             resume_attempts = self._consecutive_resume_attempts(connection, binding)
-        if resume_attempts >= MAX_CONSECUTIVE_RESUME_ATTEMPTS:
-            self._mark_terminal(
-                binding,
-                "failed",
-                provider_close_state=str(
-                    current["provider_close_state"] or "unconfirmed"
-                ),
-                summary="Phone recovery stopped after repeated failed attempts",
-                error_code="live_recovery_attempts_exhausted",
-            )
+            if self._resume_outcome_unsettled(connection, binding.call_id):
+                raise LiveVoiceError("live_outcome_unknown", 409)
+        if resume_attempts >= MAX_CONSECUTIVE_RESUME_ATTEMPTS and not manual_retry:
+            # Stop automatic attempts but keep the logical call and transcript.
+            # A distinct explicit retry may try again once the outcome is known.
             raise LiveVoiceError("live_recovery_attempts_exhausted", 409)
 
         frozen_public = self._stored_phone_public(current)
@@ -3506,6 +3528,11 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
             ).fetchone()
             if row is None or row["phase"] != "recovering":
                 raise LiveVoiceError("live_call_not_recovering", 409)
+            if self._resume_outcome_unsettled(connection, binding.call_id):
+                raise LiveVoiceError("live_outcome_unknown", 409)
+            if (not manual_retry and self._consecutive_resume_attempts(connection, binding)
+                    >= MAX_CONSECUTIVE_RESUME_ATTEMPTS):
+                raise LiveVoiceError("live_recovery_attempts_exhausted", 409)
             previous_provider_id = str(row["provider_session_id"] or "")
             now = _utc_now()
             config = {
@@ -3550,7 +3577,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 binding = self._binding_from_row(reserved_row)
                 self._append_call_state(
                     connection, binding, "connecting", "Replacing phone transport",
-                    reason="transport_resume_requested",
+                    reason="transport_resume_requested", manual_retry=manual_retry,
                 )
             except sqlite3.IntegrityError as exc:
                 raise LiveVoiceError("live_call_resume_in_progress", 409) from exc
@@ -3624,6 +3651,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
         optional_units = int(context_audit.get("optional_reference_units", 0))
         input_messages.extend(history)
         unit_counts.extend([1] * len(history))
+        provider_creation_started = False
         try:
             async with adapter.http_session() as http:
                 fit_kwargs = {
@@ -3640,6 +3668,7 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 )
                 config.update({"input_sha256": stable_digest({"input": provider_input}),
                                "input_messages": len(provider_input), **exact_audit})
+                provider_creation_started = True
                 provider = await adapter.create(
                     http, key=key,
                         sdp=sdp, instructions=phone_session["instructions"],
@@ -3649,26 +3678,32 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 )
         except LiveVoiceError as exc:
             self._remember_provider_availability(phone_session, key, exc.code)
+            unknown = exc.code in {"live_provider_create_unknown", "live_provider_answer_invalid"}
             self._mark_recovering(binding, reason=exc.code,
-                                  summary="Provider replacement failed; logical phone remains open")
+                                  summary="Provider replacement failed; logical phone remains open",
+                                  provider_close_state="unconfirmed" if unknown else None)
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
-                    "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
-                    (json.dumps({"ok": False, "error_code": exc.code}), _utc_now(), attempt_id),
+                    "UPDATE live_call_attempts SET state = ?, outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    ("unknown" if unknown else "failed",
+                     json.dumps({"ok": False, "error_code": exc.code}), _utc_now(), attempt_id),
                 )
             self.audit.record(binding, "transport.resume_failed", error_code=exc.code)
             raise
         except Exception as exc:
-            self._mark_recovering(binding, reason="provider_replacement_failed",
-                                  summary="Provider replacement failed; logical phone remains open")
+            code = "live_provider_create_unknown" if provider_creation_started else "live_provider_replacement_failed"
+            self._mark_recovering(binding, reason=code,
+                                  summary="Provider replacement failed; logical phone remains open",
+                                  provider_close_state="unconfirmed" if provider_creation_started else None)
             with self.session_store._lock, self.session_store._connection() as connection:
                 connection.execute(
-                    "UPDATE live_call_attempts SET state = 'failed', outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
-                    (json.dumps({"ok": False, "error_code": "live_provider_replacement_failed"}), _utc_now(), attempt_id),
+                    "UPDATE live_call_attempts SET state = ?, outcome_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    ("unknown" if provider_creation_started else "failed",
+                     json.dumps({"ok": False, "error_code": code}), _utc_now(), attempt_id),
                 )
             self.audit.record(binding, "transport.resume_failed",
-                              error_code="live_provider_replacement_failed", **exception_evidence(exc))
-            raise LiveVoiceError("live_provider_replacement_failed", 502) from exc
+                              error_code=code, **exception_evidence(exc))
+            raise LiveVoiceError(code, 502) from exc
         self._remember_provider_availability(phone_session, key)
         provider_id, answer = provider["provider_session_id"], provider["sdp_answer"]
         self._connection_providers[provider_id] = adapter
@@ -3810,7 +3845,14 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
     async def _op_snapshot(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         binding, row = self._call_binding(owner_id, payload)
         usage = _public_usage(json.loads(row["usage_json"])) if row["usage_json"] else None
+        with self.session_store._lock, self.session_store._connection() as connection:
+            exhausted = (str(row["phase"]) == "recovering" and
+                         self._consecutive_resume_attempts(connection, binding) >= MAX_CONSECUTIVE_RESUME_ATTEMPTS)
+            unsettled = self._resume_outcome_unsettled(connection, binding.call_id)
         snapshot = {"scope": binding.public_scope(), "phase": row["phase"],
+                "manual_resume_after_budget": True,
+                "resume_automatic_attempts_exhausted": exhausted,
+                "resume_outcome_unsettled": unsettled,
                 "latest_sequence": int(row["latest_session_event_sequence"]), "started_at": row["started_at"],
                 "ended_at": row["ended_at"], "provider_close_state": row["provider_close_state"], "usage": usage,
                 "resume_required": str(row["phase"]) == "recovering",
@@ -3865,6 +3907,104 @@ class LiveVoiceManager(DurableVoicePort, AdmissionPort, LiveApplicationPort):
                 break
         return {"ok": True, "events": events,
                 "next_after": next_after, "reset_required": False}
+
+    async def _op_transcript_page(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Read durable fragments for this logical call, newest page first.
+
+        A cursor is exclusive and tied to the authenticated call scope. This
+        preserves the initial traversal even as later fragments are committed.
+        """
+        binding, _row = self._call_binding(owner_id, payload)
+
+        def page_number(value: Any, default: int | None) -> int | None:
+            if value is None:
+                return default
+            if isinstance(value, bool) or not (
+                isinstance(value, int) or isinstance(value, str) and value.isascii() and value.isdigit()
+            ):
+                raise LiveVoiceError("live_page_invalid", 400)
+            if isinstance(value, str) and len(value) > 16:
+                raise LiveVoiceError("live_page_invalid", 400)
+            return int(value)
+
+        before = page_number(payload.get("before"), None)
+        forward = "after" in payload
+        after = page_number(payload.get("after"), None)
+        through = page_number(payload.get("through"), None)
+        limit = page_number(payload.get("limit"), 200)
+        max_sequence = 9007199254740991
+        if ((before is not None and not 1 <= before <= max_sequence)
+                or (after is not None and not 0 <= after <= max_sequence)
+                or (through is not None and not 0 <= through <= max_sequence)
+                or (forward and before is not None) or (not forward and through is not None)
+                or (forward and after is None) or not 1 <= limit <= 500):
+            raise LiveVoiceError("live_page_invalid", 400)
+        with self.session_store._lock, self.session_store._connection() as connection:
+            connection.execute("BEGIN")
+            if forward and through is None:
+                maximum = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) AS latest FROM live_fragments "
+                    "WHERE owner_id=? AND session_id=? AND call_id=?",
+                    (owner_id, binding.session_id, binding.call_id),
+                ).fetchone()
+                through = int(maximum["latest"])
+                if through > max_sequence:
+                    raise LiveVoiceError("live_page_invalid", 400)
+            bounds = ("f.sequence > ? AND f.sequence <= ?" if forward
+                      else "(? IS NULL OR f.sequence < ?)")
+            ordering = "ASC" if forward else "DESC"
+            values = (after, through) if forward else (before, before)
+            rows = connection.execute(
+                """SELECT f.provider_event_id, f.call_epoch, f.speaker, f.start_ms, f.end_ms,
+                          f.sequence, e.sequence AS event_sequence, e.kind, e.session_id AS event_session,
+                          e.detail_json
+                   FROM live_fragments f LEFT JOIN run_events e ON e.event_id = f.event_id
+                   WHERE f.owner_id=? AND f.session_id=? AND f.call_id=? AND """
+                + bounds + " ORDER BY f.sequence " + ordering + " LIMIT ?",
+                (owner_id, binding.session_id, binding.call_id, *values, limit + 1),
+            ).fetchall()
+
+        events: list[dict[str, Any]] = []
+        used_bytes = 0
+        has_more = False
+        for row in rows:
+            if len(events) >= limit:
+                has_more = True
+                break
+            try:
+                detail = json.loads(row["detail_json"] or "{}")
+                epoch = int(row["call_epoch"])
+                expected_scope = {**binding.public_scope(), "call_epoch": epoch}
+                fragment = Fragment(detail.get("provider_event_id"), detail.get("speaker"), detail.get("text"),
+                                    detail.get("start_ms"), detail.get("end_ms"))
+                if (epoch < 1 or epoch > binding.call_epoch or detail.get("scope") != expected_scope
+                        or row["kind"] != "voice.live.transcript.fragment"
+                        or row["event_session"] != binding.session_id
+                        or row["event_sequence"] != row["sequence"]
+                        or fragment.provider_event_id != row["provider_event_id"]
+                        or fragment.speaker != row["speaker"]
+                        or fragment.start_ms != row["start_ms"] or fragment.end_ms != row["end_ms"]):
+                    raise ValueError("fragment and durable event do not agree")
+                event = {"schema": detail.get("schema", CALL_EVENT_SCHEMA), "scope": expected_scope,
+                         "sequence": int(row["sequence"]), "kind": "transcript.fragment",
+                         "detail": {key: value for key, value in detail.items() if key not in {"schema", "scope"}}}
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                raise LiveVoiceError("live_transcript_corrupt", 409) from exc
+            size = len(json.dumps(event, ensure_ascii=True).encode("utf-8")) + 2
+            # Leave room for the response envelope under the existing 1 MiB proxy limit.
+            if events and used_bytes + size > 524288 - 4096:
+                has_more = True
+                break
+            if size > 524288 - 4096:
+                raise LiveVoiceError("live_transcript_fragment_too_large", 409)
+            events.append(event)
+            used_bytes += size
+        if forward:
+            return {"ok": True, "events": events, "has_more": has_more, "through": through,
+                    "next_after": events[-1]["sequence"] if has_more else None}
+        events.reverse()
+        return {"ok": True, "events": events, "has_more": has_more,
+                "next_before": events[0]["sequence"] if has_more else None}
 
     async def _op_observe(self, owner_id: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Append bounded browser lifecycle evidence outside Session events."""

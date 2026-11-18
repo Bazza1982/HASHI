@@ -36,20 +36,27 @@ def _tool(
 OFFICE_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
     _tool(
         "office_inspect",
-        "FIRST for an Excel, Word, PowerPoint or PDF file. Identify content and return a file_id and suggested next step. Supply exactly one of path, source or file_id.",
+        "FIRST for an Excel, Word, PowerPoint or PDF file. Identify content and return a file_id and suggested next step. Supply exactly one of path, source, attachment_id or file_id. An authorized working copy can be reopened from another Session using source=working_copy.",
         {
             "path": _string("Known authorized file path (Windows/WSL paths supported).", 4096),
-            "source": {"type": "string", "enum": ["last_attachment"],
-                       "description": "Use last_attachment for the latest uploaded file."},
+            "source": {"type": "string", "enum": ["last_attachment", "list_attachments", "list_working_copies", "working_copy"],
+                       "description": "List visible attachments or working copies of an authorized Session; reopen a selected working copy."},
+            "source_session_id": _string("Session holding the working copies, for list_working_copies or working_copy.", 160),
+            "source_file_id": _string("Office file ID in that Session, when source=working_copy.", 160),
+            "source_revision": {"type": "integer", "minimum": 1,
+                                "description": "Optional exact working-copy revision; without it, use the current committed version."},
+            "cursor": _string("Continuation returned by a previous list operation.", 512),
+            "attachment_id": _string("Explicit attachment ID from this Session's visible user messages.", 160),
             "file_id": _string("Existing Office file ID to inspect again.", 160),
         },
     ),
     _tool(
         "office_read",
-        "Read only the required Excel range, Word section, or PowerPoint slide. Use file_id returned by office_inspect. Never read a large workbook in full.",
+        "Read an Excel range, Word section, or PowerPoint slide. Use file_id from office_inspect and follow next cursor to read complete large results.",
         {
             "file_id": _string("Office file ID returned by office_inspect.", 160),
-            "target": _string("Range/location: Sales!A1:D20, section heading, paragraph:1-20, table:1!1:30, slide:2, page:1-3.", 512),
+            "target": _string("Range/location: Sales!A1:D20, section heading, paragraph:1-20, table:1!1:30, table-list:31-40, slide:2, page:1-3.", 512),
+            "cursor": _string("Continuation returned by a previous office_read for the same file and version.", 160),
             "view": {"type": "string", "enum": ["summary", "values", "formulas", "text", "structure"],
                      "description": "Default summary; values for cells, text for documents."},
         },
@@ -166,13 +173,30 @@ def validate_office_arguments(tool_name: str, arguments: Mapping[str, Any]) -> d
                 raise OfficeInputError("INVALID_FIELD", key + " has an unsupported value.")
         elif expected == "boolean" and type(value) is not bool:
             raise OfficeInputError("INVALID_FIELD", key + " must be true or false.")
+        elif expected == "integer" and (type(value) is not int or value < spec.get("minimum", 0)):
+            raise OfficeInputError("INVALID_FIELD", key + " must be a positive integer.")
     if tool_name == "office_inspect":
-        sources = [key for key in ("path", "source", "file_id") if key in arguments]
+        sources = [key for key in ("path", "source", "attachment_id", "file_id") if key in arguments]
         if len(sources) != 1:
             raise OfficeInputError(
-                "SOURCE_REQUIRED", "Supply exactly one of path, source or file_id.",
+                "SOURCE_REQUIRED", "Supply exactly one of path, source, attachment_id or file_id.",
                 {"tool": "office_inspect", "arguments": {"source": "last_attachment"}},
             )
+    if tool_name == "office_inspect":
+        reopen_fields = {"source_session_id", "source_file_id", "source_revision"}
+        source = arguments.get("source")
+        if source == "working_copy":
+            if not {"source_session_id", "source_file_id"}.issubset(arguments):
+                raise OfficeInputError("MISSING_FIELD", "A source Session and file ID are required to reopen a working copy.")
+        elif source == "list_working_copies":
+            if "source_session_id" not in arguments:
+                raise OfficeInputError("MISSING_FIELD", "A source Session is required to list working copies.")
+            if {"source_file_id", "source_revision"}.intersection(arguments):
+                raise OfficeInputError("INVALID_FIELD", "Choose a file only when reopening a working copy.")
+        elif reopen_fields.intersection(arguments):
+            raise OfficeInputError("INVALID_FIELD", "Working-copy fields require a working-copy source.")
+        if "cursor" in arguments and source not in {"list_attachments", "list_working_copies"}:
+            raise OfficeInputError("INVALID_FIELD", "cursor is only valid for a list operation.")
     if tool_name == "office_create":
         if not any(key in arguments for key in ("content", "source_id", "template")):
             raise OfficeInputError(
@@ -186,3 +210,4 @@ def validate_office_arguments(tool_name: str, arguments: Mapping[str, Any]) -> d
     ):
         raise OfficeInputError("CONTENT_REQUIRED", "Supply content or source_id for the edit.")
     return dict(arguments)
+# HASHI-Fingerprint: hfp_51c7a8d0a19d4a20b1eba355755c55ed

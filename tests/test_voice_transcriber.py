@@ -313,8 +313,8 @@ async def test_compute_transcription_is_shared_and_refreshes_without_local_whisp
             return SimpleNamespace(offering=SimpleNamespace(model_id=ref.model_id))
 
     class Client:
-        async def transcribe(self, resolved, data, *, filename, language):
-            invocations.append((resolved.offering.model_id, data, filename, language))
+        async def transcribe(self, resolved, data, *, filename, language, max_input_bytes):
+            invocations.append((resolved.offering.model_id, data, filename, language, max_input_bytes))
             return {"text": " 中文转写成功 "}
 
     monkeypatch.setattr(voice_transcriber, "ComputeServiceDirectory", Directory)
@@ -327,7 +327,15 @@ async def test_compute_transcription_is_shared_and_refreshes_without_local_whisp
     config.write_text(json.dumps({"provider": "compute", "compute": reference}))
     assert await transcriber.transcribe(audio) == "中文转写成功"
     assert [item[0] for item in invocations] == ["sensevoice-small", "new-model"]
-    assert invocations[0][1:] == (b"test-ogg-audio", "utterance.ogg", "zh")
+    assert invocations[0][1:] == (b"test-ogg-audio", "utterance.ogg", "zh", 8 * 1024 * 1024)
+    config.write_text(json.dumps({"provider": "compute", "compute": reference,
+                                  "max_compute_input_bytes": 8}))
+    assert (await transcriber.transcribe_result(audio)).ok is False
+    assert len(invocations) == 2
+    config.write_text(json.dumps({"provider": "compute", "compute": reference,
+                                  "max_compute_input_bytes": 1024}))
+    assert (await transcriber.transcribe_result(audio)).ok is True
+    assert invocations[-1][-1] == 1024
 
 
 @pytest.mark.asyncio

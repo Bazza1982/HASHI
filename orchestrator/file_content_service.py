@@ -6,11 +6,57 @@ import base64
 import io
 import json
 import logging
+import os
+from functools import partial
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 
 logger = logging.getLogger("BridgeU.FileContent")
+
+# The current authenticated JSON transport has a 64 MiB body budget.
+CONTENT_WIRE_MAX_BYTES = 64 * 1024 * 1024
+CONTENT_WIRE_MAX_INPUT_BYTES = ((CONTENT_WIRE_MAX_BYTES - 4096) // 4) * 3
+_CAPACITY_DEFAULTS = {
+    "max_input_bytes": 32 * 1024 * 1024,
+    "max_image_pixels": 64_000_000,
+    "max_decoded_bytes": 256 * 1024 * 1024,
+    "receiving_concurrency": 2,
+    "processing_concurrency": 2,
+    "queue_limit": 8,
+    "ocr_timeout_seconds": 120,
+}
+
+
+def _content_capacity(overrides=None):
+    if overrides is not None and (
+        not isinstance(overrides, dict) or set(overrides) - set(_CAPACITY_DEFAULTS)
+    ):
+        raise ValueError("invalid file content capacity configuration")
+    values = {}
+    for key, default in _CAPACITY_DEFAULTS.items():
+        raw = (overrides or {}).get(key, os.environ.get("HASHI_FILE_CONTENT_" + key.upper(), default))
+        if type(raw) not in (int, str) or (isinstance(raw, str) and not raw.isdecimal()):
+            raise ValueError(f"invalid file content capacity: {key}")
+        try:
+            number = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid file content capacity: {key}") from exc
+        if type(raw) is bool or number < (0 if key == "queue_limit" else 1):
+            raise ValueError(f"invalid file content capacity: {key}")
+        values[key] = number
+    if values["max_input_bytes"] > CONTENT_WIRE_MAX_INPUT_BYTES:
+        raise ValueError("file content capacity exceeds the current authenticated JSON transport")
+    return values
+
+
+def content_request_timeout_seconds():
+    """Budget for the authenticated proxy hop, including queued work."""
+    raw = os.environ.get("HASHI_FILE_CONTENT_REQUEST_TIMEOUT_SECONDS", "7200")
+    if not raw.isdecimal() or int(raw) < 1 or int(raw) > 2147483:
+        raise ValueError("invalid file content request timeout")
+    return int(raw)
 
 
 async def _bounded_thread(callable_, *args):
@@ -51,10 +97,11 @@ async def read_content_request(request, *, max_bytes):
         value = json.loads(raw.decode("utf-8"))
         if (
             not isinstance(value, dict)
-            or set(value) != {"filename", "operation", "allow_compute", "payload"}
+            or not {"filename", "operation", "payload"} <= set(value)
+            or set(value) - {"filename", "operation", "allow_compute", "payload"}
             or not isinstance(value["filename"], str)
             or not isinstance(value["operation"], str)
-            or not isinstance(value["allow_compute"], bool)
+            or ("allow_compute" in value and not isinstance(value["allow_compute"], bool))
             or not isinstance(value["payload"], str)
         ):
             raise FileContentError("fileshare_content_invalid")
@@ -68,7 +115,9 @@ async def read_content_request(request, *, max_bytes):
         if base64.b64encode(payload).decode("ascii") != value["payload"]:
             raise FileContentError("fileshare_content_invalid")
         return payload, {
-            key: value[key] for key in ("filename", "operation", "allow_compute")
+            "filename": value["filename"],
+            "operation": value["operation"],
+            "allow_compute": value.get("allow_compute"),
         }
     except FileContentError:
         raise
@@ -79,24 +128,41 @@ async def read_content_request(request, *, max_bytes):
 class FileContentService:
     MAX_BYTES = 32 * 1024 * 1024
 
-    def __init__(self, *, transcriber=None, ocr=None, configuration=None):
+    def __init__(self, *, transcriber=None, ocr=None, configuration=None, capacity=None):
         self.transcriber = transcriber
         self.ocr = ocr
         self.configuration = configuration
+        self.capacity = _content_capacity(capacity)
+        self.MAX_BYTES = self.capacity["max_input_bytes"]
+        self._receiving_slots = asyncio.Semaphore(self.capacity["receiving_concurrency"])
+        self._processing_slots = asyncio.Semaphore(self.capacity["processing_concurrency"])
         self.active = 0
         self.receiving = 0
+        self.receiving_waiters = 0
+        self.processing_waiters = 0
+
+    @asynccontextmanager
+    async def _admit(self, semaphore, count_name, waiting_name):
+        if semaphore.locked() and getattr(self, waiting_name) >= self.capacity["queue_limit"]:
+            raise FileContentError("fileshare_content_busy", 429)
+        setattr(self, waiting_name, getattr(self, waiting_name) + 1)
+        try:
+            await semaphore.acquire()
+        finally:
+            setattr(self, waiting_name, getattr(self, waiting_name) - 1)
+        setattr(self, count_name, getattr(self, count_name) + 1)
+        try:
+            yield
+        finally:
+            setattr(self, count_name, getattr(self, count_name) - 1)
+            semaphore.release()
 
     async def process_request(self, request):
-        if self.receiving >= 2:
-            raise FileContentError("fileshare_content_busy", 429)
-        self.receiving += 1
-        try:
+        async with self._admit(self._receiving_slots, "receiving", "receiving_waiters"):
             payload, metadata = await read_content_request(
                 request, max_bytes=self.MAX_BYTES
             )
             return await self.process(payload, **metadata)
-        finally:
-            self.receiving -= 1
 
     def config(self):
         if self.configuration:
@@ -109,6 +175,10 @@ class FileContentService:
         from tools.ocr import resolve_tesseract_binary, resolve_paddle_model_root
 
         configured = self.config()
+        transcription_max = self.MAX_BYTES
+        if configured.get("provider") == "compute":
+            from orchestrator.voice_transcriber import compute_audio_input_limit
+            transcription_max = min(transcription_max, compute_audio_input_limit(configured))
         return {
             "version": 1,
             "ocr": {
@@ -121,25 +191,34 @@ class FileContentService:
             "transcription": {
                 "supported": True,
                 "configured_service": configured.get("provider") == "compute",
-                "service_opt_in_required": configured.get("provider") == "compute",
+                "service_opt_in_required": False,
+                "max_bytes": transcription_max,
             },
             "max_bytes": self.MAX_BYTES,
+            "capacity": {**self.capacity, "max_input_bytes": self.MAX_BYTES,
+                         "transport_max_input_bytes": CONTENT_WIRE_MAX_INPUT_BYTES,
+                         "request_timeout_seconds": content_request_timeout_seconds()},
         }
 
-    @staticmethod
-    def normalize_image(payload):
+    def normalize_image(self, payload):
         from PIL import Image
 
         with Image.open(io.BytesIO(payload)) as image:
-            if image.width * image.height > 20_000_000:
+            pixels = image.width * image.height
+            if (
+                pixels > self.capacity["max_image_pixels"]
+                or pixels * 8 > self.capacity["max_decoded_bytes"]
+            ):
                 raise FileContentError("fileshare_content_limit", 413)
-            image = image.convert("RGB")
+            # Downscale before RGB conversion so JPEG decoders can reduce their
+            # decoded working set; malformed/bomb images still fail in Pillow.
             image.thumbnail((2400, 2400))
+            image = image.convert("RGB")
             output = io.BytesIO()
             image.save(output, format="JPEG", quality=90)
             return output.getvalue()
 
-    async def process(self, payload, *, filename, operation, allow_compute=False):
+    async def process(self, payload, *, filename, operation, allow_compute=None):
         if not isinstance(payload, bytes) or not 0 < len(payload) <= self.MAX_BYTES:
             raise FileContentError("fileshare_content_limit", 413)
         if (
@@ -150,10 +229,7 @@ class FileContentService:
             or operation not in {"ocr", "transcribe"}
         ):
             raise FileContentError("fileshare_content_invalid")
-        if self.active >= 2:
-            raise FileContentError("fileshare_content_busy", 429)
-        self.active += 1
-        try:
+        async with self._admit(self._processing_slots, "active", "processing_waiters"):
             if operation == "ocr":
                 try:
                     normalized = await _bounded_thread(self.normalize_image, payload)
@@ -164,7 +240,9 @@ class FileContentService:
                 if self.ocr is None:
                     from tools.ocr import extract_image_bytes
 
-                    ocr = extract_image_bytes
+                    ocr = partial(
+                        extract_image_bytes, timeout_seconds=self.capacity["ocr_timeout_seconds"]
+                    )
                 else:
                     ocr = self.ocr
                 result = await _bounded_thread(ocr, normalized)
@@ -195,8 +273,12 @@ class FileContentService:
                 }
             else:
                 config = self.config()
-                if config.get("provider") == "compute" and not allow_compute:
-                    raise FileContentError("fileshare_compute_opt_in_required", 403)
+                if config.get("provider") == "compute":
+                    if allow_compute is False:
+                        raise FileContentError("fileshare_compute_opt_in_required", 403)
+                    from orchestrator.voice_transcriber import compute_audio_input_limit
+                    if len(payload) > compute_audio_input_limit(config):
+                        raise FileContentError("fileshare_content_limit", 413)
                 if Path(filename).suffix.lower() not in {
                     ".wav",
                     ".ogg",
@@ -215,6 +297,7 @@ class FileContentService:
                 }:
                     raise FileContentError("fileshare_media_unsupported", 415)
                 from orchestrator.voice_transcriber import (
+                    VoiceTranscriber,
                     get_transcriber,
                     _external_python,
                 )
@@ -236,10 +319,14 @@ class FileContentService:
                     )
                     pathname.write_bytes(payload)
                     try:
+                        options = {"include_segments": True}
+                        if isinstance(transcriber, VoiceTranscriber):
+                            # The owner can change the selected provider between
+                            # admission and dispatch; carry an explicit local-only
+                            # choice to the actual transcriber as well.
+                            options["allow_compute"] = allow_compute is not False
                         result = await asyncio.wait_for(
-                            transcriber.transcribe_result(
-                                pathname, include_segments=True
-                            ),
+                            transcriber.transcribe_result(pathname, **options),
                             timeout=90,
                         )
                     except asyncio.TimeoutError as error:
@@ -271,5 +358,3 @@ class FileContentService:
             ):
                 raise FileContentError("fileshare_content_limit", 413)
             return response
-        finally:
-            self.active -= 1

@@ -44,6 +44,7 @@ from adapters.openrouter_api import (
     _message_structured_data,
     _invalid_tool_repair_prompt,
     _invalid_tool_user_error,
+    _live_camera_request_extensions,
     _provider_request_id,
     _provider_protocol_error_message,
     _provider_response_decision,
@@ -314,11 +315,22 @@ class HashiApiAdapter(OpenRouterAdapter):
         }
         if request is not None:
             request_content = bytes(request.content)
+            evidence = _body_evidence(request_content)
+            camera_evidence = request.extensions.get("hashi_transient_camera_evidence")
+            if isinstance(camera_evidence, Mapping):
+                evidence.update({
+                    "body": str(camera_evidence["body"]),
+                    "body_encoding": "utf-8",
+                    "body_is_exact": False,
+                    "transient_camera_images_omitted": int(
+                        camera_evidence["transient_camera_images_omitted"]
+                    ),
+                })
             record["http_request"] = {
                 "method": str(request.method),
                 "url": str(request.url),
                 "headers": _audit_headers(request.headers),
-                **_body_evidence(request_content),
+                **evidence,
             }
         if response is not None:
             body = bytes(response_body) if response_body is not None else b""
@@ -374,6 +386,9 @@ class HashiApiAdapter(OpenRouterAdapter):
             self.hashi_url,
             json=payload,
             headers=headers,
+        )
+        request.extensions.update(
+            _live_camera_request_extensions(payload).get("extensions", {})
         )
         request_id = str(headers.get("X-Hashi-Correlation-ID") or "")
         provider_call = str(headers.get("X-Hashi-Provider-Call") or "")
@@ -1024,8 +1039,15 @@ class HashiApiAdapter(OpenRouterAdapter):
                         after_tool_end=tool_loop_count > 0,
                         external_tool_session=gateway_session_id is not None,
                     )
+                    from orchestrator.frontend_call.transient_live_media import (
+                        project_live_frame_messages,
+                    )
+
+                    projected_messages, _ = project_live_frame_messages(
+                        outbound_messages, retain_tags=True
+                    )
                     payload = self._build_payload(
-                        list(outbound_messages),
+                        projected_messages,
                         use_streaming=use_streaming,
                         excluded_tool_names=(
                             _MEDIA_FALLBACK_TOOL_NAMES
@@ -1080,6 +1102,10 @@ class HashiApiAdapter(OpenRouterAdapter):
                             use_streaming,
                             self.config.model,
                         )
+                        if isinstance(payload.get("messages"), list):
+                            payload["messages"], _ = project_live_frame_messages(
+                                payload["messages"], retain_tags=True
+                            )
                         if use_streaming:
                             result = await self._stream_api_once(
                                 payload,

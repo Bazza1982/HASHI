@@ -25,13 +25,39 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
-from functools import lru_cache
+from contextvars import ContextVar
+from functools import lru_cache, wraps
 from pathlib import Path
 
 logger = logging.getLogger("Tools.Desktop")
+_DESKTOP_REQUEST_TIMEOUT: ContextVar[float | None] = ContextVar(
+    "desktop_request_timeout", default=None,
+)
+
+
+def _desktop_request_timeout(function):
+    @wraps(function)
+    async def wrapped(args: dict):
+        selected = args.get("timeout_s")
+        if selected is not None:
+            if isinstance(selected, bool) or not isinstance(selected, (int, float)):
+                return "Error: timeout_s must be a positive finite number"
+            try:
+                selected = float(selected)
+            except OverflowError:
+                return "Error: timeout_s must be a positive finite number"
+            if not math.isfinite(selected) or selected <= 0:
+                return "Error: timeout_s must be a positive finite number"
+        token = _DESKTOP_REQUEST_TIMEOUT.set(selected)
+        try:
+            return await function(args)
+        finally:
+            _DESKTOP_REQUEST_TIMEOUT.reset(token)
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -134,17 +160,37 @@ def _get_display() -> str:
     return resolved
 
 
-async def _run(cmd: list[str], display: str, timeout: int = 15) -> tuple[int, str, str]:
+async def _run(cmd: list[str], display: str, timeout: float = 15) -> tuple[int, str, str]:
+    from orchestrator.process_execution import process_group_kwargs
+    from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
+
+    selected = _DESKTOP_REQUEST_TIMEOUT.get()
+    effective_timeout = selected if selected is not None else timeout
     env = {**os.environ, "DISPLAY": display}
     logger.debug("desktop cmd: %s (DISPLAY=%s)", cmd, display)
+    proc = None
+    communication = None
+    pgid = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            **process_group_kwargs(),
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        pgid = _bash_process_group_id(proc)
+        communication = asyncio.create_task(proc.communicate())
+        done, _ = await asyncio.wait({communication}, timeout=effective_timeout)
+        if communication not in done:
+            cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, communication, pgid=pgid))
+            logger.error("desktop cmd timed out after %gs: %s; cleanup=%s", effective_timeout, cmd[0], cleanup)
+            return 1, "", (
+                f"command timed out after {effective_timeout:g}s; cleanup={cleanup['status']}; "
+                "the action may have partially occurred"
+            )
+        stdout, stderr = communication.result()
         rc = proc.returncode or 0
         out = stdout.decode("utf-8", errors="replace").strip()
         err = stderr.decode("utf-8", errors="replace").strip()
@@ -153,12 +199,17 @@ async def _run(cmd: list[str], display: str, timeout: int = 15) -> tuple[int, st
         else:
             logger.debug("desktop cmd OK: %s", cmd[0])
         return rc, out, err
-    except asyncio.TimeoutError:
-        logger.error("desktop cmd timed out after %ds: %s", timeout, cmd)
-        return 1, "", f"command timed out after {timeout}s"
-    except FileNotFoundError as e:
-        logger.error("desktop cmd not found: %s — %s", cmd[0], e)
-        return 1, "", str(e)
+    except asyncio.CancelledError as exc:
+        if proc is not None and communication is not None:
+            cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, communication, pgid=pgid))
+            setattr(exc, "hashi_tool_details", {
+                "cleanup_confirmed": cleanup.get("status") in {"terminated", "force_killed"},
+                "effect_state": "unknown", "foreground_cleanup": cleanup,
+            })
+        raise
+    except FileNotFoundError as exc:
+        logger.error("desktop cmd not found: %s — %s", cmd[0], exc)
+        return 1, "", str(exc)
 
 
 async def _best_effort_reset_desktop_input_state(display: str) -> None:
@@ -292,6 +343,7 @@ async def _get_display_info(display: str, uc: str | None) -> dict:
 # desktop_screenshot
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_screenshot(args: dict) -> str:
     logger.info("desktop_screenshot display=%s annotate=%s", args.get("display"), args.get("annotate", False))
     uc = _find_usecomputer()
@@ -353,6 +405,7 @@ async def execute_desktop_screenshot(args: dict) -> str:
 # desktop_mouse_move
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_mouse_move(args: dict) -> str:
     logger.info("desktop_mouse_move x=%s y=%s", args.get("x"), args.get("y"))
     display = args.get("display") or _get_display()
@@ -384,6 +437,7 @@ async def execute_desktop_mouse_move(args: dict) -> str:
 # desktop_click
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_click(args: dict) -> str:
     logger.info("desktop_click x=%s y=%s button=%s count=%s", args.get("x"), args.get("y"), args.get("button","left"), args.get("count",1))
     display = args.get("display") or _get_display()
@@ -424,6 +478,7 @@ async def execute_desktop_click(args: dict) -> str:
 # desktop_type  (uses xdotool for full Unicode/space/special-char support)
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_type(args: dict) -> str:
     text = args.get("text", "")
     logger.info("desktop_type len=%d preview=%r", len(text), text[:40])
@@ -440,11 +495,12 @@ async def execute_desktop_type(args: dict) -> str:
         rc, out, err = await _run(
             [xdotool, "type", "--delay", str(delay_ms), "--", text],
             display,
+            timeout=max(15.0, len(text) * max(delay_ms, 0) / 1000 + 5),
         )
         await _best_effort_reset_desktop_input_state(display)
         if rc == 0:
             return f"Typed {len(text)} chars via xdotool on DISPLAY={display}"
-        # xdotool failed — fall through to usecomputer
+        return f"Error: type failed; text may be partially entered: {err or out}"
 
     # fallback: usecomputer type (works for alphanumeric, may fail on space/dash)
     uc = _find_usecomputer()
@@ -462,6 +518,7 @@ async def execute_desktop_type(args: dict) -> str:
 # desktop_key  (key press / combo via usecomputer press)
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_key(args: dict) -> str:
     logger.info("desktop_key key=%r", args.get("key"))
     display = args.get("display") or _get_display()
@@ -492,6 +549,7 @@ async def execute_desktop_key(args: dict) -> str:
 # desktop_scroll
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_scroll(args: dict) -> str:
     logger.info("desktop_scroll direction=%s amount=%s at=(%s,%s)", args.get("direction","down"), args.get("amount",3), args.get("x"), args.get("y"))
     display = args.get("display") or _get_display()
@@ -539,6 +597,7 @@ async def execute_desktop_scroll(args: dict) -> str:
 # desktop_info
 # ---------------------------------------------------------------------------
 
+@_desktop_request_timeout
 async def execute_desktop_info(args: dict) -> str:
     uc = _find_usecomputer()
     display = args.get("display") or _get_display()
@@ -562,6 +621,7 @@ async def execute_desktop_info(args: dict) -> str:
     return "\n".join(lines)
 
 
+@_desktop_request_timeout
 async def execute_desktop_window_list(args: dict) -> str:
     display = args.get("display") or _get_display()
     title_contains = str(args.get("title_contains", "") or "").lower()
@@ -571,6 +631,7 @@ async def execute_desktop_window_list(args: dict) -> str:
     return json.dumps({"display": display, "windows": windows}, ensure_ascii=False, indent=2)
 
 
+@_desktop_request_timeout
 async def execute_desktop_window_focus(args: dict) -> str:
     display = args.get("display") or _get_display()
     xdotool = _find_xdotool()

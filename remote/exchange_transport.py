@@ -818,15 +818,22 @@ class ExchangeTransport:
                     conversation_id=conversation_id,
                     message_type=message_type,
                     in_reply_to=in_reply_to,
-                    originated_at=normalized_originated_at,
+                    originated_at=(
+                        normalized_originated_at
+                        if normalized_originated_at is not None
+                        else str(existing.frame.get("created_at") or "")
+                    ),
                 )
                 return await self._transmit_record(
                     ws,
                     existing,
                     replayed=True,
                 )
-        if origin_timestamp is None or normalized_originated_at is None:
-            raise ExchangeTransportError("INVALID_MESSAGE")
+        if origin_timestamp is None:
+            # The wire format needs a creation time. Generate it once for a
+            # new outbound frame; an exact retry above keeps the stored value.
+            origin_timestamp = self.clock()
+            normalized_originated_at = utc_timestamp(origin_timestamp)
         resolve_id = self._new_id("resolve")
         resolve_waiter = self._new_request_waiter(resolve_id)
         try:

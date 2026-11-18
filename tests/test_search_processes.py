@@ -3,11 +3,15 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
 import sys
 import tracemalloc
 from pathlib import Path
 
 import pytest
+
+from tests.test_scoped_search import registry_for
+from tools.registry import ToolRegistry
 
 
 @pytest.mark.asyncio
@@ -70,8 +74,6 @@ async def test_real_mcp_progress_precedes_result_and_cancel_remains_responsive(t
             await proc.wait()
         await errors
 
-from tools.registry import ToolRegistry
-from tests.test_scoped_search import registry_for
 
 
 def script_command(path):
@@ -170,3 +172,122 @@ async def test_wide_scope_is_advisory_and_shell_needs_no_prior_search(tmp_path):
     assert command_search_roots('find / -name target') == ['/']
     assert not command_search_roots("rg '/' repo")
     assert not command_search_roots('find $ROOT -name target | head')
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep is not installed")
+@pytest.mark.asyncio
+async def test_cancel_regex_reaps_foreground_worker_and_ripgrep(tmp_path, monkeypatch):
+    import psutil
+
+    registry, repo, _ = registry_for(tmp_path)
+    source = repo / "long.txt"
+    with source.open("wb") as stream:
+        chunk = b"a" * (4 * 1024 * 1024)
+        for _ in range(24):
+            stream.write(chunk)
+    started = asyncio.Event()
+    processes = []
+    real_start = asyncio.create_subprocess_exec
+    async def capture(*args, **kwargs):
+        process = await real_start(*args, **kwargs)
+        if any(str(arg).endswith("search_worker.py") for arg in args):
+            processes.append(process)
+            started.set()
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    task = asyncio.create_task(registry.execute_with_audit_context(
+        "file_search", {"query": "(a+)+b", "match": "regex", "mode": "content",
+                        "roots": [str(source)]},
+        "cancel-regex", audit_context={"request_id": "regex-cancel-run"},
+    ))
+    await asyncio.wait_for(started.wait(), 5)
+    parent = psutil.Process(processes[0].pid)
+    child = None
+    for _ in range(1000):
+        if task.done():
+            break
+        try:
+            children = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            break
+        for candidate in children:
+            try:
+                if candidate.name().lower() in {"rg", "rg.exe"} and candidate.is_running():
+                    opened = candidate.open_files()
+                    if any(Path(row.path).resolve() == source.resolve() for row in opened):
+                        child = (candidate.pid, candidate.create_time())
+                        break
+            except psutil.Error:
+                continue
+        if child:
+            break
+        await asyncio.sleep(.005)
+    assert child is not None, "actual regex subprocess was not observed"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, 10)
+    assert raised.value.hashi_tool_details["foreground_cleanup"]["process_reaped"]
+    assert processes[0].returncode is not None
+    try:
+        still_running = psutil.Process(child[0])
+        assert still_running.create_time() != child[1] or not still_running.is_running()
+    except psutil.NoSuchProcess:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_cancel_path_regex_with_catastrophic_backtracking_reaps_worker(tmp_path, monkeypatch):
+    registry, repo, _ = registry_for(tmp_path)
+    (repo / (("a" * 60) + "x.txt")).touch()
+    started = asyncio.Event()
+    processes = []
+    real_start = asyncio.create_subprocess_exec
+    async def capture(*args, **kwargs):
+        process = await real_start(*args, **kwargs)
+        if any(str(arg).endswith("search_worker.py") for arg in args):
+            processes.append(process)
+            started.set()
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    task = asyncio.create_task(registry.execute_with_audit_context(
+        "file_search", {"query": "(a+)+$", "match": "regex", "mode": "path", "roots": [str(repo)]},
+        "cancel-path-regex", audit_context={"request_id": "path-regex-cancel"},
+    ))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.sleep(.2)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, 10)
+    assert raised.value.hashi_tool_details["foreground_cleanup"]["process_reaped"]
+    assert processes[0].returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_python_content_regex_with_catastrophic_backtracking_reaps_worker(tmp_path, monkeypatch):
+    registry, repo, _ = registry_for(tmp_path)
+    source = repo / "pathological.txt"
+    source.write_bytes((b"a" * 60) + b"!\n")
+    started = asyncio.Event()
+    processes = []
+    real_start = asyncio.create_subprocess_exec
+    async def capture(*args, **kwargs):
+        process = await real_start(*args, **kwargs)
+        if any(str(arg).endswith("search_worker.py") for arg in args):
+            processes.append(process)
+            started.set()
+        return process
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    task = asyncio.create_task(registry.execute_with_audit_context(
+        "file_search", {"query": "(a+)+$", "match": "regex", "mode": "content",
+                        "roots": [str(source)], "options": {"regex_engine": "python"}},
+        "cancel-python-regex", audit_context={"request_id": "python-regex-cancel"},
+    ))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.sleep(.2)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(task, 10)
+    assert raised.value.hashi_tool_details["foreground_cleanup"]["process_reaped"]
+    assert processes[0].returncode is not None

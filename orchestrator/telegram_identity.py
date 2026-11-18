@@ -1,8 +1,7 @@
-"""Canonical Telegram actor and stable PAO owner-scope resolution.
+"""Telegram actor resolution and legacy local Session ownership lookup.
 
-Telegram account identity is replaceable.  The PAO owner scope is not: it
-keeps the same human's Sessions, Workzones, and connector preferences stable
-across an account migration.
+The legacy owner-scope value is a data key, not an authentication credential.
+It is read for continuity while connector-neutral identity is migrated.
 """
 from __future__ import annotations
 
@@ -32,6 +31,12 @@ def resolve_telegram_owner_id(
 ) -> int | None:
     """Resolve one Telegram owner using the canonical compatibility order."""
 
+    disabled = global_config.get("telegram_primary_disabled", False)
+    if not isinstance(disabled, bool):
+        raise ValueError("global.telegram_primary_disabled must be boolean")
+    if disabled:
+        # Explicitly revoking the primary must not revive a legacy secret.
+        return None
     candidates = (
         ("global.telegram_owner_id", global_config.get("telegram_owner_id")),
         ("secrets.authorized_telegram_id", secrets.get("authorized_telegram_id")),
@@ -48,13 +53,11 @@ def resolve_owner_scope_id(
     global_config: Mapping[str, Any],
     telegram_owner_id: int | None,
 ) -> str:
-    """Return the stable PAO owner scope, deriving it only for legacy config."""
+    """Locate existing local data without imposing an owner-format gate."""
 
     scope = str(global_config.get("owner_scope_id") or "").strip()
     if not scope:
         scope = f"user:{telegram_owner_id or 0}"
-    if len(scope) > 256 or any(ord(character) < 33 for character in scope):
-        raise ValueError("global.owner_scope_id is invalid")
     return scope
 
 

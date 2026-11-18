@@ -56,6 +56,7 @@ class CompanionConfig:
     model: str = "jev-latest"
     api_key_env: str = "TYPESAFE_API_KEY"
     check_timeout_s: float = 5.0
+    mode: str = "advisory"
 
     @classmethod
     def from_mapping(cls, raw: Any) -> "CompanionConfig":
@@ -66,12 +67,15 @@ class CompanionConfig:
         enabled = raw.get("enabled", False)
         interval = raw.get("interval_minutes", 5)
         timeout = raw.get("check_timeout_s", 5.0)
+        mode = raw.get("mode", "advisory")
         if not isinstance(enabled, bool):
             raise ValueError("agent_companion.enabled must be a boolean")
         if isinstance(interval, bool) or interval not in (5, 10):
             raise ValueError("agent_companion.interval_minutes must be 5 or 10")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("agent_companion.check_timeout_s must be positive")
+        if not isinstance(mode, str) or mode not in {"advisory", "enforce"}:
+            raise ValueError("agent_companion.mode must be advisory or enforce")
         model = str(raw.get("model", "jev-latest")).strip()
         key_env = str(raw.get("api_key_env", "TYPESAFE_API_KEY")).strip()
         if not model or not key_env.isidentifier():
@@ -82,6 +86,7 @@ class CompanionConfig:
             model=model,
             api_key_env=key_env,
             check_timeout_s=float(timeout),
+            mode=mode,
         )
 
 

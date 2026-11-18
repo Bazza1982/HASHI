@@ -106,6 +106,53 @@ async def test_two_tasks_cannot_overwrite_other_session_callback_context():
 
 
 @pytest.mark.asyncio
+async def test_owner_can_run_more_than_eight_independent_sessions(monkeypatch,tmp_path):
+    runtime=FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name='capacity-agent'
+    runtime.config=SimpleNamespace(extra={'max_concurrent_sessions':12},active_backend='example',project_root=tmp_path)
+    runtime.global_config=SimpleNamespace(project_root=tmp_path)
+    runtime.queue=execution.SessionQueue()
+    runtime._execution_admissions={}
+    runtime.error_logger=SimpleNamespace(exception=lambda *args:None)
+    runtime._publish_worker_metadata=AsyncMock()
+    runtime.current_request_meta=None
+    runtime.is_generating=False
+    runtime.backend_manager=SimpleNamespace(current_backend=None)
+    async def create(runtime,item,frozen):
+        handle=execution.Execution(runtime,item.session_id,'fixed',{
+            'backend_manager':SimpleNamespace(current_backend=object(),shutdown=AsyncMock()),
+            'current_request_meta':None,'is_generating':False})
+        runtime._session_executions[item.session_id]=handle
+        return handle
+    monkeypatch.setattr(execution,'create_execution',create)
+    monkeypatch.setattr(execution,'snapshot',lambda runtime:{'config':runtime.config,'settings':{
+        '_agents_json_global':{'execution_limits':{'instance_sessions':12,'engines':{'example':12}}}}})
+    entered=set()
+    all_entered=asyncio.Event()
+    release=asyncio.Event()
+    async def process(runtime,item):
+        entered.add(item.session_id)
+        if len(entered)==12:
+            all_entered.set()
+        try:
+            await release.wait()
+        finally:
+            runtime.queue.task_done()
+    for index in range(12):
+        await runtime.queue.put(SimpleNamespace(request_id=f'r{index}',session_id=f's{index}'))
+    dispatcher=asyncio.create_task(execution.process_sessions(runtime,process))
+    try:
+        await asyncio.wait_for(all_entered.wait(),3)
+        assert len(entered)==12
+        release.set()
+        await asyncio.wait_for(runtime.queue.join(),3)
+    finally:
+        release.set()
+        dispatcher.cancel()
+        await asyncio.gather(dispatcher,return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_real_backend_managers_create_independent_native_handles_without_state_writes(tmp_path,monkeypatch):
     from tests.test_flexible_backend_state import _make_manager
     from adapters.registry import get_backend_class

@@ -1,6 +1,7 @@
 """Owner/scoped-Run admission for the bounded Agent management API family."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import json
@@ -54,11 +55,13 @@ async def invoke_async_mutation(server, binding, callback, *, scope=None):
     # Never hold SQLite across Worker RPC, queue admission or a service await.
     # A scheduled child has its own lifecycle once admitted. Recovery rechecks
     # this authority after its lock wait and before each additional dispatch.
-    invoke_mutation(server, binding, lambda: None, scope=scope)
-    guard = lambda: server.session_store.hold_active_run(**binding)
+    await server._await_session_storage(invoke_mutation, server, binding, lambda: None, scope=scope)
+    def guard():
+        return server.session_store.hold_active_run(**binding)
+
     token = _current_check.set(guard if binding is not None else None)
     try:
-        check_current_mutation()
+        await asyncio.to_thread(check_current_mutation)
         return await callback()
     except StaleFencingToken:
         _reject(401, error_code="agent_run_not_active")

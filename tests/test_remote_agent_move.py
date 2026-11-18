@@ -4,7 +4,9 @@ import base64
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +23,7 @@ from orchestrator.agent_move.transport_crypto import (
     encrypt_package_transport,
 )
 from orchestrator.pcm import render_pcm_document
+from orchestrator.session_store import SessionStore
 from remote.api import server as remote_server
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
@@ -189,6 +192,275 @@ def test_remote_receiver_uses_live_identity_with_legacy_list_config(tmp_path):
     assert staged.json()["target_instance"] == "HASHI2"
 
 
+@pytest.mark.parametrize("frontend_owner", [None, "owner:frontend"])
+@pytest.mark.parametrize("history_mode", ["copy", "inherit_read_only", "none"])
+def test_remote_clone_maps_history_owners_through_shared_token(tmp_path, frontend_owner, history_mode):
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    for root, owner in ((source, "owner:source"), (target, "owner:target")):
+        config = json.loads((root / "agents.json").read_text(encoding="utf-8"))
+        config["global"]["owner_scope_id"] = owner
+        _write_json(root / "agents.json", config)
+    # The transfer is independent of any Telegram credential.
+    _write_json(source / "secrets.json", {"hashi_remote_shared_token": TOKEN})
+    store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    source_owner = frontend_owner or "owner:source"
+    session = store.ensure_default_session(owner_id=source_owner, agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id=source_owner, agent_id="zelda",
+        request_id="remote-history", text="source question", source="workbench",
+        idempotency_key="remote-history",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(
+        accepted.request_id, success=True, assistant_text="source answer",
+        assistant_source="fixture",
+    )
+    source_messages = store.messages(session["session_id"], owner_id=source_owner)
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    unrelated = target_store.ensure_default_session(owner_id="owner:target", agent_id="another-agent")
+    existing = target_store.accept_run(
+        session_id=unrelated["session_id"], owner_id="owner:target", agent_id="another-agent",
+        request_id="unrelated-history", text="unrelated question", source="workbench",
+        idempotency_key="unrelated-history",
+    )
+    target_store.mark_request_running(existing.request_id, worker_id="fixture")
+    target_store.finish_request(existing.request_id, success=True, assistant_text="unrelated answer",
+                                assistant_source="fixture")
+    package_path = tmp_path / "cross-owner.hashi-agent"
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=source, instance_id="HASHI1", deployment_profile="personal"))
+    scope = bind_frontend_command_principal(runtime, frontend_owner) if frontend_owner else nullcontext()
+    with scope:
+        package = create_agent_move_package(
+            source, "zelda", package_path, source_instance="HASHI1",
+            operation="clone", transfer_mode="workspace", history_mode=history_mode,
+            include_telegram_secret=False,
+        )
+    if history_mode == "none":
+        assert package.conversation_continuity is None
+    else:
+        assert package.conversation_continuity["owner_id"] == source_owner
+    raw = package_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    envelope = encrypt_package_transport(
+        raw, shared_token=TOKEN, source_instance="HASHI1", target_instance="HASHI2",
+        package_sha256=digest,
+    )
+    client = _client(target)
+    payload = {
+        "from_instance": "HASHI1", "encryption": ENVELOPE_SCHEME,
+        "package_b64": base64.b64encode(envelope).decode("ascii"),
+        "sha256": digest, "operation": "clone", "target_agent_id": "zelda-copy",
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = _headers("POST", "/agent-move/v1/stage", body)
+    headers["X-Hashi-Digest"] = "0" * 64
+    assert client.post("/agent-move/v1/stage", content=body, headers=headers).status_code == 401
+    staged = _post(client, "/agent-move/v1/stage", payload)
+    assert staged.status_code == 200, staged.text
+    action = {"from_instance": "HASHI1", "package_id": package.package_id}
+    committed = _post(client, "/agent-move/v1/commit", action)
+    assert committed.status_code == 200, committed.text
+    assert _post(client, "/agent-move/v1/commit", action).status_code == 200
+    sessions = target_store.list_sessions(
+        owner_id="owner:target", agent_id="zelda-copy", include_archived=True
+    )
+    if history_mode == "none":
+        assert sessions == []
+    else:
+        assert len(sessions) == 1
+        imported = target_store.messages(sessions[0]["session_id"], owner_id="owner:target")
+        assert [item["text"] for item in imported] == ["source question", "source answer"]
+        provenance = imported[0]["message_context"]["conversation_continuity"]
+        assert provenance["source_instance"] == "HASHI1"
+        assert provenance["source_session_id"] == session["session_id"]
+        assert provenance["source_message_id"] == source_messages[0]["message_id"]
+        assert provenance["transfer_id"] == package.package_id
+        # Read-only inherited sessions are archived; later work has its own active session.
+        later_session = target_store.ensure_default_session(
+            owner_id="owner:target", agent_id="zelda-copy",
+        )
+        later = target_store.accept_run(
+            session_id=later_session["session_id"], owner_id="owner:target",
+            agent_id="zelda-copy", request_id="later-target", text="later question",
+            source="workbench", idempotency_key="later-target",
+        )
+        target_store.mark_request_running(later.request_id, worker_id="fixture")
+        target_store.finish_request(
+            later.request_id, success=True, assistant_text="later answer", assistant_source="fixture",
+        )
+    assert target_store.list_sessions(
+        owner_id=source_owner, agent_id="zelda-copy", include_archived=True
+    ) == []
+    rolled_back = _post(client, "/agent-move/v1/rollback", action)
+    assert rolled_back.status_code == 200, rolled_back.text
+    surviving = target_store.list_sessions(
+        owner_id="owner:target", agent_id="zelda-copy", include_archived=True
+    )
+    if history_mode == "none":
+        assert surviving == []
+    else:
+        assert len(surviving) == 1
+        assert [item["text"] for item in target_store.messages(
+            surviving[0]["session_id"], owner_id="owner:target"
+        )] == ["later question", "later answer"]
+    assert [item["text"] for item in target_store.messages(
+        unrelated["session_id"], owner_id="owner:target"
+    )] == ["unrelated question", "unrelated answer"]
+    assert store.messages(session["session_id"], owner_id=source_owner) == source_messages
+
+
+def test_personal_remote_clone_does_not_depend_on_target_telegram_identity(tmp_path):
+    from orchestrator.agent_move.package import configured_conversation_owner_id
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    config = json.loads((source / "agents.json").read_text(encoding="utf-8"))
+    config["global"]["owner_scope_id"] = "owner:source"
+    _write_json(source / "agents.json", config)
+    config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
+    config["global"]["telegram_owner_id"] = "invalid"
+    _write_json(target / "agents.json", config)
+
+    store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="owner:source", agent_id="zelda")
+    request = store.accept_run(
+        session_id=session["session_id"], owner_id="owner:source", agent_id="zelda",
+        request_id="no-telegram-target", text="question", source="workbench",
+        idempotency_key="no-telegram-target",
+    )
+    store.mark_request_running(request.request_id, worker_id="fixture")
+    store.finish_request(request.request_id, success=True, assistant_text="answer", assistant_source="fixture")
+    package_path = tmp_path / "no-telegram-target.hashi-agent"
+    package = create_agent_move_package(
+        source, "zelda", package_path, source_instance="HASHI1",
+        operation="clone", transfer_mode="workspace", history_mode="copy",
+        include_telegram_secret=False,
+    )
+    raw = package_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    envelope = encrypt_package_transport(
+        raw, shared_token=TOKEN, source_instance="HASHI1", target_instance="HASHI2",
+        package_sha256=digest,
+    )
+    client = _client(target)
+    payload = {
+        "from_instance": "HASHI1", "encryption": ENVELOPE_SCHEME,
+        "package_b64": base64.b64encode(envelope).decode("ascii"),
+        "sha256": digest, "operation": "clone", "target_agent_id": "zelda-copy",
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = _headers("POST", "/agent-move/v1/stage", body)
+    headers["X-Hashi-Digest"] = "0" * 64
+    assert client.post("/agent-move/v1/stage", content=body, headers=headers).status_code == 401
+    assert not (target / "state" / "personal_data_owner.json").exists()
+    wrong_target = encrypt_package_transport(
+        raw, shared_token=TOKEN, source_instance="HASHI1", target_instance="HASHI3",
+        package_sha256=digest,
+    )
+    bad_payload = {**payload, "package_b64": base64.b64encode(wrong_target).decode("ascii")}
+    assert _post(client, "/agent-move/v1/stage", bad_payload).status_code == 400
+    assert not (target / "state" / "personal_data_owner.json").exists()
+
+    staged = _post(client, "/agent-move/v1/stage", payload)
+    assert staged.status_code == 200, staged.text
+    config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
+    config["global"]["telegram_owner_id"] = 99
+    _write_json(target / "agents.json", config)
+    action = {"from_instance": "HASHI1", "package_id": package.package_id}
+    committed = _post(client, "/agent-move/v1/commit", action)
+    assert committed.status_code == 200, committed.text
+    assert configured_conversation_owner_id(target, instance_role="target") == "user:0"
+    target_config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
+    assert target_config["global"]["owner_scope_id"] == "user:0"
+
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    sessions = target_store.list_sessions(owner_id="user:0", agent_id="zelda-copy")
+    assert len(sessions) == 1
+    assert [row["text"] for row in target_store.messages(
+        sessions[0]["session_id"], owner_id="user:0"
+    )] == ["question", "answer"]
+    assert target_store.list_sessions(owner_id="user:99", agent_id="zelda-copy") == []
+
+    later = target_store.accept_run(
+        session_id=sessions[0]["session_id"], owner_id="user:0", agent_id="zelda-copy",
+        request_id="after-import", text="later", source="workbench", idempotency_key="after-import",
+    )
+    target_store.mark_request_running(later.request_id, worker_id="fixture")
+    target_store.finish_request(later.request_id, success=True, assistant_text="later answer", assistant_source="fixture")
+    rolled_back = _post(client, "/agent-move/v1/rollback", action)
+    assert rolled_back.status_code == 200, rolled_back.text
+    surviving = target_store.list_sessions(owner_id="user:0", agent_id="zelda-copy")
+    assert len(surviving) == 1
+    assert [row["text"] for row in target_store.messages(
+        surviving[0]["session_id"], owner_id="user:0"
+    )] == ["later", "later answer"]
+    assert json.loads((target / "agents.json").read_text(encoding="utf-8"))["global"]["owner_scope_id"] == "user:0"
+
+
+def test_remote_move_maps_distinct_owners_with_authenticated_transport_and_safe_rollback(tmp_path):
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    for root, owner in ((source, "owner:source"), (target, "owner:target")):
+        config = json.loads((root / "agents.json").read_text(encoding="utf-8"))
+        config["global"]["owner_scope_id"] = owner
+        _write_json(root / "agents.json", config)
+    # No Telegram bot credential or primary identity is needed for Workbench history.
+    _write_json(source / "secrets.json", {"hashi_remote_shared_token": TOKEN})
+    store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = store.ensure_default_session(owner_id="owner:source", agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id="owner:source", agent_id="zelda",
+        request_id="move-history", text="original question", source="workbench",
+        idempotency_key="move-history",
+    )
+    store.mark_request_running(accepted.request_id, worker_id="fixture")
+    store.finish_request(accepted.request_id, success=True, assistant_text="original answer",
+                         assistant_source="fixture")
+    path = tmp_path / "authenticated-move.hashi-agent"
+    package = create_agent_move_package(
+        source, "zelda", path, source_instance="HASHI1", operation="move",
+        transfer_mode="identity_memory", include_agent_secrets=True, secret_passphrase=TOKEN,
+    )
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    envelope = encrypt_package_transport(
+        raw, shared_token=TOKEN, source_instance="HASHI1", target_instance="HASHI2",
+        package_sha256=digest,
+    )
+    payload = {
+        "from_instance": "HASHI1", "encryption": ENVELOPE_SCHEME,
+        "package_b64": base64.b64encode(envelope).decode("ascii"),
+        "sha256": digest, "operation": "move", "target_agent_id": "zelda",
+    }
+    client = _client(target)
+    denied = client.post("/agent-move/v1/stage", json=payload)
+    assert denied.status_code == 401
+    staged = _post(client, "/agent-move/v1/stage", payload)
+    assert staged.status_code == 200, staged.text
+    action = {"from_instance": "HASHI1", "package_id": package.package_id}
+    assert client.post("/agent-move/v1/commit", json=action).status_code == 401
+    committed = _post(client, "/agent-move/v1/commit", action)
+    assert committed.status_code == 200, committed.text
+    replay = _post(client, "/agent-move/v1/commit", action)
+    assert replay.status_code == 200
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    sessions = target_store.list_sessions(owner_id="owner:target", agent_id="zelda", include_archived=True)
+    assert len(sessions) == 1
+    assert [item["text"] for item in target_store.messages(
+        sessions[0]["session_id"], owner_id="owner:target",
+    )] == ["original question", "original answer"]
+    assert target_store.list_sessions(owner_id="owner:source", agent_id="zelda", include_archived=True) == []
+    assert _post(client, "/agent-move/v1/rollback", action).status_code == 200
+    assert target_store.list_sessions(owner_id="owner:target", agent_id="zelda", include_archived=True) == []
+    assert [item["text"] for item in store.messages(session["session_id"], owner_id="owner:source")] == [
+        "original question", "original answer",
+    ]
+
+
 def test_remote_agent_move_stage_commit_activate_protocol(tmp_path):
     source = _root(tmp_path, "source", "HASHI1", with_agent=True)
     target = _root(tmp_path, "target", "HASHI2", with_agent=False)
@@ -262,6 +534,49 @@ def test_remote_agent_move_stage_commit_activate_protocol(tmp_path):
         json.loads((target / "agents.json").read_text())["agents"][0]["is_active"]
         is True
     )
+
+
+def test_inactive_move_remote_requires_actual_offline_health_before_finalizing(tmp_path, monkeypatch):
+    from orchestrator.agent_move.package import INACTIVE_MOVE_CAPABILITY
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    config = json.loads((source / "agents.json").read_text())
+    config["agents"][0]["is_active"] = False
+    _write_json(source / "agents.json", config)
+    path = tmp_path / "inactive.hashi-agent"
+    package = create_agent_move_package(source, "zelda", path, source_instance="HASHI1",
+        operation="move", include_agent_secrets=True, secret_passphrase=TOKEN)
+    required = package.manifest["required_receiver_capabilities"]
+    outdated = AgentMoveRemoteClient(base_url="http://fixture.invalid", target_instance="HASHI2",
+        source_instance="HASHI1", shared_token=TOKEN,
+        capabilities={"schema_min":1,"schema_max":5,
+                      "capabilities":[item for item in required if item != INACTIVE_MOVE_CAPABILITY]})
+    with pytest.raises(AgentMoveRemoteError, match=INACTIVE_MOVE_CAPABILITY):
+        outdated.ensure_package_compatible(package)
+    client = _client(target)
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    envelope = encrypt_package_transport(raw, shared_token=TOKEN, source_instance="HASHI1",
+        target_instance="HASHI2", package_sha256=digest)
+    staged = _post(client, "/agent-move/v1/stage", {"from_instance":"HASHI1", "operation":"move",
+        "encryption":ENVELOPE_SCHEME, "package_b64":base64.b64encode(envelope).decode("ascii"), "sha256":digest})
+    assert staged.status_code == 200 and staged.json()["desired_target_active"] is False
+    payload = {"from_instance":"HASHI1", "package_id":package.package_id}
+    assert _post(client, "/agent-move/v1/commit", payload).status_code == 200
+    assert _post(client, "/agent-move/v1/start", payload).status_code == 409
+    monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: None)
+    assert _post(client, "/agent-move/v1/finalize", payload).status_code == 409
+    monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok":True,"agents":[]})
+    assert _post(client, "/agent-move/v1/finalize", payload).status_code == 409
+    monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok":True,"agents":[],"agent_runtime_presence":["zelda"]})
+    assert _post(client, "/agent-move/v1/finalize", payload).status_code == 409
+    monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda timeout=1.0: {"ok":True,"agents":[],"agent_runtime_presence":[]})
+    completed = _post(client, "/agent-move/v1/finalize", payload)
+    assert completed.status_code == 200
+    assert completed.json()["target_verification"] == {"runtime_online":False,"runtime_present":False,
+        "presence_checked":True,"desired_active":False,"config_inactive":True}
+    assert json.loads((target / "agents.json").read_text())["agents"][0]["is_active"] is False
 
 
 def test_remote_clone_resolve_lifecycle_and_finalize_without_telegram(
@@ -346,8 +661,8 @@ def test_remote_clone_resolve_lifecycle_and_finalize_without_telegram(
     rows = json.loads((target / "agents.json").read_text())["agents"]
     clone = next(row for row in rows if row["name"] == "zelda_1")
     assert clone["is_active"] is True
-    assert clone["telegram_token_key"] == "zelda_1"
     secrets = json.loads((target / "secrets.json").read_text())
+    assert clone["telegram_token_key"] not in secrets
     assert "zelda_1" not in secrets
     assert secrets["zelda_1_api_key"] == "safe-agent-key"
 
@@ -625,3 +940,271 @@ def test_clone_preflight_rejection_is_typed_only_with_authenticated_proof(tmp_pa
         remote.stage(path, operation="clone")
     assert not list((target / "state/agent_moves/incoming").glob("*/state.json"))
     assert json.loads((target / "agents.json").read_text())["agents"] == []
+@pytest.mark.parametrize("tamper", [False, True])
+@pytest.mark.parametrize("changed_policy", ["workspace", "typo"])
+def test_scope_change_and_staged_abort_require_signed_receiver_proof(tmp_path, monkeypatch, tamper, changed_policy):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from urllib.parse import urlsplit
+    from orchestrator.agent_move.package import AccessScopePreviewChanged, package_sha256
+    from orchestrator.agent_move.service import receiver_capabilities, stage_agent_move
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    config = json.loads((target / "agents.json").read_text())
+    config["global"]["agent_move"] = {"max_access_scope": "project"}
+    _write_json(target / "agents.json", config)
+    path = tmp_path / "scope.hashi-agent"
+    create_agent_move_package(source, "zelda", path, source_instance="HASHI1",
+                              operation="move", transfer_mode="workspace",
+                              include_agent_secrets=True, secret_passphrase=TOKEN)
+    staged = stage_agent_move(target, path, expected_sha256=package_sha256(path),
+                              source_instance="HASHI1", target_instance="HASHI2",
+                              operation="move", secret_passphrase=TOKEN)
+    config["global"]["agent_move"]["max_access_scope"] = changed_policy
+    _write_json(target / "agents.json", config)
+    receiver = _client(target)
+    package_id = staged["package_id"]
+    if changed_policy == "typo":
+        caps = receiver.get("/agent-move/v1/capabilities",
+                            headers=_headers("GET", "/agent-move/v1/capabilities"))
+        assert caps.status_code == 200
+        assert caps.json()["max_access_scope"] is None
+        assert "invalid" in caps.json()["max_access_scope_error"]
+    assert receiver.post("/agent-move/v1/abort-staged",
+                         json={"from_instance": "HASHI1", "package_id": package_id}).status_code == 401
+
+    class Response:
+        def __init__(self, raw): self.raw = raw
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, *args): return self.raw
+
+    def send(request, **kwargs):
+        url = urlsplit(request.full_url)
+        response = receiver.request(request.method, url.path, content=request.data,
+                                    headers=dict(request.header_items()))
+        body = response.json()
+        if response.status_code >= 400:
+            if tamper and url.path.endswith("/commit"):
+                body["error"] = "forged scope rejection"
+            raise HTTPError(request.full_url, response.status_code, "Rejected", {},
+                            BytesIO(json.dumps(body).encode()))
+        return Response(response.content)
+
+    monkeypatch.setattr("orchestrator.agent_move.remote_client.urllib_request.urlopen", send)
+    remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN,
+                                   receiver_capabilities(target))
+    with pytest.raises(AgentMoveRemoteError if tamper else AccessScopePreviewChanged):
+        remote.commit(package_id)
+    assert json.loads((target / "agents.json").read_text())["agents"] == []
+    if not tamper:
+        receipt = remote.abort_staged(package_id)
+        assert receipt["status"] == "rolled_back" and receipt["staged_abort"] is True
+        assert remote.abort_staged(package_id)["staged_abort"] is True
+        with pytest.raises(AgentMoveRemoteError):
+            remote.commit(package_id)
+    else:
+        assert remote.status(package_id)["status"] == "staged"
+
+
+# HASHI-Fingerprint: hfp_055c2b35cf9c4826b08b34ba5f3c5b41
+
+def test_signed_remote_member_budget_is_negotiated_and_enforced_before_upload(tmp_path, monkeypatch):
+    from urllib.parse import urlsplit
+    from orchestrator.agent_move import package as owner
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    for index in range(6):
+        (source / "workspaces/zelda" / f"extra-{index}.txt").write_text(str(index))
+    monkeypatch.setattr(owner, "MAX_ARCHIVE_MEMBERS", 8)
+    monkeypatch.setattr(owner, "MAX_UNPACKED_BYTES", 2048)
+    monkeypatch.setattr(owner, "WORKSPACE_LIMIT_BYTES", 1024)
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_ARCHIVE_MEMBERS", "64")
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_UNPACKED_BYTES", str(128 * 1024))
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_WORKSPACE_BYTES", str(128 * 1024))
+    (source / "workspaces/zelda/big.txt").write_text("synthetic data " * 1024)
+    path = tmp_path / "member-budget.hashi-agent"
+    package = create_agent_move_package(
+        source, "zelda", path, operation="clone", transfer_mode="workspace",
+        source_instance="HASHI1", max_archive_members=64, max_unpacked_bytes=128 * 1024,
+        max_workspace_bytes=128 * 1024,
+    )
+    assert len(package.names) > 8
+    assert package.unpacked_bytes > 2048
+    assert package.workspace_bytes > 1024
+    client = _client(target)
+    headers = _headers("GET", "/agent-move/v1/capabilities")
+    response = client.get("/agent-move/v1/capabilities", headers=headers)
+    assert response.status_code == 200
+    capabilities = response.json()
+    assert capabilities["max_archive_members"] == 64
+    assert capabilities["max_unpacked_bytes"] == 128 * 1024
+    assert capabilities["max_workspace_bytes"] == 128 * 1024
+    assert verify_response_auth(
+        shared_token=TOKEN, request_nonce=headers[HEADER_NONCE],
+        payload={key: value for key, value in capabilities.items() if key != "response_auth"},
+        response_auth=capabilities["response_auth"],
+    )
+
+    class Response:
+        def __init__(self, raw):
+            self.raw = raw
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self, limit):
+            return self.raw[:limit]
+
+    calls = []
+    def send(request, **kwargs):
+        calls.append(request.full_url)
+        url = urlsplit(request.full_url)
+        def chunks():
+            while chunk := request.data.read(127):
+                yield chunk
+        result = client.post(url.path + "?" + url.query, content=chunks(),
+                             headers=dict(request.header_items()))
+        assert result.status_code == 200, result.text
+        return Response(result.content)
+
+    monkeypatch.setattr("orchestrator.agent_move.remote_client.urllib_request.urlopen", send)
+    remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, capabilities)
+    result = remote.stage(path, operation="clone", target_agent_id="zelda")
+    assert result["status"] == "staged"
+    assert len(calls) == 1
+
+    limited = dict(capabilities, max_archive_members=len(package.names) - 1)
+    limited_remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, limited)
+    with pytest.raises(owner.AgentMoveError, match="member"):
+        limited_remote.stage(path, operation="clone", target_agent_id="zelda")
+    assert len(calls) == 1, "over-budget retry must fail before uploading"
+
+    limited_expanded = dict(capabilities, max_unpacked_bytes=package.unpacked_bytes - 1)
+    limited_remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, limited_expanded)
+    with pytest.raises(owner.AgentMoveError, match="expanded"):
+        limited_remote.stage(path, operation="clone", target_agent_id="zelda")
+    assert len(calls) == 1, "over-expanded retry must fail before uploading"
+
+    limited_workspace = dict(capabilities, max_workspace_bytes=package.workspace_bytes - 1)
+    limited_remote = AgentMoveRemoteClient("http://receiver", "HASHI2", "HASHI1", TOKEN, limited_workspace)
+    with pytest.raises(owner.AgentMoveError, match="workspace.*limit"):
+        limited_remote.stage(path, operation="clone", target_agent_id="zelda")
+    assert len(calls) == 1, "over-workspace retry must fail before uploading"
+
+def test_stream_receiver_uses_advertised_compressed_budget(tmp_path, monkeypatch):
+    from urllib.parse import urlencode
+    from orchestrator.agent_move.transport_crypto import encrypt_package_file
+
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    archive = tmp_path / "stream-budget.hashi-agent"
+    create_agent_move_package(source, "zelda", archive, source_instance="HASHI1")
+    size = archive.stat().st_size
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    encrypted = tmp_path / "wire.enc"
+    encrypt_package_file(archive, encrypted, shared_token=TOKEN, source_instance="HASHI1",
+                         target_instance="HASHI2", package_sha256=digest)
+    wire = encrypted.read_bytes()
+    path = "/agent-move/v1/stage-stream?" + urlencode(sorted({
+        "from_instance": "HASHI1", "sha256": digest, "operation": "move", "target_agent_id": "zelda",
+    }.items()))
+    client = _client(target)
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_PACKAGE_BYTES", str(size - 1))
+    cap = client.get("/agent-move/v1/capabilities", headers=_headers("GET", "/agent-move/v1/capabilities"))
+    assert cap.json()["max_package_bytes"] == size - 1
+    denied = client.post(path, content=iter([wire[:31], wire[31:]]), headers=_headers("POST", path))
+    assert denied.status_code == 400
+    assert not list((target / "state/agent_moves").glob("incoming/*/state.json"))
+
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_PACKAGE_BYTES", str(size))
+    cap = client.get("/agent-move/v1/capabilities", headers=_headers("GET", "/agent-move/v1/capabilities"))
+    assert cap.json()["max_package_bytes"] == size
+    accepted = client.post(path, content=iter([wire[:31], wire[31:]]), headers=_headers("POST", path))
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "staged"
+
+def test_legacy_receiver_uses_same_advertised_compressed_budget(tmp_path, monkeypatch):
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    archive = tmp_path / "legacy-budget.hashi-agent"
+    create_agent_move_package(source, "zelda", archive, source_instance="HASHI1")
+    raw = archive.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    wire = encrypt_package_transport(raw, shared_token=TOKEN, source_instance="HASHI1",
+                                     target_instance="HASHI2", package_sha256=digest)
+    payload = {"from_instance": "HASHI1", "encryption": ENVELOPE_SCHEME,
+               "package_b64": base64.b64encode(wire).decode("ascii"), "sha256": digest,
+               "operation": "move", "target_agent_id": "zelda"}
+    client = _client(target)
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_PACKAGE_BYTES", str(len(raw) - 1))
+    rejected = _post(client, "/agent-move/v1/stage", payload)
+    assert rejected.status_code in (400, 413), rejected.text
+    assert not list((target / "state/agent_moves").glob("incoming/*/state.json"))
+
+    monkeypatch.setenv("HASHI_AGENT_MOVE_MAX_PACKAGE_BYTES", str(len(raw)))
+    accepted = _post(client, "/agent-move/v1/stage", payload)
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "staged"
+
+
+
+def test_remote_personal_clone_warns_for_unidentified_source_history(tmp_path):
+    source = _root(tmp_path, "source", "HASHI1", with_agent=True)
+    target = _root(tmp_path, "target", "HASHI2", with_agent=False)
+    target_config = json.loads((target / "agents.json").read_text(encoding="utf-8"))
+    target_config["global"]["owner_scope_id"] = "owner:target"
+    _write_json(target / "agents.json", target_config)
+    _write_json(source / "secrets.json", {"hashi_remote_shared_token": TOKEN})
+    source_store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    legacy = source_store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    source_store.append_presentation_message(
+        session_id=legacy["session_id"], owner_id="user:7", agent_id="zelda",
+        role="assistant", text="unidentified history stays here", source="fixture",
+        idempotency_key="legacy-history", history_eligible=True,
+    )
+    package_path = tmp_path / "empty-selected-history.hashi-agent"
+    package = create_agent_move_package(
+        source, "zelda", package_path, source_instance="HASHI1",
+        operation="clone", transfer_mode="identity_memory", history_mode="copy",
+    )
+    assert package.conversation_continuity["owner_id"] == "user:0"
+    assert package.conversation_continuity["summary"]["eligible_message_count"] == 0
+    assert any("other local conversation history" in warning
+               for warning in package.manifest["warnings"])
+    raw = package_path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    envelope = encrypt_package_transport(
+        raw, shared_token=TOKEN, source_instance="HASHI1", target_instance="HASHI2",
+        package_sha256=digest,
+    )
+    client = _client(target)
+    payload = {
+        "from_instance": "HASHI1", "encryption": ENVELOPE_SCHEME,
+        "package_b64": base64.b64encode(envelope).decode("ascii"),
+        "sha256": digest, "operation": "clone", "target_agent_id": "zelda-copy",
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = _headers("POST", "/agent-move/v1/stage", body)
+    headers["X-Hashi-Digest"] = "0" * 64
+    assert client.post("/agent-move/v1/stage", content=body, headers=headers).status_code == 401
+    staged = _post(client, "/agent-move/v1/stage", payload)
+    assert staged.status_code == 200, staged.text
+    assert any("other local conversation history" in warning
+               for warning in staged.json()["warnings"])
+    action = {"from_instance": "HASHI1", "package_id": package.package_id}
+    committed = _post(client, "/agent-move/v1/commit", action)
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["conversation_continuity"]["imported_messages"] == 0
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    assert target_store.list_sessions(
+        owner_id="owner:target", agent_id="zelda-copy", include_archived=True,
+    ) == []
+    assert target_store.list_sessions(
+        owner_id="user:7", agent_id="zelda-copy", include_archived=True,
+    ) == []
+    assert [row["text"] for row in source_store.messages(
+        legacy["session_id"], owner_id="user:7",
+    )] == ["unidentified history stays here"]

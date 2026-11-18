@@ -57,12 +57,33 @@ under its existing read permissions; this exclusion is a preference, not a grant
 Results retain the existing five-field Smart envelope and report selected roots,
 revision, matches, exclusions, counters, coverage, stop reason and continuation.
 Complete empty searches succeed; incomplete zero results are partial. Structured
-payloads are budgeted before transport instead of slicing JSON. Continuations
-are opaque references to bounded Function-local memory (64 entries, 8 MiB total,
-15-minute TTL, 3 MiB per entry). They bind query, roots, policy, Agent, owner, Run,
-revision and Function generation, are consumed on use and never deserialize model
-state. File/directory signature changes invalidate a cursor without a rescan.
-Function replacement clears this derived cache. No scan survives a page return.
+payloads are budgeted before transport instead of slicing JSON. The former
+1,024-character query cutoff is removed. Large query/root/filter metadata is
+retained as a Run-bound JSON result, with a scope_reference readable through
+tool_output_read and root IDs in the short search response. A bound Run is
+required to retrieve that large metadata; without it the search reports the
+retention limitation. For long match terms the response refers back to the query
+and labels shortened excerpts; the original file and character offset remain
+available. Worker transport and continuation serialization have separate limits.
+Path regex compilation runs inside the cancellable worker. Continuations
+are opaque references to Function-local memory. The default holds at most 64
+entries, 8 MiB total and 3 MiB per entry, without a time-based expiry. The tool
+configuration can set file_search.continuations max_entries, max_bytes,
+max_state_bytes and ttl_seconds; zero disables that particular bound. The
+effective values appear in the result. A larger cache does not remove the
+worker's separate state-serialization limit. Cursors bind query, roots, policy,
+Agent, owner, Run, revision and Function generation, are consumed on use and
+never deserialize model state. File/directory signature changes invalidate a
+cursor without a rescan. Function replacement clears this derived cache. No scan
+survives a page return.
+There is no fixed directory-depth cutoff: platform path, handle and continuation
+limits can still stop a scan, and coverage reports errors rather than claiming
+absence. If a cursor expires, is evicted, no longer matches the Run/query or
+fails a filesystem signature check, the result reports a restart action. Restart
+without the cursor repeats the search against the current filesystem. Callers
+can compare path, type, file signature, character offset and term with prior
+pages; changed files can yield different results, so a restart is not an exact
+snapshot continuation and does not preserve unreturned matches.
 
 Recursive `file_list` uses the same foreground scanner and truthful pagination;
 the initial page defaults to 50, subject to serialized budget. Names/types and
@@ -373,3 +394,39 @@ Validation is local on isolated native Windows CPython 3.12; Unix-specific
 acceptance remains separate. No hosted suite, production adoption, merge or
 deployment is part of this review repair. Repository discovery still has no
 continuation cursor; its existing partial-result and narrowing guidance remains.
+
+## 2026-11-17 regex remediation candidate
+
+The earlier statement that regex is unavailable describes the original version.
+The current uncommitted Functions candidate supports path regex using Python's
+regular-expression syntax and line-oriented content regex. Content mode prefers
+the installed ripgrep Rust engine; it falls back to Python if ripgrep is absent
+or cannot parse a pattern that Python supports. A caller may select the engine
+through options.regex_engine (auto, ripgrep, or python). A specifically selected
+missing engine or unsupported syntax is reported explicitly. The effective
+engine is included in the result. Multiline matches are not simulated. Literal
+and log_query modes continue to treat metacharacters as ordinary text.
+
+The existing selected/authorized roots, exclusions, signatures, bounded output,
+opaque cursors and foreground cancellation remain. Content regex validates
+UTF-8, reports invalid-encoding files as incomplete coverage, and returns bounded
+excerpts at match starts with character offsets. Each page restarts that file's
+regex scan and skips prior matches; it does not keep a scanner running after the
+page returns. Large or many-page files can therefore be slow.
+
+Both engines can allocate memory proportional to a very long line. Python regex
+can also spend a long time on a pathological pattern; foreground cancellation
+terminates its worker. A synthetic 96 MiB single-line ripgrep search on this
+Windows host reached about 143 MiB resident memory;
+this is an observation, not a general upper bound. The default per-line byte
+budget is an estimate based on one eighth of available memory when available;
+it is frozen across cursor pages and shown in effective policy. A caller may
+set options.regex_max_line_bytes to a nonnegative value; zero selects no
+separate line budget. A file exceeding the selected budget is reported as not
+searched and coverage remains incomplete. The estimate does not guarantee a
+process memory ceiling, and choosing zero can exhaust resources. If available
+memory cannot be measured, the result explicitly warns that there is no
+automatic line budget.
+
+This is source and synthetic Windows evidence only. Cross-platform packaging,
+actual runtime adoption and any later main/PR state are separate.

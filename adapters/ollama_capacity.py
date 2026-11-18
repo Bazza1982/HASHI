@@ -129,14 +129,13 @@ async def check_native_capacity(
             "Ollama did not provide a valid bounded capacity probe; full generation "
             "was not started and no tools were executed by the probe."
         )
-    # The historical 2K closure margin can consume a third of a small model's
-    # usable input. Exact-model opt-ins scale that tool margin, preserving the
-    # independent output reserve and every final native admission check.
-    close_margin = 2048
-    if adapter._model_context_options().get("ollama_native_context") is True:
-        close_margin = min(close_margin, capacity.usable_input_tokens // 6)
+    # A caller may explicitly request early closure, but an extra fixed
+    # margin is not an inherent model or authorization limit.
+    close_margin = adapter._qualified_model_context_options().get("ollama_tool_closure_margin_tokens")
+    if close_margin is not None and (type(close_margin) is not int or close_margin < 0):
+        raise ValueError("Ollama tool closure margin must be a nonnegative integer")
     if (
-        allow_close and payload.get("tools")
+        close_margin is not None and allow_close and payload.get("tools")
         and result.prompt_tokens > capacity.usable_input_tokens - close_margin
     ):
         # Reclaim future tool schemas, not the task or completed evidence.
@@ -191,6 +190,12 @@ def page_new_tool_results(adapter, messages, first_result):
     if prompt_tokens is None:
         return
     results = [row for row in messages[first_result:] if row.get("role") == "tool"]
+    tool_names = {}
+    for message in messages:
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if isinstance(call, dict):
+                    tool_names[str(call.get("id") or "")] = str((call.get("function") or {}).get("name") or "")
     if not results:
         return
     remaining = max(
@@ -204,6 +209,11 @@ def page_new_tool_results(adapter, messages, first_result):
         original = row.get("content", "")
         if not isinstance(original, str):
             continue
+        source_tool = tool_names.get(str(row.get("tool_call_id") or ""), "")
+        # A continuation already has an explicit bounded page size. Let the
+        # exact next native probe decide whether it fits.
+        if source_tool == "tool_output_read":
+            continue
         if adapter._model_context_options().get("ollama_native_context") is True:
             from tools.token_tracker import estimate_tokens
 
@@ -211,7 +221,7 @@ def page_new_tool_results(adapter, messages, first_result):
             # Preserve a complete useful result when its estimated token share
             # and the exact next encoded payload fit. Native admission still
             # proves the actual changed request before any further generation.
-            char_limit = adapter._model_context_options().get("ollama_max_input_chars")
+            char_limit = adapter._qualified_model_context_options().get("ollama_max_input_chars")
             chars_fit = (char_limit is None
                          or encoded_input_chars(adapter._build_payload(messages)) <= char_limit)
             if estimate_tokens(original) <= allowance and chars_fit:
@@ -219,21 +229,33 @@ def page_new_tool_results(adapter, messages, first_result):
         elif len(original.encode("utf-8")) <= allowance:
             continue
         path, digest = _save_result(adapter, original)
-        if allowance < 1024:
-            # Only a result that actually needs a small page closes tools.
-            # Fitting results retain future reads, subject to native admission.
-            # Reprobe the changed closing payload without future schemas.
-            adapter._ollama_context_closing = True
+        reference = None
+        registry = getattr(adapter, "tool_registry", None)
+        if registry is not None and source_tool:
+            from tools.tool_output_store import run_binding
+            try:
+                available = {item["function"]["name"] for item in registry.get_tool_definitions()}
+                if "tool_output_read" in available:
+                    reference = registry._tool_output_store.retain(
+                        run_binding(registry._effective_audit_context()), source_tool, original
+                    )
+            except Exception:
+                adapter.logger.warning("Could not retain the paged result for Run-scoped continuation")
         metadata = {
             "saved_result": str(path), "sha256": digest,
             "total_chars": len(original), "shown_chars": 0, "next_line": 1,
         }
+        metadata["result_reference"] = reference
         instruction = (
-            "\nRead saved_result with file_read offset/limit or log_query. "
-            "Unshown text is unread; never rerun the original tool."
+            "\nUse tool_output_read with result_reference, next_offset and a small limit; "
+            "unshown text is unread. Never rerun the original tool."
+            if reference else
+            "\nThe full result was saved but Run-scoped continuation is unavailable; "
+            "unshown text is unread. Never rerun the original tool."
         )
         def render(prefix):
             metadata["shown_chars"] = len(prefix)
+            metadata["next_offset"] = len(prefix)
             metadata["next_line"] = prefix.count("\n") + 1
             return prefix + "\nHASHI_OLLAMA_RESULT_PAGE " + json.dumps(
                 metadata, ensure_ascii=False, separators=(",", ":")

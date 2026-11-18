@@ -273,7 +273,12 @@ def test_delete_success_cleans_tasks_secrets_and_quarantines(tmp_path, monkeypat
         },
         secrets={
             "momo_token": "secret_momo",
+            "momo": "unproven-existing-secret",
             "shared_token": "secret_koko",
+            "__hashi_pending_telegram_credentials_v1": {
+                "momo": {"token_key": "momo_token", "token": "synthetic-momo-draft"},
+                "koko": {"token_key": "shared_token", "token": "synthetic-koko-draft"},
+            },
         },
     )
     ws = paths.workspaces_root / "momo"
@@ -309,7 +314,11 @@ def test_delete_success_cleans_tasks_secrets_and_quarantines(tmp_path, monkeypat
     # 3. Check secrets.json: unshared momo_token removed, shared_token kept
     secrets_data = json.loads(paths.secrets_path.read_text(encoding="utf-8"))
     assert "momo_token" not in secrets_data
+    assert secrets_data["momo"] == "unproven-existing-secret"
     assert "shared_token" in secrets_data
+    pending = secrets_data["__hashi_pending_telegram_credentials_v1"]
+    assert "momo" not in pending
+    assert pending["koko"]["token"] == "synthetic-koko-draft"
 
     # 4. Check workspace quarantined
     assert not ws.exists()

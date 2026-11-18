@@ -25,9 +25,13 @@ from .package import (
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
+    AccessScopePreviewChanged,
     CloneImportPreflightError,
     package_sha256,
     read_agent_move_package,
+    receiver_archive_member_limit,
+    receiver_unpacked_byte_limit,
+    receiver_workspace_byte_limit,
 )
 from .transport_crypto import ENVELOPE_SCHEME, encrypt_package_transport, encrypt_package_file
 
@@ -73,7 +77,11 @@ class AgentMoveRemoteClient:
         timeout: int = 300,
     ) -> dict[str, Any]:
         path = Path(package_path)
-        package = read_agent_move_package(path, verify=True)
+        package = read_agent_move_package(
+            path, verify=True, max_archive_members=receiver_archive_member_limit(self.capabilities),
+            max_unpacked_bytes=receiver_unpacked_byte_limit(self.capabilities),
+            max_workspace_bytes=receiver_workspace_byte_limit(self.capabilities),
+        )
         self.ensure_package_compatible(package)
         package_bytes = path.stat().st_size
         try:
@@ -213,6 +221,9 @@ class AgentMoveRemoteClient:
 
     def rollback(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
         return self._action("rollback", package_id, timeout=timeout)
+
+    def abort_staged(self, package_id: str, *, timeout: int = 120) -> dict[str, Any]:
+        return self._action("abort-staged", package_id, timeout=timeout)
 
     def start(self, package_id: str, *, timeout: float | None = None) -> dict[str, Any]:
         from orchestrator.agent_lifecycle import AGENT_LIFECYCLE_REQUEST_TIMEOUT_SECONDS
@@ -401,6 +412,7 @@ def _request_json(
         _raise_receiver_http_error(
             exc, shared_token, request_nonce,
             allow_preflight_rejection=method == "POST" and urlsplit(url).path == "/agent-move/v1/stage",
+            allow_scope_rejection=method == "POST" and urlsplit(url).path == "/agent-move/v1/commit",
         )
     except (URLError, TimeoutError, OSError) as exc:
         raise AgentMoveRemoteError(f"receiver request failed: {exc}") from exc
@@ -430,7 +442,7 @@ def _request_json(
 
 def _raise_receiver_http_error(
     error: HTTPError, shared_token: str | None, request_nonce: str, *,
-    allow_preflight_rejection: bool,
+    allow_preflight_rejection: bool, allow_scope_rejection: bool = False,
 ) -> None:
     body = None
     try:
@@ -450,6 +462,16 @@ def _raise_receiver_http_error(
         )
     ):
         raise CloneImportPreflightError(str(detail)) from error
+    if (
+        allow_scope_rejection and error.code == 409 and shared_token and isinstance(body, dict)
+        and body.get("code") == AccessScopePreviewChanged.code
+        and verify_response_auth(
+            shared_token=shared_token, request_nonce=request_nonce,
+            payload={key: value for key, value in body.items() if key != "response_auth"},
+            response_auth=body.get("response_auth"),
+        )
+    ):
+        raise AccessScopePreviewChanged(str(detail)) from error
     raise AgentMoveRemoteError(f"receiver returned HTTP {error.code}: {detail}") from error
 
 

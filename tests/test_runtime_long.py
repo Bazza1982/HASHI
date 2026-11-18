@@ -262,24 +262,34 @@ async def test_cmd_end_rejects_empty_batch_without_enqueuing():
 
 
 @pytest.mark.asyncio
-async def test_cmd_end_waits_for_safevoice_confirmation():
+async def test_cmd_end_excludes_only_unconfirmed_voice_and_old_button_cannot_send_it():
     runtime = _runtime()
     runtime_long.begin_batch(runtime, 123)
-    runtime_long.collect_text(runtime, 123, "Use the voice note too.")
+    runtime_long.collect_text(runtime, 123, "first")
     pending_key = runtime_long.register_voice_confirmation(
-        runtime,
-        chat_id=123,
-        prompt="[Voice message transcription] hello",
-        transcript="hello",
-        summary="Voice: note.ogg",
+        runtime, chat_id=123, prompt="[Voice message transcription] pending voice",
+        transcript="pending voice", summary="Voice: note.ogg",
     )
-
+    runtime_long.collect_text(runtime, 123, "second")
     await runtime_long.cmd_end(runtime, _update(), SimpleNamespace())
+    assert len(runtime.enqueued) == 1
+    assert runtime.enqueued[0]["prompt"] == "first\nsecond"
+    assert "pending voice" not in runtime.enqueued[0]["prompt"]
+    assert pending_key not in runtime._pending_voice
+    assert any("Unconfirmed voice transcripts excluded: 1" in row["text"] for row in runtime.replies)
 
-    assert pending_key is not None
-    assert runtime.enqueued == []
-    assert runtime._long_buffer_active is True
-    assert "Confirm or discard 1 pending voice transcript" in runtime.replies[-1]["text"]
+    class Query:
+        data = f"safevoice:yes:{pending_key}"
+        from_user = SimpleNamespace(id=1)
+
+        async def edit_message_text(self, *_args, **_kwargs):
+            return None
+
+        async def answer(self, *_args, **_kwargs):
+            return None
+
+    await FlexibleAgentRuntime.callback_safevoice(runtime, SimpleNamespace(callback_query=Query()), SimpleNamespace())
+    assert len(runtime.enqueued) == 1
 
 
 @pytest.mark.asyncio
@@ -317,36 +327,55 @@ async def test_cmd_end_waits_for_reserved_media_before_finalizing():
 
 
 @pytest.mark.asyncio
-async def test_timeout_submits_confirmed_items_and_discards_pending_voice(monkeypatch):
+async def test_timeout_keeps_pending_voice_in_original_position(monkeypatch):
     runtime = _runtime()
     runtime_long.begin_batch(runtime, 123)
     runtime_long.collect_media(
-        runtime,
-        123,
-        'User sent a PDF document "a.pdf" (saved at /tmp/a.pdf). Read it.',
-        "document",
-        "a.pdf",
+        runtime, 123, 'User sent a PDF document "a.pdf" (saved at /tmp/a.pdf). Read it.',
+        "document", "a.pdf",
     )
-    runtime_long.register_voice_confirmation(
-        runtime,
-        chat_id=123,
-        prompt="[Voice message transcription] pending",
-        transcript="pending",
-        summary="Voice: pending.ogg",
+    pending_key = runtime_long.register_voice_confirmation(
+        runtime, chat_id=123, prompt="[Voice message transcription] pending",
+        transcript="pending", summary="Voice: pending.ogg",
     )
 
     async def no_wait(_seconds):
         return None
 
     monkeypatch.setattr(runtime_long.asyncio, "sleep", no_wait)
-
     await runtime_long.long_buffer_timeout(runtime)
-
+    assert runtime.enqueued == []
+    assert pending_key in runtime._pending_voice
+    assert runtime._long_buffer_kinds == ["document", "pending_voice"]
+    assert "draft remains open" in runtime.delivered[0]["text"]
+    pending = runtime._pending_voice.pop(pending_key)
+    assert runtime_long.resolve_voice_confirmation(runtime, pending_key, pending)
+    await runtime_long.cmd_end(runtime, _update(), SimpleNamespace())
     assert len(runtime.enqueued) == 1
-    assert runtime.enqueued[0]["source"] == "multimodal"
-    assert len(runtime.delivered) == 1
+    prompt = runtime.enqueued[0]["prompt"]
+    assert prompt.index("Document: a.pdf") < prompt.index("Voice transcript: Voice: pending.ogg")
+    assert "pending" in prompt
+
+
+@pytest.mark.asyncio
+async def test_timeout_auto_submit_requires_explicit_selected_policy(monkeypatch):
+    runtime = _runtime()
+    runtime_long.begin_batch(runtime, 123, "approved text")
+    pending_key = runtime_long.register_voice_confirmation(
+        runtime, chat_id=123, prompt="private voice", transcript="private voice",
+        summary="Voice: pending.ogg",
+    )
+    monkeypatch.setenv("HASHI_LONG_BATCH_IDLE_ACTION", "submit")
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(runtime_long.asyncio, "sleep", no_wait)
+    await runtime_long.long_buffer_timeout(runtime)
+    assert len(runtime.enqueued) == 1
+    assert runtime.enqueued[0]["prompt"] == "approved text"
+    assert pending_key not in runtime._pending_voice
     assert "discarded 1 unconfirmed voice transcript" in runtime.delivered[0]["text"]
-    assert runtime._pending_voice == {}
 
 
 def test_long_batch_is_scoped_to_starting_chat():
@@ -395,7 +424,8 @@ async def test_safevoice_callback_confirms_into_batch_without_enqueuing():
 
 
 @pytest.mark.asyncio
-async def test_safevoice_callback_preserves_telegram_connector_on_confirm():
+@pytest.mark.parametrize("known_update", [False, True])
+async def test_safevoice_callback_preserves_telegram_connector_on_confirm(known_update):
     runtime = _runtime()
     runtime._pending_voice["123"] = {
         "prompt": "[Voice message transcription] send this",
@@ -404,6 +434,8 @@ async def test_safevoice_callback_preserves_telegram_connector_on_confirm():
         "chat_id": 123,
         "timestamp": "2026-10-16T00:00:00",
         "long_batch": False,
+        **({"telegram_ingress_key": "telegram-ingress:tg:agent:123:90:901",
+            "message_age": {"reason": "stale", "age_seconds": 90}} if known_update else {}),
     }
     edits = []
     answers = []
@@ -430,7 +462,10 @@ async def test_safevoice_callback_preserves_telegram_connector_on_confirm():
             "prompt": "[Voice message transcription] send this",
             "source": "voice_transcript",
             "summary": "Voice: note.ogg",
-            "request_metadata": {"ingress_transport": "telegram"},
+            "request_metadata": {"ingress_transport": "telegram", **(
+                {"_frontend_message_age": {"reason": "stale", "age_seconds": 90}}
+                if known_update else {})},
+            **({"idempotency_key": "telegram-ingress:tg:agent:123:90:901"} if known_update else {}),
         }
     ]
     assert "send this" in edits[0]["text"]
@@ -538,3 +573,54 @@ async def test_batch_missing_admission_receipt_never_announces_success():
     assert "Submitting" not in text and "no model action" not in text
     await runtime_long._finish_batch(runtime, batch)
     assert runtime.enqueue_request.await_count == 1
+
+@pytest.mark.asyncio
+async def test_idle_timer_refreshes_on_activity_and_explicit_discard_does_not_stop_other_work(monkeypatch):
+    monkeypatch.setenv("HASHI_LONG_BATCH_IDLE_SECONDS", "30")
+    monkeypatch.delenv("HASHI_LONG_BATCH_IDLE_ACTION", raising=False)
+    first_started, second_started, expire = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        (first_started if len(sleeps) == 1 else second_started).set()
+        await expire.wait()
+
+    monkeypatch.setattr(runtime_long.asyncio, "sleep", fake_sleep)
+    runtime = _runtime()
+    unrelated = asyncio.create_task(asyncio.Event().wait())
+    try:
+        await runtime_long.cmd_long(runtime, _update(), SimpleNamespace(args=[]))
+        original_timer = runtime._long_buffer_timeout_task
+        await asyncio.wait_for(first_started.wait(), 2)
+        assert runtime_long.collect_text(runtime, 123, "more work")
+        current_timer = runtime._long_buffer_timeout_task
+        assert current_timer is not original_timer
+        await asyncio.wait_for(second_started.wait(), 2)
+        assert runtime.delivered == []
+        expire.set()
+        await asyncio.wait_for(current_timer, 2)
+        assert sleeps[:2] == [30, 30]
+        assert len(runtime.delivered) == 1
+        assert runtime.enqueued == []
+        assert runtime._long_buffer == ["more work"]
+        await runtime_long.cmd_long(runtime, _update(), SimpleNamespace(args=["continue"]))
+        assert runtime._long_buffer_timeout_task is not None
+        await runtime_long.cmd_long(runtime, _update(), SimpleNamespace(args=["discard"]))
+        assert not runtime_long.is_batch_active(runtime)
+        assert not unrelated.done()
+    finally:
+        runtime_long.discard_batch(runtime)
+        unrelated.cancel()
+        await asyncio.gather(unrelated, return_exceptions=True)
+
+
+def test_long_idle_policy_invalid_values_fall_back_to_reminder(monkeypatch):
+    monkeypatch.setenv("HASHI_LONG_BATCH_IDLE_SECONDS", "nan")
+    monkeypatch.setenv("HASHI_LONG_BATCH_IDLE_ACTION", "invalid")
+    assert runtime_long.long_batch_idle_policy() == {
+        "idle_seconds": 300.0, "idle_action": "remind", "configuration_valid": False,
+    }
+    monkeypatch.setenv("HASHI_LONG_BATCH_IDLE_SECONDS", "0")
+    monkeypatch.setenv("HASHI_LONG_BATCH_IDLE_ACTION", "remind")
+    assert runtime_long.long_batch_idle_policy()["idle_seconds"] == 0

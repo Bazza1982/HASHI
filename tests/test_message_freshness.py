@@ -116,6 +116,24 @@ def test_hchat_boundaries():
     assert res_61.reason == "stale"
 
 
+def test_equivalent_offset_timestamps_have_identical_freshness():
+    now = datetime(2026, 11, 16, 0, 0, 30, tzinfo=timezone.utc)
+    equivalents = [
+        "2026-11-16T00:00:00Z", "2026-11-16T00:00:00+00:00",
+        "2026-11-16T11:00:00+11:00", "2026-11-15T19:00:00-05:00",
+        datetime(2026, 11, 16, 11, 0, tzinfo=timezone(timedelta(hours=11))),
+    ]
+    for entrypoint in ("workbench", "telegram", "hchat"):
+        values = [classify_message_freshness(entrypoint, originated_at=item, received_at=now)
+                  for item in equivalents]
+        assert {(item.reason, item.age_seconds, item.originated_at_iso) for item in values} == {
+            ("fresh", 30.0, "2026-11-16T00:00:00Z")
+        }
+    for invalid in ("2026-11-16T00:00:00+24:00", "2026-11-16T00:00:00+05:60",
+                    "2026-11-16T00:00:00", datetime(2026, 11, 16)):
+        assert classify_message_freshness("workbench", originated_at=invalid, received_at=now).reason == "timestamp_invalid"
+
+
 def test_abnormal_timestamps():
     now = datetime(2026, 10, 16, 12, 0, 0, tzinfo=timezone.utc)
 

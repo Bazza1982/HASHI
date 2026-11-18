@@ -36,6 +36,7 @@ class RuntimeAppHost:
         self.bootstrapped_agents = set()
         self.onboarding_paths = None
         self.onboarding_done = False
+        self._candidate_personal_binding_deferred = False
 
     @timed("shared.prepare")
     async def prepare(self):
@@ -92,10 +93,13 @@ class RuntimeAppHost:
             selected_agents=set(agents) if agents else None,
             enable_api_gateway=bool(args.get("api_gateway")),
         )
-        # Candidate config validation does not initialize providers or bind ports.
-        self.app._load_config_bundle(
-            bootstrap_local_api_credential=True,
-        )
+        # Replacements, recovery and restore receive handoff state after
+        # prepare. They must not establish a key from a newer disk configuration.
+        self._candidate_personal_binding_deferred = not bool(self.bootstrap.get("initial"))
+        config_options = {"bootstrap_local_api_credential": True}
+        if self._candidate_personal_binding_deferred:
+            config_options["defer_personal_data_binding"] = True
+        self.app._load_config_bundle(**config_options)
         self.app.kernel_pid = self.bootstrap["kernel_pid"]
         self.app.core_runtime_fingerprint = core_runtime
         self.app.shared_generation_id = manifest["generation_id"]
@@ -172,6 +176,21 @@ class RuntimeAppHost:
         handoff = handoff or self.bootstrap.get("handoff", {})
         if self.bootstrap.get("recovery"):
             handoff = runtime_handoff.load(self.app)
+        if self._candidate_personal_binding_deferred:
+            binding = handoff.get("personal_data_binding")
+            if binding is not None:
+                profile = str(
+                    getattr(self.app.global_cfg, "deployment_profile", "personal") or "personal"
+                )
+                if profile != "personal":
+                    raise ValueError("personal data handoff cannot bind a governed instance")
+                from orchestrator.personal_data_owner import establish_handoff_data_binding
+
+                establish_handoff_data_binding(self.app.paths.bridge_home, binding)
+            # Older retiring versions do not include the binding. Their
+            # compatibility fallback is still derived after quiescence and
+            # requires separate legacy-handoff verification.
+            self.app._load_config_bundle(bootstrap_local_api_credential=True)
         self.app.agent_lifecycle.manually_stopped_agents = set(
             handoff.get("manually_stopped_agents", ())
         )
@@ -284,6 +303,7 @@ class RuntimeAppHost:
         app = self.app
         if self.task is None or self.task.done():
             raise RuntimeError("shared Functions are not active")
+        app._handoff_cancel_sealed = False
         app._handoff_draining = False
         app._shared_committed = True
         app._shared_replacement_continuity = bool(
@@ -376,6 +396,7 @@ class RuntimeAppHost:
         ):
             raise RuntimeError("shared Functions cannot drain in this lifecycle phase")
         self._require_shared_drain_idle(app)
+        app._handoff_cancel_sealed = False
         app._handoff_draining = True
         if self.connector_task is not None:
             self.connector_task.cancel()
@@ -402,9 +423,12 @@ class RuntimeAppHost:
             self._require_shared_drain_idle(app)
             async with asyncio.timeout(120):
                 for handle in app.runtimes:
-                    old = await handle.begin_cutover()
+                    old = await handle.begin_cutover(shared_handoff=True)
                     self.quiesced.append((handle, old))
                     await old.call("worker.quiesce", {"timeout": 120}, timeout=130)
+                # Seal stop admission before the final in-flight check so a
+                # late stop cannot be routed to the retiring Worker afterward.
+                app._handoff_cancel_sealed = True
                 self._require_shared_drain_idle(app)
             return runtime_handoff.snapshot(app)
         except BaseException:

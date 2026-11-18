@@ -57,6 +57,7 @@ class _MockRuntime:
     def __init__(self, server=None):
         self.server = server
         self.enqueue_request_calls = 0
+        self.replay_lookup_calls = 0
         self.last_enqueued_text = None
         self.last_idempotency_key = None
         self.last_request_metadata = None
@@ -76,7 +77,11 @@ class _MockRuntime:
         request_metadata,
         **kwargs,
     ):
-        self.enqueue_request_calls += 1
+        replay_only = bool(kwargs.get("replay_only", False))
+        if replay_only:
+            self.replay_lookup_calls += 1
+        else:
+            self.enqueue_request_calls += 1
         self.last_enqueued_text = prompt
         self.last_idempotency_key = idempotency_key
         self.last_request_metadata = dict(request_metadata)
@@ -90,6 +95,11 @@ class _MockRuntime:
             source=source,
             idempotency_key=idempotency_key,
             content=request_metadata.get("session_message_content"),
+            display_text=request_metadata.get("session_message_display_text"),
+            execution_mode=request_metadata.get("execution_mode"),
+            parent_run_id=request_metadata.get("parent_run_id"),
+            response_preferences=request_metadata.get("response_preferences"),
+            replay_only=replay_only,
         )
         return accepted.request_id
 
@@ -99,7 +109,7 @@ class _MockRuntime:
         *,
         source,
         request_metadata,
-        request_content,
+        request_content=None,
         idempotency_key,
         **_kwargs,
     ):
@@ -140,6 +150,7 @@ def api_server(tmp_path: Path):
             workbench_port=18800,
             api_gateway_port=18801,
             deployment_profile="personal",
+            session_message_age_policy={"mode": "confirm"},
         ),
         runtimes=[runtime],
     )
@@ -175,6 +186,57 @@ async def test_capabilities_advertises_message_freshness(api_server):
     assert freshness_cap["pending_receipt_supported"] is True
     assert "confirm" in freshness_cap["decisions_supported"]
     assert "discard" in freshness_cap["decisions_supported"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_mode", ["observe", "expire"])
+async def test_authenticated_hchat_request_age_policy_is_applied_by_workbench(api_server, session, tmp_path, policy_mode):
+    server, runtime = api_server
+    server.global_config.hchat_request_age_policy = (
+        {"mode": "expire", "max_age_seconds": 60} if policy_mode == "expire" else {"mode": "observe"}
+    )
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "synthetic-hchat-token"}), encoding="utf-8")
+    originated = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    context = {"from_agent": "rain", "from_instance": "HASHI2", "to_agent": "lily",
+        "to_instance": "HASHI3", "message_id": "delayed-hchat", "originated_at": originated,
+        "message_type": "agent_message", "conversation_id": "conversation-1",
+        "network_authentication": "shared_network_hmac"}
+    evidence = seal_connector_evidence(tmp_path, claims={
+        "_message_source_reserved": "hchat", "_hchat_context": context,
+    }, prompt="hello")
+    response = await server.handle_chat(_MockRequest({
+        "agent": "lily", "text": "hello", "source": "protocol:message",
+        "message_id": "delayed-hchat", "idempotency_key": "hchat:delayed-hchat",
+        "originated_at": originated, "message_type": "agent_message",
+        "request_metadata": {"_connector_evidence": evidence},
+    }))
+    data = json.loads(response.text)
+    if policy_mode == "observe":
+        assert response.status == 200 and data["ok"] is True
+        assert runtime.enqueue_request_calls == 1
+        assert runtime.last_request_metadata["_frontend_message_age"]["reason"] == "stale"
+    else:
+        assert response.status == 409 and data["error_code"] == "hchat_message_expired"
+        assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("originated_at", [None, "not-a-time"])
+async def test_workbench_hchat_request_without_usable_time_is_not_blocked(api_server, session, originated_at):
+    from unittest.mock import AsyncMock
+
+    server, runtime = api_server
+    runtime.enqueue_api_text = AsyncMock(return_value="req-hchat")
+    response = await server.handle_hchat_exchange(_MockRequest({
+        "to_agent": "lily", "to_instance": "HASHI3", "from_agent": "rain", "from_instance": "HASHI2",
+        "text": "hello", "message_id": "missing-time", "idempotency_key": "hchat:missing-time",
+        "conversation_id": "conversation-1", "message_type": "agent_message", "originated_at": originated_at,
+    }))
+    result = json.loads(response.text)
+    assert response.status == 200 and result["state"] == "queued"
+    metadata = runtime.enqueue_api_text.await_args.kwargs["request_metadata"]
+    assert metadata["_frontend_message_age"]["reason"] in {"timestamp_missing", "timestamp_invalid"}
 
 
 @pytest.mark.asyncio
@@ -266,6 +328,126 @@ async def test_hchat_delivery_status_is_displayed_without_agent_run(
     )
     assert visible[-1]["source"] == "hchat-status"
     assert "15 minutes" in visible[-1]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["user:7", "user:8"])
+async def test_delayed_hchat_reply_stays_in_original_bound_session(api_server, session, tmp_path, monkeypatch, owner):
+    import asyncio
+
+    from orchestrator.hchat_origin_binding import bind_outbound_origin
+    from remote import protocol_outbound
+    from remote.protocol_manager import ProtocolManager
+
+    server, runtime = api_server
+    store = server.session_store
+    if owner != "user:7":
+        session = store.create_session(owner_id=owner, agent_id="lily")
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "synthetic-hchat-token"}), encoding="utf-8",
+    )
+    run = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-outbound", text="send to rain", source="test", idempotency_key="outbound-run",
+    )
+    fence = store.mark_request_running(run.request_id, worker_id="test-worker")
+    bind_outbound_origin(
+        store, message_id="outbound-message", owner_id=owner, agent_id="lily",
+        session_id=session["session_id"], run_id=run.run_id, request_id=run.request_id,
+        context_generation=1, fencing_token=fence, target="rain@HASHI2",
+    )
+    outbound_path = tmp_path / "outbound.json"
+    monkeypatch.setattr(protocol_outbound, "outbound_state_path", lambda _instance: outbound_path)
+    assert protocol_outbound.register_outbound_correlation({
+        "message_id": "outbound-message", "conversation_id": "conv-1", "from_instance": "HASHI3",
+        "from_agent": "lily", "to_instance": "HASHI2", "to_agent": "rain",
+    }, local_instance="HASHI3", state_path=outbound_path)["ok"]
+    other = store.create_session(owner_id=owner, agent_id="lily")
+    store.bind_primary_session(owner_id=owner, agent_id="lily", session_id=other["session_id"])
+    originated = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    context = {"from_agent": "rain", "from_instance": "HASHI2", "to_agent": "lily",
+               "to_instance": "HASHI3", "message_id": "reply-1", "originated_at": originated,
+               "message_type": "agent_reply", "conversation_id": "conv-1",
+               "in_reply_to": "outbound-message", "network_authentication": "shared_network_hmac",
+               "authenticated_peer": "HASHI2"}
+
+    def request_for(verified_context, text="delayed answer"):
+        evidence = seal_connector_evidence(tmp_path, claims={
+            "_message_source_reserved": "hchat", "_hchat_context": verified_context,
+        }, prompt=text)
+        return _MockRequest({"agent": "lily", "text": text, "source": "protocol:reply",
+            "message_id": "reply-1", "idempotency_key": "hchat:reply-1", "originated_at": originated,
+            "message_type": "agent_reply", "request_metadata": {"_connector_evidence": evidence}})
+
+    # Exercise ProtocolManager's actual envelope/evidence path into Workbench's
+    # real handler; only the local HTTP hop is replaced with an in-process call.
+    manager = ProtocolManager(
+        hashi_root=tmp_path, instance_info={"instance_id": "HASHI3"},
+        peer_registry=None, workbench_port=18800,
+    )
+    manager._outbound_path = outbound_path
+    manager._frontend_session_store = lambda: store
+    manager.get_local_agents_snapshot = lambda: [{"agent_name": "lily", "is_active": True}]
+    manager._local_workbench_routes = lambda: [("127.0.0.1", 18800)]
+    manager._probe_local_workbench = lambda _host, _port: True
+    loop = asyncio.get_running_loop()
+
+    def local_http(_url, payload, timeout=10):
+        future = asyncio.run_coroutine_threadsafe(server.handle_chat(_MockRequest(payload)), loop)
+        response = future.result(timeout)
+        body = json.loads(response.text)
+        if response.status >= 400:
+            body["__http_status"] = response.status
+        return body
+
+    manager._post_json = local_http
+    protocol_payload = {"message_type": "agent_reply", "message_id": "reply-1",
+        "idempotency_key": "hchat:reply-1", "in_reply_to": "outbound-message", "conversation_id": "conv-1",
+        "from_instance": "HASHI2", "from_agent": "rain", "to_instance": "HASHI3", "to_agent": "lily",
+        "originated_at": originated, "body": {"text": "delayed answer"}, "ttl": 5, "route_trace": ["HASHI2"],
+        "_network_authenticated_instance": "HASHI2", "_network_authentication": "shared_network_hmac"}
+    status, receipt = await manager.handle_protocol_message(protocol_payload)
+    assert status == 202 and receipt["session_id"] == session["session_id"]
+    assert receipt["state"] == "reply_delivered_locally"
+    status, again = await manager.handle_protocol_message(protocol_payload)
+    assert status == 200 and again["state"] == "reply_delivered_locally"
+    from unittest.mock import AsyncMock
+
+    resumed = ProtocolManager(
+        hashi_root=tmp_path, instance_info={"instance_id": "HASHI3"},
+        peer_registry=None, workbench_port=18800,
+    )
+    resumed._outbound_path = outbound_path
+    resumed._frontend_session_store = lambda: store
+    resumed.get_local_agents_snapshot = manager.get_local_agents_snapshot
+    resumed._enqueue_local_prompt = AsyncMock(side_effect=AssertionError("must not republish after restart"))
+    status, again = await resumed.handle_protocol_message(protocol_payload)
+    assert status == 200 and again["state"] == "reply_delivered_locally"
+    resumed._enqueue_local_prompt.assert_not_awaited()
+    changed_payload = {**protocol_payload, "body": {"text": "different answer"}}
+    status, conflict = await resumed.handle_protocol_message(changed_payload)
+    assert status == 409 and conflict["body"]["code"] == "idempotency_conflict"
+
+    first = await server.handle_chat(request_for(context))
+    repeated = await server.handle_chat(request_for(context))
+    assert first.status == repeated.status == 200
+    assert json.loads(first.text)["session_id"] == session["session_id"]
+    visible = store.recent_visible_messages(session["session_id"], owner_id=owner)
+    assert sum(item["source"] == "hchat-reply" for item in visible) == 1
+    assert visible[-1]["message_context"]["message_age"]["reason"] == "stale"
+    assert not store.recent_visible_messages(other["session_id"], owner_id=owner)
+    assert runtime.enqueue_request_calls == 0
+    wrong = await server.handle_chat(request_for({**context, "from_agent": "other"}))
+    assert wrong.status == 409
+    assert json.loads(wrong.text)["error_code"] == "reply_correlation_mismatch"
+    changed = await server.handle_chat(request_for(context, "different answer"))
+    assert changed.status == 409
+    assert json.loads(changed.text)["error_code"] == "hchat_reply_conflict"
+    unverified = await server.handle_chat(request_for({**context, "network_authentication": "not_verified"}))
+    assert unverified.status == 401
+    forged_id = request_for(context)
+    forged_id._payload.update(message_id="reply-2", idempotency_key="hchat:reply-2")
+    assert (await server.handle_chat(forged_id)).status == 409
 
 
 @pytest.mark.asyncio
@@ -396,6 +578,162 @@ async def test_hchat_sender_receives_waiting_then_terminal_status(
         "discarded",
     ]
     assert refreshed["display_metadata"]["sender_delivery_status_complete"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp_kind", ["old", "missing", "invalid", "future"])
+async def test_default_session_messages_do_not_require_age_consent(
+    api_server, session, timestamp_kind
+):
+    server, runtime = api_server
+    # An empty policy is the instance default; the existing fixture explicitly
+    # selects legacy confirmation for tests of the optional policy below.
+    server.global_config.session_message_age_policy = {}
+    now = datetime.now(timezone.utc)
+    values = {
+        "old": (now - timedelta(minutes=20)).isoformat(),
+        "missing": None,
+        "invalid": "2026-11-17T11:00:00",
+        "future": (now + timedelta(minutes=2)).isoformat(),
+    }
+    payload = {
+        "idempotency_key": f"default-age-{timestamp_kind}",
+        "message": {"content": [{"type": "text", "text": "ordinary message"}]},
+    }
+    if values[timestamp_kind] is not None:
+        payload["originated_at"] = values[timestamp_kind]
+    response = await server.handle_v1_session_runs_create(_MockRequest(
+        payload, match_info={"session_id": session["session_id"]},
+    ))
+    data = json.loads(response.text)
+    assert response.status == 202, data
+    assert data.get("run_id") and not data.get("confirmation_required")
+    assert runtime.enqueue_request_calls == 1
+    assert not server.ingress_confirmation.list(
+        session_id=session["session_id"], owner_id="user:7"
+    )
+    age = data["message_age"]
+    if timestamp_kind in {"missing", "invalid"}:
+        assert age["originated_at"] is None
+        assert age["age_seconds"] is None
+    else:
+        assert age["originated_at"] is not None
+        assert isinstance(age["age_seconds"], (int, float))
+    assert runtime.last_request_metadata["_frontend_message_age"] == age
+
+
+@pytest.mark.asyncio
+async def test_default_age_capability_does_not_require_sender_timestamp(api_server):
+    server, _ = api_server
+    server.global_config.session_message_age_policy = {}
+    response = await server.handle_v1_capabilities(_MockRequest())
+    capability = json.loads(response.text)["message_freshness"]
+    assert capability["required_fields"] == []
+    assert capability["session_api_policy"]["mode"] == "observe"
+    assert json.loads(response.text)["session_message_age"] == {
+        "version": "1.0", "mode": "observe", "max_age_seconds": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("originated_at", [None, "2026-11-17T11:00:00"])
+async def test_selected_expiry_refuses_unknown_time_without_fabrication(
+    api_server, session, originated_at
+):
+    server, runtime = api_server
+    server.global_config.session_message_age_policy = {"mode": "expire", "max_age_seconds": 60}
+    response = await server.handle_v1_session_runs_create(_MockRequest(
+        {"idempotency_key": f"expiry-{originated_at}", "originated_at": originated_at,
+         "message": {"content": [{"type": "text", "text": "expiring message"}]}},
+        match_info={"session_id": session["session_id"]},
+    ))
+    data = json.loads(response.text)
+    assert response.status == 409, data
+    assert data["code"] == "message_age_expired"
+    assert data["message_age"]["age_seconds"] is None
+    assert runtime.enqueue_request_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_selected_expiry_enforces_its_actual_age_limit(api_server, session):
+    server, runtime = api_server
+    server.global_config.session_message_age_policy = {"mode": "expire", "max_age_seconds": 60}
+    now = datetime.now(timezone.utc)
+    for age, expected_status in [(120, 409), (10, 202)]:
+        response = await server.handle_v1_session_runs_create(_MockRequest(
+            {"idempotency_key": f"expiry-age-{age}",
+             "originated_at": (now - timedelta(seconds=age)).isoformat(),
+             "message": {"content": [{"type": "text", "text": "expiring action"}]}},
+            match_info={"session_id": session["session_id"]},
+        ))
+        assert response.status == expected_status, json.loads(response.text)
+    assert runtime.enqueue_request_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_retry_returns_only_a_matching_previously_accepted_run(api_server, session):
+    server, runtime = api_server
+    server.global_config.session_message_age_policy = {"mode": "expire", "max_age_seconds": 120}
+    payload = {
+        "idempotency_key": "expiring-idempotent-request",
+        "originated_at": (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat(),
+        "message": {"content": [{"type": "text", "text": "do this once"}]},
+    }
+
+    async def send(body):
+        return await server.handle_v1_session_runs_create(_MockRequest(
+            body, match_info={"session_id": session["session_id"]},
+        ))
+
+    first = await send(payload)
+    assert first.status == 202, first.text
+    original = json.loads(first.text)
+    server.global_config.session_message_age_policy = {"mode": "expire", "max_age_seconds": 30}
+    retry = await send(payload)
+    assert retry.status == 202, retry.text
+    assert json.loads(retry.text)["run_id"] == original["run_id"]
+    assert json.loads(retry.text)["request_id"] == original["request_id"]
+
+    changed = dict(payload, message={"content": [{"type": "text", "text": "do something else"}]})
+    conflict = await send(changed)
+    assert conflict.status == 409, conflict.text
+    assert json.loads(conflict.text)["code"] == "idempotency_conflict"
+    missing = await send(dict(payload, idempotency_key="never-accepted"))
+    assert missing.status == 409 and json.loads(missing.text)["code"] == "message_age_expired"
+    assert runtime.enqueue_request_calls == 1
+    assert runtime.replay_lookup_calls == 2
+    assert server.session_store.find_run_by_idempotency(
+        session_id=session["session_id"], owner_id="user:7", idempotency_key="never-accepted"
+    ) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_error,expected_code", [
+    ("IdempotencyConflict", "idempotency_conflict"),
+    ("ExistingRunNotFound", "message_age_expired"),
+])
+async def test_expired_retry_maps_typed_worker_receipt_errors(api_server, session, worker_error, expected_code):
+    from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
+
+    server, runtime = api_server
+    server.global_config.session_message_age_policy = {"mode": "expire", "max_age_seconds": 120}
+    payload = {
+        "idempotency_key": "worker-replay-error",
+        "originated_at": (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat(),
+        "message": {"content": [{"type": "text", "text": "once"}]},
+    }
+    def request():
+        return _MockRequest(payload, match_info={"session_id": session["session_id"]})
+    assert (await server.handle_v1_session_runs_create(request())).status == 202
+    server.global_config.session_message_age_policy = {"mode": "expire", "max_age_seconds": 30}
+
+    async def reject(*args, **kwargs):
+        assert kwargs["replay_only"] is True
+        raise FunctionWorkerRemoteError("runtime.enqueue_request", {"type": worker_error})
+
+    runtime.enqueue_request = reject
+    result = await server.handle_v1_session_runs_create(request())
+    assert result.status == 409 and json.loads(result.text)["code"] == expected_code
 
 
 @pytest.mark.asyncio
@@ -626,6 +964,7 @@ async def test_confirmed_stale_protocol_attachment_uses_primary_session_once(
         {"agent_name": "lily", "is_active": True}
     ]
     protocol._frontend_session_store = lambda: server.session_store
+    protocol._hchat_request_age_policy = lambda: {"mode": "confirm"}
     protocol._enqueue_local_prompt = pytest.fail
     code, receipt = await protocol.handle_protocol_message(
         {
@@ -1240,3 +1579,54 @@ async def test_ingress_confirmation_decision_confirm_and_discard(api_server, ses
     r_data = json.loads(repeat_resp.text)
     assert r_data["run_id"] == c_data["run_id"]
     assert runtime.enqueue_request_calls == 1  # not re-executed
+
+@pytest.mark.asyncio
+async def test_confirmation_registration_keeps_status_responsive_under_database_writer(api_server, session, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    server, runtime = api_server
+    started = threading.Event()
+    original = server.ingress_confirmation.register_pending
+
+    def observed_register(**kwargs):
+        started.set()
+        return original(**kwargs)
+
+    monkeypatch.setattr(server.ingress_confirmation, "register_pending", observed_register)
+    payload = {
+        "idempotency_key": "stale-message-contention",
+        "originated_at": (datetime.now(timezone.utc) - timedelta(seconds=40)).isoformat(),
+        "message": {"content": [{"type": "text", "text": "send once"}]},
+    }
+
+    def request():
+        return _MockRequest(payload, match_info={"session_id": session["session_id"]})
+
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    task = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        task = asyncio.create_task(server.handle_v1_session_runs_create(request()))
+        assert await asyncio.to_thread(started.wait, 2)
+        assert not task.done()
+        before = time.monotonic()
+        status = await server.handle_v1_capabilities(_MockRequest())
+        assert status.status == 200
+        assert time.monotonic() - before < 1
+        connection.rollback()
+        result = await asyncio.wait_for(task, 3)
+        assert result.status == 202, result.text
+        first = json.loads(result.text)
+        assert first["confirmation_required"] is True
+        retry = await server.handle_v1_session_runs_create(request())
+        assert retry.status == 202
+        assert json.loads(retry.text)["confirmation"]["id"] == first["confirmation"]["id"]
+        assert runtime.enqueue_request_calls == 0
+    finally:
+        connection.rollback()
+        connection.close()
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)

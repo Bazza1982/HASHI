@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1060,6 +1061,38 @@ def test_restart_result_notification_preserves_frozen_session_and_locale(monkeyp
     assert captured["publication_id"] == "restart:cmd_1"
 
 
+def test_remote_restart_notice_uses_live_route_without_cached_peer(monkeypatch):
+    notices = []
+    peer = {"identity": "HASHI1"}
+    manager = SimpleNamespace(
+        _shared_token="shared-secret",
+        resolve_forward_urls=lambda instance, path: [f"http://peer.invalid:8767{path}"],
+        _post_json=lambda url, payload, timeout: {
+            "status": "handshake_accept", "instance_id": peer["identity"],
+        },
+    )
+    monkeypatch.setattr(remote_server, "_protocol_manager", manager)
+    monkeypatch.setattr(remote_server, "_peer_registry", None)
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI2"})
+    monkeypatch.setattr(remote_server, "get_shared_token", lambda: "shared-secret")
+    monkeypatch.setattr(
+        remote_server, "_post_json_with_optional_hmac",
+        lambda url, payload, timeout: notices.append((url, payload)) or {"ok": True},
+    )
+    origin = {"instance_id": "HASHI1", "surface": "workbench", "owner_id": "user:7",
+              "session_id": "ses_selected", "context_generation": 1, "notice_id": "restart:cmd_1"}
+    record = {"state": "completed", "target_instance": "HASHI2", "notify_origin": origin}
+    result = remote_server._notify_restart_result(agent="agent1", record=record)
+    assert result["state"] == "delivered"
+    assert notices[0][1]["origin"] == origin
+    assert notices[0][1]["publication_id"] == "restart:cmd_1"
+
+    peer["identity"] = "HASHI9"
+    result = remote_server._notify_restart_result(agent="agent1", record=record)
+    assert result == {"state": "failed", "error": "target_identity_mismatch"}
+    assert len(notices) == 1
+
+
 def test_terminal_restart_notice_recovers_after_caller_exit_without_restarting_again(tmp_path, monkeypatch):
     _client(tmp_path, max_level=AuthLevel.L3_RESTART)
     monkeypatch.setattr(remote_server, "_restart_hashi_process", lambda: pytest.fail("notice recovery cannot restart"))
@@ -1383,3 +1416,29 @@ def test_restart_qualifies_target_before_cutover_and_verifies_that_contract(tmp_
         assert body["phase"] == "runtime_qualification"
         assert body["state"] == "failed"
 # HASHI-Fingerprint: hfp_7dd00655d44449dcbb5b515413342b48
+
+@pytest.mark.parametrize(
+    "health",
+    [
+        {"ok": True, "ready": True, "status": "draining"},
+        {"ok": True, "startup": {"services_ready": True}, "shared_functions": {"draining": True}},
+    ],
+)
+def test_remote_control_reports_draining_and_does_not_claim_restart_ready(monkeypatch, health):
+    monkeypatch.setattr(remote_server, "_fetch_workbench_health", lambda **kwargs: health)
+    monkeypatch.setattr(
+        remote_server,
+        "_read_hashi_pid_state",
+        lambda: {"pid_alive": True, "pid_file_exists": True},
+    )
+    status = remote_server._hashi_control_status()
+    assert status["hashi_running"] is True
+    assert status["state"] == "draining"
+    assert remote_server._restart_backend_health(status) == (False, "backend_draining")
+
+
+def test_restart_health_tolerates_non_object_shared_functions():
+    status = {"hashi_running": True, "workbench_health": {
+        "ok": True, "ready": True, "shared_functions": "invalid",
+    }}
+    assert remote_server._restart_backend_health(status) == (True, "ready")

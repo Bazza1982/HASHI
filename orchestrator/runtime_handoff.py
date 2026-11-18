@@ -21,7 +21,7 @@ def snapshot(app) -> dict:
             "generation": client.generation.to_dict(),
             "root": str(client.generation_root),
         }
-    return {
+    result = {
         "agents": list(agents),
         "manually_stopped_agents": sorted(
             getattr(getattr(app, "agent_lifecycle", None), "manually_stopped_agents", ())
@@ -43,6 +43,28 @@ def snapshot(app) -> dict:
             if getattr(app, name, None) is not None
         ],
     }
+    global_config = getattr(app, "global_cfg", None)
+    profile = str(getattr(global_config, "deployment_profile", "personal") or "personal")
+    owner = str(getattr(global_config, "owner_scope_id", "") or "").strip()
+    if global_config is not None and profile == "personal" and owner:
+        from orchestrator.personal_data_owner import read_personal_data_binding
+
+        api_config = getattr(getattr(app, "workbench_api", None), "global_config", None)
+        if api_config is not None:
+            from orchestrator.session_store import SessionStore
+
+            api_profile = str(getattr(api_config, "deployment_profile", "personal") or "personal")
+            if api_profile != profile or SessionStore.owner_id_for(api_config) != owner:
+                raise ValueError("runtime and live session API data owners disagree")
+        binding = read_personal_data_binding(app.paths.bridge_home)
+        if binding is not None and binding[0] != owner:
+            raise ValueError("runtime personal data binding differs from its persisted binding")
+        result["personal_data_binding"] = {
+            "version":1,
+            "data_owner_id":owner,
+            "legacy_owner_known":binding[1] if binding is not None else False,
+        }
+    return result
 
 
 def persist(app) -> None:

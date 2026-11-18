@@ -567,3 +567,61 @@ async def test_prestart_failure_cannot_replace_a_prepared_or_started_claim(envir
                                           result_digest=sha256(b"failed").hexdigest())
     assert authority.operation_state("started") == "started"
 # HASHI-Fingerprint: hfp_b05477b830af4bd1908d4111c95b6d73
+
+
+
+@pytest.mark.asyncio
+async def test_http_file_body_cannot_dispatch_without_both_file_and_network_authority(environment, tmp_path):
+    authority, _issuer, context, waiter, _supervisor, _gate = environment
+    calls = []
+
+    class HttpSupervisor:
+        def supports(self, name):
+            return name == "http_request"
+
+        async def execute(self, *args):
+            calls.append(args)
+            raise AssertionError("a missing scope must prevent dispatch")
+
+    source = tmp_path / "body.bin"
+    source.write_bytes(b"fixture")
+    args = {"url": "https://api.example.com/upload", "method": "POST", "body_file": str(source)}
+    network = normalize_scope("network", "https://api.example.com", ["send", "upload"], cwd=tmp_path)
+    file_read = normalize_scope("file", str(source), ["read"], cwd=tmp_path)
+    for index, policy in enumerate(((network,), (file_read,))):
+        gate = PermissionExecutionGate(
+            authority, waiter, HttpSupervisor(), context=context, cwd=tmp_path,
+            read_roots=(tmp_path,), requestable_scopes=policy,
+        )
+        result = await gate.execute(
+            f"missing-scope-{index}", "http_request", args, reason="upload selected file",
+        )
+        assert result.state == "denied"
+        assert result.payload == {"reason": "outside_selected_policy"}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_http_response_file_cannot_dispatch_without_file_write_authority(environment, tmp_path):
+    authority, _issuer, context, waiter, _supervisor, _gate = environment
+    calls = []
+
+    class HttpSupervisor:
+        def supports(self, name):
+            return name == "http_request"
+
+        async def execute(self, *args):
+            calls.append(args)
+            raise AssertionError("a missing response file scope must prevent dispatch")
+
+    target = tmp_path / "response.bin"
+    args = {"url": "https://api.example.com/data", "response_file": str(target)}
+    network = normalize_scope("network", "https://api.example.com", ["fetch", "send"], cwd=tmp_path)
+    gate = PermissionExecutionGate(
+        authority, waiter, HttpSupervisor(), context=context, cwd=tmp_path,
+        read_roots=(tmp_path,), requestable_scopes=(network,),
+    )
+    result = await gate.execute("missing-response-file-scope", "http_request", args, reason="save response")
+    assert result.state == "denied"
+    assert result.payload == {"reason": "outside_selected_policy"}
+    assert calls == [] and not target.exists()

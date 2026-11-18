@@ -32,6 +32,18 @@ def default_hchat_conversation_id(message_id: str) -> str:
     return f"conv-{digest[:24]}"
 
 
+def group_member_message_id(
+    parent_message_id: str, source_instance: str, from_agent: str, recipient: str,
+) -> str:
+    """Derive a stable, recipient-specific message identity for group fanout."""
+    binding = json.dumps(
+        ["hchat-group-v1", source_instance.upper(), from_agent.casefold(),
+         parent_message_id, recipient.casefold()],
+        ensure_ascii=True, separators=(",", ":"),
+    )
+    return "hchatg-" + hashlib.sha256(binding.encode("utf-8")).hexdigest()[:40]
+
+
 def delivery_status_message_id(original_message_id: str, state: str) -> str:
     """Return one stable wire-safe identity for an immutable status transition."""
 
@@ -154,6 +166,7 @@ __all__ = [
     "DELIVERY_STATUS_STATES",
     "STATUS_PREFIX",
     "default_hchat_conversation_id",
+    "group_member_message_id",
     "decode_delivery_status",
     "delivery_status_matches_outbound_correlation",
     "delivery_status_display_text",

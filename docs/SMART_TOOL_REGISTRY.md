@@ -1,5 +1,7 @@
 # Smart Tool Registry
 
+The request-scoped tool_catalog lists only already-authorized and currently available tools, with a query and paged continuation. Ollama may add returned tool schemas on a later turn; the Registry applies the active request grant again before advertising or execution. Managed execution does not expose tool_catalog until its supervised channel is qualified. This discovery mechanism does not grant additional tools.
+
 HASHI uses one deterministic layer around its existing tools. It is not a model
 or a semantic task planner. It may, however, reject a mechanically unsafe tool
 shape before execution and return typed guidance so the HERV3 main model can
@@ -32,6 +34,61 @@ output, wildcard context expansion, or an unbounded result with a probed large
 record. The process is not spawned. HER receives `status: needs_replan`, exact
 reason data, and `suggested_tool: log_query`. This is a narrow deterministic
 safety rule, not a general shell parser or a model-level task decision.
+
+## Resumable file reads
+
+`file_read` keeps its line offset and page-size inputs. When a page ends before
+EOF, it returns a `next_cursor`; pass that cursor with the same authorized path
+to continue, including inside one oversized UTF-8 line. A cursor is not a read
+grant: the path is checked again. File identity and a SHA-256 of the exact bytes
+are verified for each continuation. If the file changes, restart the read.
+Checksumming reads the complete file on each continued page, so very large files
+can be slow; literal `log_query` remains available for targeted log searches.
+
+## Retained tool-result continuations
+
+When a Run-bound plain or structured text result exceeds the model projection
+budget, the original text is retained in the owning Registry and the projected
+result supplies a reference. `tool_output_read` reads it in pages from offset
+zero, reports the exact SHA-256 and completeness, and verifies the original
+Run binding. Structured image blocks remain unchanged. An incomplete projection
+and its effect receipt explicitly report `complete_content=false`.
+
+Legacy screenshot strings with more frames or image bytes than fit in one MCP
+page are retained by the owning Registry under the same Run binding.
+`tool_output_read` returns image blocks, and its `offset`/`next_offset` count
+source frames rather than text characters for these references. Invalid frames
+are reported and prevent a complete-coverage claim. Each page defaults to six
+frames and 4,000,000 normalized image bytes; operators may configure
+`HASHI_MCP_IMAGE_PAGE_COUNT` and `HASHI_MCP_IMAGE_PAGE_BYTES`. These are paging
+budgets, not negotiated provider limits. Existing image decode/source limits and
+the owner-proxy response limit still apply. Already-structured image results
+continue through their existing path.
+
+The current retention is process-local: a Registry or Worker restart loses
+these references, and a context without a Run identity cannot use this path.
+There is no automatic eviction while that Registry lives, so retained results
+consume memory. Persistent, lifecycle-managed retention and managed execution
+channel support remain to be completed.
+
+## Browser and desktop deadlines
+
+Standalone browser text, HTML and evaluation navigation defaults to
+`domcontentloaded` and accepts `timeout_ms` and `wait_until`. Omitted
+`max_length` returns all extracted text for the normal Run-bound result paging;
+an explicitly requested `max_length` returns a clearly marked prefix.
+The browser extension currently supports explicit `load` readiness only.
+Its selected navigation timeout is forwarded through session setup, the client
+and native host. A lost response after dispatch is reported as unconfirmed and
+is not automatically resent. The legacy extension transport does not yet
+guarantee interruption of an action already running in another thread or
+extension; multi-step session deadlines and installed-worker behavior need
+separate qualification.
+
+Desktop tools accept `timeout_s` for each subprocess. A timeout or cancellation
+requests cleanup of the owned process tree and reports the cleanup result.
+Typing is not automatically repeated after an error because input may already
+have occurred. Actual Linux desktop and other platforms still need validation.
 
 ## Tool profiles
 
@@ -93,8 +150,9 @@ enabled.
 Within one task, the third consecutive call with the same tool, arguments, and
 result receives a warning. Poll tools receive an unchanged-state/backoff
 warning. A repeated successful side-effect action receives an intent warning.
-Repeat rules do not block or short-circuit execution. Deterministic admission
-rules may do so before execution when they can name a concrete safer Tool.
+Repeat rules do not block or short-circuit execution. Search record-size checks
+are advisory observations: a completed shell search can suggest `log_query`
+for long records, but a lexical pattern is not an execution denial.
 
 The first version deliberately does not infer semantic novelty, causal
 contribution, task success, or evidence quality.
@@ -155,3 +213,25 @@ the roots, refine the query, switch tools, or stop.
 or remote URL without scanning repository contents (`.git` directories,
 worktree `gitdir` files, remotes and HEAD branch only). It is read-only, uses
 the existing read scope, and performs no network access.
+
+## HTTP response and write budgets in the remediation candidate
+
+The ordinary HTTP tool honors its positive requested timeout instead of
+clamping it to 60 seconds. The Registry option
+http_request.max_response_bytes selects the maximum decoded response bytes
+retained in the response body buffer (default 16 MiB). HTTP decompression may
+transiently allocate more; the Run-bound output store is not a memory quota.
+The tool reads incrementally and reports
+the selected limit, response status and whether the full response arrived.
+A response within that limit is available in full; when its displayed text
+is too long, the existing Run-bound result reader supplies continuation pages.
+If the response exceeds the selected limit, the prefix is marked incomplete;
+the response may correspond to a request that has already taken effect, and
+the tool does not replay it. Cancellation stops waiting and does not retry.
+
+The existing file_write.max_file_size_kb option controls allowed content
+size. An oversized write is rejected before touching the destination. File
+writes still use the existing direct write path; crash-safe atomic publication
+and streaming artifact delivery have not been added by this change. Result
+continuations remain process-local and their retained memory is not yet
+lifecycle-quota-managed.

@@ -50,8 +50,16 @@ running Core. See [dependency profiles](DEPENDENCIES.md).
 ## Engine or provider cannot connect
 
 Use /connect in the local TUI, or hashi onboard. Choose an installed CLI or
-configure a HERV3 provider in the masked local page. Confirm the chosen
-provider's minimal connection check before expecting model tasks to work.
+configure a HERV3 provider in the masked local page. If the provider is offline,
+choose **Save unverified** to save the selected settings and key without a
+model request or reload. The saved state does not claim the provider works.
+When available, explicitly confirm the minimal connection check; it may incur
+a charge. OpenRouter accepts a custom model ID on this page. Existing different
+keys require explicit replacement confirmation.
+
+If the page reports an uncertain or partial save, reopen it and inspect the
+stored settings and key before retrying. A saved configuration and a running
+agent that has loaded it are separate states.
 
 For CLI engines, verify the executable and authentication from the same OS
 and user environment as HASHI. For API providers, check the configured

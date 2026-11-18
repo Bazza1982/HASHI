@@ -1,11 +1,137 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from orchestrator import runtime_cancel, runtime_pipeline
+from orchestrator import runtime_cancel, runtime_control, runtime_pipeline
+from orchestrator.frontend_command_context import bind_frontend_command_principal
+from orchestrator.session_store import SessionStore
+from orchestrator.telegram_actor_scope import TelegramActorScope, _current_actor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["telegram", "enterprise", "local"])
+async def test_scoped_stop_cancels_only_authenticated_owners_runs(tmp_path, monkeypatch, transport):
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    owner = {"telegram": "telegram-user:21:abc", "enterprise": "enterprise:alice",
+             "local": "local:alice"}[transport]
+    mine = store.ensure_default_session(owner_id=owner, agent_id="sakura")
+    mine_other = store.create_session(owner_id=owner, agent_id="sakura")
+    other = store.ensure_default_session(owner_id="user:primary", agent_id="sakura")
+
+    def accept(session, session_owner, suffix):
+        return store.accept_run(session_id=session["session_id"], owner_id=session_owner,
+                                agent_id="sakura", request_id=f"req-{suffix}", text="work",
+                                source="workbench", idempotency_key=suffix)
+
+    first = accept(mine, owner, "one")
+    second = accept(mine_other, owner, "two")
+    foreign = accept(other, "user:primary", "other")
+    runtime = SimpleNamespace(
+        name="sakura", session_store=store, queue=asyncio.Queue(),
+        config=SimpleNamespace(active_backend="codex-cli"),
+        global_config=SimpleNamespace(owner_scope_id="user:primary"),
+        logger=logging.getLogger("test"), _is_authorized_user=lambda _: True,
+        _reply_text=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=21 if transport == "telegram" else owner),
+        effective_chat=SimpleNamespace(id=21), _hashi_session_owner_id=owner,
+        _hashi_session_id=mine["session_id"],
+        _hashi_session_surface="telegram" if transport == "telegram" else "workbench",
+    )
+    def no_global_stop(*_args, **_kwargs):
+        raise AssertionError("scoped user must not advance the agent-wide stop fence")
+    monkeypatch.setattr(runtime_control, "advance_runtime_fence", no_global_stop)
+    if transport == "telegram":
+        token = _current_actor.set(TelegramActorScope(runtime, 21, owner, False, False))
+        try:
+            await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
+        finally:
+            _current_actor.reset(token)
+    else:
+        with bind_frontend_command_principal(runtime, owner):
+            await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
+
+    assert store.get_run(first.run_id, owner_id=owner)["state"] == "stopped"
+    assert store.get_run(second.run_id, owner_id=owner)["state"] == "stopped"
+    assert store.get_run(foreign.run_id, owner_id="user:primary")["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_scoped_stop_rejects_foreign_selected_session(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    foreign = store.ensure_default_session(owner_id="user:primary", agent_id="sakura")
+    run = store.accept_run(session_id=foreign["session_id"], owner_id="user:primary",
+                           agent_id="sakura", request_id="foreign", text="work",
+                           source="workbench", idempotency_key="foreign")
+    runtime = SimpleNamespace(
+        name="sakura", session_store=store, queue=asyncio.Queue(),
+        config=SimpleNamespace(active_backend="codex-cli"),
+        global_config=SimpleNamespace(owner_scope_id="user:primary"),
+        logger=logging.getLogger("test"), _is_authorized_user=lambda _: True,
+        _reply_text=AsyncMock(),
+    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id="enterprise:alice"),
+                             effective_chat=SimpleNamespace(id="default"),
+                             _hashi_session_owner_id="user:primary",
+                             _hashi_session_id=foreign["session_id"],
+                             _hashi_session_surface="workbench")
+    monkeypatch.setattr(runtime_control, "advance_runtime_fence",
+                        lambda *_a, **_k: pytest.fail("advanced global stop fence"))
+    with bind_frontend_command_principal(runtime, "enterprise:alice"):
+        result = await runtime_control.cmd_stop(runtime, update, SimpleNamespace(args=[]))
+    assert result["ok"] is False
+    assert store.get_run(run.run_id, owner_id="user:primary")["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_scoped_question_stop_targets_original_run_and_reports_pending(tmp_path):
+    from orchestrator.run_questions import RunQuestions
+    from tests.test_run_questions import active, spec
+
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI1")
+    session, run = active(store, req="target", agent="sakura", owner="enterprise:alice")
+    _, other = active(store, req="other", agent="sakura", owner="enterprise:bob")
+    questions = RunQuestions(store)
+    question = questions.create(request_id=run.request_id, agent_id="sakura", payload=spec())
+    questions.answer(session_id=session["session_id"], owner_id="enterprise:alice",
+                     question_id=question["question_id"],
+                     payload={"idempotency_key": "stop", "option_id": "__hashi_stop__"})
+    target_task = asyncio.create_task(asyncio.Event().wait())
+    other_task = asyncio.create_task(asyncio.Event().wait())
+    runtime = SimpleNamespace(
+        name="sakura", session_store=store, queue=asyncio.Queue(),
+        config=SimpleNamespace(active_backend="codex-cli"),
+        global_config=SimpleNamespace(owner_scope_id="user:primary"),
+        logger=logging.getLogger("test"), _is_authorized_user=lambda _: True,
+        _reply_text=AsyncMock(),
+        current_request_meta={"request_id": run.request_id, "hashi_session_id": session["session_id"],
+                              "hashi_run_id": run.run_id},
+        _generation_tasks_by_request={run.request_id: target_task, other.request_id: other_task},
+    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id="enterprise:alice"))
+    context = SimpleNamespace(_hashi_question_stop_id=question["question_id"])
+    try:
+        with bind_frontend_command_principal(runtime, "enterprise:bob"):
+            rejected = await runtime_control.cmd_stop(runtime, update, context)
+        assert rejected["ok"] is False
+        assert not target_task.cancelling()
+        with bind_frontend_command_principal(runtime, "enterprise:alice"):
+            result = await runtime_control.cmd_stop(runtime, update, context)
+        assert result == {"ok": False, "error_code": "question_stop_unconfirmed"}
+        assert target_task.cancelling() > 0
+        assert not other_task.cancelling()
+        assert store.get_run(run.run_id)["state"] == "running"
+        assert store.get_run(other.run_id)["state"] == "running"
+    finally:
+        target_task.cancel()
+        other_task.cancel()
+        await asyncio.gather(target_task, other_task, return_exceptions=True)
 
 
 class _Store:

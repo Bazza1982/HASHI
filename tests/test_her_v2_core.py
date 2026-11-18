@@ -288,17 +288,26 @@ def test_retired_strategy_and_planning_tool_controls_cannot_reenable_stages():
 
 
 @pytest.mark.parametrize("value", [False, True, "true", 0, 1, None])
-def test_cognitive_control_switch_is_removed_and_rejected(value):
-    with pytest.raises(
-        HERv2ConfigurationError,
-        match="Cognitive control is permanently active",
-    ):
-        HERv2Config.from_mapping(
-            {
-                "profiles": _profiles(),
-                "cognitive_control_enabled": value,
-            }
-        )
+def test_retired_cognitive_control_switch_is_ignored_with_warning(value, caplog):
+    config = HERv2Config.from_mapping(
+        {"profiles": _profiles(), "cognitive_control_enabled": value}
+    )
+    assert not hasattr(config, "cognitive_control_enabled")
+    assert "cognitive_control_enabled" in caplog.text
+
+
+def test_legacy_her_controls_are_ignored_without_rejecting_nested_business_data(caplog):
+    profiles = _profiles()
+    profiles["premium"]["max_loops"] = 1
+    profiles["premium"]["options"] = {"timeout_s": 12, "data": {"max_tokens": 17}}
+    raw = {"profiles": profiles, "max_turns": 1, "cognitive_control_enabled": False}
+    config = HERv2Config.from_mapping(raw)
+    options = config.profile_for(Stage.EXECUTION).options
+    assert "max_loops" not in options
+    assert options["options"] == {"timeout_s": 12, "data": {"max_tokens": 17}}
+    assert raw["max_turns"] == 1 and raw["profiles"]["premium"]["max_loops"] == 1
+    assert "max_turns" in caplog.text and "cognitive_control_enabled" in caplog.text
+    assert "max_loops" in caplog.text
 
 
 def test_explicit_main_model_is_not_overridden_by_legacy_direct_route():
@@ -483,9 +492,10 @@ def test_safety_configuration_rejects_ambiguous_or_unsafe_values():
         "token_budget",
     ],
 )
-def test_her_v2_rejects_removed_legacy_execution_limits(field):
-    with pytest.raises(HERv2ConfigurationError, match="removed execution limit"):
-        HERv2Config.from_mapping({"profiles": _profiles(), field: 1})
+def test_her_v2_ignores_removed_legacy_execution_limits(field, caplog):
+    config = HERv2Config.from_mapping({"profiles": _profiles(), field: 1})
+    assert not hasattr(config, field)
+    assert field in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -501,25 +511,35 @@ def test_her_v2_rejects_removed_legacy_execution_limits(field):
         "timeout_s",
     ],
 )
-def test_her_v2_provider_profiles_reject_removed_execution_limits(field):
+def test_her_v2_provider_profiles_ignore_removed_execution_limits(field, caplog):
     profiles = _profiles()
     profiles["premium"][field] = 1
-    with pytest.raises(HERv2ConfigurationError, match="removed execution limit"):
-        HERv2Config.from_mapping({"profiles": profiles})
+    config = HERv2Config.from_mapping({"profiles": profiles})
+    assert field not in config.profile_for(Stage.EXECUTION).options
+    assert field in caplog.text
 
 
-def test_her_v2_provider_profiles_reject_nested_execution_limits():
+def test_her_v2_provider_profiles_preserve_nested_data_with_similar_names():
     profiles = _profiles()
     profiles["premium"]["options"] = {"request_timeout_s": 300}
-    with pytest.raises(HERv2ConfigurationError, match="request_timeout_s"):
-        HERv2Config.from_mapping({"profiles": profiles})
+    config = HERv2Config.from_mapping({"profiles": profiles})
+    assert config.profile_for(Stage.EXECUTION).options["options"] == {"request_timeout_s": 300}
 
 
 def test_provider_recovery_contract_contains_no_elapsed_limit_fields():
     policy = ProviderRetryPolicy()
 
     assert policy.max_provider_retries == 1
-    assert set(policy.__dataclass_fields__) == {"max_provider_retries"}
+    configured = ProviderRetryPolicy.from_mapping({
+        "max_provider_retries": 4,
+        "base_delay_s": 0.5,
+        "max_delay_s": 1,
+        "capacity_delays_s": [0, 2, 4, 6],
+    })
+    assert configured.delay(0) == 0.5
+    assert configured.delay(1) == 1
+    assert configured.delay(2, 9) == 9
+    assert configured.capacity_delays_s == (0.0, 2.0, 4.0, 6.0)
     assert "retry_tier" not in StageRequest.__dataclass_fields__
     assert "attempt_timeout_s" not in StageRequest.__dataclass_fields__
 
@@ -585,6 +605,36 @@ def test_total_audit_failure_is_a_hard_boundary():
         primary_writer=_MemoryWriter(fail=True),
         fallback_writer=_MemoryWriter(fail=True),
     )
+    with pytest.raises(AuditPersistenceError):
+        _audit_append(log)
+
+
+def test_canonical_audit_receipt_survives_shadow_failures_and_retries_projection():
+    primary = _MemoryWriter(fail=True)
+    fallback = _MemoryWriter(fail=True)
+    seen = []
+    observation = []
+
+    def canonical(record):
+        seen.append(record)
+        return 17
+
+    log = DurableAuditLog(primary_writer=primary, fallback_writer=fallback,
+                          canonical_observer=canonical, observer=observation.append)
+    assert _audit_append(log).startswith("hashi-canonical:17:")
+    assert seen[0]["payload"] == {"api_key": "[REDACTED]", "safe": "kept"}
+    assert len(observation) == 1
+    primary.fail = False
+    assert _audit_append(log) == "memory:event-1"
+    assert len(primary.rows) == 1
+    assert _audit_append(log) == "hashi-log:deduplicated:event-1"
+    assert len(primary.rows) == 1
+
+
+def test_noop_canonical_observer_does_not_claim_durable_record():
+    log = DurableAuditLog(primary_writer=_MemoryWriter(fail=True),
+                          fallback_writer=_MemoryWriter(fail=True),
+                          canonical_observer=lambda _record: None)
     with pytest.raises(AuditPersistenceError):
         _audit_append(log)
 
@@ -679,3 +729,15 @@ def test_only_new_meaningful_progress_resets_idle_clock():
     assert tracker.record("ledger", "timestamp-only", meaningful=False) is False
     now[0] = 11.0
     assert tracker.expired(6.0) is True
+
+
+@pytest.mark.parametrize("field,value", [
+    ("max_provider_retries", -1),
+    ("max_provider_retries", True),
+    ("base_delay_s", float("nan")),
+    ("max_delay_s", -1),
+    ("capacity_delays_s", [0, float("inf")]),
+])
+def test_provider_recovery_rejects_invalid_policy(field, value):
+    with pytest.raises(ValueError):
+        ProviderRetryPolicy.from_mapping({field: value})

@@ -221,6 +221,7 @@ def retire_agent_state(
     *,
     lifecycle_id: object = None,
     reason: str,
+    before_retire: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any] | None:
     path = Path(root).expanduser().resolve() / "state" / "telegram_delivery_health.json"
     expected_lifecycle = str(lifecycle_id or "").strip().casefold()
@@ -234,6 +235,11 @@ def retire_agent_state(
             observed.get("agent_lifecycle_id") != expected_lifecycle
         ):
             return None, False
+        if before_retire is not None:
+            # Preserve this exact revision before CAS removes it. A conflict
+            # re-runs this callback with the newer record; a failed backup
+            # leaves the active record intact.
+            before_retire(_safe_record_copy(record))
         entry = quarantine_record(
             state,
             agent_name,

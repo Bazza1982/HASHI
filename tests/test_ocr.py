@@ -184,3 +184,23 @@ def test_missing_selected_paddle_runtime_does_not_fall_back(tmp_path, monkeypatc
     monkeypatch.setenv("HASHI_PADDLE_OCR_PYTHON", str(tmp_path / "missing runtime" / "python"))
     monkeypatch.setattr(ocr.importlib.util, "find_spec", lambda name: object())
     assert probe_paddle_runtime() is False
+
+
+def test_ocr_preserves_long_text_and_uses_configured_timeout_for_fallback(tmp_path, monkeypatch):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"fixture")
+    text = ("recognized " * 6000) + "FINAL-TEXT"
+    timeouts = []
+    monkeypatch.setattr(ocr, "resolve_tesseract_binary", lambda: "fixture-tesseract")
+    monkeypatch.setattr(ocr, "resolve_ocr_model_root", lambda: tmp_path)
+    monkeypatch.setattr(ocr, "_available_languages", lambda *_args: {"eng", "osd"})
+    def run(command, *, timeout_seconds):
+        timeouts.append(timeout_seconds)
+        if "osd" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="Script: Latin\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=text + "\n", stderr="")
+    monkeypatch.setattr(ocr, "_run_tesseract", run)
+    result = ocr.extract_image_text(image, languages=["eng"], timeout_seconds=120)
+    assert result.status == "ok"
+    assert result.text == text
+    assert timeouts == [120, 120]

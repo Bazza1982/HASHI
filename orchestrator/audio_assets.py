@@ -23,11 +23,12 @@ from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
 from orchestrator.config_json import file_write_lock
+from orchestrator.session_attachment_limits import SESSION_ATTACHMENT_LIMITS
 
 
 MIN_RETENTION_SECONDS = 60
 DEFAULT_RETENTION_SECONDS = 3600
-MAX_AUDIO_ASSET_BYTES = 64 * 1024 * 1024
+MAX_AUDIO_ASSET_BYTES = SESSION_ATTACHMENT_LIMITS.attachment_bytes
 SUPPORTED_AUDIO_FORMATS = frozenset(
     {"wav", "mp3", "ogg", "opus", "webm", "flac", "m4a", "mp4"}
 )
@@ -386,6 +387,129 @@ class AudioAssetStore:
                 raise AudioAssetError("audio asset id already exists")
             try:
                 partial.write_bytes(payload)
+                try:
+                    os.chmod(partial, 0o600)
+                except OSError:
+                    pass
+                partial.replace(target)
+                self._write(metadata)
+            except Exception:
+                partial.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
+                self._metadata_path(opaque_id).unlink(missing_ok=True)
+                raise
+        return self._public(metadata)
+
+    def create_stream(
+        self,
+        source,
+        *,
+        owner_id: str,
+        session_id: str,
+        direction: str,
+        mime_type: str,
+        audio_format: str,
+        expected_size: int,
+        expected_sha256: str,
+        asset_id: str | None = None,
+        filename: str = "",
+        duration_ms: int | None = None,
+        retention_seconds: int = DEFAULT_RETENTION_SECONDS,
+        retention_indefinite: bool = False,
+        correlation: Mapping[str, Any] | None = None,
+        canonical_managed: bool = False,
+    ) -> dict[str, Any]:
+        """Store an already-open audio file in chunks with exact source identity."""
+        try:
+            before = os.fstat(source.fileno())
+        except (OSError, ValueError, AttributeError) as exc:
+            raise AudioAssetError("audio source is unavailable") from exc
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
+            raise AudioAssetError("audio payload must contain bytes")
+        if before.st_size > MAX_AUDIO_ASSET_BYTES:
+            raise AudioAssetError("audio payload exceeds the configured limit")
+        if before.st_size != int(expected_size):
+            raise AudioAssetError("audio size does not match staged metadata")
+        normalized_format = normalize_audio_format(audio_format, mime_type=mime_type)
+        source.seek(0)
+        validate_audio_signature(source.read(64), normalized_format)
+        if not str(mime_type or "").split(";", 1)[0].casefold().startswith("audio/"):
+            raise AudioAssetError("audio assets require an audio MIME type")
+        if direction not in {"input", "output", "normalized"}:
+            raise AudioAssetError("invalid audio asset direction")
+        if duration_ms is None:
+            source.seek(0)
+            if normalized_format == "wav":
+                try:
+                    with wave.open(source, "rb") as audio:
+                        rate = int(audio.getframerate() or 0)
+                        frames = int(audio.getnframes() or 0)
+                    if rate > 0:
+                        duration_ms = max(0, round(frames * 1000 / rate))
+                except (EOFError, wave.Error):
+                    pass
+            else:
+                ffprobe = shutil.which("ffprobe")
+                if ffprobe:
+                    try:
+                        completed = subprocess.run(
+                            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                             "-of", "default=noprint_wrappers=1:nokey=1", "-i", "pipe:0"],
+                            stdin=source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            check=False, timeout=10,
+                        )
+                        seconds = float(completed.stdout.decode("ascii", errors="ignore").strip())
+                        if completed.returncode == 0 and seconds >= 0:
+                            duration_ms = round(seconds * 1000)
+                    except (OSError, subprocess.SubprocessError, ValueError, OverflowError):
+                        pass
+        if duration_ms is not None and int(duration_ms) < 0:
+            raise AudioAssetError("duration_ms must be non-negative")
+        if not retention_indefinite and int(retention_seconds) < MIN_RETENTION_SECONDS:
+            raise AudioAssetError("audio retention must be at least 60 seconds")
+
+        opaque_id = self._safe_id(asset_id or f"media_{uuid4().hex}")
+        created = _utc_now()
+        storage_name = f"{opaque_id}.{normalized_format}"
+        target = self.files_root / storage_name
+        partial = target.with_suffix(f".{uuid4().hex}.partial")
+        digest, observed = hashlib.sha256(), 0
+        with self._transaction():
+            self._validated_files_root()
+            if target.exists() or self._metadata_path(opaque_id).exists():
+                raise AudioAssetError("audio asset id already exists")
+            try:
+                source.seek(0)
+                with partial.open("xb") as output:
+                    while chunk := source.read(1024 * 1024):
+                        observed += len(chunk)
+                        if observed > int(expected_size):
+                            raise AudioAssetError("audio changed while being copied")
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                after = os.fstat(source.fileno())
+                before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                if before_identity != after_identity or observed != int(expected_size):
+                    raise AudioAssetError("audio changed while being copied")
+                if digest.hexdigest() != str(expected_sha256):
+                    raise AudioAssetError("audio digest does not match staged metadata")
+                metadata = {
+                    "asset_id": opaque_id, "owner_id": str(owner_id),
+                    "session_id": str(session_id), "direction": direction,
+                    "filename": str(filename or storage_name),
+                    "mime_type": str(mime_type).split(";", 1)[0].strip().casefold(),
+                    "format": normalized_format,
+                    "duration_ms": int(duration_ms) if duration_ms is not None else None,
+                    "size_bytes": observed, "sha256": digest.hexdigest(),
+                    "created_at": _iso(created),
+                    "retention_seconds": None if retention_indefinite else int(retention_seconds),
+                    "retention_expires_at": None if retention_indefinite else _iso(created + timedelta(seconds=int(retention_seconds))),
+                    "retention_indefinite": bool(retention_indefinite), "lease_count": 0,
+                    "state": "available", "canonical_managed": bool(canonical_managed),
+                    "storage_name": storage_name, "correlation": dict(correlation or {}),
+                }
                 try:
                     os.chmod(partial, 0o600)
                 except OSError:

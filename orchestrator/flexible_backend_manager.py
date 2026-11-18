@@ -2101,6 +2101,7 @@ class FlexibleBackendManager:
                 max_loops=None,
                 audit_context={
                     "agent_name": getattr(adapter_cfg, "name", workspace_dir.name),
+                    "backend": canonical_backend_engine(getattr(adapter_cfg, "engine", None)),
                     "workspace_dir": str(workspace_dir),
                     "access_scope": access_scope,
                     "allow_wsl_windows_drive_paths": allow_wsl_windows_drive_paths,
@@ -2516,9 +2517,67 @@ class FlexibleBackendManager:
                                 ],
                             },
                         )
-        invocation = self._refresh_tool_runtime_context(request_id)
+        backend = self.current_backend
+        backend_name = str(getattr(self.config, "active_backend", ""))
+        runtime_before_wait = getattr(self, "runtime", None)
+        metadata_before_wait = self._tool_request_metadata(request_id)
+        run_keys = ("owner_id", "hashi_session_id", "hashi_run_id", "hashi_fencing_token")
+        run_binding_before_wait = (
+            (str(metadata_before_wait.get("request_id") or request_id),)
+            + tuple(str(metadata_before_wait.get(key) or "") for key in run_keys)
+            if metadata_before_wait.get("hashi_run_id") else None
+        )
+        reservation = None
+        if backend_name in {"codex-cli", "claude-cli"} and bool(
+            getattr(backend, "_hashi_mcp_enabled", False)
+        ):
+            from adapters.hashi_mcp import HashiMcpCapacityError, reserve_hashi_mcp_capacity
+
+            try:
+                reservation = await reserve_hashi_mcp_capacity(backend)
+            except HashiMcpCapacityError as exc:
+                from adapters.base import BackendResponse
+
+                return BackendResponse(
+                    text="", duration_ms=0, error=str(exc), is_success=False,
+                    error_code="MCP_CAPACITY_BUSY", error_retryable=True,
+                    stream_metadata={"mcp_capacity": exc.snapshot},
+                )
+            if self.current_backend is not backend or str(
+                getattr(self.config, "active_backend", "")
+            ) != backend_name:
+                reservation.release_reservation()
+                from adapters.base import BackendResponse
+
+                return BackendResponse(
+                    text="", duration_ms=0, error="Backend changed while waiting for MCP capacity.",
+                    is_success=False, error_code="MCP_BACKEND_CHANGED", error_retryable=True,
+                )
+            if run_binding_before_wait is not None:
+                current_metadata = self._tool_request_metadata(request_id)
+                current_binding = (
+                    (str(current_metadata.get("request_id") or request_id),)
+                    + tuple(str(current_metadata.get(key) or "") for key in run_keys)
+                )
+                if getattr(self, "runtime", None) is not runtime_before_wait or current_binding != run_binding_before_wait:
+                    reservation.release_reservation()
+                    from adapters.base import BackendResponse
+
+                    return BackendResponse(
+                        text="", duration_ms=0, error="Run changed while waiting for MCP capacity.",
+                        is_success=False, error_code="MCP_RUN_CHANGED", error_retryable=False,
+                    )
         try:
-            return await self.current_backend.generate_response(
+            if reservation is not None:
+                from orchestrator.session_attachment_authorization import current_run_attachment_grants
+
+                current_run_attachment_grants(self, request_id, request_content)
+            invocation = self._refresh_tool_runtime_context(request_id)
+        finally:
+            if reservation is not None:
+                reservation.release_reservation()
+        try:
+            return await backend.generate_response(
                 prompt,
                 request_id,
                 **kwargs,
@@ -2527,11 +2586,7 @@ class FlexibleBackendManager:
             if invocation is not None:
                 invocation.close()
 
-    def _refresh_tool_runtime_context(self, request_id: str):
-        registry = getattr(self.current_backend, "tool_registry", None)
-        if registry is None:
-            return
-        context = dict(getattr(registry, "audit_context", {}) or {})
+    def _tool_request_metadata(self, request_id: str) -> dict[str, Any]:
         runtime = getattr(self, "runtime", None)
         meta_registry = getattr(runtime, "_request_meta_by_id", None)
         request_meta = (
@@ -2543,6 +2598,15 @@ class FlexibleBackendManager:
             current_meta = dict(getattr(runtime, "current_request_meta", None) or {})
             if str(current_meta.get("request_id") or "") == str(request_id or ""):
                 request_meta = current_meta
+        return request_meta
+
+    def _refresh_tool_runtime_context(self, request_id: str):
+        registry = getattr(self.current_backend, "tool_registry", None)
+        if registry is None:
+            return
+        context = dict(getattr(registry, "audit_context", {}) or {})
+        runtime = getattr(self, "runtime", None)
+        request_meta = self._tool_request_metadata(request_id)
         context.update(
             {
                 "_runtime": runtime,

@@ -54,7 +54,9 @@ Layer 4 instance configuration. Protected Core is unchanged.
 
 The existing revisioned, ignored `call_profiles.json` owns an optional top-level
 `video_tts` selection. It is disabled/absent by default. Existing audio TTS
-selections are preserved. A call freezes this selection at its Call revision.
+selections are preserved. A call freezes this selection at its Call revision,
+before waiting for the connector. Saving a profile during that wait affects
+later calls, not the current call's output selection.
 
 ```json
 {
@@ -248,3 +250,79 @@ The following operational constraints were relocated intact from the prior boots
 [catalogue](HASHI_VOICE_TTS_CATALOG.md),
 [routing](repairs/TTS_LANGUAGE_ROUTING_DECISION_20261015.md) and
 [fallback](repairs/VOICE_PROVIDER_FALLBACK_REPAIR_20261014.md).
+
+
+
+## Configured VideoTTS capacity and submission reconciliation
+
+The provider's advertised PNG byte/count limits remain authoritative for its
+input. The HASHI process also has bounded in-memory transport budgets, shared
+by the Compute consumer and the AgentPresence connector. Operators can set
+`HASHI_CALL_VIDEO_MAX_REFERENCE_BYTES` (default 4 MiB),
+`HASHI_CALL_VIDEO_MAX_REFERENCE_PIXELS` (default 8 million) and
+`HASHI_CALL_VIDEO_MAX_MEDIA_BYTES` (default 64 MiB) for selected services and
+connectors that actually support larger payloads. These values bound HASHI's
+buffers; they do not prove AgentPresence or the provider accepts the same size.
+The request, queue, job tracking and foreground wait timeouts and the configured
+text-segment size accept positive values beyond the previous fixed ceilings.
+Large in-memory videos can use multiple copies and must fit the host's budget.
+
+A provider may advertise a GET interface with protocol
+`video.speech.lookup.v1` and path containing exactly `{idempotency_key}`.
+The key is the hexadecimal SHA-256 of the request identifier, identical to the
+POST's `Idempotency-Key` header. On an unknown asynchronous POST outcome,
+HASHI uses only that selected provider's same-origin, credentialed lookup, and
+accepts its job only when the response echoes the exact `idempotency_key`.
+Absent lookup, failed lookup, or mismatched key remains outcome-unknown; no
+second generation POST is sent. Every polled response must repeat the accepted
+job ID and a different or missing ID is rejected before downloading media.
+The provider remains responsible for enforcing ownership of the lookup and job.
+
+This is not durable recovery across a HASHI process restart. The current job
+receipt and polling task live in the Call process; the configured job timeout
+also still ends polling. Longer-term durable tracking, restart reconciliation,
+and deployed provider/AgentPresence capacity negotiation require further work.
+
+
+## Long answer speech windows
+
+A Call snapshot exposes at most 32 speech segments at a time. Speech segment
+identifiers are absolute within the turn; the snapshot includes speech_offset
+and speech_more. After the client has played the last segment in a window, it
+sends speech_advance with that turn and segment. Repeating the same advance
+after an uncertain response returns the current window without creating another
+synthesis. The operation is rejected for a stale turn, an interrupted turn,
+an undelivered last segment, or an invalid boundary. Video preparation is
+limited to the visible window; audio continues serially with bounded prefetch.
+
+The current Call service keeps the acknowledged window cursor for the life of
+the active Call. A Call service restart and recovery of an individual played
+segment within the current window are not yet a durable playback receipt.
+Stopping audio sends an interrupt that cancels queued synthesis and fences a
+late provider result. The completed Run remains in the authenticated Session.
+
+Call captions preserve the original answer; an oversized caption projection is
+marked partial and the Session contains the complete result. Default speech
+may replace a code-only, link-only or table-only answer with a localized hint to
+view the result in chat. A compatible client may explicitly select structured
+speech for future turns using read_structured=true. The Function waits for the
+complete answer before rendering code, links and tables for audio or video
+speech, so partial markup is not spoken prematurely. Context advertises this
+capability as structured_speech; older clients and default turns keep the
+existing concise speech. The choice is per turn and does not alter the Run or
+its original text.
+
+
+## Long-running Call requests
+
+A live Call keeps observing its already-admitted Session Run beyond ten
+minutes while the Call remains active. This is background service work, not
+one HTTP request held open. If the presentation lease expires, the Call reaches
+its duration limit, or the Call service shuts down, Call presentation detaches
+and does not itself request cancellation of the admitted Session Run. The Run
+and its final answer remain owned by the existing authenticated Session.
+Explicit hangup continues to request cancellation of the exact admitted Run.
+
+Returning the answer automatically to a new Call or offering an explicit
+background-delivery choice after reconnection still requires a durable
+subscription. The Session result remains independently retrievable.

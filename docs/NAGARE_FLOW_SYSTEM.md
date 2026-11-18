@@ -50,11 +50,11 @@ RUNNING ── step succeeds ──→ next ready step
 COMPLETED
 ```
 
-Recovery has no fixed attempt or wall-clock ceiling. Attempt count alone has no authority to end
-a task. The runner sends the failure evidence and prior recovery history to the Debug Agent,
-requires diagnosis/evidence/fix fields, and rejects an exact repeated recovery action. Semantic
-equivalence is not mechanically provable, so the Debug Agent must return an explicit
-`unrecoverable` result when the path cannot safely continue.
+Recovery has no default fixed attempt or wall-clock ceiling. An owner may select
+error_handling.recovery.max_attempts for a specific workflow. The runner sends failure evidence
+and prior recovery history to the Debug Agent and requires diagnosis, evidence, and fix fields.
+An identical description is recorded as a warning rather than treated as proof of repetition.
+The Debug Agent must return an explicit unrecoverable result when the path cannot safely continue.
 
 Sequential and `strategy: parallel` task failures use the same Debug recovery semantics. Parallel
 steps finish their current dispatch group before recovery is processed.
@@ -272,3 +272,8 @@ Built-in workflow locations:
 - `flow/workflows/examples/smoke_test.yaml`
 - `flow/workflows/examples/meta_workflow_creation.yaml`
 - `flow/workflows/library/book_translation.yaml`
+
+
+Legacy retired controls in recognized workflow control positions are ignored in
+memory with a run event listing field paths. The YAML file and candidate bytes
+are not rewritten, and identically named business input fields are preserved.

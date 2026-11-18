@@ -715,6 +715,42 @@ async def test_hchat_draft_success_prepares_delivery_report(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hchat_draft_records_exact_origin_before_sender_runs(tmp_path):
+    from orchestrator.hchat_origin_binding import find_outbound_origin
+    from orchestrator.session_store import SessionStore
+
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    runtime.session_store = store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.create_session(owner_id="user:7", agent_id=runtime.name)
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id=runtime.name,
+        request_id="req-001", text="send", source="bridge:hchat-draft", idempotency_key="request-key",
+    )
+    fence = store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "akane@HASHI2"}
+    item.owner_id, item.session_id, item.run_id, item.fencing_token = (
+        "user:7", session["session_id"], accepted.run_id, fence,
+    )
+    sent = []
+
+    def sender(target, from_agent, text, **kwargs):
+        recorded = find_outbound_origin(store, kwargs["message_id"])
+        assert recorded["session_id"] == session["session_id"]
+        assert recorded["run_id"] == accepted.run_id
+        assert recorded["originated_at"] == kwargs["originated_at"]
+        sent.append((target, from_agent, text))
+        return True
+
+    runtime._hchat_draft_sender = sender
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime, item, core_raw="Please inspect the issue.", completion_path="foreground",
+    )
+    assert result.visible_text.startswith("🟡 Hchat queued")
+    assert sent == [("akane@HASHI2", runtime.name, "Please inspect the issue.")]
+
+
+@pytest.mark.asyncio
 async def test_hchat_draft_success_forwards_bound_output_attachments(tmp_path):
     runtime, _sent, _voices = _make_background_runtime(tmp_path)
     attachment = tmp_path / "review.xlsx"
@@ -3252,3 +3288,131 @@ def test_core_transcript_helper_records_foreground_path(tmp_path):
     assert entry["completion_path"] == "foreground"
     assert entry["wrapper_used"] is True
 # HASHI-Fingerprint: hfp_ab52130c8be44af5a182a3b15e89cf11
+
+
+@pytest.mark.asyncio
+async def test_hchat_group_draft_freezes_run_origin_and_does_not_repeat_accepted_members(tmp_path, monkeypatch):
+    from orchestrator.hchat_origin_binding import find_outbound_origin
+    from orchestrator.hchat_submit_result import record_hchat_response
+    from orchestrator.session_store import SessionStore
+    from tools import hchat_send
+
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    runtime.session_store = store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.create_session(owner_id="user:7", agent_id=runtime.name)
+    run = store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id=runtime.name,
+        request_id="req-001", text="send", source="bridge:hchat-draft", idempotency_key="request-key",
+    )
+    fence = store.mark_request_running(run.request_id, worker_id="test-worker")
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "@reviewers"}
+    item.owner_id, item.session_id, item.run_id, item.fencing_token = (
+        "user:7", session["session_id"], run.run_id, fence,
+    )
+    cfg = {
+        "global": {"instance_id": "HASHI1", "workbench_port": 18800},
+        "agents": [{"name": "akane", "is_active": True}],
+        "groups": {"reviewers": {"members": ["akane", "rain@HASHI9"]}},
+    }
+    calls = []
+    def verify_before_send(target, message_id):
+        origin = find_outbound_origin(store, message_id)
+        assert origin is not None
+        assert origin["target"] == target.casefold()
+        assert origin["session_id"] == session["session_id"]
+        assert origin["run_id"] == run.run_id
+        calls.append((target, message_id))
+        record_hchat_response({"ok": True, "state": "accepted"})
+        return True
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda *a: None)
+    monkeypatch.setattr(hchat_send, "_register_hchat_outbound_correlation", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_hchat_channel_egress_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_send_via_local_workbench", lambda cfg, port, target, sender, text, source, route, **k: verify_before_send(f"{target}@HASHI1", k["message_id"]))
+    monkeypatch.setattr(hchat_send, "_send_via_protocol_transport", lambda target, instance, sender, text, **k: verify_before_send(f"{target}@{instance}", k["message_id"]))
+    runtime._hchat_draft_sender = hchat_send.send_hchat_result
+
+    first = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime, item, core_raw="Please review.", completion_path="foreground",
+    )
+    assert [target for target, _ in calls] == ["akane@HASHI1", "rain@HASHI9"]
+    assert "akane@HASHI1" in first.visible_text and "rain@HASHI9" in first.visible_text
+    # A repeated execution of the same Run uses the frozen recipients and receipts.
+    cfg["groups"]["reviewers"]["members"] = ["different@HASHI8"]
+    second = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime, item, core_raw="Please review.", completion_path="foreground",
+    )
+    assert len(calls) == 2
+    assert "akane@HASHI1" in second.visible_text and "rain@HASHI9" in second.visible_text
+    assert "different@HASHI8" not in second.visible_text
+
+
+@pytest.mark.asyncio
+async def test_hchat_group_draft_sends_only_owned_selected_attachment(tmp_path, monkeypatch):
+    import hashlib
+    from orchestrator.hchat_submit_result import record_hchat_response
+    from orchestrator.session_store import SessionConflict, SessionStore
+    from tools import hchat_send
+
+    runtime, _sent, _voices = _make_background_runtime(tmp_path)
+    runtime.session_store = store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    session = store.create_session(owner_id="user:7", agent_id=runtime.name)
+    foreign_session = store.create_session(owner_id="user:8", agent_id=runtime.name)
+    run = store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id=runtime.name,
+        request_id="req-001", text="send", source="bridge:hchat-draft", idempotency_key="request-key",
+    )
+    fence = store.mark_request_running(run.request_id, worker_id="test-worker")
+    def stage(target_session, owner, content, key):
+        digest = hashlib.sha256(content).hexdigest()
+        row = store.stage_attachment(
+            session_id=target_session["session_id"], owner_id=owner, filename=key + ".txt",
+            media_type="text/plain", size_bytes=len(content), sha256=digest, idempotency_key=key,
+        )
+        store.upload_attachment_bytes(
+            session_id=target_session["session_id"], owner_id=owner,
+            attachment_id=row["attachment_id"], payload=content,
+        )
+        store.commit_attachment(
+            session_id=target_session["session_id"], owner_id=owner, attachment_id=row["attachment_id"],
+        )
+        return row
+    owned = stage(session, "user:7", b"my selected report", "mine")
+    foreign = stage(foreign_session, "user:8", b"someone else's report", "other")
+    common = dict(
+        request_id=run.request_id, session_id=session["session_id"], owner_id="user:7",
+        agent_id=runtime.name, request_digest=hashlib.sha256(b"selection").hexdigest(),
+    )
+    with pytest.raises(SessionConflict):
+        store.bind_run_output_attachments(
+            **common, idempotency_key="foreign", attachments=[{"attachment_id": foreign["attachment_id"]}],
+        )
+    store.bind_run_output_attachments(
+        **common, idempotency_key="owned", attachments=[{"attachment_id": owned["attachment_id"]}],
+    )
+    item = _queued_request_from("bridge:hchat-draft")
+    item.request_metadata = {HCHAT_TARGET_METADATA_KEY: "@reviewers"}
+    item.owner_id, item.session_id, item.run_id, item.fencing_token = (
+        "user:7", session["session_id"], run.run_id, fence,
+    )
+    cfg = {
+        "global": {"instance_id": "HASHI1", "workbench_port": 18800},
+        "agents": [], "groups": {"reviewers": {"members": ["rain@HASHI9", "other@HASHI9"]}},
+    }
+    seen = []
+    def send(target, instance, sender, text, **kwargs):
+        seen.append((target, [path.read_bytes() for path in kwargs["attachments"]]))
+        record_hchat_response({"ok": True, "state": "accepted"})
+        return True
+    monkeypatch.setattr(hchat_send, "_load_config", lambda: cfg)
+    monkeypatch.setattr(hchat_send, "_build_reply_route", lambda *a: None)
+    monkeypatch.setattr(hchat_send, "_register_hchat_outbound_correlation", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_hchat_channel_egress_allowed", lambda *a, **k: True)
+    monkeypatch.setattr(hchat_send, "_send_via_protocol_transport", send)
+    runtime._hchat_draft_sender = hchat_send.send_hchat_result
+    result = await FlexibleAgentRuntime._prepare_hchat_draft_success(
+        runtime, item, core_raw="Please review.", completion_path="foreground",
+    )
+    assert seen == [("rain", [b"my selected report"]), ("other", [b"my selected report"])]
+    assert "2 accepted" in result.visible_text

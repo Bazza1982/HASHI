@@ -652,15 +652,18 @@ async def test_direct_tui_attachment_sends_bytes_and_caption_in_one_request(monk
 
 
 @pytest.mark.asyncio
-async def test_direct_tui_attachment_uses_session_asset_and_run_when_advertised(monkeypatch):
+@pytest.mark.parametrize("content,filename,media_type", [
+    (b"example image bytes", "photo.png", "image/png"),
+    (b"", "empty.txt", "text/plain"),
+])
+async def test_direct_tui_attachment_uses_session_asset_and_run_when_advertised(monkeypatch, content, filename, media_type):
     client = TuiApiClient(
         "http://127.0.0.1:18800", expected_instance_id="HASHI1"
     )
     calls = []
-    content = b"example image bytes"
     attachment = {
-        "filename": "photo.png",
-        "media_type": "image/png",
+        "filename": filename,
+        "media_type": media_type,
         "size_bytes": len(content),
         "sha256": hashlib.sha256(content).hexdigest(),
         "content_b64": base64.b64encode(content).decode("ascii"),
@@ -903,7 +906,8 @@ async def test_remote_tui_attachment_never_falls_back_after_canonical_admission(
 
 
 @pytest.mark.asyncio
-async def test_direct_tui_workzone_reference_binds_session_run(monkeypatch):
+@pytest.mark.parametrize("reference", ["reports/weekly.pdf", r"C:\Workzone\weekly.pdf", "/allowed/weekly.pdf"])
+async def test_direct_tui_workzone_reference_binds_session_run(monkeypatch, reference):
     client = TuiApiClient("http://127.0.0.1:18800", expected_instance_id="HASHI1")
     calls = []
 
@@ -932,7 +936,7 @@ async def test_direct_tui_workzone_reference_binds_session_run(monkeypatch):
 
     monkeypatch.setattr(client, "_direct_request", request)
     result = await client.send_chat_attachment(
-        "akane", "read it", workzone_ref="reports/weekly.pdf",
+        "akane", "read it", workzone_ref=reference,
         client_id="tui-window-1", telegram_mirror=False,
     )
 
@@ -943,7 +947,7 @@ async def test_direct_tui_workzone_reference_binds_session_run(monkeypatch):
         "/api/v1/sessions/ses-1/attachments/from-workzone",
         "/api/v1/sessions/ses-1/runs",
     ]
-    assert calls[2][2] == {"reference": "reports/weekly.pdf"}
+    assert calls[2][2] == {"reference": reference}
     assert calls[2][3] == calls[3][3] == "http://127.0.0.1:18800"
     assert calls[-1][2]["message"]["content"] == [
         {"type": "text", "text": "read it"},
@@ -952,7 +956,8 @@ async def test_direct_tui_workzone_reference_binds_session_run(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_remote_tui_workzone_reference_stays_target_relative(monkeypatch):
+@pytest.mark.parametrize("reference", ["reports/weekly.pdf", r"C:\Workzone\weekly.pdf", "/allowed/weekly.pdf"])
+async def test_remote_tui_workzone_reference_stays_target_relative(monkeypatch, reference):
     client = TuiApiClient(
         remote_url="http://127.0.0.1:8766", target_instance="HASHI2"
     )
@@ -979,7 +984,7 @@ async def test_remote_tui_workzone_reference_stays_target_relative(monkeypatch):
 
     monkeypatch.setattr(client, "_proxy_request", proxy)
     result = await client.send_chat_attachment(
-        "akane", "read it", workzone_ref="reports/weekly.pdf",
+        "akane", "read it", workzone_ref=reference,
         client_id="tui-window-1",
     )
 
@@ -987,13 +992,13 @@ async def test_remote_tui_workzone_reference_stays_target_relative(monkeypatch):
     assert [operation for operation, _ in calls] == [
         "capabilities", "primary_session", "session_workzone_attachment_run"
     ]
-    assert calls[-1][1]["workzone_ref"] == "reports/weekly.pdf"
+    assert calls[-1][1]["workzone_ref"] == reference
     assert calls[-1][1]["session_id"] == "ses-2"
     assert "attachment" not in calls[-1][1]
 
 
 @pytest.mark.asyncio
-async def test_tui_workzone_reference_rejects_absolute_and_traversal_before_io(
+async def test_tui_workzone_reference_rejects_traversal_before_io(
     monkeypatch,
 ):
     client = TuiApiClient("http://127.0.0.1:18800")
@@ -1002,7 +1007,7 @@ async def test_tui_workzone_reference_rejects_absolute_and_traversal_before_io(
         raise AssertionError("invalid reference must not touch the server")
 
     monkeypatch.setattr(client, "capabilities_info", forbidden)
-    for reference in ("../secret.txt", "/etc/passwd", "C:\\private.txt"):
+    for reference in ("../secret.txt", r"C:\folder\..\secret.txt", "report\x00.txt"):
         result = await client.send_chat_attachment(
             "akane", "read", workzone_ref=reference
         )

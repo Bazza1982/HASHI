@@ -161,6 +161,78 @@ def test_media_defaults_on_but_explicit_instance_opt_out_is_kept(tmp_path):
     assert global_config.native_audio_chat_v1 is False
 
 
+def test_session_message_age_policy_is_optional_and_explicit(tmp_path):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    config, _, _ = manager.load()
+    assert config.session_message_age_policy == {"mode": "observe", "max_age_seconds": None}
+
+    document = read_config_json(config_path)
+    document["global"]["session_message_age_policy"] = {"mode": "expire", "max_age_seconds": 60}
+    write_config_json(config_path, document)
+    config, _, _ = manager.load()
+    assert config.session_message_age_policy == {"mode": "expire", "max_age_seconds": 60}
+
+    document["global"]["session_message_age_policy"] = {"mode": "expire"}
+    write_config_json(config_path, document)
+    with pytest.raises(ValueError, match="requires max_age_seconds"):
+        manager.load()
+    for invalid in ({"mode": False}, {"mode": "observe", "max_age_seconds": 60}):
+        document["global"]["session_message_age_policy"] = invalid
+        write_config_json(config_path, document)
+        with pytest.raises(ValueError, match="session_message_age_policy"):
+            manager.load()
+
+
+def test_hchat_request_age_policy_is_separate_and_optional(tmp_path):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    config, _, _ = manager.load()
+    assert config.hchat_request_age_policy == {"mode": "observe", "max_age_seconds": None}
+    document = read_config_json(config_path)
+    document["global"]["hchat_request_age_policy"] = {"mode": "expire", "max_age_seconds": 120}
+    write_config_json(config_path, document)
+    config, _, _ = manager.load()
+    assert config.hchat_request_age_policy == {"mode": "expire", "max_age_seconds": 120}
+    document["global"]["hchat_request_age_policy"] = {"mode": "expire"}
+    write_config_json(config_path, document)
+    with pytest.raises(ValueError, match="hchat_request_age_policy"):
+        manager.load()
+
+
+def test_telegram_message_age_policy_is_separate_and_optional(tmp_path):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    config, _, _ = manager.load()
+    assert config.telegram_message_age_policy == {"mode": "observe", "max_age_seconds": None}
+    document = read_config_json(config_path)
+    document["global"]["telegram_message_age_policy"] = {"mode": "confirm", "max_age_seconds": 120}
+    write_config_json(config_path, document)
+    config, _, _ = manager.load()
+    assert config.telegram_message_age_policy == {"mode": "confirm", "max_age_seconds": 120}
+    document["global"]["telegram_message_age_policy"] = {"mode": "expire"}
+    write_config_json(config_path, document)
+    with pytest.raises(ValueError, match="telegram_message_age_policy"):
+        manager.load()
+
+
+def test_agent_document_budget_is_configurable_and_validated(tmp_path):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    config, _, _ = manager.load()
+    assert config.agent_document_max_bytes == 8 * 1024 * 1024
+    document = read_config_json(config_path)
+    document["global"]["agent_document_max_bytes"] = 12 * 1024 * 1024
+    write_config_json(config_path, document)
+    config, _, _ = manager.load()
+    assert config.agent_document_max_bytes == 12 * 1024 * 1024
+    for invalid in (0, -1, True, "100"):
+        document["global"]["agent_document_max_bytes"] = invalid
+        write_config_json(config_path, document)
+        with pytest.raises(ValueError, match="agent_document_max_bytes"):
+            manager.load()
+
+
 def test_global_timezone_uses_explicit_iana_name(tmp_path):
     config_path, secrets_path = _write_base_files(
         tmp_path,
@@ -224,6 +296,16 @@ def test_legacy_owner_scope_defaults_to_effective_telegram_owner(tmp_path):
 
     assert global_cfg.authorized_id == 7666
     assert global_cfg.owner_scope_id == "user:7666"
+
+
+@pytest.mark.parametrize("legacy_scope", ["owner with spaces", "owner:" + "x" * 300])
+def test_legacy_owner_scope_format_cannot_block_configuration(tmp_path, legacy_scope):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    config = read_config_json(config_path)
+    config["global"]["owner_scope_id"] = legacy_scope
+    write_config_json(config_path, config)
+    global_cfg, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    assert global_cfg.owner_scope_id == legacy_scope
 
 
 def test_invalid_global_timezone_is_rejected(tmp_path):
@@ -864,3 +946,151 @@ def test_startup_concurrency_rejects_invalid_value(tmp_path, value):
     config_path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(ValueError, match="startup_agent_concurrency"):
         ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+
+
+
+@pytest.mark.parametrize("invalid_source", ["global", "secrets", "disabled"])
+def test_invalid_telegram_owner_does_not_block_local_startup_and_recovers_live(tmp_path, invalid_source):
+    from types import SimpleNamespace
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["owner_scope_id"] = "local-owner:stable"
+    if invalid_source == "global":
+        document["global"]["telegram_owner_id"] = "not-a-telegram-id"
+    elif invalid_source == "disabled":
+        document["global"]["telegram_primary_disabled"] = "not-a-boolean"
+    else:
+        secrets_path.write_text(json.dumps({"authorized_telegram_id": "invalid"}), encoding="utf-8")
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    global_config, agents, _ = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    assert agents[0].name == "flexy"
+    assert global_config.authorized_id == 0
+    assert global_config.owner_scope_id == "local-owner:stable"
+    assert global_config.telegram_identity_invalid is True
+
+    runtime = SimpleNamespace(
+        name="flexy", global_config=global_config, _authorized_telegram_ids={42}
+    )
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+    with bind_frontend_command_principal(runtime, "local-owner:stable"):
+        assert FlexibleAgentRuntime._is_authorized_user(runtime, "local-owner:stable")
+    # Repair does not need a runtime restart, and an unrelated actor stays denied.
+    if invalid_source == "secrets":
+        secrets_path.write_text(json.dumps({"authorized_telegram_id": 42}), encoding="utf-8")
+    elif invalid_source == "disabled":
+        document["global"].update(telegram_primary_disabled=False, telegram_owner_id=42)
+    else:
+        document["global"]["telegram_owner_id"] = 42
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    assert FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 999)
+
+
+def test_invalid_telegram_owner_recovery_preserves_legacy_agent_allowlist(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    agent = _minimal_flex_agent()
+    agent["extra"] = {"authorized_telegram_ids": [75]}
+    config_path, secrets_path = _write_base_files(tmp_path, agent)
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["telegram_owner_id"] = "invalid"
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    global_config, _, _ = ConfigManager(config_path, secrets_path, bridge_home=tmp_path).load()
+    runtime = SimpleNamespace(
+        name="flexy", global_config=global_config, _authorized_telegram_ids={75}
+    )
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 75)
+    document["global"]["telegram_owner_id"] = 42
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    assert FlexibleAgentRuntime._is_authorized_user(runtime, 75)
+    assert not FlexibleAgentRuntime._is_authorized_user(runtime, 42)
+
+
+@pytest.mark.parametrize("initial_telegram_owner", [42, "invalid"])
+def test_personal_local_data_owner_survives_telegram_setting_changes(tmp_path, initial_telegram_owner):
+    from types import SimpleNamespace
+
+    from orchestrator.agent_move.package import configured_conversation_owner_id
+    from orchestrator.telegram_actor_scope import runtime_snapshot
+
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["telegram_owner_id"] = initial_telegram_owner
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    manager.load()
+    assert not (tmp_path / "state" / "personal_data_owner.json").exists()
+    before, _, _ = manager.load(bootstrap_local_api_credential=True)
+    local_owner = "user:42" if initial_telegram_owner == 42 else "user:0"
+    assert before.owner_scope_id == local_owner
+
+    # Rollback generations see the same existing local key without treating it
+    # as a credential. Only a missing compatibility projection is populated.
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    assert document["global"]["owner_scope_id"] == local_owner
+
+    # A repaired or replaced connector account does not select a new data owner.
+    document["global"]["telegram_owner_id"] = 99
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    from orchestrator.telegram_identity import resolve_owner_scope_id
+
+    assert resolve_owner_scope_id(document["global"], 99) == local_owner
+    after, _, loaded_secrets = manager.load()
+    assert after.owner_scope_id == local_owner
+    assert configured_conversation_owner_id(tmp_path, instance_role="target") == local_owner
+
+    from orchestrator.workbench_api import WorkbenchApiServer
+
+    server = WorkbenchApiServer(
+        config_path=config_path, global_config=after, secrets=loaded_secrets,
+        reconcile_session_runs=False,
+    )
+    owner = server._v1_owner_id(None)
+    assert owner == local_owner
+    mine = server.session_store.ensure_default_session(owner_id=owner, agent_id="flexy")
+    other = server.session_store.ensure_default_session(owner_id="user:99", agent_id="flexy")
+    visible = server.session_store.list_sessions(owner_id=owner, agent_id="flexy")
+    assert [row["session_id"] for row in visible] == [mine["session_id"]]
+    assert mine["session_id"] != other["session_id"]
+    actor = runtime_snapshot(SimpleNamespace(name="flexy", global_config=after))
+    assert actor.primary_user_id == 99
+    assert actor.owner_scope_id == local_owner
+
+    from orchestrator.telegram_access import TelegramAccessService
+    from orchestrator.telegram_credential import TelegramCredentialService
+    from orchestrator.telegram_owner import stage_telegram_owner_replacement
+
+    access = TelegramAccessService(config_path=config_path, secrets_path=secrets_path)
+    assert access._context("flexy")[2].owner_scope_id == local_owner
+    credential = TelegramCredentialService(config_path=config_path, secrets_path=secrets_path)
+    assert credential.context("flexy").owner_scope_id == local_owner
+    replacement = stage_telegram_owner_replacement(
+        bridge_home=tmp_path, new_owner_id=100, expected_current_owner_id=99
+    )
+    assert replacement["owner_scope_id"] == local_owner
+    reloaded, _, _ = manager.load()
+    assert reloaded.owner_scope_id == local_owner
+
+
+def test_personal_legacy_projection_conflict_does_not_change_owner_or_block_startup(tmp_path, caplog):
+    config_path, secrets_path = _write_base_files(tmp_path, _minimal_flex_agent())
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["telegram_owner_id"] = 42
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    manager = ConfigManager(config_path, secrets_path, bridge_home=tmp_path)
+    first, _, _ = manager.load(bootstrap_local_api_credential=True)
+    assert first.owner_scope_id == "user:42"
+
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["owner_scope_id"] = "pre-existing-different-value"
+    config_path.write_text(json.dumps(document), encoding="utf-8")
+    loaded, _, _ = manager.load(bootstrap_local_api_credential=True)
+    assert loaded.owner_scope_id == "user:42"
+    assert json.loads(config_path.read_text(encoding="utf-8"))["global"]["owner_scope_id"] == "pre-existing-different-value"
+    assert "older generations require separate compatibility verification" in caplog.text

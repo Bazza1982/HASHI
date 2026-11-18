@@ -50,6 +50,46 @@ from remote.security.shared_token import (
 logger = logging.getLogger(__name__)
 
 
+def _protocol_ingress_identity(payload: dict, *, local_instance: str, kind: str) -> str:
+    """Bind replay receipts to stable message intent, not changing transport hops."""
+    from orchestrator.message_freshness import parse_rfc3339_utc
+
+    origin = payload.get("originated_at")
+    body = payload.get("body") or {}
+    if not isinstance(body, dict):
+        raise ValueError("protocol message body must be an object")
+    if origin is None:
+        origin = body.get("originated_at")
+    parsed_origin = parse_rfc3339_utc(origin)
+    normalized_origin = (parsed_origin.isoformat().replace("+00:00", "Z")
+                         if parsed_origin is not None else str(origin or ""))
+    logical_body = {key: value for key, value in body.items() if key != "originated_at"}
+    if payload.get("_local_attachment_manifest_verified") is True and logical_body.get("attachments"):
+        # Staged storage paths can change when a verified upload is retried;
+        # the admitted attachment IDs, content digests and metadata are the intent.
+        logical_body["attachments"] = [
+            {key: value for key, value in item.items() if key != "stored_path"}
+            for item in canonical_hchat_attachment_manifest(logical_body["attachments"])
+        ]
+    identity = {
+        "kind": kind,
+        "message_id": str(payload.get("message_id") or "").strip(),
+        "idempotency_key": str(payload.get("idempotency_key") or "").strip(),
+        "conversation_id": str(payload.get("conversation_id") or "").strip(),
+        "in_reply_to": str(payload.get("in_reply_to") or "").strip(),
+        "from_instance": str(payload.get("from_instance") or "").strip().upper(),
+        "from_agent": str(payload.get("from_agent") or "").strip().lower(),
+        "to_instance": str(payload.get("to_instance") or local_instance).strip().upper(),
+        "to_agent": str(payload.get("to_agent") or "").strip().lower(),
+        "originated_at": normalized_origin,
+        "body": logical_body,
+        "authorization_resources": payload.get("authorization_resources") or [],
+        "authorization_content_text": payload.get("_private_authorization_content_text"),
+    }
+    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _normalize_identity(value: str) -> str:
     value = str(value or "").strip().lower()
     return "".join(ch for ch in value if ch.isalnum())
@@ -222,6 +262,26 @@ class ProtocolManager:
             "instances_file_reads": 0,
             "inflight_cycles": 0,
         }
+
+    def _hchat_request_age_policy(self) -> dict[str, Any] | None:
+        """Read the instance's optional policy, retaining the last valid value."""
+        from orchestrator.config_json import read_config_json
+        from orchestrator.message_freshness import normalize_hchat_request_age_policy
+
+        path = Path(self._hashi_root) / "agents.json"
+        try:
+            document = read_config_json(path)
+            settings = document.get("global") or {}
+            if not isinstance(settings, dict):
+                raise ValueError("global configuration is invalid")
+            policy = normalize_hchat_request_age_policy(settings.get("hchat_request_age_policy"))
+            self._last_hchat_request_age_policy = policy
+            return policy
+        except FileNotFoundError:
+            return getattr(self, "_last_hchat_request_age_policy", None)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("HChat request age policy unavailable; retaining last valid policy (%s)", type(exc).__name__)
+            return getattr(self, "_last_hchat_request_age_policy", None)
 
     def get_protocol_status(self) -> dict:
         peers = []
@@ -1640,8 +1700,17 @@ class ProtocolManager:
         if local_instance in route_trace:
             return 409, self._error_payload("loop_detected", "Local instance already present in route_trace", retryable=False, payload=payload)
 
+        try:
+            ingress_identity = _protocol_ingress_identity(payload, local_instance=local_instance, kind="message")
+        except (TypeError, ValueError, UnicodeEncodeError):
+            return 400, self._error_payload("invalid_message", "Invalid protocol message body", retryable=False, payload=payload)
         existing = self._inflight.get(message_id)
         if existing:
+            prior_identity = existing.get("ingress_identity")
+            if not prior_identity:
+                return 409, self._error_payload("delivery_outcome_unknown", "Prior receipt cannot be matched to the original message", retryable=False, payload=payload)
+            if prior_identity != ingress_identity:
+                return 409, self._error_payload("idempotency_conflict", "Message ID is already bound to a different request", retryable=False, payload=payload)
             state = str(existing.get("state") or "")
             if state in {
                 "discarded",
@@ -1672,7 +1741,7 @@ class ProtocolManager:
                     "state": "awaiting_confirmation",
                     "normalized_ttl": existing.get("ttl", normalized_ttl),
                 }
-            if state in {"delivery_in_progress", "delivered_to_local_queue", "assistant_started", "assistant_streaming"}:
+            if state in {"delivery_in_progress", "delivered_to_local_queue", "assistant_started", "assistant_streaming", "queued", "running", "awaiting_approval"}:
                 return 202, {
                     "ok": True,
                     "message_type": "ack",
@@ -1683,10 +1752,10 @@ class ProtocolManager:
                     "request_id": existing.get("request_id"),
                     "normalized_ttl": existing.get("ttl", normalized_ttl),
                 }
-            if state in {"reply_unknown", "reply_failed"}:
+            if state in {"reply_unknown", "reply_failed", "abandoned_after_restart", "timed_out", "failed"}:
                 return 409, self._error_payload(
                     "delivery_outcome_unknown",
-                    "Prior reply outcome is unknown and will not be replayed",
+                    "Prior message outcome cannot safely be replayed",
                     retryable=False,
                     payload=payload,
                 )
@@ -1809,9 +1878,11 @@ class ProtocolManager:
             enqueue_kwargs["attachments"] = attachments
 
         from orchestrator.hchat_freshness_gate import (
+            HChatMessageExpired,
             check_hchat_freshness_and_register,
             hchat_payload_digest,
         )
+        from orchestrator.ingress_confirmation import ConfirmationConflictError
 
         originated_at = (
             payload.get("originated_at")
@@ -1828,28 +1899,34 @@ class ProtocolManager:
             text=str(body.get("text") or ""),
             attachment_binding=attachments or [],
         )
-        is_fresh, conf = check_hchat_freshness_and_register(
-            store=self._frontend_session_store(),
-            originated_at=originated_at,
-            is_remote=True,
-            to_agent=to_agent,
-            from_agent=from_agent,
-            from_instance=from_instance,
-            message_id=message_id,
-            text=str(body.get("text") or ""),
-            is_reply=False,
-            transport="protocol",
-            connector_id="hchat_protocol",
-            idempotency_key=idempotency_key,
-            canonical_text=str(body.get("text") or ""),
-            attachment_binding=attachments or [],
-            payload_to_execute={
-                "to_agent": to_agent,
-                "prompt_text": prompt_text,
-                "enqueue_kwargs": enqueue_kwargs,
-                "originated_at": originated_at,
-            },
-        )
+        try:
+            is_fresh, conf = check_hchat_freshness_and_register(
+                store=self._frontend_session_store(),
+                originated_at=originated_at,
+                is_remote=True,
+                to_agent=to_agent,
+                from_agent=from_agent,
+                from_instance=from_instance,
+                message_id=message_id,
+                text=str(body.get("text") or ""),
+                is_reply=False,
+                transport="protocol",
+                connector_id="hchat_protocol",
+                idempotency_key=idempotency_key,
+                canonical_text=str(body.get("text") or ""),
+                attachment_binding=attachments or [],
+                age_policy=self._hchat_request_age_policy(),
+                payload_to_execute={
+                    "to_agent": to_agent,
+                    "prompt_text": prompt_text,
+                    "enqueue_kwargs": enqueue_kwargs,
+                    "originated_at": originated_at,
+                },
+            )
+        except HChatMessageExpired as exc:
+            return 409, self._error_payload("hchat_message_expired", str(exc), retryable=False, payload=payload)
+        except ConfirmationConflictError as exc:
+            return 409, self._error_payload("idempotency_conflict", str(exc), retryable=False, payload=payload)
         if not is_fresh and conf:
             confirmation_state = str(conf.get("state") or "")
             waiting = confirmation_state in {"awaiting_confirmation", "confirming"}
@@ -1863,6 +1940,7 @@ class ProtocolManager:
             }.get(confirmation_state, "failed")
             self._inflight[message_id] = {
                 "message_id": message_id,
+                "ingress_identity": ingress_identity,
                 "conversation_id": conversation_id,
                 "from_instance": from_instance,
                 "from_agent": from_agent,
@@ -1916,6 +1994,7 @@ class ProtocolManager:
 
         self._inflight[message_id] = {
             "message_id": message_id,
+            "ingress_identity": ingress_identity,
             "conversation_id": conversation_id,
             "from_instance": from_instance,
             "from_agent": from_agent,
@@ -2182,8 +2261,17 @@ class ProtocolManager:
         if from_instance == local_instance:
             return 409, self._error_payload("loop_detected", "Refusing local self-bounce agent_reply", retryable=False, payload=payload)
 
+        try:
+            ingress_identity = _protocol_ingress_identity(payload, local_instance=local_instance, kind="reply")
+        except (TypeError, ValueError, UnicodeEncodeError):
+            return 400, self._error_payload("invalid_reply", "Invalid protocol reply body", retryable=False, payload=payload)
         existing_reply = self._inflight.get(message_id)
         if existing_reply:
+            prior_identity = existing_reply.get("ingress_identity")
+            if not prior_identity:
+                return 409, self._error_payload("delivery_outcome_unknown", "Prior receipt cannot be matched to the original reply", retryable=False, payload=payload)
+            if prior_identity != ingress_identity:
+                return 409, self._error_payload("idempotency_conflict", "Message ID is already bound to a different reply", retryable=False, payload=payload)
             state = str(existing_reply.get("state") or "")
             if state in {
                 "reply_delivered_locally",
@@ -2201,6 +2289,8 @@ class ProtocolManager:
                     "confirmation_id": existing_reply.get("confirmation_id"),
                     "normalized_ttl": existing_reply.get("ttl", normalized_ttl),
                 }
+            if state == "abandoned_after_restart":
+                return 409, self._error_payload("delivery_outcome_unknown", "Prior reply outcome is unknown", retryable=False, payload=payload)
             if state in TERMINAL_INFLIGHT_STATES:
                 return 409, self._error_payload("duplicate_message", "Reply message already terminal", retryable=False, payload=payload)
             if state == "awaiting_confirmation":
@@ -2228,14 +2318,13 @@ class ProtocolManager:
 
         correlation_state = "missing_legacy_allowed"
         correlated = self._inflight.get(in_reply_to)
-        outbound_correlation = None
+        outbound_correlation = self._outbound_correlation_for(in_reply_to)
         if correlated:
             correlated_conversation_id = str(correlated.get("conversation_id") or "").strip()
             if correlated_conversation_id and correlated_conversation_id != conversation_id:
                 return 409, self._error_payload("reply_correlation_mismatch", "Reply conversation_id does not match correlation record", retryable=False, payload=payload)
             correlation_state = "matched"
         else:
-            outbound_correlation = self._outbound_correlation_for(in_reply_to)
             if outbound_correlation:
                 correlated_conversation_id = str(outbound_correlation.get("conversation_id") or "").strip()
                 if correlated_conversation_id and correlated_conversation_id != conversation_id:
@@ -2263,6 +2352,20 @@ class ProtocolManager:
         )
 
         originated_at = payload.get("originated_at")
+        from orchestrator.hchat_origin_binding import HChatOriginConflict, resolve_reply_origin
+
+        reply_store = self._frontend_session_store()
+        try:
+            bound_origin = resolve_reply_origin(
+                reply_store, correlation=outbound_correlation, in_reply_to=in_reply_to,
+                conversation_id=conversation_id, from_instance=from_instance,
+                from_agent=from_agent, to_instance=local_instance, to_agent=to_agent,
+            )
+        except HChatOriginConflict:
+            return 409, self._error_payload(
+                "reply_correlation_mismatch", "Reply does not match its original conversation",
+                retryable=False, payload=payload,
+            )
         payload_digest = hchat_payload_digest(
             message_id=message_id,
             originated_at=originated_at,
@@ -2273,7 +2376,7 @@ class ProtocolManager:
             text=str((body or {}).get("text") or "").strip(),
         )
         is_fresh, conf = check_hchat_freshness_and_register(
-            store=self._frontend_session_store(),
+            store=reply_store,
             originated_at=originated_at,
             is_remote=True,
             to_agent=to_agent,
@@ -2284,6 +2387,8 @@ class ProtocolManager:
             is_reply=True,
             transport="protocol",
             connector_id="hchat_protocol",
+            owner_id=bound_origin["owner_id"] if bound_origin else None,
+            age_policy={"mode": "observe"} if bound_origin else None,
             idempotency_key=idempotency_key,
             canonical_text=str((body or {}).get("text") or "").strip(),
             payload_to_execute={
@@ -2309,6 +2414,7 @@ class ProtocolManager:
             }.get(confirmation_state, "failed")
             self._inflight[message_id] = {
                 "message_id": message_id,
+                "ingress_identity": ingress_identity,
                 "conversation_id": conversation_id,
                 "in_reply_to": in_reply_to,
                 "from_instance": from_instance,
@@ -2351,9 +2457,15 @@ class ProtocolManager:
             conversation_id=conversation_id,
             from_instance=from_instance,
             from_agent=from_agent,
+            to_instance=local_instance,
+            to_agent=to_agent,
+            route_trace=route_trace,
+            authenticated_peer=str(payload.get("_network_authenticated_instance") or ""),
+            network_authentication=str(payload.get("_network_authentication") or "not_verified"),
             terminal_response_text=str((body or {}).get("text") or "").strip(),
             originated_at=originated_at,
             idempotency_key=idempotency_key,
+            in_reply_to=in_reply_to,
             payload_digest=payload_digest,
         )
         if isinstance(local_acceptance, dict):
@@ -2379,6 +2491,7 @@ class ProtocolManager:
             self._mark_outbound_reply_delivered(in_reply_to, reply_message_id=message_id, delivered_at=now)
         self._inflight[message_id] = {
             "message_id": message_id,
+            "ingress_identity": ingress_identity,
             "conversation_id": conversation_id,
             "in_reply_to": in_reply_to,
             "from_instance": from_instance,
@@ -3192,6 +3305,40 @@ class ProtocolManager:
             "state": "failed" if known_failure else "unknown",
         }
 
+    async def _live_peer_capabilities(self, instance_id: str, route: dict[str, Any]) -> set[str] | None:
+        """Read optional features from a nonce-authenticated live peer.
+
+        A missing feature in discovery may be stale. Do not mutate the remote
+        peer registry merely to probe it, and never trust an unsigned reply.
+        """
+        if not getattr(self, "_shared_token", None):
+            return None
+        urls = self._candidate_urls(route["host"], route["port"], "/protocol/handshake")
+        for url in urls:
+            try:
+                response = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda u=url: self._post_json(
+                        u,
+                        {"from_instance": str(self._instance_info.get("instance_id") or ""),
+                         "protocol_version": PROTOCOL_VERSION},
+                        timeout=5,
+                    ),
+                )
+            except Exception:
+                continue
+            if (not isinstance(response, dict)
+                    or response.get("status") != "handshake_accept"
+                    or str(response.get("instance_id") or "").strip().upper() != instance_id.strip().upper()):
+                continue
+            status = response.get("__http_status", 200)
+            if not isinstance(status, int) or status >= 400:
+                continue
+            capabilities = response.get("capabilities")
+            if isinstance(capabilities, list):
+                return {str(value) for value in capabilities}
+        return None
+
     async def _send_delivery_status(
         self,
         item: dict[str, Any],
@@ -3222,14 +3369,17 @@ class ProtocolManager:
         peer_capabilities = {
             str(value) for value in getattr(peer, "capabilities", ()) or ()
         }
-        if peer is not None and "hchat_delivery_status_v1" not in peer_capabilities:
-            item["delivery_status_error_code"] = (
-                "hchat_delivery_status_capability_missing"
-            )
-            return False
         route = self._resolve_peer_route(instance_id)
         if route is None:
             return False
+        if "hchat_delivery_status_v1" not in peer_capabilities:
+            live_capabilities = await self._live_peer_capabilities(instance_id, route)
+            if live_capabilities is None:
+                item["delivery_status_error_code"] = "hchat_delivery_status_capability_unverified"
+                return False
+            if "hchat_delivery_status_v1" not in live_capabilities:
+                item["delivery_status_error_code"] = "hchat_delivery_status_capability_missing"
+                return False
         original_message_id = str(item.get("message_id") or "").strip()
         if not original_message_id:
             return False
@@ -3319,16 +3469,6 @@ class ProtocolManager:
                     if self._peer_registry
                     else peer
                 )
-        if peer is not None and "message_freshness_v1" not in {
-            str(value) for value in getattr(peer, "capabilities", ()) or ()
-        }:
-            item["reply_failure_known"] = True
-            item["reply_error_code"] = "message_freshness_capability_missing"
-            logger.warning(
-                "Cannot send HChat reply to %s: peer lacks message_freshness_v1",
-                instance_id,
-            )
-            return False
         route = self._resolve_peer_route(instance_id)
         if route is None:
             logger.warning("Cannot send reply for %s: origin peer unavailable", item.get("message_id"))
@@ -3374,6 +3514,12 @@ class ProtocolManager:
                 str(value)
                 for value in getattr(peer, "capabilities", ()) or ()
             }
+            if "message_attachments_v1" not in capabilities:
+                capabilities = await self._live_peer_capabilities(instance_id, route)
+            if capabilities is None:
+                item["reply_error_code"] = "attachment_capability_unverified"
+                logger.warning("Cannot verify attachment support for peer %s", instance_id)
+                return False
             if "message_attachments_v1" not in capabilities:
                 item["reply_failure_known"] = True
                 item["reply_error_code"] = "attachment_capability_missing"
@@ -3674,6 +3820,21 @@ class ProtocolManager:
             if state == "awaiting_confirmation" and item.get("confirmation_id"):
                 # The PAO confirmation ledger is restart-safe and authoritative;
                 # keep polling it instead of abandoning a visible user decision.
+                continue
+            if item.get("confirmation_id") and item.get("owner_id") and not item.get("request_id"):
+                # A confirmed legacy receipt can be rebound through the same
+                # durable confirmation ledger without executing a second Run.
+                item["previous_state"] = state or "unknown"
+                item["state"] = "awaiting_confirmation"
+                item["updated_at"] = now
+                changed = True
+                continue
+            if all(item.get(key) for key in (
+                "request_id", "ingress_identity", "message_id", "conversation_id",
+                "from_instance", "from_agent", "to_agent",
+            )):
+                # The exact local acceptance is already durable. The watcher
+                # resolves or polls its existing Run instead of re-enqueueing.
                 continue
             item["previous_state"] = state or "unknown"
             item["state"] = "abandoned_after_restart"

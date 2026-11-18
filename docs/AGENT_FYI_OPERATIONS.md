@@ -44,8 +44,8 @@
 - Compute：PAO[目录](HASHI_COMPUTE_SERVICE_DIRECTORY.md)精确选择local/LAN服务，转写设置逐请求重读，失败不静默跨网或回退本地。
   TTS `default_voice`仅补未保存选择，不启用语音、不改已存策略；服务输入上限约束实际请求。Call独立profile共享[TTS目录](HASHI_VOICE_TTS_CATALOG.md)。
   属Functions/实例配置；Core、源地址和运行采用独立验收。
-- Call frames are input-only/cleared camera-off; LAN targets are literal private
-  IPv4 without redirects; preview is not vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
+- Call frames are input-only/cleared camera-off; configured LAN hostnames resolve
+  to checked private destinations without redirects; preview is not vision. [Call](HASHI_CALL_INTERACTION_2026-10-04.md).
   Tool screenshots use native images, not Base64; Ollama/public Provider IDs
   follow [HERV3](HERV3_UPGRADE.md).
 

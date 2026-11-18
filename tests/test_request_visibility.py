@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -21,7 +22,7 @@ from orchestrator.frontend_call.transient_live_media import (
     encode_live_frames,
     live_frames_for,
 )
-from orchestrator.session_store import AcceptedRun, SessionStore
+from orchestrator.session_store import AcceptedRun, ExistingRunNotFound, IdempotencyConflict, SessionStore
 
 
 def _runtime_for_admission():
@@ -67,8 +68,12 @@ def _use_explicit_runtime_store(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trusted_call", "frame_count", "claim_limit"),
+    [(True, 1, 1), (False, 1, 1), (True, 12, 12), (False, 12, 12), (True, 12, 10)],
+)
 async def test_live_frames_leave_request_metadata_before_session_admission(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, trusted_call, frame_count, claim_limit
 ):
     runtime = _runtime_for_admission()
     runtime.name = "visibility"
@@ -104,29 +109,51 @@ async def test_live_frames_leave_request_metadata_before_session_admission(
     monkeypatch.setattr(
         runtime_session, "session_workzone_state", lambda *args, **kwargs: {}
     )
+    captured_at = datetime.now(timezone.utc).isoformat()
     encoded = encode_live_frames(
-        (
-            {
-                "image": bytes.fromhex("ffd8ffc00008080010001000ffd9"),
-                "frame_sequence": 1,
-                "captured_at": "2026-10-17T06:20:00+11:00",
-            },
-        )
+        tuple({
+            "image": bytes.fromhex("ffd8ffc00008080010001000ffd9"),
+            "frame_sequence": index,
+            "captured_at": captured_at,
+        } for index in range(1, frame_count + 1)),
+        max_frames=frame_count,
     )
+    media = {
+        "version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "video",
+        "camera": {"state": "fresh"}, "captured_at": captured_at,
+        "observation": "A book.", "freshness_seconds": 20, "max_frames_per_turn": claim_limit,
+    }
+    monkeypatch.setattr(message_context, "_network_secret", lambda _root: "fixture-token")
+    evidence = message_context.seal_connector_evidence(
+        tmp_path, claims={"call_media": media}, prompt="What am I holding?"
+    )
+    request_metadata = {TRANSIENT_LIVE_FRAMES_METADATA_KEY: encoded}
+    if trusted_call:
+        request_metadata[message_context.CONNECTOR_EVIDENCE_METADATA_KEY] = evidence
+    else:
+        request_metadata["call_media"] = media
 
+    if trusted_call and frame_count > claim_limit:
+        with pytest.raises(ValueError, match="at most 10"):
+            await runtime.enqueue_request(
+                123, "What am I holding?", "session-api", "live frame privacy",
+                request_metadata=request_metadata,
+            )
+        assert runtime.queue.empty()
+        return
     result = await runtime.enqueue_request(
         123,
         "What am I holding?",
-        "api",
+        "session-api",
         "live frame privacy",
-        request_metadata={TRANSIENT_LIVE_FRAMES_METADATA_KEY: encoded},
+        request_metadata=request_metadata,
     )
 
     item = runtime.queue.get_nowait()
     assert result == item.request_id == "req-live-frames"
     assert TRANSIENT_LIVE_FRAMES_METADATA_KEY not in item.request_metadata
     assert "data:image" not in json.dumps(item.request_metadata)
-    assert len(live_frames_for(runtime, result)) == 1
+    assert len(live_frames_for(runtime, result)) == (frame_count if trusted_call else 0)
 
 
 @pytest.mark.asyncio
@@ -1017,3 +1044,92 @@ async def test_idempotent_frontend_retry_reuses_the_original_pcm_request_identit
 
     assert first == replay == "req-original"
     assert runtime.queue.qsize() == 1
+
+    # Exercise the real Function proxy and worker path, not just a store stub.
+    from orchestrator.function_worker_host import FunctionWorkerHost
+    from orchestrator.function_worker_supervisor import AgentRuntimeHandle
+
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime = runtime
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.agent_name = runtime.name
+    host.emit_metadata = AsyncMock()
+    host._begin_native_voice_transcription = AsyncMock()
+    proxy = AgentRuntimeHandle.__new__(AgentRuntimeHandle)
+    proxy._route = host.handle_request
+    proxy._outstanding_request_ids = set()
+
+    lookup = await proxy.enqueue_request(
+        0, "one frontend action", "session-api", "one frontend action",
+        idempotency_key="stable-frontend-action", replay_only=True,
+    )
+    assert lookup == first and runtime.queue.qsize() == 1
+    assert not proxy._outstanding_request_ids
+    host._begin_native_voice_transcription.assert_not_awaited()
+    with pytest.raises(IdempotencyConflict):
+        await proxy.enqueue_request(
+            0, "different action", "session-api", "different action",
+            idempotency_key="stable-frontend-action", replay_only=True,
+        )
+    with pytest.raises(ExistingRunNotFound):
+        await proxy.enqueue_request(
+            0, "not previously accepted", "session-api", "not previously accepted",
+            idempotency_key="unknown-action", replay_only=True,
+        )
+    assert runtime.queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_delayed_telegram_text_replay_stays_bound_to_the_original_run(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from orchestrator import runtime_long, runtime_run_questions, runtime_workzone
+
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    runtime.global_config = SimpleNamespace(
+        project_root=tmp_path, bridge_home=tmp_path, instance_id="HASHI2",
+        authorized_id=123, owner_scope_id="user:123", telegram_message_age_policy={},
+    )
+    runtime.next_request_id = Mock(side_effect=["req-original", "req-duplicate"])
+    runtime.session_store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI2")
+    runtime._is_authorized_user = lambda actor: actor == 123
+    runtime._record_active_chat = Mock()
+    runtime._should_redirect_after_transfer = lambda: False
+    runtime.logger = Mock()
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(runtime_run_questions, "handle_text_reply", AsyncMock(return_value=False))
+    monkeypatch.setattr(runtime_workzone, "handle_pending_path_reply", AsyncMock(return_value=False))
+    monkeypatch.setattr(runtime_long, "collect_text", lambda *args: False)
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runtime_delivery_order, "register_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime_cross_session, "capture_reply_target", lambda *args, **kwargs: None)
+
+    message = SimpleNamespace(
+        text="execute this once", message_id=1234, chat_id=123,
+        date=datetime.now(timezone.utc) - timedelta(hours=1), caption=None, reply_to_message=None,
+    )
+    update = SimpleNamespace(
+        message=message, effective_message=message, effective_chat=SimpleNamespace(id=123),
+        effective_user=SimpleNamespace(id=123), update_id=4321,
+    )
+    await runtime.handle_message(update, None)
+    assert runtime.queue.qsize() == 1
+    admitted = runtime.queue.get_nowait()
+    run = runtime.session_store.get_run(admitted.run_id, owner_id="user:123")
+    assert run["message_context"]["message_age"]["reason"] == "stale"
+
+    later_session = runtime.session_store.create_session(owner_id="user:123", agent_id="visibility")
+    runtime.session_store.bind_primary_session(
+        owner_id="user:123", agent_id="visibility", session_id=later_session["session_id"],
+    )
+    runtime.global_config.telegram_message_age_policy = {"mode": "expire", "max_age_seconds": 60}
+    await runtime.handle_message(update, None)
+    message.text = "different content with the same transport identity"
+    await runtime.handle_message(update, None)
+    assert runtime.queue.empty()
+    assert runtime.next_request_id.call_count == 1
+    assert runtime.logger.warning.call_count == 1

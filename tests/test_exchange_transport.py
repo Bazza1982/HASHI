@@ -389,3 +389,35 @@ async def test_websocket_redirect_is_rejected_before_followup_request(
         await runner.cleanup()
 
     assert hits == ["configured"]
+
+
+
+def test_new_exchange_message_can_generate_and_reuse_its_creation_time(tmp_path):
+    now = [1_800_000_000.0]
+    transport = _ready_transport(tmp_path, now=now[0])
+    transport.clock = lambda: now[0]
+    frames = []
+
+    async def send(_ws, frame):
+        if frame["type"] == "resolve":
+            transport._request_waiters[frame["request_id"]].set_result({"to": _target()})
+
+    async def transmit(_ws, record, *, replayed):
+        frames.append(record.frame)
+        return {"ok": True, "replayed": replayed}
+
+    transport._send_frame = send
+    transport._transmit_record = transmit
+    arguments = {
+        "from_agent": "reviewer", "to_address": "planner@home.alice",
+        "text": "Please review.", "message_id": "message_generated_time",
+        "conversation_id": "conversation_generated_time",
+    }
+    first = asyncio.run(transport.send_message(**arguments))
+    now[0] += 30
+    retry = asyncio.run(transport.send_message(**arguments))
+    assert first["replayed"] is False and retry["replayed"] is True
+    assert frames[0] == frames[1]
+    assert frames[0]["created_at"] == utc_timestamp(1_800_000_000.0)
+    with pytest.raises(ExchangeTransportError, match="IDEMPOTENCY_CONFLICT"):
+        asyncio.run(transport.send_message(**{**arguments, "text": "Different content"}))

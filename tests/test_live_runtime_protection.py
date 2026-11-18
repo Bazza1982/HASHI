@@ -63,6 +63,30 @@ def _reason(result) -> str:
     return str((result.details or {}).get("reason") or "")
 
 
+def test_scheduler_delegation_key_is_protected_from_tool_read_and_write(tmp_path):
+    import asyncio
+    from orchestrator.workbench_auth import scheduler_delegation_key
+
+    registry, paths = _registry(tmp_path)
+    registry._allowed.update({"file_search", "log_query"})
+    original = scheduler_delegation_key(paths["bridge_home"], create=True)
+    key_path = paths["bridge_home"] / "state" / "scheduler_delegation.json"
+
+    async def exercise():
+        read = await registry.execute("file_read", {"path": str(key_path)}, "read-key")
+        assert read.is_error and original not in read.output
+        log = await registry.execute("log_query", {"path": str(key_path), "terms": [original]}, "search-key")
+        assert log.is_error and original not in log.output
+        search = await registry.execute("file_search", {"query": "key", "mode": "content",
+                                        "roots": [str(paths["bridge_home"] / "state")],
+                                        "profile": "expanded", "include_hidden": True}, "search-parent")
+        assert not search.is_error and original not in search.output
+        write = await registry.execute("file_write", {"path": str(key_path), "content": "changed"}, "write-key")
+        assert write.is_error and scheduler_delegation_key(paths["bridge_home"]) == original
+
+    asyncio.run(exercise())
+
+
 def test_runtime_protection_cache_key_notices_same_stat_selector_change(
     tmp_path, monkeypatch,
 ):
@@ -183,6 +207,137 @@ def test_runtime_drift_keeps_workspace_access_and_prior_protection(tmp_path, mon
         assert not core.exists()
 
     asyncio.run(exercise())
+
+def test_loader_failure_reuses_only_verified_unchanged_snapshot(tmp_path, monkeypatch):
+    import asyncio
+    import orchestrator.live_runtime_protection as protection
+    from orchestrator.runtime_contract import RuntimeContractError
+
+    registry, paths = _registry(tmp_path)
+    registry._allowed.add("tool_catalog")
+    policy_path = paths["bridge_home"] / "state/platform/live-runtime-protection.json"
+    policy_path.parent.mkdir(parents=True)
+    policy_path.write_text('{"schema":1}', encoding="utf-8")
+    real_loader = protection.load_live_runtime_policy
+    note = paths["workspace"] / "read.txt"
+    note.write_text("available", encoding="utf-8")
+
+    async def exercise():
+        first = await registry.execute("file_read", {"path": str(note)}, "first")
+        assert not first.is_error
+        saved_stat = policy_path.stat()
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeContractError("fixture loader failure")
+
+        monkeypatch.setattr(protection, "load_live_runtime_policy", unavailable)
+        # Trigger a reload without changing the policy bytes or runtime binding.
+        os.utime(policy_path, ns=(saved_stat.st_atime_ns, saved_stat.st_mtime_ns + 1_000_000_000))
+        resumed = await registry.execute("file_read", {"path": str(note)}, "read")
+        assert not resumed.is_error and "available" in resumed.output
+        assert resumed.details["runtime_protection"]["protection_complete"] is False
+        assert resumed.details["runtime_protection"]["qualification"] == "previous_verified_snapshot"
+        target = paths["workspace"] / "report.txt"
+        written = await registry.execute("file_write", {"path": str(target), "content": "report"}, "write")
+        assert not written.is_error and target.read_text() == "report"
+        assert written.details["runtime_protection"]["protection_complete"] is False
+        secret = await registry.execute("file_read", {"path": str(paths["secrets_path"])}, "secret")
+        assert secret.is_error
+        core = paths["code_root"] / "main.py"
+        blocked = await registry.execute("file_write", {"path": str(core), "content": "change"}, "core")
+        assert blocked.is_error and not core.exists()
+        alias = paths["workspace"] / "secret-alias.txt"
+        os.link(paths["secrets_path"], alias)
+        try:
+            hidden = await registry.execute("file_read", {"path": str(alias)}, "alias-read")
+            assert hidden.is_error and hidden.details["control_disposition"] == "unavailable"
+            denied = await registry.execute("file_write", {"path": str(alias), "content": "change"}, "alias-write")
+            assert denied.is_error and paths["secrets_path"].read_text() == "{}"
+        finally:
+            alias.unlink()
+        old_prefix = registry.audit_context["live_runtime_prefix"]
+        registry.audit_context["live_runtime_prefix"] = str(paths["workspace"] / "different-runtime")
+        blocked = await registry.execute("file_read", {"path": str(note)}, "changed-runtime")
+        assert blocked.is_error and blocked.details["control_disposition"] == "unavailable"
+        registry.audit_context["live_runtime_prefix"] = old_prefix
+
+        # Even equal length and timestamp cannot hide a changed protection policy.
+        changed_stat = policy_path.stat()
+        policy_path.write_text('{"schema":2}', encoding="utf-8")
+        os.utime(policy_path, ns=(changed_stat.st_atime_ns, changed_stat.st_mtime_ns))
+        blocked = await registry.execute("file_read", {"path": str(note)}, "unknown")
+        assert blocked.is_error and blocked.details["tool_executed"] is False
+        assert blocked.details["control_disposition"] == "unavailable"
+        catalogue = await registry.execute("tool_catalog", {}, "catalogue")
+        assert not catalogue.is_error
+        assert catalogue.details["runtime_protection"]["protection_complete"] is False
+
+        policy_path.write_text('{"schema":1}', encoding="utf-8")
+        monkeypatch.setattr(protection, "load_live_runtime_policy", real_loader)
+        recovered = await registry.execute("file_read", {"path": str(note)}, "recovered")
+        assert not recovered.is_error and "available" in recovered.output
+        assert "runtime_protection" not in (recovered.details or {})
+
+    asyncio.run(exercise())
+
+
+def test_policy_bytes_changed_without_stat_change_invalidate_the_registry_cache(tmp_path):
+    import asyncio
+
+    registry, paths = _registry(tmp_path)
+    policy_path = paths["bridge_home"] / "state/platform/live-runtime-protection.json"
+    policy_path.parent.mkdir(parents=True)
+    first, second = paths["workspace"] / "secret-a.txt", paths["workspace"] / "secret-b.txt"
+    first.write_text("first")
+    second.write_text("second")
+    def content(path):
+        return json.dumps({"schema": 1, "protected_read_paths": [str(path)]})
+    policy_path.write_text(content(first), encoding="utf-8")
+
+    async def exercise():
+        before = await registry.execute("file_read", {"path": str(second)}, "before")
+        assert not before.is_error and before.output.endswith("second")
+        saved = policy_path.stat()
+        old_size = len(policy_path.read_bytes())
+        policy_path.write_text(content(second), encoding="utf-8")
+        assert len(policy_path.read_bytes()) == old_size
+        os.utime(policy_path, ns=(saved.st_atime_ns, saved.st_mtime_ns))
+        after = await registry.execute("file_read", {"path": str(second)}, "after")
+        assert after.is_error
+
+    asyncio.run(exercise())
+
+
+def test_loader_failure_without_previous_snapshot_keeps_unrelated_catalog_available(tmp_path, monkeypatch):
+    import asyncio
+    import orchestrator.live_runtime_protection as protection
+    from orchestrator.runtime_contract import RuntimeContractError
+
+    registry, paths = _registry(tmp_path)
+    registry._allowed.update({"tool_catalog", "web_fetch"})
+    note = paths["workspace"] / "note.txt"
+    note.write_text("private fixture", encoding="utf-8")
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeContractError("fixture loader failure")
+    monkeypatch.setattr(protection, "load_live_runtime_policy", unavailable)
+
+    async def exercise():
+        catalogue = await registry.execute("tool_catalog", {}, "catalogue")
+        assert not catalogue.is_error
+        assert catalogue.details["runtime_protection"]["protection_complete"] is False
+        async def fake_fetch(name, _arguments, **_kwargs):
+            assert name == "web_fetch"
+            return "synthetic public result"
+        monkeypatch.setattr(registry, "_dispatch_observed", fake_fetch)
+        fetched = await registry.execute("web_fetch", {"url": "https://example.test"}, "fetch")
+        assert not fetched.is_error and fetched.output == "synthetic public result"
+        assert fetched.details["runtime_protection"]["protection_complete"] is False
+        read = await registry.execute("file_read", {"path": str(note)}, "unknown")
+        assert read.is_error and read.details["tool_executed"] is False
+        assert read.details["control_disposition"] == "unavailable"
+
+    asyncio.run(exercise())
+
 
 def test_live_runtime_gate_denies_core_and_secret_but_allows_workzone(tmp_path):
     registry, paths = _registry(tmp_path)

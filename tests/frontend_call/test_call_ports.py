@@ -343,3 +343,281 @@ async def test_worker_accepts_scoped_call_opening_without_a_phone_database_row(
         await worker_actions.handle_phone_action_operation(
             runtime, "call_speak", payload
         )
+
+
+
+@pytest.mark.anyio
+async def test_expired_call_leaves_completed_result_in_the_real_session_store(tmp_path, monkeypatch):
+    import asyncio
+    from test_call_service import setup, start
+    from test_call_contract import wav
+
+    monkeypatch.setattr("orchestrator.message_context._network_secret", lambda root: "fixture-secret")
+    database = tmp_path / "sessions.db"
+    store = SessionStore(database, instance_id="TEST")
+    session = store.create_session(owner_id="owner", agent_id="lily", title="Call result")
+    admitted = []
+
+    class Runtime:
+        backend_manager = SimpleNamespace(privacy_level=1)
+
+        def _primary_chat_id(self):
+            return 7
+
+        async def enqueue_request(self, chat, prompt, source, summary, **kwargs):
+            metadata = kwargs["request_metadata"]
+            accepted = store.accept_run(
+                session_id=metadata["session_id"], owner_id=metadata["owner_id"],
+                agent_id="lily", request_id="request-1", text=metadata["session_message_text"],
+                source=source, idempotency_key=kwargs["idempotency_key"],
+                expected_context_generation=metadata["session_context_generation"],
+            )
+            store.mark_request_running(accepted.request_id, worker_id="fixture")
+            admitted.append(accepted)
+            return accepted.request_id
+
+    api = SimpleNamespace(
+        config_path=tmp_path / "agents.json", session_store=store,
+        _runtime_map=lambda: {"lily": Runtime()}, _persistent_session_v1_ready=lambda: True,
+        live_voice_manager=SimpleNamespace(has_foreground_call=lambda _owner: False),
+    )
+    ports = HashiPorts(api)
+    ports.opening = None
+    ports.frontend_subscribers = lambda *_args: ()
+    ports.emit_frontend_event = lambda *_args, **_kwargs: None
+
+    async def no_output(*_args, **_kwargs):
+        return None
+
+    cancel_calls = []
+
+    async def cancel(*_args, **_kwargs):
+        cancel_calls.append(True)
+
+    ports.call_output = no_output
+    ports.cancel = cancel
+    service, _fixture_ports, _adapters, base, clock = setup(tmp_path)
+    service.ports = ports
+    base.update(agent_id="lily", session_id=session["session_id"],
+                context_generation=session["context_generation"])
+    try:
+        binding, _, _ = await start(service, base)
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "long-run", "sequence": 1, "audio_b64": wav(),
+        })
+        for _ in range(100):
+            if admitted and service.calls["call-1"].turn.get("phase") == "thinking":
+                break
+            await asyncio.sleep(0.001)
+        else:
+            pytest.fail("real Session Run was not admitted")
+        call = service.calls["call-1"]
+        run_id = call.turn["run_id"]
+        clock[0] = call.expires + 1
+        service.expire()
+        await asyncio.gather(*list(call.turn_tasks.values()), return_exceptions=True)
+        assert cancel_calls == []
+        assert store.get_run(run_id, owner_id="owner")["state"] == "running"
+        store.finish_request("request-1", success=True, assistant_text="Final result after disconnect.")
+        reopened = SessionStore(database, instance_id="TEST")
+        run = reopened.get_run(run_id, owner_id="owner")
+        assert run["state"] == "completed"
+        message = reopened.get_message(run["final_message_id"], session_id=session["session_id"], owner_id="owner")
+        assert message["text"] == "Final result after disconnect."
+        with pytest.raises(Exception):
+            reopened.get_message(run["final_message_id"], session_id=session["session_id"], owner_id="other")
+    finally:
+        await service.close()
+
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("extra_bytes", "ipc_limit", "expectation", "supports_large"),
+    [(2034, 5000, "subset", False), (8000, 5000, "none", False),
+     (0, 1000000, "all", False), (2034, 5000, "all", True)],
+)
+async def test_call_preserves_voice_when_camera_exceeds_actual_worker_ipc_capacity(
+    tmp_path, monkeypatch, extra_bytes, ipc_limit, expectation, supports_large
+):
+    from orchestrator import function_worker_protocol as ipc
+    from orchestrator.function_worker_supervisor import AgentRuntimeHandle
+
+    monkeypatch.setattr("orchestrator.message_context._network_secret", lambda root: "test-secret")
+    monkeypatch.setattr(ipc, "MAX_FRAME_BYTES", ipc_limit)
+    store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
+    session = store.ensure_default_session(owner_id="owner", agent_id="lily")
+    runtime = object.__new__(AgentRuntimeHandle)
+    runtime.metadata = {"primary_chat_id": 7}
+    if supports_large:
+        runtime.metadata["worker_large_request"] = {"version": 1}
+    runtime._outstanding_request_ids = set()
+    received = []
+
+    async def route(method, params, **_kwargs):
+        try:
+            payload = ipc.encode_envelope({
+                "version": ipc.FUNCTION_WORKER_PROTOCOL_VERSION,
+                "kind": ipc.REQUEST, "id": "0" * 32, "method": method, "params": params,
+            })
+            wire_bytes = len(payload)
+        except ipc.FunctionWorkerProtocolError as exc:
+            if not supports_large or not str(exc).startswith("IPC frame exceeds"):
+                raise
+            wire_bytes = None  # the real route uses bounded chunks in this case
+        received.append((params, wire_bytes))
+        metadata = params["request_metadata"]
+        store.accept_run(
+            session_id=metadata["session_id"], owner_id=metadata["owner_id"], agent_id="lily",
+            request_id="request-large-camera", text=metadata["session_message_text"],
+            display_text=metadata["session_message_display_text"],
+            content=metadata["session_message_content"], source=params["source"],
+            idempotency_key=params["idempotency_key"],
+            expected_context_generation=metadata["session_context_generation"],
+        )
+        return "request-large-camera"
+
+    runtime._route = route
+    api = SimpleNamespace(
+        config_path=tmp_path / "agents.json", session_store=store,
+        _runtime_map=lambda: {"lily": runtime}, _persistent_session_v1_ready=lambda: True,
+    )
+    ports = HashiPorts(api)
+    binding = {
+        "agent_id": "lily", "session_id": session["session_id"],
+        "context_generation": session["context_generation"], "call_id": "call-1",
+        "client_id": "client-1", "call_context": {
+            "mode": "video", "camera": {"state": "fresh"}, "freshness_seconds": 60,
+            "sample_window_seconds": 10, "max_frames_per_turn": 40,
+        },
+    }
+    now = datetime.now(timezone.utc)
+    frames = tuple({
+        "image": bytes.fromhex("ffd8ffc00008080010001000ffd9") + b"x" * extra_bytes,
+        "frame_sequence": index, "captured_at": (now + timedelta(milliseconds=index)).isoformat(),
+        "captured_unix": (now + timedelta(milliseconds=index)).timestamp(),
+    } for index in range(1, 36))
+
+    result = await ports.admit("owner", binding, "turn-1", "Continue speaking.", "", None, frames)
+
+    assert len(received) == 1
+    params, wire_bytes = received[0]
+    if supports_large:
+        assert wire_bytes is None
+    else:
+        assert wire_bytes <= ipc.MAX_FRAME_BYTES
+    assert params["prompt"] == "Continue speaking."
+    envelope = params["request_metadata"].get(TRANSIENT_LIVE_FRAMES_METADATA_KEY)
+    encoded = envelope["frames"] if envelope else []
+    if expectation == "subset":
+        assert 0 < len(encoded) < len(frames)
+    elif expectation == "none":
+        assert len(encoded) == 0
+    else:
+        assert len(encoded) == len(frames) == 35
+    assert result["_admitted_frame_sequences"] == [frame["frame_sequence"] for frame in encoded]
+    assert result["_omitted_frames_for_transport"] == len(frames) - len(encoded)
+    from orchestrator.message_context import verify_connector_evidence, CONNECTOR_EVIDENCE_METADATA_KEY
+    claims = verify_connector_evidence(
+        tmp_path, evidence=params["request_metadata"][CONNECTOR_EVIDENCE_METADATA_KEY],
+        prompt=params["prompt"],
+    )
+    assert claims["call_media"]["recent_frames"]["count"] == len(encoded)
+
+
+@pytest.mark.anyio
+async def test_camera_frames_over_one_ipc_frame_reach_real_worker_route(tmp_path, monkeypatch):
+    import asyncio
+    import base64
+    import hashlib
+    import multiprocessing
+    from orchestrator.function_worker_host import FunctionWorkerHost
+    from orchestrator.function_worker_protocol import MAX_FRAME_BYTES, JsonConnectionPeer
+    from orchestrator.function_worker_supervisor import AgentRuntimeHandle
+    from orchestrator.message_context import CONNECTOR_EVIDENCE_METADATA_KEY, verify_connector_evidence
+
+    monkeypatch.setattr("orchestrator.message_context._network_secret", lambda root: "test-secret")
+    store = SessionStore(tmp_path / "sessions.db", instance_id="TEST")
+    session = store.ensure_default_session(owner_id="owner", agent_id="lily")
+    received = []
+
+    async def enqueue(chat_id, prompt, source, summary, **kwargs):
+        metadata = kwargs["request_metadata"]
+        received.append(metadata)
+        store.accept_run(
+            session_id=metadata["session_id"], owner_id=metadata["owner_id"], agent_id="lily",
+            request_id="large-camera-run", text=metadata["session_message_text"],
+            display_text=metadata["session_message_display_text"],
+            content=metadata["session_message_content"], source=source,
+            idempotency_key=kwargs["idempotency_key"],
+            expected_context_generation=metadata["session_context_generation"],
+        )
+        return "large-camera-run"
+
+    async def no_transcription(*args, **kwargs):
+        return None
+
+    async def emit_metadata():
+        return None
+
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.agent_name = "lily"
+    host.phase = "ACTIVE"
+    host.accepting = True
+    host.runtime = SimpleNamespace(enqueue_request=enqueue)
+    host._begin_native_voice_transcription = no_transcription
+    host.emit_metadata = emit_metadata
+    core_connection, worker_connection = multiprocessing.Pipe(duplex=True)
+    core = JsonConnectionPeer(core_connection, label="camera-core")
+    worker = JsonConnectionPeer(worker_connection, label="camera-worker",
+                                request_handler=host.handle_request)
+    core.start()
+    worker.start()
+
+    class Client:
+        agent_name = "lily"
+
+        async def call(self, method, params=None, *, timeout=180):
+            return await core.request(method, params, timeout=timeout)
+
+    runtime = AgentRuntimeHandle(SimpleNamespace(), Client(), {
+        "primary_chat_id": 7, "worker_large_request": {"version": 1},
+    })
+    api = SimpleNamespace(
+        config_path=tmp_path / "agents.json", session_store=store,
+        _runtime_map=lambda: {"lily": runtime}, _persistent_session_v1_ready=lambda: True,
+    )
+    ports = HashiPorts(api)
+    binding = {
+        "agent_id": "lily", "session_id": session["session_id"],
+        "context_generation": session["context_generation"], "call_id": "large-call",
+        "client_id": "client-1", "call_context": {
+            "mode": "video", "camera": {"state": "fresh"}, "freshness_seconds": 60,
+            "sample_window_seconds": 10, "max_frames_per_turn": 10,
+        },
+    }
+    image = bytes.fromhex("ffd8ffc00008080010001000ffd9") + b"x" * (1300 * 1024)
+    assert 10 * len(base64.b64encode(image)) > MAX_FRAME_BYTES
+    now = datetime.now(timezone.utc)
+    frames = tuple({
+        "image": image, "frame_sequence": index,
+        "captured_at": (now + timedelta(milliseconds=index)).isoformat(),
+        "captured_unix": (now + timedelta(milliseconds=index)).timestamp(),
+    } for index in range(1, 11))
+    try:
+        result = await ports.admit("owner", binding, "turn-1", "Speak.", "", None, frames)
+        assert result["_admitted_frame_sequences"] == list(range(1, 11))
+        assert result["_omitted_frames_for_transport"] == 0
+        assert len(received) == 1
+        rows = received[0][TRANSIENT_LIVE_FRAMES_METADATA_KEY]["frames"]
+        assert len(rows) == 10
+        decoded = base64.b64decode(rows[-1]["data_url"].split(",", 1)[1])
+        assert hashlib.sha256(decoded).digest() == hashlib.sha256(image).digest()
+        claims = verify_connector_evidence(
+            tmp_path, evidence=received[0][CONNECTOR_EVIDENCE_METADATA_KEY], prompt="Speak.",
+        )
+        assert claims["call_media"]["recent_frames"]["count"] == 10
+    finally:
+        if hasattr(host, "_large_request_uploads"):
+            host._large_request_uploads.close()
+        await asyncio.gather(core.close(), worker.close())

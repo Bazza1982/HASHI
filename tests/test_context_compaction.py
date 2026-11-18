@@ -674,7 +674,7 @@ async def test_successful_compaction_keeps_raw_turns_and_commits_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_manual_compact_is_unnecessary_only_below_64k(tmp_path):
+async def test_nonforced_manual_compact_respects_selected_threshold(tmp_path):
     runtime = _Runtime(tmp_path)
     runtime._last_full_prompt_tokens = DEFAULT_MANUAL_COMPACTION_MIN_TOKENS - 1
     calls = []
@@ -686,7 +686,7 @@ async def test_manual_compact_is_unnecessary_only_below_64k(tmp_path):
     outcome = await coordinator.compact(
         trigger="manual_command",
         request_ref="manual-below-window",
-        force=True,
+        force=False,
     )
 
     assert outcome.status == "not_needed"
@@ -1622,7 +1622,7 @@ def test_declared_provider_capacity_does_not_move_64k_128k_window(tmp_path):
     assert budget.response_headroom_tokens == 0
 
 
-def test_persisted_threshold_fields_cannot_move_fixed_window(tmp_path):
+def test_persisted_threshold_fields_set_compaction_policy(tmp_path):
     runtime = _Runtime(tmp_path)
     runtime.state_store.value = {
         "context_compaction": {
@@ -1638,12 +1638,13 @@ def test_persisted_threshold_fields_cannot_move_fixed_window(tmp_path):
 
     policy = load_policy(runtime)
 
-    assert policy.manual_min_tokens == DEFAULT_MANUAL_COMPACTION_MIN_TOKENS
-    assert policy.auto_trigger_tokens == DEFAULT_AUTO_COMPACTION_TRIGGER_TOKENS
-    assert (
-        policy.post_compaction_target_tokens
-        == DEFAULT_POST_COMPACTION_TARGET_TOKENS
-    )
+    assert policy.manual_min_tokens == 12_000
+    assert policy.auto_trigger_tokens == 24_000
+    assert policy.post_compaction_target_tokens == 8_000
+    budget = resolve_trigger_budget(runtime, policy=policy)
+    assert budget.high_projected_tokens == 24_000
+    assert budget.low_input_tokens == 8_000
+    assert budget.provenance == "configured_compaction_policy"
 
 
 def test_capacity_error_rendering_is_stable_and_escaped():
@@ -2702,7 +2703,7 @@ async def test_registered_compact_command_executes_through_local_command_path(tm
 
 
 @pytest.mark.asyncio
-async def test_compact_below_64k_preserves_wip_capsule_then_clears_journal(tmp_path):
+async def test_forced_compact_preserves_wip_even_when_model_route_is_offline(tmp_path):
     runtime = _Runtime(tmp_path)
     runtime._last_full_prompt_tokens = 25_459
 
@@ -2753,11 +2754,12 @@ async def test_compact_below_64k_preserves_wip_capsule_then_clears_journal(tmp_p
     )
 
     assert "WIP recovery</b> · <code>ACTIVE" in status["messages"][0]["text"]
-    text = result["messages"][0]["text"]
+    assert result["ok"] is True
+    text = result["messages"][-1]["text"]
     assert "WIP recovery compacted" in text
     assert "WIP_RECOVERY_COMPACTED" in text
-    assert "Context compaction not needed" in text
-    assert "25,459" in text
+    assert "COMPACTION_INTERNAL_FAILURE" in text
+    assert "model route intentionally unavailable" in text
     assert journal.snapshot().active is False
     memory = BridgeMemoryStore(workspace)
     with sqlite3.connect(memory.db_path) as connection:
@@ -2871,3 +2873,58 @@ def test_invalid_pointer_falls_back_to_complete_raw_history_without_rewriting_it
     assert "user-0:" in sections[0][1]
     assert store.state_path.read_text(encoding="utf-8") == '{"format":"wrong"}\n'
     assert "CONTEXT_COMPACTION_STATE_INVALID" in compact_status_text(runtime)
+
+
+@pytest.mark.asyncio
+async def test_forced_manual_compaction_below_default_threshold_preserves_original_history(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 2, chars=2_000)
+    runtime._last_full_prompt_tokens = 8_000
+    before = sqlite3.connect(runtime.memory_store.db_path).execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    calls = []
+    coordinator = ContextCompactionCoordinator(runtime, invoker=_valid_invoker(calls))
+    result = await coordinator.compact(trigger="manual_command", request_ref="small-model", force=True)
+    assert result.status == "completed" and result.changed and calls
+    assert coordinator.store.read_state()["generation"] == 1
+    _, archive = coordinator.store.load_active(coordinator.store.read_state())
+    assert archive["selected_turns"]
+    after = sqlite3.connect(runtime.memory_store.db_path).execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    assert after == before == 4
+
+
+def test_manual_compaction_threshold_can_be_zero(tmp_path):
+    runtime = _Runtime(tmp_path)
+    runtime.state_store.value = {"context_compaction": {"policy": {"manual_min_tokens": 0}}}
+    assert load_policy(runtime).manual_min_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_forced_compaction_with_history_and_unavailable_model_fails_truthfully(tmp_path):
+    runtime = _Runtime(tmp_path)
+    _write_turns(runtime, 2, chars=2_000)
+    def unavailable():
+        raise RuntimeError("fixture model unavailable")
+    runtime.backend_manager.get_her_v2_configuration = unavailable
+    coordinator = ContextCompactionCoordinator(runtime, invoker=_valid_invoker([]))
+    result = await coordinator.compact(trigger="manual_command", request_ref="model-offline", force=True)
+    assert result.status == "failed" and result.code == "COMPACTION_INTERNAL_FAILURE"
+    assert coordinator.store.read_state()["generation"] == 0
+    assert coordinator._active_task is None
+    with sqlite3.connect(runtime.memory_store.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 4
+
+
+def test_small_model_reserve_scales_only_when_no_explicit_value_is_selected(tmp_path):
+    runtime = _Runtime(tmp_path, capacity=8192, headroom=2048)
+    for grant in runtime.backend_manager.config.allowed_backends:
+        grant.pop("response_headroom_tokens", None)
+    automatic = resolve_capacity_profile(runtime, "deepseek-api", "deepseek-v4-flash")
+    assert automatic.context_window_tokens == 8192 and automatic.response_headroom_tokens == 2048
+    explicit = resolve_capacity_profile(runtime, "deepseek-api", "deepseek-v4-flash",
+                                        profile_options={"context_window_tokens": 8192, "response_headroom_tokens": 512})
+    assert explicit.response_headroom_tokens == 512 and explicit.usable_input_tokens == 7680
+    runtime.state_store.value = {"context_compaction": {"policy": {"response_headroom_tokens": 1024}}}
+    selected = resolve_capacity_profile(runtime, "deepseek-api", "deepseek-v4-flash")
+    assert selected.response_headroom_tokens == 1024
+    per_request = resolve_capacity_profile(runtime, "deepseek-api", "deepseek-v4-flash", response_headroom_tokens=256)
+    assert per_request.response_headroom_tokens == 256

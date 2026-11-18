@@ -512,6 +512,18 @@ async def test_already_starting_is_pending_not_successfully_online(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_health_exposes_worker_presence_separately_from_successful_startup(tmp_path):
+    orchestrator = SimpleNamespace(runtimes=[], _startup_tasks={"starting": object()})
+    server = _server(tmp_path, orchestrator=orchestrator)
+    orchestrator.runtimes = [SimpleNamespace(name="failed", startup_success=False),
+                             SimpleNamespace(name="online", startup_success=True)]
+    response = await server.handle_health(_Request())
+    health = json.loads(response.text)
+    assert health["agents"] == ["online"]
+    assert health["agent_runtime_presence"] == ["failed", "online", "starting"]
+
+
+@pytest.mark.asyncio
 async def test_agent_lifecycle_control_is_durable_and_replayed_once(tmp_path):
     calls = []
 
@@ -1023,14 +1035,21 @@ async def test_agent_command_binds_trusted_owner_not_payload_owner(tmp_path, mon
         active=True,
         orchestrator=SimpleNamespace(runtimes=[runtime]),
     )
+    server.admin_token = "synthetic-token"
     monkeypatch.setattr(
         server, "_v1_owner_id", lambda _request: "enterprise:trusted-user"
     )
 
+    denied = await server.handle_agent_command(
+        _Request(match_info={"name": "lily"},
+                 payload={"command": "/reboot min", "owner_id": "enterprise:attacker"})
+    )
+    assert denied.status == 401 and captured == []
     response = await server.handle_agent_command(
         _Request(
             match_info={"name": "lily"},
             payload={"command": "/reboot min", "owner_id": "enterprise:attacker"},
+            headers={"X-Workbench-Token": "synthetic-token"},
         )
     )
 
@@ -1068,7 +1087,7 @@ async def test_direct_command_routes_preserve_exact_sys_prompt_text(
         active=True,
         orchestrator=SimpleNamespace(runtimes=[runtime]),
     )
-    monkeypatch.setattr(server, "_check_admin_auth", lambda _request: True)
+    server.admin_token = "synthetic-token"
     monkeypatch.setattr(server, "_v1_owner_id", lambda _request: "user:7")
     prompt = '  indented first line\n\n"quoted" C:\\Prompt\\rule\t  '
     command = f"/sys 3 save {prompt}"
@@ -1079,7 +1098,8 @@ async def test_direct_command_routes_preserve_exact_sys_prompt_text(
         match_info = {}
 
     response = await getattr(server, handler_name)(
-        _Request(match_info=match_info, payload=payload)
+        _Request(match_info=match_info, payload=payload,
+                 headers={"X-Workbench-Token": "synthetic-token"})
     )
 
     assert response.status == 200
@@ -1155,3 +1175,69 @@ async def test_agent_deletion_routes_preview_commit_and_status_to_pao_owner(tmp_
         "deletion.status",
     ]
     assert all(action.owner_id == "user:0" for action in actions)
+
+
+@pytest.mark.asyncio
+async def test_agent_metadata_accepts_long_unicode_display_without_changing_identity(tmp_path):
+    server = _server(tmp_path, active=True)
+    display = "".join(map(chr, (0x8D75, 0x7075, 0x513F, 0x1F338))) * 70 + " ../ text"
+    response = await server.handle_agent_metadata(_Request(
+        match_info={"name": "lily"}, payload={"display_name": display},
+    ))
+    assert response.status == 200
+    row = json.loads(server.config_path.read_text(encoding="utf-8-sig"))["agents"][0]
+    assert row["name"] == "lily"
+    assert row["workspace_dir"] == "workspaces/lily"
+    assert row["display_name"] == display
+    assert json.loads(response.text)["agent"]["display_name"] == display
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_operation_readback_resolves_exact_failed_receipt_without_replay(tmp_path, monkeypatch):
+    calls = []
+
+    async def fail_start(name, **_kwargs):
+        calls.append(name)
+        return {"ok": False, "status": "failed", "message": "synthetic failure"}
+
+    orchestrator = SimpleNamespace(
+        runtimes=[],
+        _startup_tasks={},
+        agent_lifecycle=SimpleNamespace(request_start_agent=fail_start),
+    )
+    server = _server(tmp_path, active=False, orchestrator=orchestrator)
+    request = _Request(
+        match_info={"name": "lily"},
+        payload={"is_active": True, "operation_id": "fixture-op-123"},
+        headers={"Idempotency-Key": "different-header-value"},
+    )
+    first = await server.handle_agent_active(request)
+    second = await server.handle_agent_active(request)
+    assert first.status == second.status == 400
+    assert calls == ["lily"]
+    status_request = _Request(match_info={"name": "lily", "operation_id": "fixture-op-123"})
+    readback = await server.handle_agent_lifecycle_operation(status_request)
+    assert readback.status == 200
+    status = json.loads(readback.text)
+    assert status["operation_id"] == "fixture-op-123"
+    assert status["agent_id"] == "lily"
+    assert status["desired_active"] is True
+    assert status["state"] == "failed"
+    assert status["error_code"] == "agent_start_failed"
+    assert "response_json" not in status
+    assert readback.headers["Cache-Control"] == "no-store"
+
+    wrong_agent = await server.handle_agent_lifecycle_operation(
+        _Request(match_info={"name": "guardian", "operation_id": "fixture-op-123"})
+    )
+    assert wrong_agent.status == 404
+    snapshot = read_config_json(server.config_path)
+    snapshot["agents"][0]["agent_lifecycle_id"] = "recreated-agent"
+    write_config_json(server.config_path, snapshot)
+    changed_target = await server.handle_agent_lifecycle_operation(status_request)
+    assert changed_target.status == 409
+    assert json.loads(changed_target.text)["error_code"] == "lifecycle_target_changed"
+    monkeypatch.setattr(server, "_v1_owner_id", lambda _request: "different-owner")
+    wrong_owner = await server.handle_agent_lifecycle_operation(status_request)
+    assert wrong_owner.status == 404
+    assert calls == ["lily"]

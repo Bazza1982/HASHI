@@ -616,6 +616,13 @@ class RebootManager:
                     # notice retry owner without claiming a successful send.
                     delivery.update(status="exhausted", next_attempt_at=0,
                                     reason="telegram_replay_" + result["delivery_state"])
+                elif result.get("delivery_state") in {"unknown", "failed"}:
+                    # A lost acknowledgement is not proof that the notice was
+                    # unsent; a rejected destination also needs attention.
+                    delivery.update(
+                        status="exhausted", next_attempt_at=0,
+                        reason="notice_delivery_outcome_" + result["delivery_state"],
+                    )
                 else:
                     delivery.update(
                         status=(

@@ -1177,3 +1177,86 @@ async def test_hashi_stream_does_not_replay_after_partial_provider_output(tmp_pa
     assert response.stream_metadata["provider_activity_observed"] is True
     assert response.stream_metadata["multimodal_fallback_attempted"] is False
     await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_does_not_resend_expired_camera_during_tool_continuation(tmp_path):
+    import asyncio
+    from datetime import datetime, timezone
+    from orchestrator.frontend_call.transient_live_media import bind_live_frames, live_frames_for
+
+    now = datetime.now(timezone.utc)
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "request-tool-camera", [{
+        "data_url": "data:image/jpeg;base64,/9j/wAAICAAQABAA/9k=",
+        "frame_sequence": 1, "captured_at": now.isoformat(),
+    }], freshness_seconds=1)
+    frames = live_frames_for(runtime, "request-tool-camera", now=now)
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = SimpleNamespace(get_tool_definitions=lambda tiers=None: [])
+    call = {"id": "one-tool", "type": "function",
+            "function": {"name": "file_read", "arguments": "{}"}}
+    adapter._call_api_once = AsyncMock(side_effect=[
+        _APIResult("", [call], "tool_calls"),
+        _APIResult("Finished.", None, "stop"),
+    ])
+    executed = []
+    async def slow_tool(calls, messages, callback, **kwargs):
+        del callback, kwargs
+        executed.extend(calls)
+        await asyncio.sleep(1.2)
+        messages.append({"role": "tool", "tool_call_id": "one-tool", "content": "completed"})
+    adapter._run_tool_calls = slow_tool
+
+    response = await adapter.generate_response(
+        "Keep speaking.", "request-tool-camera", transient_images=frames,
+    )
+
+    assert response.is_success
+    assert len(executed) == 1
+    first = adapter._call_api_once.call_args_list[0].args[0]["messages"][1]["content"]
+    second = adapter._call_api_once.call_args_list[1].args[0]["messages"][1]["content"]
+    assert any(part.get("type") == "image_url" for part in first)
+    assert not any(part.get("type") == "image_url" for part in second)
+    assert any("expired" in part.get("text", "").lower() for part in second)
+    assert adapter._call_api_once.call_args_list[1].args[0]["messages"][-1]["content"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_hashi_api_transport_log_omits_only_transient_camera_bytes(tmp_path):
+    from orchestrator.multimodal_contract import InputCapability
+
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    ordinary = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"ordinary-upload").decode()
+    camera = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"camera-canary").decode()
+    adapter = _adapter(tmp_path)
+    adapter.resolve_input_capability = lambda: InputCapability(
+        provider="test", model="visual", input_modalities=frozenset({"text", "image"}),
+        input_transports={"image": ("data_url",)}, limits={},
+    )
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Compare."},
+        {"type": "image_url", "image_url": {"url": ordinary}},
+    ]}]
+    adapter._append_transient_images(messages, [{
+        "data_url": camera, "captured_at": "2026-11-17T18:00:00+00:00", "frame_sequence": 1,
+    }])
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": []}, request=request),
+    ))
+    request, _ = adapter._build_audited_request(
+        {"model": "visual", "messages": messages},
+        {"X-Hashi-Correlation-ID": "camera", "X-Hashi-Provider-Call": "1"}, streaming=False,
+    )
+    adapter._record_transport_event("client_response_received", request_id="camera",
+                                    provider_call="1", streaming=False, request=request)
+    rows = [json.loads(line) for line in adapter.transport_audit_path.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        evidence = row["http_request"]
+        assert evidence["body_sha256"] == hashlib.sha256(request.content).hexdigest()
+        assert evidence["body_is_exact"] is False
+        assert evidence["transient_camera_images_omitted"] == 1
+        assert camera not in json.dumps(evidence)
+        assert ordinary in json.dumps(evidence)
+    assert camera in request.content.decode(), "the physical provider request remains unchanged"
+    await adapter.client.aclose()

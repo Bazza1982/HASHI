@@ -24,6 +24,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -44,16 +45,18 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from orchestrator.agent_move.package import (
     AGENT_MOVE_CAPABILITY,
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
     AgentMoveError,
+    AccessScopePreviewChanged,
+    configured_transfer_package_limit,
 )
 from orchestrator.agent_move.service import (
-    MAX_PACKAGE_BYTES,
+    abort_staged_agent_move,
     activate_agent_move,
     commit_agent_move,
     get_agent_move_status,
@@ -315,6 +318,7 @@ API_PROTOCOL_CAPABILITIES = [
 
 _WORKBENCH_GATEWAY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 _WORKBENCH_SESSION_RUN_API_PATH = re.compile(r"^v1/sessions/[^/]+/runs/?$")
+_WORKBENCH_TRANSCRIPT_ATTACHMENT_PATH = re.compile(r"^transcript/[^/]+/attachments/[^/]+/[^/]+/?$")
 _BRIDGE_HANDOFF_PROXY_TIMEOUT_SECONDS = 3590.0
 _WORKBENCH_GATEWAY_REQUEST_HEADERS = frozenset(
     {
@@ -619,6 +623,9 @@ class ProtocolTuiRequest(BaseModel):
     """Authenticated peer-to-peer form of a restricted TUI request."""
 
     from_instance: str
+    # Included in the signed request so an updated receiver can reject an
+    # accidentally misrouted operation before executing it. Older senders omit it.
+    target_instance: Optional[str] = None
     operation: str
     agent: Optional[str] = None
     text: Optional[str] = None
@@ -855,25 +862,42 @@ def _post_json_with_optional_hmac(url: str, payload: dict[str, Any], *, timeout:
         return result
 
 
-def _peer_has_completed_handshake(instance_id: str) -> tuple[bool, str, Any]:
-    """Require a target whose Remote handshake has completed.
+def _verify_forward_route_identity(url: str, instance_id: str) -> tuple[bool, str]:
+    """Verify the actual route with the existing nonce-bound handshake.
 
-    Liveness and advertised capabilities are discovery hints, not additional
-    authority. The actual authenticated request and response determine
-    whether the target operation is currently available.
+    Cached discovery/handshake state is not authorization. The probe omits
+    remote_port so the receiver does not rewrite its peer registry merely to
+    answer an identity check. ProtocolManager verifies the response HMAC.
     """
-    peer = (
-        _peer_registry.get_peer(str(instance_id or "").upper())
-        if _peer_registry
-        else None
-    )
-    if peer is None:
-        return False, "peer_not_found", None
-    properties = dict(getattr(peer, "properties", None) or {})
-    handshake_state = str(properties.get("handshake_state") or "").strip().lower()
-    if handshake_state != "handshake_accepted":
-        return False, "handshake_required", peer
-    return True, "ok", peer
+    token = get_shared_token()
+    manager_token = getattr(_protocol_manager, "_shared_token", None)
+    if (not isinstance(token, str) or not token or not isinstance(manager_token, str)
+            or not hmac.compare_digest(token.encode("utf-8"), manager_token.encode("utf-8"))):
+        return False, "trusted_remote_unavailable"
+    route = urlsplit(str(url or ""))
+    if route.scheme not in {"http", "https"} or not route.netloc:
+        return False, "peer_route_unavailable"
+    handshake_url = route._replace(path="/protocol/handshake", query="", fragment="").geturl()
+    try:
+        response = _protocol_manager._post_json(
+            handshake_url,
+            {"from_instance": str(_instance_info.get("instance_id") or ""),
+             "protocol_version": "2.0"},
+            timeout=5,
+        )
+    except Exception as exc:
+        logger.warning("Unable to verify target identity for %s: %s", instance_id, type(exc).__name__)
+        return False, "peer_identity_unverified"
+    if not isinstance(response, dict) or response.get("status") != "handshake_accept":
+        return False, "peer_identity_unverified"
+    status = response.get("__http_status", 200)
+    if not isinstance(status, int) or status >= 400:
+        return False, "peer_identity_unverified"
+    actual = str(response.get("instance_id") or "").strip().upper()
+    expected = str(instance_id or "").strip().upper()
+    if not expected or actual != expected:
+        return False, "target_identity_mismatch"
+    return True, "ok"
 
 
 def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]:
@@ -995,17 +1019,16 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 or "\x00" in reference
             ):
                 return False, "invalid_workzone_ref"
-            if operation == "session_workzone_attachment_run" and (
-                reference.startswith(("/", "\\"))
-                or "\\" in reference
-                or ":" in reference
-                or any(part in {"", ".", ".."} for part in reference.split("/"))
+            if operation == "session_workzone_attachment_run" and any(
+                part == ".." for part in reference.replace("\\", "/").split("/")
             ):
                 return False, "invalid_workzone_ref"
         else:
             attachment = payload.attachment or {}
             filename = str(attachment.get("filename") or "")
-            encoded = str(attachment.get("content_b64") or "")
+            encoded = attachment.get("content_b64")
+            if not isinstance(encoded, str):
+                return False, "invalid_attachment"
             if (
                 not filename
                 or filename in {".", ".."}
@@ -1020,7 +1043,7 @@ def _validate_tui_proxy_payload(payload: ProtocolTuiRequest) -> tuple[bool, str]
                 decoded = base64.b64decode(encoded, validate=True)
             except (ValueError, binascii.Error):
                 return False, "invalid_attachment"
-            if not decoded or len(decoded) > TUI_PROXY_MAX_ATTACHMENT_BYTES:
+            if len(decoded) > TUI_PROXY_MAX_ATTACHMENT_BYTES:
                 return False, "invalid_attachment"
             declared_size = attachment.get("size_bytes")
             if operation == "session_attachment_run" and declared_size is None:
@@ -1727,12 +1750,23 @@ def _restart_runtime_contract_mismatches(
     ]
 
 
+def _health_is_draining(health: Any) -> bool:
+    if not isinstance(health, dict):
+        return False
+    shared = health.get("shared_functions")
+    return health.get("status") == "draining" or (
+        isinstance(shared, dict) and shared.get("draining") is True
+    )
+
+
 def _restart_backend_health(status: dict[str, Any]) -> tuple[bool, str]:
     health = status.get("workbench_health") or {}
     if not status.get("hashi_running") or not isinstance(health, dict):
         return False, "backend_unavailable"
     if health.get("ok") is not True:
         return False, "backend_unhealthy"
+    if _health_is_draining(health):
+        return False, "backend_draining"
     if health.get("ready") is True:
         return True, "ready"
     startup = health.get("startup") or {}
@@ -2330,6 +2364,10 @@ def _workbench_gateway_route_timeout(
     *, method: str, api_path: str
 ) -> float | None:
     normalized_path = str(api_path or "").strip().strip("/")
+    if str(method or "").upper() == "POST" and normalized_path == "v1/file-content":
+        from orchestrator.file_content_service import content_request_timeout_seconds
+
+        return float(content_request_timeout_seconds())
     if str(method or "").upper() == "POST" and normalized_path in {
         "bridge/transfer",
         "bridge/fork",
@@ -2697,6 +2735,64 @@ def _forward_workbench_gateway_request(
     raise last_error or _workbench_upstream_failure(ConnectionError(), method=normalized_method, phase="request")
 
 
+async def _forward_workbench_attachment_stream(
+    *, api_path: str, query: str, request_headers: dict[str, str],
+) -> StreamingResponse:
+    """Relay one authenticated attachment without buffering its body."""
+    import httpx
+
+    upstream_path = _validate_workbench_gateway_path(api_path)
+    if query:
+        upstream_path = f"{upstream_path}?{query}"
+    headers = {
+        name: value for name, value in request_headers.items()
+        if name.lower() in _WORKBENCH_GATEWAY_REQUEST_HEADERS
+    }
+    headers["Accept-Encoding"] = "identity"
+    admin_token = _workbench_admin_token()
+    if admin_token:
+        headers["X-Workbench-Token"] = admin_token
+    client = httpx.AsyncClient(
+        timeout=_workbench_gateway_timeout(), follow_redirects=False, trust_env=False,
+    )
+    response = None
+    last_error = None
+    try:
+        for host in local_http_hosts():
+            url = local_http_url(_workbench_port, upstream_path, host=host)
+            try:
+                response = await client.send(client.build_request("GET", url, headers=headers), stream=True)
+                break
+            except (httpx.HTTPError, OSError) as exc:
+                last_error = exc
+        if response is None:
+            raise _workbench_upstream_failure(
+                last_error or ConnectionError(), method="GET", phase="request",
+            )
+        allowed = _WORKBENCH_GATEWAY_RESPONSE_HEADERS | {
+            "content-length", "x-hashi-attachment-sha256", "x-content-type-options",
+        }
+        forwarded = {
+            name.lower(): value for name, value in response.headers.items()
+            if name.lower() in allowed
+        }
+
+        async def body():
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(body(), status_code=response.status_code, headers=forwarded)
+    except BaseException:
+        if response is not None:
+            await response.aclose()
+        await client.aclose()
+        raise
+
+
 def _observe_detached_workbench_gateway(
     task: asyncio.Task,
     *,
@@ -2801,16 +2897,24 @@ def _notify_restart_result(
                             publication_id=origin["notice_id"])
         source = str(origin["instance_id"]).upper()
         if source != str(_instance_info.get("instance_id") or "").upper():
-            trusted, reason, _peer = _peer_has_completed_handshake(source)
-            if not trusted or _protocol_manager is None or not get_shared_token():
-                return {"state": "failed", "error": reason if not trusted else "trusted_route_unavailable"}
+            if _protocol_manager is None or not get_shared_token():
+                return {"state": "failed", "error": "trusted_remote_unavailable"}
             urls = _protocol_manager.resolve_forward_urls(source, "/workbench/v1/proxy/api/admin/notify")
             if not urls:
                 return {"state": "failed", "error": "peer_route_unavailable"}
+            verified_url = None
+            reason = "peer_identity_unverified"
+            for url in urls:
+                trusted, reason = _verify_forward_route_identity(url, source)
+                if trusted:
+                    verified_url = url
+                    break
+            if verified_url is None:
+                return {"state": "failed", "error": reason}
             # Stable publication identity makes a lost ACK recoverable. Do not
             # fan out to alternate addresses in the same uncertain attempt.
             try:
-                response = _post_json_with_optional_hmac(urls[0], notification, timeout=5)
+                response = _post_json_with_optional_hmac(verified_url, notification, timeout=5)
             except Exception as exc:
                 return {"state": "failed", "error": str(exc)}
             return ({"state": "delivered", "agent": normalized_agent}
@@ -3087,7 +3191,7 @@ def _hashi_control_status() -> dict[str, Any]:
     health = _fetch_workbench_health(timeout=1.0)
     pid_state = _read_hashi_pid_state()
     if health:
-        state = "running"
+        state = "draining" if _health_is_draining(health) else "running"
     elif pid_state["pid_alive"]:
         state = "starting_or_stuck"
     elif pid_state["pid_file_exists"]:
@@ -3302,13 +3406,193 @@ def create_app(
             "workbench_health": health,
         })
 
+    @app.post("/workbench/v1/session-proof")
+    async def workbench_gateway_session_proof(request: Request):
+        """Authenticate an existing Session/Run identity without changing it."""
+        try:
+            body_bytes = await _bounded_request_body(request, limit=8192)
+        except ValueError:
+            return JSONResponse(status_code=413, content={"ok": False, "error_code": "binding_request_invalid"})
+        ok, reason, authenticated_instance = verify_protocol_request(request, body_bytes=body_bytes)
+        if not ok:
+            return JSONResponse(status_code=401, content={
+                "ok": False, "error_code": "auth_required" if reason == "auth_required" else "auth_failed"
+            })
+        try:
+            payload = json.loads(body_bytes.decode("utf-8"))
+            if not isinstance(payload, dict) or set(payload) - {"session_id", "run_id"}:
+                raise ValueError("invalid binding request")
+            session_id = payload.get("session_id")
+            run_id = payload.get("run_id")
+            def valid_id(value):
+                return (
+                    isinstance(value, str) and value and value == value.strip()
+                    and len(value) <= 512
+                    and not any(ord(char) < 32 or ord(char) == 127 or char in "/\\\\"
+                                for char in value)
+                )
+            if not valid_id(session_id) or (run_id is not None and not valid_id(run_id)):
+                raise ValueError("invalid binding identity")
+        except (UnicodeError, ValueError, TypeError):
+            return JSONResponse(status_code=400, content={"ok": False, "error_code": "binding_request_invalid"})
+
+        headers = {name.lower(): value for name, value in request.headers.items()}
+        headers["accept"] = "application/json"
+        async def read_binding(api_path):
+            status, content, _ = await asyncio.to_thread(
+                _forward_workbench_gateway_request,
+                method="GET", api_path=api_path, query="", body_bytes=b"",
+                request_headers=headers,
+                timeout=_workbench_gateway_route_timeout(method="GET", api_path=api_path),
+            )
+            if status != 200:
+                return status, None
+            try:
+                result = json.loads(content)
+            except (UnicodeError, ValueError, TypeError):
+                return 502, None
+            return status, result if isinstance(result, dict) and result.get("ok") is True else None
+
+        path = "v1/sessions/" + quote(session_id, safe="")
+        try:
+            status, result = await read_binding(path)
+            session = result.get("session") if result else None
+            if status != 200 or not isinstance(session, dict):
+                return JSONResponse(status_code=status if 400 <= status < 600 else 502,
+                                    content={"ok": False, "error_code": "binding_session_unavailable"})
+            if session.get("session_id") != session_id:
+                return JSONResponse(status_code=409, content={"ok": False, "error_code": "binding_scope_mismatch"})
+            session_fields = ("session_id", "agent_id", "owner_id", "context_generation", "status")
+            projected_session = {field: session.get(field) for field in session_fields}
+            projected_run = None
+            if run_id is not None:
+                status, result = await read_binding(path + "/runs/" + quote(run_id, safe=""))
+                run = result.get("run") if result else None
+                if status != 200 or not isinstance(run, dict):
+                    return JSONResponse(status_code=status if 400 <= status < 600 else 502,
+                                        content={"ok": False, "error_code": "binding_run_unavailable"})
+                if (run.get("run_id") != run_id or run.get("session_id") != session_id
+                        or run.get("agent_id") != session.get("agent_id")):
+                    return JSONResponse(status_code=409, content={"ok": False, "error_code": "binding_scope_mismatch"})
+                run_fields = ("run_id", "session_id", "agent_id", "request_id", "context_generation", "state")
+                projected_run = {field: run.get(field) for field in run_fields}
+            return _shared_token_response(request, {
+                "ok": True, "instance_id": _instance_info.get("instance_id"),
+                "authenticated_instance": authenticated_instance,
+                "session": projected_session, "run": projected_run,
+            }, headers={"Cache-Control": "private, no-store"})
+        except (ValueError, WorkbenchGatewayError):
+            return JSONResponse(status_code=503, content={"ok": False, "error_code": "binding_unavailable"})
+
+    @app.post("/workbench/v1/agent-proof")
+    async def workbench_gateway_agent_proof(request: Request):
+        """Authenticate one Agent lifecycle readback without changing it."""
+        try:
+            body_bytes = await _bounded_request_body(request, limit=8192)
+        except ValueError:
+            return JSONResponse(status_code=413, content={"ok": False, "error_code": "binding_request_invalid"})
+        ok, reason, authenticated_instance = verify_protocol_request(request, body_bytes=body_bytes)
+        if not ok:
+            return JSONResponse(status_code=401, content={
+                "ok": False, "error_code": "auth_required" if reason == "auth_required" else "auth_failed"
+            })
+        try:
+            payload = json.loads(body_bytes.decode("utf-8"))
+            if not isinstance(payload, dict) or set(payload) not in (
+                {"agent_id"}, {"agent_id", "operation_id"}
+            ):
+                raise ValueError("invalid binding request")
+            agent_id = payload["agent_id"]
+            operation_id = payload.get("operation_id")
+            if operation_id is not None and (
+                not isinstance(operation_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", operation_id)
+            ):
+                raise ValueError("invalid operation identity")
+            if (not isinstance(agent_id, str) or not agent_id or agent_id != agent_id.strip()
+                    or len(agent_id) > 160 or any(ord(char) < 32 or ord(char) == 127 for char in agent_id)):
+                raise ValueError("invalid Agent identity")
+        except (UnicodeError, ValueError, TypeError):
+            return JSONResponse(status_code=400, content={"ok": False, "error_code": "binding_request_invalid"})
+        headers = {name.lower(): value for name, value in request.headers.items()}
+        headers["accept"] = "application/json"
+        try:
+            status, content, _ = await asyncio.to_thread(
+                _forward_workbench_gateway_request,
+                method="GET", api_path="agents", query="include_inactive=1", body_bytes=b"",
+                request_headers=headers,
+                timeout=_workbench_gateway_route_timeout(method="GET", api_path="agents"),
+            )
+            if status != 200:
+                return JSONResponse(status_code=status if 400 <= status < 600 else 502,
+                                    content={"ok": False, "error_code": "binding_agent_unavailable"})
+            data = json.loads(content)
+            rows = data.get("agents") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("invalid Agent status")
+            matches = [row for row in rows if isinstance(row, dict) and row.get("id") == agent_id]
+            if not matches:
+                return JSONResponse(status_code=404, content={"ok": False, "error_code": "binding_agent_unavailable"})
+            if len(matches) != 1:
+                return JSONResponse(status_code=409, content={"ok": False, "error_code": "binding_scope_mismatch"})
+            fields = ("id", "isActive", "is_active", "online", "status", "worker_phase")
+            agent = {field: matches[0][field] for field in fields if field in matches[0]}
+            proof_payload = {
+                "ok": True, "instance_id": _instance_info.get("instance_id"),
+                "authenticated_instance": authenticated_instance, "agent": agent,
+            }
+            if operation_id is not None:
+                api_path = (
+                    "agents/" + quote(agent_id, safe="") + "/active/operations/"
+                    + quote(operation_id, safe="")
+                )
+                status, content, _ = await asyncio.to_thread(
+                    _forward_workbench_gateway_request,
+                    method="GET", api_path=api_path, query="", body_bytes=b"",
+                    request_headers=headers,
+                    timeout=_workbench_gateway_route_timeout(method="GET", api_path=api_path),
+                )
+                if status == 404:
+                    proof_payload["operation"] = None
+                elif status != 200:
+                    return JSONResponse(status_code=status if 400 <= status < 600 else 502,
+                                        content={"ok": False, "error_code": "binding_operation_unavailable"})
+                else:
+                    operation = json.loads(content)
+                    if (not isinstance(operation, dict) or operation.get("ok") is not True
+                            or operation.get("agent_id") != agent_id
+                            or operation.get("operation_id") != operation_id
+                            or not isinstance(operation.get("desired_active"), bool)
+                            or operation.get("state") not in {"pending", "starting", "succeeded", "failed", "unknown"}):
+                        return JSONResponse(status_code=409, content={
+                            "ok": False, "error_code": "binding_scope_mismatch"
+                        })
+                    allowed = ("operation_id", "agent_id", "desired_active", "state", "error_code")
+                    proof_payload["operation"] = {
+                        field: operation[field] for field in allowed if field in operation
+                    }
+            return _shared_token_response(
+                request, proof_payload, headers={"Cache-Control": "private, no-store"}
+            )
+        except (UnicodeError, ValueError, TypeError, WorkbenchGatewayError):
+            return JSONResponse(status_code=503, content={"ok": False, "error_code": "binding_unavailable"})
+
     @app.api_route(
         "/workbench/v1/proxy/api/{api_path:path}",
         methods=sorted(_WORKBENCH_GATEWAY_METHODS),
     )
     async def workbench_gateway_proxy(request: Request, api_path: str):
         route_started = time.monotonic()
-        body_bytes = await request.body()
+        if request.method == "POST" and str(api_path or "").strip().strip("/") == "v1/file-content":
+            from orchestrator.file_content_service import CONTENT_WIRE_MAX_BYTES
+            try:
+                body_bytes = await _bounded_request_body(request, limit=CONTENT_WIRE_MAX_BYTES)
+            except ValueError:
+                return JSONResponse(status_code=413, content={
+                    "ok": False, "error_code": "fileshare_content_limit",
+                })
+        else:
+            body_bytes = await request.body()
         request_headers = {name.lower(): value for name, value in request.headers.items()}
         trace_facts = _workbench_gateway_trace_facts(request_headers)
         trace_headers = _workbench_gateway_trace_headers(request_headers)
@@ -3346,6 +3630,22 @@ def create_app(
             "proxy_authenticated", **trace_facts, method=request.method,
             api_path=safe_api_path,
         )
+        if (request.method == "GET" and
+                _WORKBENCH_TRANSCRIPT_ATTACHMENT_PATH.fullmatch(str(api_path or "").strip("/"))):
+            try:
+                return await _forward_workbench_attachment_stream(
+                    api_path=api_path, query=request.url.query, request_headers=request_headers,
+                )
+            except (ValueError, WorkbenchGatewayError) as exc:
+                failure = exc if isinstance(exc, WorkbenchGatewayError) else _workbench_upstream_failure(
+                    exc, method="GET", phase="validate",
+                )
+                return JSONResponse(
+                    status_code=failure.status,
+                    content=_workbench_gateway_failure_payload(failure, method="GET"),
+                    headers={**trace_headers, "Cache-Control": "no-store"},
+                )
+
         forward_task = asyncio.create_task(asyncio.to_thread(
             _forward_workbench_gateway_request,
             method=request.method,
@@ -3505,13 +3805,9 @@ def create_app(
         local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
         if not target_instance or target_instance == local_instance:
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_remote_target"})
-        handshaken, reason, _peer = _peer_has_completed_handshake(target_instance)
-        if not handshaken:
-            logger.warning("TUI proxy target rejected: target=%s reason=%s", target_instance, reason)
-            return JSONResponse(status_code=409, content={"ok": False, "error": reason})
-
         protocol_payload = ProtocolTuiRequest(
             from_instance=local_instance,
+            target_instance=target_instance,
             operation=payload.operation,
             agent=payload.agent,
             text=payload.text,
@@ -3540,8 +3836,15 @@ def create_app(
         if not candidate_urls:
             return JSONResponse(status_code=503, content={"ok": False, "error": "peer_route_unavailable"})
         last_error: Exception | None = None
+        identity_error = "peer_identity_unverified"
+        verified_route = False
         normalized_operation = str(payload.operation or "").strip().lower()
         for url in candidate_urls:
+            trusted, reason = await asyncio.to_thread(_verify_forward_route_identity, url, target_instance)
+            if not trusted:
+                identity_error = reason
+                continue
+            verified_route = True
             try:
                 result = await asyncio.get_running_loop().run_in_executor(
                     None,
@@ -3609,6 +3912,8 @@ def create_app(
                             "error": "Peer may have accepted the request; check its Session before retrying",
                         },
                     )
+        if not verified_route:
+            return JSONResponse(status_code=502, content={"ok": False, "error": identity_error})
         return JSONResponse(
             status_code=502,
             content={"ok": False, "error": "peer_proxy_failed", "detail": str(last_error or "no route")},
@@ -3630,6 +3935,13 @@ def create_app(
         source_instance = str(
             authenticated_instance or payload.from_instance or ""
         ).strip().upper()
+        local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
+        requested_target = str(payload.target_instance or "").strip().upper()
+        if requested_target and requested_target != local_instance:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "target_identity_mismatch", "target_instance": local_instance},
+            )
         valid, validation_error = _validate_tui_proxy_payload(payload)
         if not valid:
             return JSONResponse(status_code=400, content={"ok": False, "error": validation_error})
@@ -3638,7 +3950,6 @@ def create_app(
             None,
             lambda: _local_workbench_tui_request(payload),
         )
-        local_instance = str(_instance_info.get("instance_id") or "").strip().upper()
         if payload.operation == "health" and status < 400:
             workbench_instance = str(result.get("instance_id") or "").strip().upper()
             if workbench_instance != local_instance:
@@ -3714,16 +4025,19 @@ def create_app(
     async def protocol_directory(request: Request):
         if _protocol_manager is None:
             return JSONResponse(status_code=503, content={"ok": False, "error": "protocol manager unavailable"})
-        authenticated = try_authenticate_request(request, allow_loopback=True)
+        if str(request.headers.get(HEADER_AUTH_SCHEME) or "").strip():
+            authenticated, _reason, _identity = verify_protocol_request(request, body_bytes=b"")
+        else:
+            authenticated = bool(try_authenticate_request(request, allow_loopback=True))
         if not authenticated:
             return JSONResponse(status_code=401, content={"ok": False, "error": "auth_required", "code": "auth_required"})
-        return {
+        return _shared_token_response(request, {
             "ok": True,
             "instance_id": _instance_info.get("instance_id"),
             "agents": _protocol_manager.get_local_agents_snapshot(),
             "agent_directory": _protocol_manager.get_local_agent_directory_state(),
             "trusted_view": True,
-        }
+        })
 
     @app.post("/protocol/message")
     async def protocol_message(request: Request, payload: ProtocolMessagePayload):
@@ -3772,14 +4086,20 @@ def create_app(
             local_instance=str(_instance_info.get("instance_id") or ""),
             max_allowed_ttl=max_allowed_ttl,
         )
+        def authenticated_receipt(content: dict, status: int) -> JSONResponse:
+            response = dict(content)
+            response["responder_instance"] = str(_instance_info.get("instance_id") or "").strip().upper()
+            response["response_status"] = int(status)
+            return _shared_token_response(request, response, status_code=status)
+
         if not validation.ok:
-            return JSONResponse(status_code=validation.status_code, content=validation.error)
+            return authenticated_receipt(validation.error, validation.status_code)
         validation.payload["_network_authenticated_instance"] = str(
             _auth_identity or ""
         ).strip().upper()
         validation.payload["_network_authentication"] = "shared_network_hmac"
         status, result = await _protocol_manager.handle_protocol_message(validation.payload)
-        return JSONResponse(status_code=status, content=result)
+        return authenticated_receipt(result, status)
 
     @app.post("/protocol/outbound")
     async def protocol_outbound(request: Request, payload: ProtocolOutboundRegisterPayload):
@@ -4327,6 +4647,10 @@ def create_app(
             result = dict(result)
             if status < 400 and result.get("ok"):
                 result["attachments"] = normalized_attachments
+        if isinstance(result, dict):
+            result["responder_instance"] = local_instance
+            result["response_status"] = int(status)
+            return _shared_token_response(request, result, status_code=status)
         return JSONResponse(status_code=status, content=result)
 
     @app.get("/attachments/message/{message_id}")
@@ -5374,8 +5698,9 @@ def create_app(
             return _agent_move_response(request, status_code=503,
                                         content={"ok": False, "error": "HASHI root is unavailable"})
         from orchestrator.agent_move.transport_crypto import decrypt_package_file
-        limit = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
         try:
+            package_limit = configured_transfer_package_limit()
+            limit = package_limit + ENVELOPE_OVERHEAD_BYTES
             length = request.headers.get("content-length")
             if length and (int(length) > limit or int(length) <= ENVELOPE_OVERHEAD_BYTES):
                 raise AgentMoveError("Agent move transport envelope size is invalid")
@@ -5392,7 +5717,7 @@ def create_app(
                 if length and count != int(length):
                     raise AgentMoveError("Agent move transport envelope was truncated")
                 await asyncio.to_thread(
-                    decrypt_package_file, envelope, plaintext, max_plaintext_bytes=MAX_PACKAGE_BYTES,
+                    decrypt_package_file, envelope, plaintext, max_plaintext_bytes=package_limit,
                     shared_token=get_shared_token() or "",
                     source_instance=sender or from_instance,
                     target_instance=str(_instance_info.get("instance_id") or "HASHI"),
@@ -5431,7 +5756,12 @@ def create_app(
                 status_code=503,
                 content={"ok": False, "error": "HASHI root is unavailable"},
             )
-        max_envelope_bytes = MAX_PACKAGE_BYTES + ENVELOPE_OVERHEAD_BYTES
+        try:
+            max_envelope_bytes = configured_transfer_package_limit() + ENVELOPE_OVERHEAD_BYTES
+        except AgentMoveError as exc:
+            return _agent_move_response(
+                request, status_code=503, content={"ok": False, "error": str(exc)},
+            )
         if len(payload.package_b64) > ((max_envelope_bytes + 2) // 3) * 4 + 4:
             return _agent_move_response(
                 request,
@@ -5579,6 +5909,11 @@ def create_app(
                 **kwargs,
             )
             return _agent_move_response(request, result)
+        except AccessScopePreviewChanged as exc:
+            return _agent_move_response(
+                request, status_code=409,
+                content={"ok": False, "error": str(exc), "code": exc.code},
+            )
         except AgentMoveError as exc:
             return _agent_move_response(
                 request,
@@ -5597,6 +5932,10 @@ def create_app(
     @app.post("/agent-move/v1/rollback")
     async def agent_move_rollback(request: Request, payload: AgentMoveActionPayload):
         return await _agent_move_action(request, payload, rollback_agent_move)
+
+    @app.post("/agent-move/v1/abort-staged")
+    async def agent_move_abort_staged(request: Request, payload: AgentMoveActionPayload):
+        return await _agent_move_action(request, payload, abort_staged_agent_move)
 
     async def _agent_move_runtime_action(
         request: Request,
@@ -5646,6 +5985,8 @@ def create_app(
                 current.get("target_agent_id") or current.get("agent_id") or ""
             )
             if action in {"start", "stop"}:
+                if action == "start" and current.get("desired_target_active") is False:
+                    raise AgentMoveError("this transfer selected an inactive target")
                 lifecycle = await asyncio.to_thread(
                     _request_workbench_agent_lifecycle,
                     target_agent_id,
@@ -5654,11 +5995,13 @@ def create_app(
                 result = {**current, "lifecycle": lifecycle}
             elif action == "finalize":
                 health = await asyncio.to_thread(_fetch_workbench_health, 3.0)
-                runtime_online = bool(
-                    health
-                    and target_agent_id in {
-                        str(item) for item in health.get("agents", []) or []
-                    }
+                health_key = ("agent_runtime_presence" if current.get("desired_target_active") is False
+                              else "agents")
+                agents = (health.get(health_key) if isinstance(health, dict)
+                          and health.get("ok") is not False else None)
+                runtime_online = (
+                    target_agent_id in {str(item) for item in agents}
+                    if isinstance(agents, list) else None
                 )
                 result = await asyncio.to_thread(
                     finalize_agent_move,

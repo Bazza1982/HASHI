@@ -25,8 +25,11 @@ Provider settings resolve in this order: CLI flags, environment variables, priva
 | Transport retries | `--retries` | — | 2 |
 | Longest image side | `--max-side` | `VISION_MAX_SIDE` | 1280 pixels |
 | Encoded-image budget | `--max-mb` | `VISION_MAX_MB` | 1.5 MiB |
+| Input bytes per image | `--max-input-bytes` | `VISION_MAX_INPUT_BYTES` | 128 MiB |
+| Response bytes | `--max-response-bytes` | `VISION_MAX_RESPONSE_BYTES` | 4 MiB |
+| Shrink retries on HTTP 413 | `--resize-retries` | `VISION_RESIZE_RETRIES` | 2 |
 
-Use an HTTP(S) URL without embedded credentials, query parameters or fragments. A bare service URL, a URL ending in `/v1`, or an exact `/chat/completions` endpoint is accepted. Pass credentials separately; environment variables avoid exposing keys in process arguments. Provider image counts, token limits and concurrency are provider capabilities, not assumptions made by this skill.
+Use an HTTP(S) URL without embedded user credentials or fragments. Configured query parameters are preserved exactly for the selected service; query values may contain secrets and are redacted in `--show-config`. A bare service URL, a URL ending in `/v1`, or an exact `/chat/completions` endpoint is accepted. Pass credentials separately; environment variables avoid exposing keys in process arguments. Provider image counts, token limits and concurrency are provider capabilities, not assumptions made by this skill.
 
 ## Run
 
@@ -82,11 +85,11 @@ Read the model's full listing, composition and crop evidence before interpreting
 
 ## Image and transport boundaries
 
-Supported extensions are PNG, JPEG, WebP, BMP, GIF and TIFF. Each input is bounded to 128 MiB. With Pillow, oversized inputs are resized and JPEG-encoded until the configured byte budget fits, or fail explicitly. Transparency is flattened on white when encoding or cropping. `--no-resize` preserves original bytes; without Pillow, files are sent unchanged and an oversized payload is reported as unenforced. Original metadata can remain in unchanged bytes.
+Supported extensions are PNG, JPEG, WebP, BMP, GIF and TIFF. Each input is bounded by the selected input-byte budget. With Pillow, oversized inputs are resized and JPEG-encoded until the configured byte budget fits, or fail explicitly. A warning reports re-encoding because visual detail may change. Transparency is flattened on white when encoding or cropping. `--no-resize` preserves original bytes; without Pillow, files are sent unchanged and an oversized payload is reported as unenforced. Original metadata can remain in unchanged bytes.
 
-HTTP redirects are rejected so images or authentication headers are not silently forwarded. Responses are bounded to 4 MiB. HTTP 413 can trigger up to two smaller-image attempts; 5xx and connection failures use bounded backoff. Provider error bodies and reasoning-only fields are not copied into answers or diagnostics. Stable protocol codes may produce targeted guidance.
+HTTP redirects are rejected so images or authentication headers are not silently forwarded. Responses are bounded by the selected response-byte budget. HTTP 413 can trigger the selected number of smaller-image attempts; 5xx and connection failures use the selected transport retry count with bounded backoff. Provider error bodies and reasoning-only fields are not copied into answers or diagnostics. Stable protocol codes may produce targeted guidance.
 
-Numeric options must be finite. Token limits are positive; temperature is 0–2; timeout is greater than zero and at most 3600 seconds; retries are 0–5; jobs are 1–32; image side is 1–16384; image budget is at least one byte and at most 128 MiB; batch limits are positive.
+Numeric options must be finite. Token limits, timeout, worker count, image side, input and response budgets are positive; retries and temperature are nonnegative; the encoded-image budget is at least one byte. Byte budgets must fit the platform's supported read size. Choose capacities and concurrency that the selected provider and this machine can actually support; the defaults are client settings, not universal provider limits.
 
 ## Output
 

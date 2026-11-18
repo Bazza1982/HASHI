@@ -109,3 +109,106 @@ async def test_desktop_window_list_reports_active_window(monkeypatch: pytest.Mon
 def test_desktop_tool_schemas_include_window_controls() -> None:
     assert "desktop_window_list" in TOOL_SCHEMA_MAP
     assert "desktop_window_focus" in TOOL_SCHEMA_MAP
+
+
+@pytest.mark.asyncio
+async def test_desktop_type_timeout_does_not_repeat_partially_entered_text(monkeypatch):
+    calls = []
+    monkeypatch.setattr(desktop, "_find_xdotool", lambda: "fixture-xdotool")
+    monkeypatch.setattr(desktop, "_find_usecomputer", lambda: "fixture-fallback")
+
+    async def fake_run(cmd, display, timeout=15):
+        setting = getattr(desktop, "_DESKTOP_REQUEST_TIMEOUT", None)
+        calls.append((cmd, display, timeout, setting.get() if setting is not None else None))
+        return 1, "", "command timed out"
+
+    async def no_reset(_display):
+        pass
+
+    monkeypatch.setattr(desktop, "_run", fake_run)
+    monkeypatch.setattr(desktop, "_best_effort_reset_desktop_input_state", no_reset)
+    result = await desktop.execute_desktop_type({
+        "text": "some text", "display": ":test", "timeout_s": 120,
+    })
+    assert len(calls) == 1
+    assert calls[0][3] == 120
+    assert result.startswith("Error:") and "partially" in result
+
+
+@pytest.mark.asyncio
+async def test_desktop_subprocess_timeout_and_cancellation_reap_fixture(tmp_path):
+    import asyncio
+    import sys
+    import psutil
+
+    async def start_fixture(marker, timeout):
+        code = ("import os,pathlib,sys,time; "
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(120)")
+        return await desktop._run([sys.executable, "-c", code, str(marker)], ":fixture", timeout=timeout)
+
+    async def wait_pid(marker):
+        for _ in range(200):
+            if marker.exists():
+                return int(marker.read_text())
+            await asyncio.sleep(0.025)
+        pytest.fail("fixture subprocess did not start")
+
+    for mode in ("timeout", "cancel"):
+        marker = tmp_path / (mode + ".pid")
+        task = asyncio.create_task(start_fixture(marker, 1 if mode == "timeout" else 120))
+        pid = await wait_pid(marker)
+        try:
+            if mode == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError) as cancelled:
+                    await task
+                assert cancelled.value.hashi_tool_details["cleanup_confirmed"] is True
+            else:
+                rc, _out, error = await task
+                assert rc != 0 and "timed out" in error
+            assert not psutil.pid_exists(pid)
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if psutil.pid_exists(pid):
+                process = psutil.Process(pid)
+                assert str(marker) in " ".join(process.cmdline())
+                process.kill()
+                process.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_desktop_selected_timeout_allows_work_past_old_limit():
+    import os
+    import sys
+    if os.environ.get("HASHI_HX036_SLOW_DESKTOP") != "1":
+        pytest.skip("opt-in synthetic slow subprocess qualification")
+    token = desktop._DESKTOP_REQUEST_TIMEOUT.set(22.0)
+    try:
+        rc, out, err = await desktop._run(
+            [sys.executable, "-c", "import time; time.sleep(16); print('fixture-complete')"],
+            ":fixture",
+        )
+    finally:
+        desktop._DESKTOP_REQUEST_TIMEOUT.reset(token)
+    assert rc == 0 and out == "fixture-complete" and not err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), True, "10", 10**1000])
+async def test_desktop_invalid_timeout_is_rejected_before_input(monkeypatch, timeout):
+    calls = []
+    monkeypatch.setattr(desktop, "_find_xdotool", lambda: "fixture-xdotool")
+
+    async def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0, "", ""
+
+    monkeypatch.setattr(desktop, "_run", fake_run)
+    result = await desktop.execute_desktop_type({"text": "fixture", "timeout_s": timeout})
+    assert result.startswith("Error:") and "timeout_s" in result
+    assert not calls

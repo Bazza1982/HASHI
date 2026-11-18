@@ -398,19 +398,16 @@ async def test_scheduler_run_history_uses_typed_task_identity(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_scheduler_gateway_rerun_requires_exact_single_job_authorization(tmp_path):
-    server, runtime = _server(tmp_path)
+async def test_scheduler_owner_rerun_needs_no_magic_but_anonymous_gateway_claim_is_denied(tmp_path):
+    from aiohttp import web
 
-    denied = await server.handle_agent_run_job(
-        _FakeRequest(
-            payload={
-                "kind": "cron",
-                "job_id": "daily-report",
-                "requested_by": "hashi_tool_gateway",
-            }
-        )
+    server, runtime = _server(tmp_path)
+    fake_gateway = _FakeRequest(
+        payload={"kind": "cron", "job_id": "daily-report", "requested_by": "hashi_tool_gateway"}
     )
-    assert denied.status == 403
+    fake_gateway.headers = {}
+    with pytest.raises(web.HTTPUnauthorized):
+        await server.handle_agent_run_job(fake_gateway)
     assert runtime.reruns == []
 
     accepted = await server.handle_agent_run_job(
@@ -418,8 +415,6 @@ async def test_scheduler_gateway_rerun_requires_exact_single_job_authorization(t
             payload={
                 "kind": "cron",
                 "job_id": "daily-report",
-                "requested_by": "hashi_tool_gateway",
-                "authorization": "explicit_user_authorization",
             }
         )
     )
@@ -742,20 +737,22 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
     assert updated.status == 200
     assert updated_payload["task_id"]
 
-    denied = await server.handle_agent_superloop_delete(
-        type(
-            "Request",
-            (),
-            {
-                "match_info": {"name": "momo", "loop_id": loop_id},
-                "headers": {"X-Workbench-Token": "fixture-owner-key"},
-                "json": _FakeRequest(
-                    payload={"requested_by": "hashi_tool_gateway"}
-                ).json,
-            },
-        )()
-    )
-    assert denied.status == 403
+    from aiohttp import web
+    # A claimed gateway sender is not owner authentication.
+    with pytest.raises(web.HTTPUnauthorized):
+        await server.handle_agent_superloop_delete(
+            type(
+                "Request",
+                (),
+                {
+                    "match_info": {"name": "momo", "loop_id": loop_id},
+                    "headers": {},
+                    "json": _FakeRequest(
+                        payload={"requested_by": "hashi_tool_gateway"}
+                    ).json,
+                },
+            )()
+        )
 
     deleted = await server.handle_agent_superloop_delete(
         type(
@@ -765,10 +762,7 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
                 "match_info": {"name": "momo", "loop_id": loop_id},
                 "headers": {"X-Workbench-Token": "fixture-owner-key"},
                 "json": _FakeRequest(
-                    payload={
-                        "requested_by": "hashi_tool_gateway",
-                        "authorization": "explicit_user_authorization",
-                    }
+                    payload={}
                 ).json,
             },
         )()
@@ -780,3 +774,227 @@ async def test_superloop_agent_api_binds_create_manage_delete_to_owner(tmp_path)
     listed_after = await server.handle_agent_superloops(_FakeRequest())
     assert json.loads(listed_after.text)["loops"] == []
 # HASHI-Fingerprint: hfp_9ba0a064b6de48f6a5b9aa0cf7877b09
+
+@pytest.mark.asyncio
+async def test_scheduler_tool_approval_wait_keeps_unrelated_status_responsive(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    import aiohttp
+    from tests.test_scheduler_run_authorization import active_run, credential, deletion_scope, setup_personal
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    scope = deletion_scope(runtime)
+    started = threading.Event()
+    original = server._scheduler_tool_run
+
+    def observed(*args, **kwargs):
+        started.set()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_scheduler_tool_run", observed)
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    operation = None
+    try:
+        async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+            base = str(upstream.make_url("")).rstrip("/")
+            token = credential(server, base, binding)
+            connection.execute("BEGIN IMMEDIATE")
+
+            async def delete():
+                async with client.delete(
+                    base + "/api/agents/momo/scheduler/jobs/daily-report",
+                    json={**scope, "authorization": "explicit_user_authorization"},
+                    headers={"X-Hashi-Scheduler-Token": token},
+                ) as response:
+                    return response.status, await response.json()
+
+            operation = asyncio.create_task(delete())
+            assert await asyncio.to_thread(started.wait, 2)
+            await asyncio.sleep(0.05)
+            assert not operation.done()
+            before = time.monotonic()
+            async with client.get(
+                base + "/api/v1/capabilities",
+                headers={"X-Workbench-Token": server.admin_token},
+            ) as response:
+                assert response.status == 200
+            assert time.monotonic() - before < 1
+            connection.rollback()
+            status, payload = await asyncio.wait_for(operation, 3)
+            assert status == 403 and payload["error_code"] == "approval_required"
+            assert runtime.skill_manager.get_job("cron", "daily-report") is not None
+    finally:
+        connection.rollback()
+        connection.close()
+        if operation is not None and not operation.done():
+            await asyncio.gather(operation, return_exceptions=True)
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["list", "status", "history", "superloop", "renewal"])
+async def test_scheduler_reads_wait_off_event_loop_for_active_run_lock(tmp_path, monkeypatch, operation):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    import aiohttp
+    from tests.test_scheduler_run_authorization import active_run, credential, setup_personal
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    paths = {
+        "list": ("hashi_scheduler_list", "/api/agents/momo/scheduler/jobs"),
+        "status": ("hashi_scheduler_status", "/api/agents/momo/scheduler/status?kind=cron&job_id=daily-report"),
+        "history": ("hashi_scheduler_run_history", "/api/agents/momo/scheduler/runs"),
+        "superloop": ("hashi_superloop_list", "/api/agents/momo/superloops"),
+        "renewal": ("hashi_scheduler_list", "/api/agents/momo/scheduler/token/renew"),
+    }
+    tool, path = paths[operation]
+    started = threading.Event()
+    original = server._scheduler_tool_run
+
+    def observed(*args, **kwargs):
+        started.set()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_scheduler_tool_run", observed)
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    pending = None
+    try:
+        async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+            base = str(upstream.make_url("")).rstrip("/")
+            token = credential(server, base, binding, tools=[tool])
+            connection.execute("BEGIN IMMEDIATE")
+
+            async def call():
+                method = client.post if operation == "renewal" else client.get
+                kwargs = {"headers": {"X-Hashi-Scheduler-Token": token}}
+                if operation == "renewal":
+                    kwargs["json"] = {"tool": tool}
+                async with method(base + path, **kwargs) as response:
+                    return response.status, await response.json()
+
+            pending = asyncio.create_task(call())
+            assert await asyncio.to_thread(started.wait, 2)
+            await asyncio.sleep(0.05)
+            assert not pending.done()
+            before = time.monotonic()
+            async with client.get(
+                base + "/api/v1/capabilities",
+                headers={"X-Workbench-Token": server.admin_token},
+            ) as response:
+                assert response.status == 200
+            assert time.monotonic() - before < 1
+            connection.rollback()
+            status, payload = await asyncio.wait_for(pending, 3)
+            assert status == 200, payload
+            assert payload["ok"] is True
+    finally:
+        connection.rollback()
+        connection.close()
+        if pending is not None and not pending.done():
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+
+@pytest.mark.asyncio
+async def test_scheduler_create_settles_original_write_after_cancellation(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    entered, release = threading.Event(), threading.Event()
+    original = runtime.skill_manager.upsert_cron_job
+    calls = []
+
+    def slow_write(*args, **kwargs):
+        calls.append(kwargs["task_id"])
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.skill_manager, "upsert_cron_job", slow_write)
+    request = _FakeRequest(payload={
+        "kind": "cron", "task_id": "cancelled-request",
+        "schedule": "0 9 * * *", "prompt": "fixture", "enabled": False,
+    })
+    task = asyncio.create_task(server.handle_agent_scheduler_create(request))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    assert calls == ["cancelled-request"]
+    assert runtime.skill_manager.get_job("cron", "cancelled-request")["prompt"] == "fixture"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_create_waits_off_loop_before_run_fence(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    import aiohttp
+    from tests.test_scheduler_run_authorization import active_run, credential, setup_personal
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    entered = threading.Event()
+    original = server._scheduler_tool_run
+
+    def observed(*args, **kwargs):
+        entered.set()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_scheduler_tool_run", observed)
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    pending = None
+    try:
+        async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+            base = str(upstream.make_url("")).rstrip("/")
+            token = credential(server, base, binding, tools=["hashi_scheduler_create"])
+            connection.execute("BEGIN IMMEDIATE")
+
+            async def create():
+                async with client.post(
+                    base + "/api/agents/momo/scheduler/jobs",
+                    json={"kind": "cron", "task_id": "contended-create",
+                          "schedule": "0 9 * * *", "prompt": "fixture", "enabled": False},
+                    headers={"X-Hashi-Scheduler-Token": token},
+                ) as response:
+                    return response.status, await response.json()
+
+            pending = asyncio.create_task(create())
+            assert await asyncio.to_thread(entered.wait, 2)
+            await asyncio.sleep(0.05)
+            assert not pending.done()
+            before = time.monotonic()
+            async with client.get(
+                base + "/api/v1/capabilities",
+                headers={"X-Workbench-Token": server.admin_token},
+            ) as response:
+                assert response.status == 200
+            assert time.monotonic() - before < 1
+            connection.rollback()
+            status, payload = await asyncio.wait_for(pending, 3)
+            assert status == 201, payload
+            assert runtime.skill_manager.get_job("cron", "contended-create")["prompt"] == "fixture"
+    finally:
+        connection.rollback()
+        connection.close()
+        if pending is not None and not pending.done():
+            await asyncio.gather(pending, return_exceptions=True)

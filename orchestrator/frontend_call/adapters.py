@@ -19,7 +19,8 @@ from orchestrator.openai_compatible_speech import (
     build_speech_request,
     validate_speech_audio,
 )
-from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS
+from orchestrator.lan_transport import LanDestinationError, configured_media_session
+from .config import OPENROUTER_API_BASE, OPENROUTER_GEMINI_TTS_MODELS, pcm_settings_for
 from .contract import CallError, MAX_OUTPUT
 from .diagnostics import (
     diagnostic_context,
@@ -120,8 +121,8 @@ class MediaAdapters:
             raise CallError("call_credential_missing", 503)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
-            async with self.session_factory(
-                timeout=aiohttp.ClientTimeout(total=25), trust_env=False
+            async with configured_media_session(
+                self.session_factory, target, timeout=aiohttp.ClientTimeout(total=25)
             ) as session:
                 async with session.post(
                     target["base_url"].rstrip("/") + path,
@@ -144,13 +145,15 @@ class MediaAdapters:
                             raise CallError("call_provider_response_limit", 502)
                         chunks.append(chunk)
                     payload = b"".join(chunks)
-                    mime = response.headers.get("Content-Type", "").split(";")[0]
+                    mime = response.headers.get("Content-Type", "")
                     diagnostic["response_duration_ms"] = elapsed_ms(
                         time.monotonic, started
                     )
                 return payload, mime, None
         except CallError:
             raise
+        except LanDestinationError as exc:
+            raise CallError("call_lan_target_not_private", 503) from exc
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
             # Never disclose provider messages, URLs, headers, or credentials.
             raise CallError("call_provider_unavailable", 502) from exc
@@ -333,6 +336,7 @@ class MediaAdapters:
 
     async def synthesize(self, target, slot, text):
         fmt = target.get("audio_format", "mp3")
+        pcm_settings = pcm_settings_for(target) if fmt == "pcm" else {}
         options = dict(slot.get("options", {}))
         # Gemini 3.8 speaks input verbatim; style is metadata, never spoken text.
         if (
@@ -361,7 +365,7 @@ class MediaAdapters:
                 target, "/audio/speech", json_body=body
             )
         try:
-            audio = validate_speech_audio(data, mime, fmt)
+            audio = validate_speech_audio(data, mime, fmt, **pcm_settings)
         except SpeechProtocolError as exc:
             code = (
                 "call_speech_response_empty"

@@ -10,10 +10,10 @@ Use `vision_inspect` only when visual evidence is necessary.
 1. Prefer native image input when the active backend supports it.
 2. Use OCR instead when the request concerns only visible text.
 3. Otherwise call `vision_inspect` with the `image_ref` shown in the attachment summary and a specific visual question.
-4. Start with `detail: standard`. Use `brief` for simple identification and retry once with `detailed` only when important evidence remains unclear.
+4. As an economical default, start with `detail: standard` or use `brief` for simple identification. Use detailed or additional focused inspections when they materially resolve the authorized question.
 5. Treat observations as visual evidence and preserve every stated uncertainty. Never turn an inference into a confirmed fact.
 6. Do not infer image content from filenames, captions, or OCR alone.
 
-When comparing multiple images, inspect each image separately and identify each result by its attachment reference.
+For comparisons, inspect images individually or jointly when the selected provider and tool support it; retain the exact attachment references and distinguish uncertainty for each image.
 
 Read [references/observation-contract.md](references/observation-contract.md) when interpreting or relaying structured results.

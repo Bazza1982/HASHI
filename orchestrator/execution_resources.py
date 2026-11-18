@@ -10,8 +10,11 @@ from contextlib import asynccontextmanager
 import ctypes
 import hashlib
 import inspect
+import json
+import math
 import os
 from pathlib import Path
+import sys
 import time
 
 if os.name == 'nt':
@@ -27,11 +30,26 @@ if os.name == 'nt':
     _lock_file.restype = wintypes.BOOL
 
 
-def limit(value, name, default, maximum=64):
+def limit(value, name, default, maximum=sys.maxsize):
     value = default if value is None else value
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         raise ValueError(f"{name} must be an integer between 1 and {maximum}")
     return value
+
+
+def queue_wait_seconds(value):
+    """Return the selected capacity-wait deadline, or None for no deadline."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError('execution_limits.queue_wait_seconds must be a positive finite number or null')
+    try:
+        selected = float(value)
+    except OverflowError:
+        raise ValueError('execution_limits.queue_wait_seconds must be a positive finite number or null') from None
+    if not math.isfinite(selected):
+        raise ValueError('execution_limits.queue_wait_seconds must be a positive finite number or null')
+    return selected
 
 
 class FileLease:
@@ -113,7 +131,7 @@ async def leases(root, groups, *, on_wait=None, timeout=600):
                 if inspect.isawaitable(result):
                     await result
                 waiting = failed
-            if time.monotonic()-started >= timeout:
+            if timeout is not None and time.monotonic()-started >= timeout:
                 raise TimeoutError('execution_resource_wait_timeout')
             await asyncio.sleep(0.05)
         if on_wait is not None:
@@ -145,11 +163,26 @@ def execution_configuration(settings, extra):
     engines = {} if engines is None else engines
     if not isinstance(engines, dict):
         raise ValueError('execution_limits.engines must be an object')
-    limit((extra or {}).get('max_concurrent_sessions'), 'max_concurrent_sessions', 2, 8)
+    limit((extra or {}).get('max_concurrent_sessions'), 'max_concurrent_sessions', 2)
     limit(raw.get('instance_sessions'), 'instance_sessions', 8)
     for engine, value in engines.items():
         limit(value, 'execution_limits.engines.'+str(engine), 4)
+    queue_wait_seconds(raw.get('queue_wait_seconds'))
     return raw
+
+
+def instance_execution_configuration(global_config):
+    """Read the instance policy used by Function admission without mutating it."""
+    config_path = getattr(global_config, 'config_path', None)
+    root = getattr(global_config, 'bridge_home', None) or getattr(global_config, 'project_root', '.')
+    path = Path(config_path) if config_path else Path(root) / 'agents.json'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+    except FileNotFoundError:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError('instance configuration must be an object')
+    return execution_configuration(data.get('global', {}), {})
 
 
 @asynccontextmanager
@@ -168,7 +201,8 @@ async def execution_budget(runtime, item, frozen):
         from orchestrator.runtime_lifecycle import _publish_worker_metadata
         await _publish_worker_metadata(runtime, transition='Execution capacity changed')
     try:
-        async with leases(instance_state(runtime),groups,on_wait=waiting) as elapsed:
+        async with leases(instance_state(runtime),groups,on_wait=waiting,
+                          timeout=queue_wait_seconds(raw.get('queue_wait_seconds'))) as elapsed:
             yield elapsed
     finally:
         reasons.pop(item.request_id,None)

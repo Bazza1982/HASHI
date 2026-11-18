@@ -80,7 +80,8 @@ def validate_loop(store: SuperloopStore, loop_id: str, *, closeout: bool = False
 
     _validate_state(state, findings, closeout=closeout)
     _validate_stats(state, tasks, issues, waits, findings, closeout=closeout)
-    _validate_tasks(store, loop_id, tasks, findings, closeout=closeout)
+    _validate_tasks(store, loop_id, tasks, findings, closeout=closeout,
+                    state=state, dispatches=dispatches, events=events)
     _validate_issues(issues, findings, closeout=closeout)
     _validate_waits(waits, findings, closeout=closeout)
     _validate_events(events, findings, closeout=closeout)
@@ -237,6 +238,9 @@ def _validate_tasks(
     findings: list[SuperloopFinding],
     *,
     closeout: bool,
+    state: dict[str, Any],
+    dispatches: list[dict[str, Any]],
+    events: list[dict[str, Any]],
 ) -> None:
     in_progress = []
     for index, task in enumerate(tasks):
@@ -250,7 +254,15 @@ def _validate_tasks(
         if status == "in_progress":
             in_progress.append(ref)
         if status in TRUTH_CLAIM_STATUSES:
-            _validate_completed_task(store, loop_id, task, findings, ref=ref, closeout=closeout)
+            canonical_receipt = None
+            if task.get("execution_mode") == "hchat_agent":
+                canonical_receipt = _canonical_hchat_receipt(
+                    store, loop_id, task, state, dispatches, events, findings,
+                )
+            _validate_completed_task(
+                store, loop_id, task, findings, ref=ref, closeout=closeout,
+                canonical_receipt=canonical_receipt,
+            )
     if len(in_progress) > 1:
         findings.append(
             SuperloopFinding("warn", "multiple_tasks_in_progress", f"Multiple tasks in progress: {', '.join(in_progress)}")
@@ -265,7 +277,15 @@ def _validate_completed_task(
     *,
     ref: str,
     closeout: bool,
+    canonical_receipt: tuple[str, str] | None = None,
 ) -> None:
+    evidence_task = dict(task)
+    if canonical_receipt:
+        dispatch_id, receipt_id = canonical_receipt
+        if not _has_any(task, "dispatch_refs", "dispatch_evidence", "hchat_dispatch_ref", "hchat_request_id"):
+            evidence_task["dispatch_refs"] = [dispatch_id]
+        if not _has_any(task, "receipt_refs", "reply_refs", "hchat_reply_ref", "worker_report_refs", "review_report_refs"):
+            evidence_task["receipt_refs"] = [receipt_id]
     delivery_gaps = task_delivery_gaps(store, loop_id, task)
     if delivery_gaps:
         findings.append(SuperloopFinding(
@@ -273,7 +293,7 @@ def _validate_completed_task(
             f"Completed task has unaccepted delivery checks: {', '.join(delivery_gaps)}.", ref,
         ))
     required_evidence = task.get("required_evidence") or []
-    missing_evidence = _missing_required_evidence(task, required_evidence)
+    missing_evidence = _missing_required_evidence(evidence_task, required_evidence)
     if missing_evidence:
         severity = "error" if closeout else "warn"
         findings.append(
@@ -287,6 +307,34 @@ def _validate_completed_task(
 
     execution_mode = str(task.get("execution_mode") or "")
     if execution_mode == "hchat_agent":
+        if canonical_receipt:
+            # A correlated PAO review and the collected dispatch are an
+            # alternative to a retained transcript projection. Explicitly
+            # contradictory agent/artifact evidence is still reported.
+            if _receipt_source_entries(task):
+                source_findings: list[SuperloopFinding] = []
+                _validate_hchat_receipt_sources(
+                    store, loop_id, evidence_task, source_findings,
+                    ref=ref, closeout=closeout,
+                )
+                stale_transcript = {
+                    "hchat_receipt_transcript_missing",
+                    "hchat_receipt_transcript_unreadable",
+                    "hchat_receipt_transcript_mismatch",
+                }
+                for item in source_findings:
+                    if item.code in stale_transcript:
+                        findings.append(SuperloopFinding(
+                            "legacy", item.code, item.message, item.ref,
+                        ))
+                    else:
+                        findings.append(item)
+            findings.append(SuperloopFinding(
+                "info", "hchat_receipt_canonical_reviewed",
+                "A correlated PAO dispatch and independently reviewed receipt "
+                "provide the receipt evidence.", ref,
+            ))
+            return
         missing = []
         if not _has_any(task, "dispatch_refs", "dispatch_evidence", "hchat_dispatch_ref", "hchat_request_id"):
             missing.append("dispatch")
@@ -304,6 +352,187 @@ def _validate_completed_task(
             )
         elif _has_any(task, "receipt_refs", "reply_refs", "hchat_reply_ref", "worker_report_refs", "review_report_refs"):
             _validate_hchat_receipt_sources(store, loop_id, task, findings, ref=ref, closeout=closeout)
+
+
+def _canonical_hchat_receipt(
+    store: SuperloopStore,
+    loop_id: str,
+    task: dict[str, Any],
+    state: dict[str, Any],
+    dispatches: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    findings: list[SuperloopFinding],
+) -> tuple[str, str] | None:
+    """Recognize an already-admitted, independently reviewed PAO receipt.
+
+    This is a read-only evidence projection. It does not turn transport
+    collection or an unreviewed reply into a task verdict.
+    """
+    task_id = str(task.get("task_id") or "").strip()
+    controller = state.get("controller")
+    if not task_id or not isinstance(controller, dict):
+        return None
+    controller_agent = str(controller.get("agent") or "").strip()
+    controller_instance = str(controller.get("instance") or "").strip()
+    if not controller_agent or not controller_instance:
+        return None
+    # A partial journal cannot establish that no newer attempt superseded the
+    # reviewed one. Keep the existing transcript path available in that case.
+    if any(
+        item.code in {"event_json_invalid", "event_not_object", "jsonl_unreadable"}
+        and str(item.ref or "").split(":", 1)[0] in {"events.jsonl", "dispatches.jsonl"}
+        for item in findings
+    ):
+        return None
+
+    task_rows = [row for row in dispatches if row.get("task_id") == task_id]
+    if not task_rows:
+        return None
+    terminal = task_rows[-1]
+    dispatch_id = str(terminal.get("dispatch_instance_id") or terminal.get("dispatch_id") or "").strip()
+    request_id = str(terminal.get("request_id") or "").strip()
+    if not (terminal.get("schema_version") == 2 and terminal.get("loop_id") == loop_id
+            and terminal.get("terminal") is True and terminal.get("outcome") == "collected"
+            and terminal.get("status") == "collected" and dispatch_id and request_id):
+        return None
+    starts = [
+        (index, row) for index, row in enumerate(task_rows)
+        if str(row.get("dispatch_instance_id") or row.get("dispatch_id") or "").strip() == dispatch_id
+        and row.get("terminal") is False
+    ]
+    if len(starts) != 1:
+        return None
+    start_index, start = starts[0]
+    if not (start.get("schema_version") == 2 and start.get("loop_id") == loop_id
+            and start.get("status") == "accepted" and start.get("request_id") == request_id):
+        return None
+    if any(
+        str(row.get("dispatch_instance_id") or row.get("dispatch_id") or "").strip() != dispatch_id
+        for row in task_rows[start_index:]
+    ):
+        return None
+
+    root = store.loop_dir(loop_id).resolve()
+    try:
+        reviews = json.loads((root / "receipt_reviews.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(reviews, list) or any(not isinstance(row, dict) for row in reviews):
+        return None
+    matching = [
+        row for row in reviews
+        if row.get("task_id") == task_id and row.get("dispatch_instance_id") == dispatch_id
+    ]
+    if len(matching) != 1:
+        return None
+    review = matching[0]
+    def identity(value: Any) -> str:
+        return str(value or "").strip().casefold()
+
+    owner = (identity(task.get("owner_agent")), identity(task.get("owner_instance")))
+    source = (identity(review.get("receipt_from_agent")),
+              identity(review.get("receipt_from_instance")))
+    start_owner = (identity(start.get("owner_agent")), identity(start.get("owner_instance")))
+    destination = (identity(review.get("receipt_to_agent")),
+                   identity(review.get("receipt_to_instance")))
+    if not all(owner):
+        return None
+    # New admissions persist the verified peer; some older dispatch records
+    # already contain the task owner. Do not infer an absent sender from the
+    # current taskboard alone, especially after a task is reassigned.
+    if any(source):
+        if not all(source) or source != owner:
+            return None
+    elif not all(start_owner) or start_owner != owner:
+        return None
+    if any(start_owner) and (not all(start_owner) or start_owner != owner):
+        return None
+    if any(destination) and (
+        not all(destination) or destination != (identity(controller_agent), identity(controller_instance))
+    ):
+        return None
+    receipt_id = str(review.get("receipt_message_id") or "").strip()
+    queued_request_id = str(review.get("controller_request_id") or "").strip()
+    request = review.get("request")
+    recovery = review.get("recovery")
+    observed_request_id = str(review.get("observed_request_id") or "").strip()
+    observed_target = (
+        str(recovery.get("controller_request_id") or "").strip()
+        if isinstance(recovery, dict) and recovery.get("controller_request_id")
+        else queued_request_id
+    )
+    if not (
+        receipt_id and queued_request_id and observed_request_id == observed_target
+        and review.get("status") == "queued" and review.get("review_verified") is True
+        and review.get("followthrough_state") == "reviewed"
+        and review.get("execution_state") == "completed"
+        and review.get("controller_agent") == controller_agent
+        and isinstance(request, dict) and request.get("agent") == controller_agent
+        and str(request.get("session_id") or "").strip()
+    ):
+        return None
+    evidence_ref = review.get("review_evidence_ref")
+    if not isinstance(evidence_ref, str) or not evidence_ref.strip():
+        return None
+    try:
+        evidence_path = (root / evidence_ref).resolve()
+        if not evidence_path.is_relative_to(root) or not evidence_path.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+    admitted = []
+    for index, event in enumerate(events):
+        data, refs, actor = event.get("data"), event.get("refs"), event.get("actor")
+        if not all(isinstance(value, dict) for value in (data, refs, actor)):
+            continue
+        if (
+            event.get("loop_id") == loop_id and event.get("kind") == "receipt.review_queued"
+            and data.get("task_id") == task_id and data.get("request_id") == queued_request_id
+            and refs.get("dispatch_instance_id") == dispatch_id
+            and refs.get("receipt_message_id") == receipt_id
+            and actor.get("kind") == "system" and actor.get("agent") == "superloop_receipts"
+            and str(actor.get("instance") or "").casefold() == controller_instance.casefold()
+        ):
+            admitted.append(index)
+    if len(admitted) != 1:
+        return None
+    # Reopening a task requires evidence for its new attempt.
+    for event in events[admitted[0] + 1:]:
+        data = event.get("data")
+        if not isinstance(data, dict) or data.get("task_id") != task_id:
+            continue
+        if event.get("kind") in {"task.started", "task.added"}:
+            return None
+        if event.get("kind") == "task.status_updated" and data.get("status") != "completed":
+            return None
+
+    # Reject evidence that changed while this read-only validation was
+    # assembling it. This is not a cross-process transaction or a receipt
+    # for future changes; normal task and dispatch coordination still applies.
+    try:
+        for name, expected in (("events.jsonl", events), ("dispatches.jsonl", dispatches)):
+            lines = (root / name).read_text(encoding="utf-8").splitlines()
+            observed = [json.loads(line) for line in lines if line.strip()]
+            if observed != expected:
+                return None
+        if json.loads((root / "receipt_reviews.json").read_text(encoding="utf-8")) != reviews:
+            return None
+        current_state = store.load_loop_state(loop_id)
+        if current_state.get("controller") != controller:
+            return None
+        board_path = store.resolve_loop_path(
+            loop_id, current_state.get("taskboard_path"), "taskboard.json",
+        )
+        current_tasks = [
+            item for item in store.load_loop_json_list(board_path)
+            if item.get("task_id") == task_id
+        ]
+        if current_tasks != [task]:
+            return None
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+    return dispatch_id, receipt_id
 
 
 def _validate_hchat_receipt_sources(
@@ -762,3 +991,4 @@ def _issue_blocks_closeout(issue: dict[str, Any]) -> bool:
         return True
     title = str(issue.get("title") or "").lower()
     return "blocker" in title
+# HASHI-Fingerprint: hfp_c18fb34abd6249e1a8d2715570ca7441

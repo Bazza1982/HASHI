@@ -175,9 +175,14 @@ class RestrictedScriptRuns:
                   "stdout": "", "stderr": "", "outputs": [], "temporary_outputs": True}
         for name, path, maximum in (("stdout", stdout, 128 * 1024), ("stderr", stderr, 64 * 1024)):
             try:
-                result[name] = self._small_file(path, maximum).decode("utf-8", errors="replace")
+                data = self._small_file(path, maximum)
+                result[name] = data.decode("utf-8", errors="replace")
+                if len(data) == maximum:
+                    # Exact-boundary and clipped output cannot be distinguished here.
+                    result[f"{name}_status"] = "possibly_truncated_at_capture_limit"
             except (OSError, ValueError):
                 result[name] = "[output unavailable or above its return limit]"
+                result[f"{name}_status"] = "unavailable"
         total = 0
         for name in record["arguments"]["outputs"]:
             try:
@@ -191,7 +196,10 @@ class RestrictedScriptRuns:
                 result["outputs"].append({"name": name, "error": "temporary output unavailable or above its return limit"})
         payload = json.dumps(result, ensure_ascii=False)
         if len(payload.encode("utf-8")) > 900000:
-            result["stdout"], result["stderr"] = "[output clipped to keep artifacts bounded]", ""
+            for name in ("stdout", "stderr"):
+                if result[name]:
+                    result[name] = "[output omitted due to result size limit]"
+                    result[f"{name}_status"] = "omitted_for_result_budget"
             payload = json.dumps(result, ensure_ascii=False)
         return payload
 

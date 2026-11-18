@@ -11,11 +11,14 @@ import mimetypes
 import os
 import re
 import sqlite3
+import sys
+import tempfile
 import time
 from collections.abc import Mapping
 from datetime import datetime
 import ipaddress
 from pathlib import Path
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -24,6 +27,7 @@ from aiohttp import web
 
 from orchestrator.message_freshness import (
     classify_freshness,
+    normalize_session_message_age_policy,
     CONFIRMATION_EXPIRY_SECONDS,
     FRESHNESS_TELEGRAM_SECONDS,
     FRESHNESS_WORKBENCH_LOCAL_SECONDS,
@@ -61,6 +65,7 @@ from orchestrator.agent_management import (
     AgentManagementManager,
 )
 from orchestrator.agent_overview import build_agent_overview
+from orchestrator.history_search import history_search_limits
 from orchestrator.chat_transcript_projection import (
     build_agent_history_projection,
     build_chat_projection,
@@ -72,7 +77,8 @@ from orchestrator.config_json import (
     read_config_json,
 )
 from orchestrator.telegram_access import (
-    LEGACY_AGENT_USERS_KEY, SCOPED_ACCESS_PROTOCOL_VERSION, TelegramAccessError, TelegramAccessService,
+    TelegramAccessError, TelegramAccessService, page_access_projection,
+    parse_access_paging,
 )
 from orchestrator.telegram_credential import (
     TelegramCredentialError,
@@ -80,7 +86,7 @@ from orchestrator.telegram_credential import (
     verify_telegram_bot_token,
 )
 from orchestrator.telegram_credential_activation import TelegramCredentialActivation
-from orchestrator.workbench_auth import _windows_remote_runtime_sids
+from orchestrator.workbench_auth import resolve_remote_runtime_sids
 from orchestrator.conversation_router import ConversationRouter
 from orchestrator.enterprise.audit_export import format_otel_log, format_siem_event
 from orchestrator.demo.api import DemoConnector
@@ -177,7 +183,7 @@ from orchestrator.message_context import (
     verify_connector_evidence,
 )
 from orchestrator.private_authorization import (
-    public_private_authorization_capabilities,
+    load_private_authorization_config, public_private_authorization_capabilities,
 )
 from orchestrator.ui_language import normalize_locale, preferred_locale, tr
 from orchestrator.multimodal_contract import (
@@ -194,10 +200,13 @@ from orchestrator.session_store import (
     MAX_SESSION_MESSAGE_CHARS,
     SESSION_KIND_CONVERSATION,
     TERMINAL_RUN_STATES,
+    ExistingRunNotFound,
     IdempotencyConflict,
     SessionConflict,
     SessionNotFound,
+    SessionStorageBusy,
     SessionStore,
+    attachment_storage_wait_ms,
 )
 from orchestrator.transfer_store import TransferStore
 from orchestrator.voice_synthesizer import VoiceSynthesisError, safe_voice_error_detail
@@ -441,28 +450,26 @@ class WorkbenchApiServer:
             getattr(self.global_config, "secrets_path", None)
             or Path(self.config_path).parent / "secrets.json"
         )
-        remote_shared_token = self.secrets.get("hashi_remote_shared_token")
-        remote_access_configured = (
-            isinstance(remote_shared_token, str) and bool(remote_shared_token.strip())
-        ) or bool(os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip())
-        remote_runtime_sids = ()
-        if (
-            getattr(self.global_config, "deployment_profile", "personal")
-            == "personal"
-            and remote_access_configured
-        ):
-            remote_runtime_sids = _windows_remote_runtime_sids(
-                Path(secrets_path).expanduser().resolve().parent
+        def remote_consumers_for_write(document):
+            token = document.get("hashi_remote_shared_token")
+            configured = (isinstance(token, str) and bool(token.strip())) or bool(
+                os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()
             )
+            if (getattr(self.global_config, "deployment_profile", "personal") != "personal"
+                    or not configured):
+                return ()
+            return resolve_remote_runtime_sids(Path(secrets_path).expanduser().resolve().parent)
+
         self.telegram_credential_service = TelegramCredentialService(
             config_path=self.config_path,
             secrets_path=secrets_path,
             state_root=getattr(self.global_config, "bridge_home", None),
             verify_bot=telegram_bot_verifier or verify_telegram_bot_token,
-            private_full_control_sids=remote_runtime_sids,
+            private_full_control_sids_resolver=remote_consumers_for_write,
         )
         self.telegram_access_service = TelegramAccessService(
             config_path=self.config_path, secrets_path=secrets_path,
+            state_root=getattr(self.global_config, "bridge_home", None),
         )
         self.telegram_activation = TelegramCredentialActivation(
             status=self._telegram_credential_base_status, runtime_map=self._runtime_map,
@@ -516,10 +523,69 @@ class WorkbenchApiServer:
         @web.middleware
         async def runtime_admission(request, handler):
             if getattr(self.orchestrator, "_handoff_draining", False):
-                return web.json_response({"error": "shared_functions_draining"}, status=503,
-                                         headers={"Retry-After": "1", "Connection": "close"})
+                durable_reads = (
+                    self.handle_v1_sessions_list,
+                    self.handle_v1_session_get,
+                    self.handle_v1_session_snapshot,
+                    self.handle_v1_session_messages,
+                    self.handle_v1_session_run_get,
+                )
+                plain_events = (
+                    handler == self.handle_v1_session_events
+                    and not str(request.query.get("consumer_id") or "").strip()
+                )
+                if (request.method == "GET"
+                        and getattr(self.orchestrator, "_shared_committed", False)
+                        and (handler in durable_reads or plain_events)):
+                    # These handlers read existing owner-scoped data only.
+                    # Consumer polling is excluded because it writes a cursor.
+                    if not self._is_governed_profile() and not self._check_admin_auth(request):
+                        return web.json_response({"error": "not_authenticated"}, status=401,
+                                                 headers={"Cache-Control": "no-store"})
+                    response = await handler(request)
+                    response.headers["Cache-Control"] = "no-store"
+                    return response
+                if request.method == "GET" and request.path == "/api/health":
+                    # Build a minimal snapshot without calling the normal health
+                    # handler: some governed health services initialize storage.
+                    return web.json_response({
+                        "ok": True,
+                        "instance_id": getattr(self.global_config, "instance_id", None) or "HASHI",
+                        "kernel_pid": getattr(self.orchestrator, "kernel_pid", None),
+                        "agents": [runtime.name for runtime in self._runtime_list()
+                                   if getattr(runtime, "startup_success", False)],
+                        "ready": False,
+                        "status": "draining",
+                        "shared_functions": {
+                            "pid": os.getpid(),
+                            "generation_id": getattr(self.orchestrator, "shared_generation_id", None),
+                            "draining": True,
+                        },
+                    }, headers={"Cache-Control": "no-store", "Retry-After": "1"})
+                # Only the existing exact-Run stop endpoints remain available,
+                # and only until the retiring generation seals its handoff.
+                stop_allowed = (
+                    request.method == "POST"
+                    and handler in (self.handle_v1_session_run_cancel, self.handle_request_cancel)
+                    and getattr(self.orchestrator, "_shared_committed", False)
+                    and not getattr(self.orchestrator, "_handoff_cancel_sealed", True)
+                )
+                if not stop_allowed:
+                    return web.json_response({"error": "shared_functions_draining"}, status=503,
+                                             headers={"Retry-After": "1", "Connection": "close"})
+                if not self._is_governed_profile() and not self._check_admin_auth(request):
+                    return web.json_response({"error": "not_authenticated"}, status=401,
+                                             headers={"Cache-Control": "no-store"})
             owner = self.orchestrator
-            tracked = owner is not None and request.method != "GET"
+            write_capable_get = request.method == "GET" and (
+                handler == self.handle_v1_sessions_list
+                or handler == self.handle_v1_agent_primary_session
+                or handler == self.handle_chat_projection
+                or handler == self.handle_v2_frontend_feed
+                or (handler == self.handle_v1_session_events
+                    and bool(str(request.query.get("consumer_id") or "").strip()))
+            )
+            tracked = owner is not None and (request.method != "GET" or write_capable_get)
             if tracked:
                 outstanding = max(
                     0, int(getattr(owner, "_handoff_requests", 0) or 0)
@@ -806,6 +872,9 @@ class WorkbenchApiServer:
             self.handle_admin_agent_deletion_status,
         )
         self.app.router.add_get("/api/v1/capabilities", self.handle_v1_capabilities)
+        self.app.router.add_post(
+            "/api/v1/workbench-local-paths/verify", self.handle_v1_workbench_local_paths_verify,
+        )
         self.app.router.add_get(
             "/api/v2/frontend/capabilities",
             self.handle_v2_frontend_capabilities,
@@ -871,6 +940,11 @@ class WorkbenchApiServer:
                 "GET",
                 "/api/v1/sessions/{session_id}/messages",
                 self.handle_v1_session_messages,
+            ),
+            (
+                "GET",
+                "/api/v1/sessions/{session_id}/messages/{message_id}/quote-source",
+                self.handle_v1_session_quote_source,
             ),
             (
                 "POST",
@@ -994,6 +1068,7 @@ class WorkbenchApiServer:
                 self.handle_v1_agent_history,
             ),
             ("POST", "/api/v1/agents/{agent_id}/history/search", self.handle_v1_agent_history_search),
+            ("GET", "/api/v1/session-history/agents", self.handle_v1_history_agents),
             ("GET", "/api/v1/attachment-catalogue", self.handle_v1_attachment_catalogue),
             ("GET", "/api/v1/attachment-catalogue/source", self.handle_v1_attachment_catalogue_source),
             ("GET", "/api/v1/file-content/capabilities", self.handle_v1_file_content_capabilities),
@@ -1029,6 +1104,10 @@ class WorkbenchApiServer:
         )
         self.app.router.add_post(
             "/api/agents/{name}/active", self.handle_agent_active
+        )
+        self.app.router.add_get(
+            "/api/agents/{name}/active/operations/{operation_id}",
+            self.handle_agent_lifecycle_operation,
         )
         self.app.router.add_get("/api/transcript/{name}", self.handle_transcript_recent)
         self.app.router.add_get(
@@ -1101,6 +1180,10 @@ class WorkbenchApiServer:
         self.app.router.add_get(
             "/api/agents/{name}/scheduler/jobs",
             self.handle_agent_scheduler_jobs,
+        )
+        self.app.router.add_post(
+            "/api/agents/{name}/scheduler/token/renew",
+            self.handle_scheduler_token_renewal,
         )
         self.app.router.add_post(
             "/api/agents/{name}/scheduler/jobs",
@@ -1502,6 +1585,7 @@ class WorkbenchApiServer:
         operation: str,
         agent_id: str | None,
         payload: Mapping[str, Any],
+        request_id_override: str | None = None,
     ) -> AgentManagementAction:
         owner_id = self._v1_owner_id(request)
         if owner_id is None:
@@ -1519,7 +1603,8 @@ class WorkbenchApiServer:
             )
             headers = getattr(request, "headers", {}) or {}
             request_id = str(
-                headers.get("Idempotency-Key")
+                request_id_override
+                or headers.get("Idempotency-Key")
                 or headers.get("X-Request-ID")
                 or f"api-agent-control-{uuid4().hex}"
             ).strip()
@@ -1926,7 +2011,7 @@ class WorkbenchApiServer:
         return request.headers.get("X-Workbench-Session", "").strip()
 
     def _enterprise_user_from_request(self, request):
-        if self.identity_service is None:
+        if getattr(self, "identity_service", None) is None:
             return None
         token = self._bearer_token_from_request(request)
         if not token:
@@ -2410,6 +2495,10 @@ class WorkbenchApiServer:
                 hashi_root=self.config_path.parent,
                 runtime_map=self._runtime_map,
                 session_store=self.session_store,
+                personal_owner_id=lambda: (
+                    None if self._is_governed_profile()
+                    else SessionStore.owner_id_for(self.global_config)
+                ),
             )
         return self._exchange_ingress
 
@@ -5435,75 +5524,58 @@ class WorkbenchApiServer:
             status=int(outcome.get("status", 201)),
         )
 
-    def _telegram_access_management_supported(self, agent_id: str, *, global_change: bool = False) -> bool:
-        """Check the exact Agent; global changes require every affected Worker."""
+    async def _telegram_access_adoption(self, agent_id: str, *, expected_revision: str) -> dict[str, Any]:
+        """Report actual per-Worker observation without blocking desired settings."""
         try:
-            document = read_config_json(self.config_path)
+            document = await asyncio.to_thread(read_config_json, self.config_path)
             rows = document.get("agents")
-            if not isinstance(rows, list) or not rows:
-                return False
-            active, configured, legacy_holders = set(), set(), set()
-            for row in rows:
-                if not isinstance(row, Mapping):
-                    return False
-                name = str(row.get("name") or "").strip().casefold()
-                if not name or name in configured:
-                    return False
-                configured.add(name)
-                extra = row.get("extra")
-                if extra is None:
-                    extra = {}
-                if not isinstance(extra, Mapping):
-                    return False
-                if any(source.get(LEGACY_AGENT_USERS_KEY) not in (None, [])
-                       for source in (row, extra)):
-                    legacy_holders.add(name)
-                if row.get("is_active", True) is not False:
-                    active.add(name)
-            target = str(agent_id or "").strip().casefold()
+            if not isinstance(rows, list):
+                raise ValueError("Agent configuration is unavailable")
+            names = [str(row.get("name") or "").strip() for row in rows if isinstance(row, Mapping)]
+            if not names or any(not name for name in names):
+                raise ValueError("Agent configuration is unavailable")
             runtimes = self._runtime_map()
-            if target not in configured or target not in runtimes:
-                return False
 
-            def compatible(runtime):
-                if not getattr(runtime, "is_function_worker_proxy", False):
-                    return False
-                reader = getattr(runtime, "get_runtime_metadata", None)
-                metadata = reader() if callable(reader) else None
-                if not isinstance(metadata, Mapping):
-                    return False
-                protocol = metadata.get("telegram_scoped_access_protocol")
-                return (
-                    type(protocol) is int and protocol == SCOPED_ACCESS_PROTOCOL_VERSION
-                    and metadata.get("worker_phase") == "ACTIVE"
-                    and metadata.get("worker_accepting") is True
-                )
+            async def observe(name: str) -> dict[str, str]:
+                runtime = runtimes.get(name.casefold())
+                if runtime is None:
+                    return {"agent_id": name, "state": "offline"}
+                observer = getattr(runtime, "observe_telegram_access_policy", None)
+                if not getattr(runtime, "is_function_worker_proxy", False) or not callable(observer):
+                    return {"agent_id": name, "state": "pending"}
+                try:
+                    desired = await asyncio.to_thread(self.telegram_access_service.status, name)
+                    actual = await asyncio.wait_for(observer(), timeout=3.0)
+                    state = "applied" if actual == desired["policy_revision"] else "pending"
+                except Exception:
+                    state = "pending"
+                return {"agent_id": name, "state": state}
 
-            if not compatible(runtimes[target]):
-                return False
-            if not global_change:
-                return True
-            # A legacy holder may later return with an old cached allowlist.
-            required = active | legacy_holders
-            if not required.issubset(runtimes) or not set(runtimes).issubset(configured):
-                return False
-            return all(compatible(runtime) for runtime in runtimes.values())
+            consumers = await asyncio.gather(*(observe(name) for name in names))
+            latest = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
+            if not hmac.compare_digest(str(latest["revision"]), str(expected_revision)):
+                # The displayed desired settings changed while observations
+                # were in flight; never claim adoption for a different version.
+                raise ValueError("Telegram access settings changed during observation")
+            selected = next((item for item in consumers if item["agent_id"].casefold() == agent_id.casefold()), None)
+            if selected is None:
+                raise ValueError("Agent configuration is unavailable")
+            return {
+                "agent": selected,
+                "global": {"state": "applied" if all(item["state"] == "applied" for item in consumers) else "pending",
+                           "consumers": consumers},
+            }
         except Exception:
-            # A missing or unreadable compatibility signal must fail closed.
-            return False
+            return {"agent": {"agent_id": agent_id, "state": "unknown"},
+                    "global": {"state": "unknown", "consumers": []}}
 
-    def _telegram_access_denial(self, request, *, global_change: bool = False):
+    def _telegram_access_denial(self, request):
         if (
             (not self._is_governed_profile() and not self.admin_token)
             or not self._check_admin_auth(request)
         ):
             return self._telegram_credential_response(
                 {"ok": False, "error_code": "admin_auth_failed"}, status=403
-            )
-        agent_id = str(request.match_info.get("agent_id") or "").strip()
-        if not self._telegram_access_management_supported(agent_id, global_change=global_change):
-            return self._telegram_credential_response(
-                {"ok": False, "error_code": "telegram_access_unavailable"}, status=501
             )
         return None
 
@@ -5513,21 +5585,29 @@ class WorkbenchApiServer:
             return denied
         agent_id = str(request.match_info.get("agent_id") or "").strip()
         try:
+            paging = parse_access_paging(getattr(request, "query", {}))
             snapshot = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
+            snapshot = page_access_projection(snapshot, paging)
         except TelegramAccessError as exc:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
         return self._telegram_credential_response(
             {"ok": True, "management_supported": True,
-             "global_management_supported": self._telegram_access_management_supported(
-                 agent_id, global_change=True), **snapshot}
+             "global_management_supported": True,
+             "policy_adoption": await self._telegram_access_adoption(agent_id, expected_revision=snapshot["revision"]), **snapshot}
         )
 
     async def handle_admin_agent_telegram_access_change(self, request):
         denied = self._telegram_access_denial(request)
         if denied is not None:
             return denied
+        try:
+            paging = parse_access_paging(getattr(request, "query", {}), allow_revision=False)
+        except TelegramAccessError as exc:
+            return self._telegram_credential_response(
+                {"ok": False, "error_code": exc.error_code}, status=exc.status_code
+            )
         try:
             payload = await request.json()
         except Exception:
@@ -5539,12 +5619,17 @@ class WorkbenchApiServer:
                 {"ok": False, "error_code": "invalid_request"}, status=400
             )
         agent_id = str(request.match_info.get("agent_id") or "").strip()
-        if payload["scope"] == "global":
-            denied = self._telegram_access_denial(request, global_change=True)
-            if denied is not None:
-                return denied
+        prior_users = {}
+        if payload["action"] == "add":
+            for target in self._runtime_map():
+                try:
+                    prior_users[target] = self.telegram_credential_service.context(
+                        target
+                    ).authorized_user_configured
+                except Exception as exc:
+                    logger.warning("Telegram access readiness unavailable before update: agent=%s error_type=%s",
+                                   target, type(exc).__name__)
         try:
-            previous = await asyncio.to_thread(self.telegram_access_service.status, agent_id)
             snapshot = await asyncio.to_thread(
                 self.telegram_access_service.change, agent_id, **payload
             )
@@ -5552,14 +5637,18 @@ class WorkbenchApiServer:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
+        snapshot = page_access_projection(snapshot, paging)
         # A Token may have been saved before the first authorized user. Finish
-        # the existing exact-Agent activation only when that prerequisite first
-        # becomes available; later access-list edits remain live policy changes.
-        if previous["primary_user_id"] is None and snapshot["primary_user_id"] is not None:
-            for target in self._runtime_map():
+        # exact-Agent activation when any effective user first becomes available,
+        # regardless of whether a primary Telegram account is configured.
+        if prior_users:
+            for target, had_user in prior_users.items():
+                if had_user:
+                    continue
                 try:
                     credential = self._telegram_credential_status(target)
-                    if credential["configured"] and credential["activation_status"] == "pending":
+                    if (credential["configured"] and credential["authorized_user_configured"]
+                            and credential["activation_status"] == "pending"):
                         await self._activate_saved_telegram_credential(request, credential)
                 except Exception as exc:
                     # Access is already committed; a failed adoption must never
@@ -5568,8 +5657,8 @@ class WorkbenchApiServer:
                                    target, type(exc).__name__)
         return self._telegram_credential_response(
             {"ok": True, "management_supported": True,
-             "global_management_supported": self._telegram_access_management_supported(
-                 agent_id, global_change=True), **snapshot}
+             "global_management_supported": True,
+             "policy_adoption": await self._telegram_access_adoption(agent_id, expected_revision=snapshot["revision"]), **snapshot}
         )
 
     def _telegram_credential_response(self, payload: dict, *, status: int = 200):
@@ -5591,10 +5680,13 @@ class WorkbenchApiServer:
         return self.telegram_credential_service.status(
             agent_id, runtime_active=self._telegram_credential_runtime_active(agent_id),
             runtime_metadata=self._telegram_credential_runtime_metadata(agent_id),
+            include_activation_binding=True,
         )
 
     def _telegram_credential_status(self, agent_id: str) -> dict:
-        return self.telegram_activation.project(self._telegram_credential_base_status(agent_id))
+        result = self.telegram_activation.project(self._telegram_credential_base_status(agent_id))
+        result.pop("_activation_binding", None)
+        return result
 
     async def _execute_telegram_credential_activation(self, runtime, owner, invocation_id):
         return await try_execute_slash_command_text(
@@ -5726,12 +5818,16 @@ class WorkbenchApiServer:
                 },
                 status=400,
             )
-        allowed = {"token", "expected_revision", "replace_existing"}
+        allowed = {"token", "expected_revision", "replace_existing", "save_unverified"}
+        verify_pending = isinstance(payload, dict) and payload.get("verify_pending") is True
         if (
             not isinstance(payload, dict)
-            or set(payload) - allowed
-            or "token" not in payload
-            or "expected_revision" not in payload
+            or (verify_pending and set(payload) != {"expected_revision", "verify_pending"})
+            or (not verify_pending and (
+                set(payload) - allowed or "token" not in payload
+                or "expected_revision" not in payload
+                or not isinstance(payload.get("save_unverified", False), bool)
+            ))
         ):
             return self._telegram_credential_response(
                 {
@@ -5744,13 +5840,21 @@ class WorkbenchApiServer:
         agent_id = str(request.match_info.get("agent_id") or "").strip()
         runtime_active = self._telegram_credential_runtime_active(agent_id)
         try:
-            result = await self.telegram_credential_service.replace(
-                agent_id,
-                token=payload.get("token"),
-                expected_revision=payload.get("expected_revision"),
-                replace_existing=payload.get("replace_existing", False),
-                runtime_active=runtime_active,
-            )
+            if verify_pending:
+                result = await self.telegram_credential_service.verify_pending(
+                    agent_id, expected_revision=payload.get("expected_revision"),
+                    runtime_active=runtime_active,
+                )
+            else:
+                result = await self.telegram_credential_service.replace(
+                    agent_id,
+                    token=payload.get("token"),
+                    expected_revision=payload.get("expected_revision"),
+                    replace_existing=payload.get("replace_existing", False),
+                    runtime_active=runtime_active,
+                    save_unverified=payload.get("save_unverified", False),
+                    runtime_metadata=self._telegram_credential_runtime_metadata(agent_id),
+                )
         except TelegramCredentialError as exc:
             return self._telegram_credential_response(
                 {
@@ -5775,7 +5879,8 @@ class WorkbenchApiServer:
             result["replaced"],
             runtime_active,
         )
-        await self._activate_saved_telegram_credential(request, result)
+        if not result.get("pending_verification"):
+            await self._activate_saved_telegram_credential(request, result)
         return self._telegram_credential_response(result)
 
     async def handle_admin_agent_telegram_mirror_policy_update(self, request):
@@ -6092,7 +6197,7 @@ class WorkbenchApiServer:
         emoji = None
         if has_display_name:
             display_name = str(payload.get("display_name") or "").strip()
-            if not display_name or len(display_name) > 160:
+            if not display_name:
                 return web.json_response(
                     {"ok": False, "error": "display_name is invalid"}, status=400
                 )
@@ -6148,6 +6253,14 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "boolean is_active is required"},
                 status=400,
             )
+        operation_id = payload.get("operation_id")
+        if operation_id is not None and (
+            not isinstance(operation_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", operation_id)
+        ):
+            return web.json_response(
+                {"ok": False, "error_code": "invalid_lifecycle_operation"}, status=400
+            )
 
         try:
             action = self._agent_management_action(
@@ -6156,6 +6269,7 @@ class WorkbenchApiServer:
                 operation="lifecycle.set_active",
                 agent_id=name,
                 payload={"is_active": desired},
+                request_id_override=operation_id,
             )
             outcome = await self._agent_management_manager().dispatch(
                 action,
@@ -6173,6 +6287,7 @@ class WorkbenchApiServer:
                     "error": str(outcome.get("error") or outcome.get("message") or "Agent lifecycle control failed."),
                     "error_code": str(outcome.get("error_code") or "agent_lifecycle_failed"),
                     "state": str(outcome.get("state") or "failed"),
+                    "operation_id": outcome.get("operation_id"),
                     "replayed": bool(outcome.get("replayed")),
                 },
                 status=int(outcome.get("status", 400)),
@@ -6187,9 +6302,54 @@ class WorkbenchApiServer:
                 "ok": True,
                 "agent": metadata,
                 "lifecycle": lifecycle,
+                "operation_id": outcome.get("operation_id"),
             },
             status=int(outcome.get("status", 200)),
         )
+
+    async def handle_agent_lifecycle_operation(self, request):
+        """Read the exact owner's committed lifecycle result; never redispatch it."""
+        if not self._check_admin_auth(request):
+            return web.json_response({"ok": False, "error_code": "not_authenticated"}, status=403)
+        owner_id = self._v1_owner_id(request)
+        if owner_id is None:
+            return web.json_response({"ok": False, "error_code": "not_authenticated"}, status=401)
+        name = str(request.match_info.get("name") or "").strip()
+        operation_id = str(request.match_info.get("operation_id") or "").strip()
+        if not name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", operation_id):
+            return web.json_response({"ok": False, "error_code": "invalid_lifecycle_operation"}, status=400)
+        try:
+            receipt = self.session_store.agent_lifecycle_operation(
+                owner_id=owner_id, agent_id=name, request_id=operation_id
+            )
+        except SessionConflict:
+            return web.json_response({"ok": False, "error_code": "lifecycle_receipt_unavailable"}, status=409)
+        if receipt is None:
+            return web.json_response({"ok": False, "error_code": "lifecycle_operation_not_found"}, status=404)
+        manager = self._agent_management_manager()
+        row = manager._agent_row(name)
+        if row is None or manager._target_generation(name, row) != receipt["target_generation"]:
+            return web.json_response({"ok": False, "error_code": "lifecycle_target_changed"}, status=409)
+        result = receipt["response"]
+        if receipt["state"] != "completed":
+            state = "pending"
+        elif result.get("ok") is False and result.get("state") == "failed":
+            state = "failed"
+        elif result.get("ok") is True and result.get("state") in {"starting", "succeeded"}:
+            state = str(result["state"])
+        else:
+            state = "unknown"
+        body = {
+            "ok": True,
+            "operation_id": operation_id,
+            "agent_id": name,
+            "desired_active": receipt["desired_active"],
+            "state": state,
+        }
+        if state == "failed":
+            code = str(result.get("error_code") or "agent_lifecycle_failed")
+            body["error_code"] = code if re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", code) else "agent_lifecycle_failed"
+        return web.json_response(body, headers={"Cache-Control": "no-store"})
 
     def _can_view_deletion_revision(self, request, agent_name: str) -> bool:
         """Only an authenticated owner with Agent visibility receives a revision."""
@@ -6198,6 +6358,8 @@ class WorkbenchApiServer:
         if not self._is_governed_profile():
             return True
         user = self._enterprise_user_from_request(request)
+        if user is None:
+            return False
         rows = self._filter_enterprise_agent_rows_for_user(user, self._load_agent_rows())
         return any(str(row.get("name") or "") == agent_name for row in rows)
 
@@ -6263,16 +6425,13 @@ class WorkbenchApiServer:
                 payload = await request.json()
             except Exception:
                 payload = {}
-            if removing and (not isinstance(payload, dict)
-                             or payload.get("authorization") != "explicit_user_authorization"):
-                return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
             if not isinstance(payload, dict) or not re.fullmatch(r"(?:main|[1-9])", slot):
                 return web.json_response({"ok": False, "error_code": "invalid_target"}, status=400)
             expected = payload.get("expected_revision")
             if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
                 return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
             if removing:
-                if set(payload) != {"expected_revision", "authorization"}:
+                if set(payload) not in ({"expected_revision"}, {"expected_revision", "authorization"}):
                     return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
             else:
                 raw_path = payload.get("path")
@@ -6285,7 +6444,9 @@ class WorkbenchApiServer:
 
             phase = "read"
             state = normalize_workzone_state(
-                self.session_store.get_agent_workzone_set(owner_id=owner, agent_id=name)
+                await asyncio.to_thread(
+                    self.session_store.get_agent_workzone_set, owner_id=owner, agent_id=name
+                )
             )
             if int(state["revision"]) != expected:
                 return web.json_response({"ok": False, "error_code": "workzone_revision_conflict"}, status=409)
@@ -6317,12 +6478,14 @@ class WorkbenchApiServer:
             phase, dispatched = "persist", True
             try:
                 if removing:
-                    updated = self.session_store.delete_agent_workzone_slot(
+                    updated = await self._await_session_storage(
+                        self.session_store.delete_agent_workzone_slot,
                         owner_id=owner, agent_id=name, slot_id=slot,
                         expected_revision=expected, source="frontend_workzone",
                     )
                 else:
-                    updated = self.session_store.set_agent_workzone_slot(
+                    updated = await self._await_session_storage(
+                        self.session_store.set_agent_workzone_slot,
                         owner_id=owner, agent_id=name, slot_id=slot, path=str(path),
                         enabled=True if payload["mode"] == "add" else None,
                         expected_revision=expected, source="frontend_workzone",
@@ -6370,10 +6533,10 @@ class WorkbenchApiServer:
                 payload = await request.json()
             except Exception:
                 payload = {}
-            if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
-                return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+            if not isinstance(payload, dict):
+                return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
             revision = payload.get("expected_revision")
-            if (set(payload) != {"authorization", "expected_revision"}
+            if (set(payload) not in ({"expected_revision"}, {"authorization", "expected_revision"})
                 or not re.fullmatch(r"[1-9][0-9]{0,15}", slot) or int(slot) > 9007199254740991
                 or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)):
                 return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
@@ -6426,8 +6589,8 @@ class WorkbenchApiServer:
                 payload = await request.json()
             except Exception:
                 payload = {}
-            if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
-                return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+            if not isinstance(payload, dict):
+                return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
             revision = payload.get("expected_revision")
             if slot not in {str(index) for index in range(1, 11)} or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision):
                 return web.json_response({"ok": False, "error": "invalid slot or revision"}, status=400)
@@ -6484,15 +6647,18 @@ class WorkbenchApiServer:
         workspace = str(metadata.get("workspace_dir") or "").strip()
         if not workspace:
             return web.json_response({"ok": False, "error_code": "pcm_unavailable"}, status=503)
+        max_bytes = getattr(self.global_config, "agent_document_max_bytes", MAX_AGENT_PCM_BYTES)
+        if type(max_bytes) is not int or max_bytes < 1:
+            return web.json_response({"ok": False, "error_code": "pcm_limit_invalid"}, status=503)
         try:
             if request.method == "GET":
-                result = await asyncio.to_thread(read_agent_pcm, workspace)
+                result = await asyncio.to_thread(read_agent_pcm, workspace, max_bytes=max_bytes)
             else:
                 chunks = bytearray()
                 async for chunk in request.content.iter_chunked(65536):
                     chunks.extend(chunk)
-                    if len(chunks) > 6 * MAX_AGENT_PCM_BYTES + 4096:
-                        return web.json_response({"ok": False, "error_code": "pcm_too_large"}, status=413)
+                    if len(chunks) > 6 * max_bytes + 4096:
+                        return web.json_response({"ok": False, "error_code": "pcm_too_large", "max_document_bytes": max_bytes}, status=413)
                 try:
                     payload = json.loads(chunks.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -6500,18 +6666,18 @@ class WorkbenchApiServer:
                 if not isinstance(payload, dict) or set(payload) != {"expected_revision", "content"}:
                     return web.json_response({"ok": False, "error_code": "invalid_action"}, status=400)
                 result = await asyncio.to_thread(
-                    replace_agent_pcm, workspace, payload["expected_revision"], payload["content"],
+                    replace_agent_pcm, workspace, payload["expected_revision"], payload["content"], max_bytes=max_bytes,
                 )
         except PCMValidationError as exc:
             status = 409 if exc.code == "pcm_conflict" else 413 if exc.code == "pcm_too_large" else 400
             if exc.code in {"pcm_unreadable", "pcm_missing", "pcm_symlink_forbidden"}:
                 status = 503
-            return web.json_response({"ok": False, "error_code": exc.code}, status=status,
+            return web.json_response({"ok": False, "error_code": exc.code, **({"max_document_bytes": max_bytes} if exc.code == "pcm_too_large" else {})}, status=status,
                                      headers={"Cache-Control": "no-store"})
         except (OSError, TimeoutError):
             return web.json_response({"ok": False, "error_code": "outcome_unknown"}, status=503,
                                      headers={"Cache-Control": "no-store"})
-        return web.json_response({"ok": True, **result}, headers={"Cache-Control": "no-store"})
+        return web.json_response({"ok": True, **result, "max_document_bytes": max_bytes}, headers={"Cache-Control": "no-store"})
 
     async def handle_agent_overview(self, request):
         name = str(request.match_info.get("name") or "").strip()
@@ -6565,7 +6731,7 @@ class WorkbenchApiServer:
         name = request.match_info["name"]
         limit = max(1, min(int(request.query.get("limit", 50)), 200))
         agent_row = next(
-            (row for row in self._load_agent_rows() if row["name"] == name), None
+            (row for row in self._load_agent_rows(include_inactive=True) if row["name"] == name), None
         )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
@@ -6623,7 +6789,7 @@ class WorkbenchApiServer:
                 status=400,
             )
         agent_row = next(
-            (row for row in self._load_agent_rows() if row["name"] == name), None
+            (row for row in self._load_agent_rows(include_inactive=True) if row["name"] == name), None
         )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
@@ -6643,12 +6809,13 @@ class WorkbenchApiServer:
         if owner_id is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         agent_row = next(
-            (row for row in self._load_agent_rows() if row["name"] == name), None
+            (row for row in self._load_agent_rows(include_inactive=True) if row["name"] == name), None
         )
         if agent_row is None:
             return web.json_response({"error": "agent not found"}, status=404)
         try:
-            attachment = self.session_store.visible_agent_message_attachment(
+            attachment = await asyncio.to_thread(
+                self.session_store.visible_agent_message_attachment,
                 owner_id=owner_id,
                 agent_id=name,
                 message_id=request.match_info["message_id"],
@@ -6727,19 +6894,11 @@ class WorkbenchApiServer:
             is_download = str(
                 request.query.get("download") or ""
             ).strip().casefold() in {"1", "true", "yes"}
-            size_limit = (
-                25 * 1024 * 1024
-                if disposition_inline and not is_download
-                else MAX_SESSION_ATTACHMENT_BYTES
-            )
-            if actual_size > size_limit:
-                raise SessionConflict("visible attachment exceeds the allowed size limit")
+            if disposition_inline and not is_download and actual_size > 25 * 1024 * 1024:
+                raise SessionConflict("visible attachment exceeds the preview size limit")
             if expected_size and expected_size != actual_size:
                 raise SessionConflict("visible attachment size changed")
-            payload = candidate.read_bytes()
             expected_digest = str(attachment.get("sha256") or "").strip().casefold()
-            if expected_digest and hashlib.sha256(payload).hexdigest() != expected_digest:
-                raise SessionConflict("visible attachment content changed")
 
             disposition_type = "attachment" if (is_download or not disposition_inline) else "inline"
             filename = str(attachment.get("filename") or candidate.name).strip()
@@ -6752,15 +6911,28 @@ class WorkbenchApiServer:
                 encoded_name = quote(filename)
                 content_disposition = f"{disposition_type}; filename*=UTF-8''{encoded_name}"
 
-            return web.Response(
-                body=payload,
-                content_type=mime_type,
-                headers={
-                    "Cache-Control": "private, no-store",
-                    "Content-Disposition": content_disposition,
-                    "X-Content-Type-Options": "nosniff",
-                },
-            )
+            headers = {
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": content_disposition,
+                "X-Content-Type-Options": "nosniff",
+            }
+            if actual_size > 8 * 1024 * 1024:
+                from orchestrator.transcript_attachment_stream import stream_verified_attachment
+
+                return await stream_verified_attachment(
+                    request, candidate, observed_size=actual_size, expected_digest=expected_digest,
+                    content_type=mime_type, headers=headers,
+                )
+
+            payload = await asyncio.to_thread(candidate.read_bytes)
+            if len(payload) != actual_size:
+                raise SessionConflict("visible attachment size changed")
+            actual_digest = hashlib.sha256(payload).hexdigest()
+            if expected_digest and actual_digest != expected_digest:
+                raise SessionConflict("visible attachment content changed")
+            headers["X-Hashi-Attachment-SHA256"] = actual_digest
+            headers["ETag"] = f'"{actual_digest}"'
+            return web.Response(body=payload, content_type=mime_type, headers=headers)
         except FileNotFoundError:
             return self._v1_error(
                 SessionNotFound("visible attachment is unavailable")
@@ -6802,17 +6974,20 @@ class WorkbenchApiServer:
     async def _cancel_selected_run_result(self, run, *, owner_id: str, reason: str, source: str):
         """Cancel one PAO-selected Run without coupling the result to HTTP."""
 
-        def audit(status, error_code=""):
-            self.session_store.record_run_control(
+        async def audit(status, error_code=""):
+            await self._await_session_storage(
+                self.session_store.record_run_control,
                 run["run_id"], owner_id=owner_id, source=source, status=status,
                 reason=reason, error_code=error_code,
             )
 
-        audit("requested")
+        await audit("requested")
         runtime = self._runtime_map().get(run["agent_id"])
-        cancel = getattr(runtime, "cancel_session_run", None) if runtime is not None else None
+        during_handoff = bool(getattr(self.orchestrator, "_handoff_draining", False))
+        method = "cancel_session_run_during_handoff" if during_handoff else "cancel_session_run"
+        cancel = getattr(runtime, method, None) if runtime is not None else None
         if not callable(cancel):
-            audit("unavailable", "run_cancel_unavailable")
+            await audit("unavailable", "run_cancel_unavailable")
             return ({"ok": False, "error_code": "run_cancel_unavailable",
                      "error": "The selected Agent Worker is unavailable."}, 503)
         try:
@@ -6821,9 +6996,14 @@ class WorkbenchApiServer:
                 run_id=run["run_id"], request_id=run["request_id"], reason=reason,
             )
         except Exception:
-            audit("outcome_unknown", "worker_cancel_outcome_unknown")
+            await audit("outcome_unknown", "worker_cancel_outcome_unknown")
+            if during_handoff:
+                return ({
+                    "ok": False, "error_code": "worker_cancel_outcome_unknown",
+                    "error": "The stop outcome is not confirmed; check the Run before retrying.",
+                }, 503)
             raise
-        audit(str(result.get("status") or "outcome_unknown"), str(result.get("error_code") or ""))
+        await audit(str(result.get("status") or "outcome_unknown"), str(result.get("error_code") or ""))
         status = 200 if result.get("ok") and result.get("terminal") else (
             202 if result.get("ok") else 409
         )
@@ -6848,8 +7028,8 @@ class WorkbenchApiServer:
                 raise ValueError("cancel payload must be an object")
             if not payload.get("session_id") or not payload.get("run_id"):
                 raise ValueError("session_id and run_id are required for cancellation")
-            run = self.session_store.get_run_by_request(
-                request_id, owner_id=owner, agent_id=name,
+            run = await asyncio.to_thread(
+                self.session_store.get_run_by_request, request_id, owner_id=owner, agent_id=name,
             )
             if (payload["session_id"] != run["session_id"]
                     or payload["run_id"] != run["run_id"]):
@@ -6911,8 +7091,8 @@ class WorkbenchApiServer:
                 status=401,
             )
         try:
-            run = self.session_store.get_run_by_request(
-                request_id,
+            run = await asyncio.to_thread(
+                self.session_store.get_run_by_request, request_id,
                 owner_id=owner_id,
                 agent_id=name,
             )
@@ -6945,7 +7125,8 @@ class WorkbenchApiServer:
             "context_generation": int(run["context_generation"]),
         }
         failure = (
-            self.session_store.request_failure_detail(
+            await asyncio.to_thread(
+                self.session_store.request_failure_detail,
                 request_id, owner_id=owner_id, agent_id=name,
             )
             if result.get("state") == "failed" or run.get("state") == "failed"
@@ -7054,6 +7235,7 @@ class WorkbenchApiServer:
             ],
             "privacy_levels": [0, 1, 2],
             "autonomy_risk_ladder": False,
+            "permissions_scope_marker_optional": True,
         }
 
     def _frontend_settings_target(self, request, instance_id: str):
@@ -7085,9 +7267,14 @@ class WorkbenchApiServer:
                 {"ok": False, "error_code": "agent_not_found"},
                 status=404,
             )
+        runtime_name = str(getattr(runtime, "name", requested_agent))
+        if self._is_governed_profile() and not self._can_view_deletion_revision(request, runtime_name):
+            return None, None, web.json_response(
+                {"ok": False, "error_code": "agent_not_found"}, status=404
+            )
         target = {
             "instance_id": expected_instance,
-            "agent_id": str(getattr(runtime, "name", requested_agent)).casefold(),
+            "agent_id": runtime_name.casefold(),
         }
         return runtime, target, None
 
@@ -7142,6 +7329,12 @@ class WorkbenchApiServer:
                 {"ok": False, "error_code": "settings_target_instance_mismatch"},
                 status=409,
             )
+        if self._is_governed_profile() and operation in {
+            "privacy.set_level", "permissions.set_access_scope",
+        }:
+            denied = self._guard_agent_management_access(request, str(runtime.name))
+            if denied is not None:
+                return None, None, None, denied
         return runtime, target, envelope, None
 
     @staticmethod
@@ -7253,7 +7446,7 @@ class WorkbenchApiServer:
             )
             if not request_id:
                 raise LiveVoiceError("live_admission_rejected", 409)
-            run = self.session_store.get_run_by_request(str(request_id))
+            run = await asyncio.to_thread(self.session_store.get_run_by_request, str(request_id))
         except LiveVoiceError:
             raise
         except Exception as exc:
@@ -7294,7 +7487,9 @@ class WorkbenchApiServer:
         return await self._live_voice_action_operation(binding, "inspect", request_id=request_id, actions=actions)
 
     async def _cancel_live_voice_action(self, binding, run_id) -> dict[str, Any]:
-        run = self.session_store.get_run(run_id, owner_id=binding.owner_id)
+        run = await asyncio.to_thread(
+            self.session_store.get_run, run_id, owner_id=binding.owner_id
+        )
         return await self._live_voice_action_operation(binding, "cancel", request_id=run["request_id"])
 
     async def _poll_live_voice_run_activity(
@@ -7309,8 +7504,8 @@ class WorkbenchApiServer:
         if not callable(poll):
             return {"ok": False, "error_code": "request_activity_unavailable"}
         try:
-            run = self.session_store.get_run_by_request(
-                request_id,
+            run = await asyncio.to_thread(
+                self.session_store.get_run_by_request, request_id,
                 owner_id=binding.owner_id,
                 agent_id=binding.agent_id,
             )
@@ -7451,20 +7646,27 @@ class WorkbenchApiServer:
 
     async def handle_v1_session_not_ready(self, request):
         del request
+        reason = (
+            "Persistent Session API v1 is disabled in the instance settings."
+            if not getattr(self.global_config, "persistent_session_v1", False)
+            else "Persistent Session API v1 is unavailable in this build."
+        )
         return web.json_response(
-            {
-                "ok": False,
-                "code": "session_api_not_ready",
-                "error": "Persistent Session API v1 has not passed qualification.",
-            },
+            {"ok": False, "code": "session_api_not_ready", "error": reason},
             status=503,
         )
 
     @staticmethod
     def _v1_error(error: Exception, *, status: int | None = None):
+        from orchestrator.session_attachment_limits import AttachmentSizeExceeded
+
         resolved_status = status
         if resolved_status is None:
-            if isinstance(error, (SessionNotFound, ConfirmationNotFoundError)):
+            if isinstance(error, AttachmentSizeExceeded):
+                resolved_status = 413
+            elif isinstance(error, SessionStorageBusy):
+                resolved_status = 503
+            elif isinstance(error, (SessionNotFound, ConfirmationNotFoundError)):
                 resolved_status = 404
             elif isinstance(
                 error,
@@ -7496,21 +7698,63 @@ class WorkbenchApiServer:
                         getattr(error, "code", "invalid_request"),
                     )
                 ),
+                **(
+                    {
+                        "scope": error.scope,
+                        "maximum_bytes": error.maximum_bytes,
+                        "actual_bytes": error.actual_bytes,
+                    }
+                    if isinstance(error, AttachmentSizeExceeded) else {}
+                ),
             },
             status=resolved_status,
         )
+
+    async def handle_v1_workbench_local_paths_verify(self, request):
+        # Authenticate through the existing Backend API boundary. This
+        # read-only proof is not a second user approval or an ownership claim.
+        if self._strict_authenticated_owner(request) is None:
+            return web.json_response({"ok": False, "error_code": "not_authenticated"}, status=401)
+        if not (sys.platform == "linux" and os.environ.get("WSL_DISTRO_NAME")):
+            return web.json_response({"ok": False, "error_code": "attachment_reselect_required"}, status=400)
+        from orchestrator.wsl_windows_identity import WslPathIdentityError, verify_windows_paths
+
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or set(payload) != {"attachments"}:
+                raise WslPathIdentityError("attachment_manifest_invalid", "Invalid path verification request.")
+            resolved = await asyncio.to_thread(verify_windows_paths, payload["attachments"])
+        except (ValueError, TypeError) as exc:
+            code = exc.code if isinstance(exc, WslPathIdentityError) else "attachment_manifest_invalid"
+            status = 503 if code == "attachment_identity_unavailable" else 400
+            return web.json_response({"ok": False, "error_code": code}, status=status,
+                                     headers={"Cache-Control": "private, no-store"})
+        return web.json_response({"ok": True, "attachments": resolved},
+                                 headers={"Cache-Control": "private, no-store"})
 
     async def handle_v1_capabilities(self, request):
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         from orchestrator.host_identity import storage_identity
+        private_config = await asyncio.to_thread(
+            load_private_authorization_config, self.config_path.parent
+        )
         capabilities: dict[str, Any] = {
             "ok": True,
-            "storage_identity": storage_identity(),
+            "storage_identity": await asyncio.to_thread(storage_identity),
             "message_source": public_source_capabilities(),
-            "private_authorization": public_private_authorization_capabilities(),
+            "private_authorization": public_private_authorization_capabilities(private_config),
             "private_authorization_proof_version": 1,
+            "telegram_long_draft": {
+                "version": 1,
+                "idle_actions": ["remind", "submit"],
+                "default_idle_action": "remind",
+                "default_idle_seconds": 300,
+                "configurable_idle_seconds": True,
+                "explicit_submit_excludes_unconfirmed_voice": True,
+                "draft_persistence": "process_memory",
+            },
             "settings": self._frontend_settings_capability(),
             "agent_deletion": {
                 "version": "1.0",
@@ -7533,6 +7777,19 @@ class WorkbenchApiServer:
                 TOOL_INTERACTION_VERSION,
             )
 
+            history_capability = {
+                "version": "1.0", "candidate_filter": "literal_superset_v1",
+                "method": "POST", "available": True,
+            }
+            try:
+                history_capability.update(history_search_limits())
+            except ValueError:
+                history_capability.update(available=False, configuration_error="invalid_history_search_budget")
+            try:
+                attachment_wait_ms = attachment_storage_wait_ms()
+            except ValueError:
+                attachment_wait_ms = None
+
             frontend_contract_versions = {
                 "ingress": FRONTEND_INGRESS_VERSION,
                 "delivery_intent": DELIVERY_INTENT_VERSION,
@@ -7551,7 +7808,8 @@ class WorkbenchApiServer:
                     "attachment_catalogue": {"version": 1, "incremental": True, "historical_source": True},
                     "file_content": {"version": 1, "read_only": True, "explicit_media_processing": True},
                     "standby": {"version": 1, "control_available": True, "media_available": False, "armed_available": False},
-                    "agent_history_search": {"version": "1.0", "candidate_filter": "literal_superset_v1", "method": "POST", "max_scan_rows": 4000},
+                    "agent_history_search": history_capability,
+                    "session_history_agents": {"version": "1.0", "owner_scoped": True, "pagination": True},
                     "message_content_schema_version": "1.2",
                     "attachment_upload_transport": (
                         "direct-multipart-or-octet-stream"
@@ -7617,6 +7875,8 @@ class WorkbenchApiServer:
                         "assistant_attachment_delivery": "terminal-message-projection",
                         "atomic_run_admission": True,
                         "attachment_stage_idempotency": True,
+                        "attachment_storage_wait_ms": attachment_wait_ms,
+                        "attachment_storage_wait_configured": attachment_wait_ms is not None,
                         "unbound_attachment_discard": True,
                         "preserves_attachment_order": True,
                         "content_types": ["text", "attachment", "audio"],
@@ -7666,12 +7926,26 @@ class WorkbenchApiServer:
                 "available": True,
                 "protocol_version": "1.0",
             }
+        session_age_policy = normalize_session_message_age_policy(
+            getattr(self.global_config, "session_message_age_policy", None)
+        )
+        capabilities["session_message_age"] = {
+            "version": "1.0", **session_age_policy,
+        }
         capabilities["message_freshness"] = {
             "version": "1.0",
             "capability": "message_freshness_v1",
-            "required_fields": ["originated_at"],
-            "missing_required_field_error_code": "frontend_message_protocol_incompatible",
-            "time_format": "rfc3339_utc",
+            "required_fields": (
+                ["originated_at"] if session_age_policy["mode"] != "observe" else []
+            ),
+            "missing_required_field_error_code": (
+                "frontend_message_protocol_incompatible"
+                if session_age_policy["mode"] == "confirm"
+                else "message_age_expired" if session_age_policy["mode"] == "expire"
+                else None
+            ),
+            "time_format": "rfc3339",
+            "session_api_policy": session_age_policy,
             "pending_receipt_supported": True,
             "decisions_supported": ["confirm", "discard"],
             "states": [
@@ -7808,6 +8082,10 @@ class WorkbenchApiServer:
         try:
             if level == 2 and current_level < 2:
                 await _verify_level_two_detector()
+            if self._is_governed_profile():
+                denied = self._guard_agent_management_access(request, str(runtime.name))
+                if denied is not None:
+                    return denied
             notice = _set_level(
                 runtime,
                 level,
@@ -7925,12 +8203,12 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         payload = dict(envelope["payload"])
-        if payload.pop("explicit_user_confirmation", None) is not True:
+        confirmation = payload.pop("explicit_user_confirmation", None)
+        if confirmation is not None and confirmation is not True:
             return web.json_response(
                 {"ok": False, "error_code": "explicit_user_confirmation_required"},
                 status=403,
             )
-        payload["authorization"] = "explicit_user_authorization"
         job_id = str(request.match_info.get("job_id") or "").strip()
         if not job_id:
             return web.json_response(
@@ -8038,9 +8316,8 @@ class WorkbenchApiServer:
         if error is not None:
             return error
         payload = envelope["payload"]
-        if set(payload) != {
-            "backend", "expected_current_scope", "access_scope", "confirm_scope_expansion"
-        }:
+        required = {"backend", "expected_current_scope", "access_scope"}
+        if not required.issubset(payload) or set(payload) - required - {"confirm_scope_expansion"}:
             return web.json_response(
                 {"ok": False, "error_code": "permissions_payload_invalid"}, status=400
             )
@@ -8055,7 +8332,9 @@ class WorkbenchApiServer:
         new_scope = str(payload.get("access_scope") or "").strip().casefold()
         expected_scope = str(payload.get("expected_current_scope") or "").strip().casefold()
         supplied_backend = canonical_backend_engine(payload.get("backend"))
-        confirm_expansion = payload.get("confirm_scope_expansion")
+        # An authenticated typed direct settings operation is the user's
+        # explicit selection. A legacy false remains an explicit opt-out.
+        confirm_expansion = payload.get("confirm_scope_expansion", True)
         if (new_scope not in VALID_ACCESS_SCOPES or expected_scope not in VALID_ACCESS_SCOPES
                 or not supplied_backend or not isinstance(confirm_expansion, bool)):
             return web.json_response(
@@ -8074,6 +8353,12 @@ class WorkbenchApiServer:
             )
 
         async with self._agent_config_lock:
+            # Permission may have changed while this request waited for the
+            # Agent configuration lock. No backend effect has started yet.
+            if self._is_governed_profile():
+                denied = self._guard_agent_management_access(request, str(runtime.name))
+                if denied is not None:
+                    return denied
             try:
                 document = read_config_json(self.config_path)
             except (OSError, ValueError):
@@ -8168,6 +8453,31 @@ class WorkbenchApiServer:
                 return web.json_response(
                     {"ok": False, "error_code": "permissions_runtime_apply_failed"}, status=503
                 )
+            if self._is_governed_profile():
+                # Backend switching awaits external work; revalidate before
+                # persisting, and compensate if the prior authority vanished.
+                try:
+                    denied = self._guard_agent_management_access(request, str(runtime.name))
+                except Exception:
+                    denied = web.json_response(
+                        {"ok": False, "error_code": "settings_authority_unavailable"}, status=503
+                    )
+                if denied is not None:
+                    if had_scope:
+                        manager_row["access_scope"] = old_manager_scope
+                    else:
+                        manager_row.pop("access_scope", None)
+                    try:
+                        rolled_back = bool(
+                            await switch_backend(active_backend, target_model=previous_model)
+                        )
+                    except Exception:
+                        rolled_back = False
+                    if not rolled_back:
+                        return web.json_response(
+                            {"ok": False, "error_code": "settings_persistence_uncertain"}, status=503
+                        )
+                    return denied
             try:
                 from orchestrator.agent_config_json import write_agent_config_json
 
@@ -8236,8 +8546,8 @@ class WorkbenchApiServer:
             agent_id = str(request.match_info.get("agent_id") or "").strip().lower()
             if agent_id not in self._runtime_map():
                 raise SessionNotFound("agent not found")
-            session = self.session_store.resolve_primary_session(
-                owner_id=owner, agent_id=agent_id, establish=True
+            session = await self._await_session_storage(
+                self.session_store.resolve_primary_session, owner_id=owner, agent_id=agent_id, establish=True
             )
             return web.json_response({"ok": True, "session": session})
         except Exception as exc:
@@ -8257,24 +8567,26 @@ class WorkbenchApiServer:
             if agent_id not in self._runtime_map():
                 raise SessionNotFound("agent not found")
             provided_title = str(payload.get("title") or "").strip()
-            session = self.session_store.create_session(
-                owner_id=owner,
-                agent_id=agent_id,
-                title=provided_title or None,
-                title_source="user" if provided_title else "system",
-            )
             surface = str(payload.get("surface") or "").strip().lower()
             channel_key = str(
                 payload.get("channel_key") or payload.get("client_id") or ""
             ).strip()
-            if surface and channel_key:
-                self.session_store.bind_channel(
+
+            def create_and_bind():
+                session = self.session_store.create_session(
                     owner_id=owner,
                     agent_id=agent_id,
-                    surface=surface,
-                    channel_key=channel_key,
-                    session_id=session["session_id"],
+                    title=provided_title or None,
+                    title_source="user" if provided_title else "system",
                 )
+                if surface and channel_key:
+                    self.session_store.bind_channel(
+                        owner_id=owner, agent_id=agent_id, surface=surface,
+                        channel_key=channel_key, session_id=session["session_id"],
+                    )
+                return session
+
+            session = await self._await_session_storage(create_and_bind)
             return web.json_response({"ok": True, "session": session}, status=201)
         except Exception as exc:
             return self._v1_error(exc)
@@ -8284,16 +8596,19 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            rows = await asyncio.to_thread(
-                self.session_store.list_sessions,
-                owner_id=owner,
-                agent_id=str(request.query.get("agent_id") or "") or None,
-                include_archived=str(
+            options = {
+                "owner_id": owner,
+                "agent_id": str(request.query.get("agent_id") or "") or None,
+                "include_archived": str(
                     request.query.get("include_archived") or ""
-                ).lower()
-                in {"1", "true", "yes"},
-                limit=int(request.query.get("limit") or 100),
-            )
+                ).lower() in {"1", "true", "yes"},
+                "limit": int(request.query.get("limit") or 100),
+            }
+            if getattr(self.orchestrator, "_handoff_draining", False):
+                # Normal listing may backfill placeholder titles; a retiring
+                # generation must return only the durable rows it can read.
+                options["repair_titles"] = False
+            rows = await asyncio.to_thread(self.session_store.list_sessions, **options)
             return web.json_response(
                 {"ok": True, "sessions": rows, "next_cursor": None}
             )
@@ -8311,7 +8626,10 @@ class WorkbenchApiServer:
         if self._v1_owner_id(request) is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            return web.json_response({"ok": True, **await asyncio.to_thread(self._file_content_owner().capabilities)})
+            return web.json_response({
+                "ok": True, "instance_id": self.session_store.instance_id,
+                **await asyncio.to_thread(self._file_content_owner().capabilities),
+            })
         except Exception:
             return web.json_response({"ok": False, "error_code": "fileshare_processing_unavailable"}, status=503)
 
@@ -8412,6 +8730,23 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
+    async def handle_v1_history_agents(self, request):
+        """Discover owner-scoped stored conversations, including departed Agents."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            raw_limit = request.query.get("limit")
+            limit = 100 if raw_limit in {None, ""} else int(raw_limit)
+            cursor = str(request.query.get("cursor") or "")
+            page = await asyncio.to_thread(
+                self.session_store.conversation_history_agents,
+                owner_id=owner, after=cursor, limit=limit,
+            )
+            return web.json_response({"ok": True, **page}, headers={"Cache-Control": "private, no-store"})
+        except Exception as exc:
+            return self._v1_error(exc)
+
     async def handle_v1_agent_history(self, request):
         """Return one owner-scoped, cross-Session presentation history page."""
 
@@ -8420,7 +8755,9 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             agent_id = str(request.match_info.get("agent_id") or "").strip().lower()
-            if agent_id not in self._runtime_map():
+            if (agent_id not in self._runtime_map() and not await asyncio.to_thread(
+                self.session_store.has_conversation_history_agent, owner_id=owner, agent_id=agent_id,
+            )):
                 raise SessionNotFound("agent not found")
             raw_limit = request.query.get("limit")
             limit = 80 if raw_limit in {None, ""} else int(raw_limit)
@@ -8496,10 +8833,11 @@ class WorkbenchApiServer:
         try:
             if request.content_type != "application/json":
                 raise ValueError("history search requires JSON")
+            max_body = history_search_limits()["max_request_bytes"]
             chunks, size = [], 0
             async for chunk in request.content.iter_chunked(4096):
                 size += len(chunk)
-                if size > 4096:
+                if size > max_body:
                     return self._v1_error(ValueError("history search body exceeds limit"), status=413)
                 chunks.append(chunk)
             def unique_object(pairs):
@@ -8520,7 +8858,9 @@ class WorkbenchApiServer:
             query = payload["query"]
             literal_candidate(query)
             agent = str(request.match_info.get("agent_id") or "").strip().lower()
-            if agent not in self._runtime_map():
+            if (agent not in self._runtime_map() and not await asyncio.to_thread(
+                self.session_store.has_conversation_history_agent, owner_id=owner, agent_id=agent,
+            )):
                 raise SessionNotFound("agent not found")
             limit = payload.get("limit", 200)
             if type(limit) is not int or not 1 <= limit <= 200:
@@ -8570,7 +8910,8 @@ class WorkbenchApiServer:
                 expected = str(request.headers.get("If-Match") or "").strip('"')
             if expected in {None, ""}:
                 raise ValueError("expected_revision or If-Match is required")
-            session = self.session_store.update_session(
+            session = await self._await_session_storage(
+                self.session_store.update_session,
                 request.match_info["session_id"],
                 owner_id=owner,
                 expected_revision=int(expected),
@@ -8588,12 +8929,11 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            self.session_store.get_session(
-                request.match_info["session_id"], owner_id=owner
-            )
-            session = self.session_store.archive_session(
-                request.match_info["session_id"], deleted=True
-            )
+            def archive_owned_session():
+                self.session_store.get_session(request.match_info["session_id"], owner_id=owner)
+                return self.session_store.archive_session(request.match_info["session_id"], deleted=True)
+
+            session = await self._await_session_storage(archive_owned_session)
             return web.json_response(
                 {"ok": True, "session": session, "records_deleted": False}
             )
@@ -8605,14 +8945,10 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            return web.json_response(
-                {
-                    "ok": True,
-                    "snapshot": self.session_store.snapshot(
-                        request.match_info["session_id"], owner_id=owner
-                    ),
-                }
+            snapshot = await asyncio.to_thread(
+                self.session_store.snapshot, request.match_info["session_id"], owner_id=owner
             )
+            return web.json_response({"ok": True, "snapshot": snapshot})
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -8630,6 +8966,52 @@ class WorkbenchApiServer:
             )
             return web.json_response(
                 {"ok": True, "messages": rows, "next_cursor": None}
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_quote_source(self, request):
+        """Read one visible message for explicit quote recovery."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            session_id = request.match_info["session_id"]
+            session = await asyncio.to_thread(
+                self.session_store.get_session, session_id, owner_id=owner
+            )
+            if session.get("status") not in {"active", "archived"}:
+                raise SessionNotFound("message unavailable")
+            message = await asyncio.to_thread(
+                self.session_store.get_message, request.match_info["message_id"],
+                session_id=session_id, owner_id=owner,
+            )
+            context = message.get("message_context")
+            context = context if isinstance(context, dict) else {}
+            if (message.get("visibility") != "visible"
+                    or message.get("role") not in {"user", "assistant"}
+                    or context.get("presentation_enabled") is False
+                    or context.get("delivery_class") in {"internal", "private"}
+                    or context.get("kind") in {
+                        "typing", "tool", "tool_call", "tool_result",
+                        "reasoning_delta", "thinking_delta",
+                    }):
+                raise SessionNotFound("message unavailable")
+            rows = await asyncio.to_thread(
+                build_agent_history_projection, self.session_store,
+                messages=[message], owner_id=owner,
+            )
+            if len(rows) != 1:
+                raise SessionNotFound("message unavailable")
+            fields = (
+                "role", "text", "message_id", "message_ref", "session_id",
+                "context_generation", "created_at", "content_format",
+            )
+            projected = {field: rows[0].get(field) for field in fields}
+            projected["visibility"] = "visible"
+            return web.json_response(
+                {"ok": True, "message": projected},
+                headers={"Cache-Control": "private, no-store", "Pragma": "no-cache"},
             )
         except Exception as exc:
             return self._v1_error(exc)
@@ -8846,6 +9228,8 @@ class WorkbenchApiServer:
         confirmation_id: str | None = None,
         confirmed_at: str | None = None,
         validate_only: bool = False,
+        freshness_metadata: Mapping[str, Any] | None = None,
+        replay_only: bool = False,
     ) -> dict[str, Any] | web.Response:
         runtime = self._runtime_map().get(session["agent_id"])
         if runtime is None:
@@ -8900,7 +9284,7 @@ class WorkbenchApiServer:
             for block in audio_blocks
         ):
             raise SessionConflict(
-                "native audio is not enabled or qualified for this Agent"
+                "native audio is unavailable for this Agent or its selected backend"
             )
         if len(attachment_blocks) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE:
             raise ValueError("message exceeds the configured attachment count limit")
@@ -8981,7 +9365,8 @@ class WorkbenchApiServer:
                     }
                 )
             elif block_type in {"attachment", "audio"}:
-                canonical_part = self.session_store.attachment_canonical_part(
+                canonical_part = await asyncio.to_thread(
+                    self.session_store.attachment_canonical_part,
                     session_id=session["session_id"],
                     owner_id=owner,
                     attachment_id=str(block.get("attachment_id") or ""),
@@ -9069,7 +9454,7 @@ class WorkbenchApiServer:
                 ).encode("utf-8")
             ).hexdigest(),
         }
-        if runtime_transfer.session_request_requires_transfer_fence(
+        if not replay_only and runtime_transfer.session_request_requires_transfer_fence(
             canonical_content
         ):
             redirect = runtime_transfer.authoritative_transfer_redirect_snapshot(
@@ -9086,10 +9471,8 @@ class WorkbenchApiServer:
                 )
                 if transfer_response is not None:
                     return transfer_response
-        transcript_state = self._begin_session_voice_transcription(
-            runtime=runtime,
-            canonical_content=canonical_content,
-            terminal=surface,
+        transcript_state = None if replay_only else self._begin_session_voice_transcription(
+            runtime=runtime, canonical_content=canonical_content, terminal=surface,
         )
         try:
             req_meta = {
@@ -9118,6 +9501,8 @@ class WorkbenchApiServer:
                 **authorization_metadata,
                 **tui_metadata,
             }
+            if freshness_metadata is not None:
+                req_meta["_frontend_message_age"] = dict(freshness_metadata)
             if confirmation_id is not None:
                 req_meta["ingress_confirmation_id"] = confirmation_id
             if confirmed_at is not None:
@@ -9132,10 +9517,22 @@ class WorkbenchApiServer:
                 idempotency_key=idempotency_key,
                 request_metadata=req_meta,
                 request_content=canonical_content,
+                **({"replay_only": True} if replay_only else {}),
             )
         except Exception as exc:
             if transcript_state is not None:
                 transcript_state["task"].cancel()
+            if replay_only:
+                from orchestrator.function_worker_protocol import FunctionWorkerRemoteError
+
+                if isinstance(exc, FunctionWorkerRemoteError) and exc.method == "runtime.enqueue_request":
+                    remote_type = exc.error.get("type")
+                    if remote_type == "ExistingRunNotFound":
+                        raise ExistingRunNotFound("no prior Run was accepted for this request") from exc
+                    if remote_type == "IdempotencyConflict":
+                        raise IdempotencyConflict(
+                            "idempotency key is already bound to a different request"
+                        ) from exc
             redirect = runtime_transfer.transfer_redirect_from_exception(exc)
             if redirect is not None:
                 transfer_response = self._transfer_redirect_response(
@@ -9158,7 +9555,7 @@ class WorkbenchApiServer:
             state=transcript_state,
             request_id=str(request_id),
         )
-        run = self.session_store.get_run_by_request(request_id)
+        run = await asyncio.to_thread(self.session_store.get_run_by_request, request_id)
         return {
             "session_id": session["session_id"],
             "run_id": run["run_id"],
@@ -9175,7 +9572,8 @@ class WorkbenchApiServer:
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise ValueError("Session Run request body must be an object")
-            session = self.session_store.get_session(
+            session = await asyncio.to_thread(
+                self.session_store.get_session,
                 request.match_info["session_id"], owner_id=owner, include_deleted=False
             )
             surface = str(payload.get("surface") or "session-api").strip().lower()
@@ -9238,19 +9636,55 @@ class WorkbenchApiServer:
                 message.get("originated_at") if isinstance(message, dict) else None
             )
             is_remote = not is_loopback or trusted_remote_workbench
+            age_policy = normalize_session_message_age_policy(
+                getattr(self.global_config, "session_message_age_policy", None)
+            )
             freshness = (
                 None
-                if trusted_local_tui
+                if trusted_local_tui and age_policy["mode"] != "expire"
                 else classify_freshness(
                     ingress_type="workbench",
                     originated_at=originated_at,
                     is_remote=is_remote,
+                    threshold_seconds=age_policy["max_age_seconds"],
                 )
             )
+            age_metadata = freshness.age_metadata() if freshness is not None else None
+            if freshness is not None and age_policy["mode"] == "expire" and not freshness.is_fresh:
+                key = str(
+                    payload.get("idempotency_key")
+                    or request.headers.get("Idempotency-Key")
+                    or ""
+                ).strip()
+                prior = await asyncio.to_thread(
+                    self.session_store.find_run_by_idempotency,
+                    session_id=session["session_id"], owner_id=owner, idempotency_key=key,
+                ) if key else None
+                if prior is not None:
+                    try:
+                        result = await self._execute_session_run_from_payload(
+                            session, owner, payload, request=request,
+                            freshness_metadata=age_metadata, replay_only=True,
+                        )
+                    except ExistingRunNotFound:
+                        result = None
+                    if isinstance(result, web.Response):
+                        return result
+                    if result is not None:
+                        return web.json_response(
+                            {"ok": True, **result, "message_age": age_metadata},
+                            status=202, headers={"Cache-Control": "no-store"},
+                        )
+                return web.json_response(
+                    {"ok": False, "accepted": False, "code": "message_age_expired",
+                     "message_age": age_metadata},
+                    status=409, headers={"Cache-Control": "no-store"},
+                )
             # A Session API client that omits the required original-send time
             # is speaking an older frontend protocol.  That is not evidence of
             # delay, so do not create a misleading confirmation or a Run.
-            if freshness is not None and freshness.reason == "timestamp_missing":
+            if (freshness is not None and age_policy["mode"] == "confirm"
+                    and freshness.reason == "timestamp_missing"):
                 return web.json_response(
                     {
                         "ok": False,
@@ -9265,7 +9699,7 @@ class WorkbenchApiServer:
                     status=409,
                     headers={"Cache-Control": "no-store"},
                 )
-            if freshness is not None and not freshness.is_fresh:
+            if freshness is not None and age_policy["mode"] == "confirm" and not freshness.is_fresh:
                 prepared = await self._execute_session_run_from_payload(
                     session,
                     owner,
@@ -9323,7 +9757,8 @@ class WorkbenchApiServer:
                 )
                 expires_at = freshness.expires_at.isoformat().replace("+00:00", "Z")
 
-                conf = self.ingress_confirmation.register_pending(
+                conf = await self._await_session_storage(
+                    self.ingress_confirmation.register_pending,
                     session_id=session["session_id"],
                     owner_id=owner,
                     agent_id=session["agent_id"],
@@ -9344,7 +9779,9 @@ class WorkbenchApiServer:
                     display_metadata=display_metadata,
                 )
                 if conf["state"] == "confirmed" and conf.get("run_id"):
-                    run = self.session_store.get_run(conf["run_id"], owner_id=owner)
+                    run = await asyncio.to_thread(
+                        self.session_store.get_run, conf["run_id"], owner_id=owner
+                    )
                     return web.json_response(
                         {
                             "ok": True,
@@ -9382,7 +9819,7 @@ class WorkbenchApiServer:
 
             # Fresh messages (including the always-local TUI) execute normally.
             result = await self._execute_session_run_from_payload(
-                session, owner, payload, request=request
+                session, owner, payload, request=request, freshness_metadata=age_metadata
             )
             if isinstance(result, web.Response):
                 return result
@@ -9394,6 +9831,7 @@ class WorkbenchApiServer:
                     "message_id": result["message_id"],
                     "request_id": result["request_id"],
                     "state": result["state"],
+                    **({"message_age": age_metadata} if age_metadata is not None else {}),
                 },
                 status=202,
             )
@@ -9406,11 +9844,12 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             session_id = request.match_info["session_id"]
-            session = self.session_store.get_session(
-                session_id, owner_id=owner, include_deleted=False
+            session = await asyncio.to_thread(
+                self.session_store.get_session, session_id, owner_id=owner, include_deleted=False
             )
             limit = int(request.query.get("limit", 50))
-            confirmations = self.ingress_confirmation.list(
+            confirmations = await self._await_session_storage(
+                self.ingress_confirmation.list,
                 session_id=session["session_id"],
                 owner_id=owner,
                 limit=limit,
@@ -9436,10 +9875,11 @@ class WorkbenchApiServer:
         try:
             session_id = request.match_info["session_id"]
             confirmation_id = request.match_info["confirmation_id"]
-            session = self.session_store.get_session(
-                session_id, owner_id=owner, include_deleted=False
+            session = await asyncio.to_thread(
+                self.session_store.get_session, session_id, owner_id=owner, include_deleted=False
             )
-            confirmation = self.ingress_confirmation.get(
+            confirmation = await self._await_session_storage(
+                self.ingress_confirmation.get,
                 confirmation_id=confirmation_id,
                 owner_id=owner,
                 session_id=session["session_id"],
@@ -9464,8 +9904,8 @@ class WorkbenchApiServer:
         try:
             session_id = request.match_info["session_id"]
             confirmation_id = request.match_info["confirmation_id"]
-            session = self.session_store.get_session(
-                session_id, owner_id=owner, include_deleted=False
+            session = await asyncio.to_thread(
+                self.session_store.get_session, session_id, owner_id=owner, include_deleted=False
             )
             body = await request.json()
             if not isinstance(body, dict):
@@ -9478,7 +9918,8 @@ class WorkbenchApiServer:
             # The route's Session is part of the authority boundary.  Owning
             # two Sessions must not let a caller decide a confirmation from
             # one by presenting its ID through the other Session's endpoint.
-            self.ingress_confirmation.get(
+            await self._await_session_storage(
+                self.ingress_confirmation.get,
                 confirmation_id=confirmation_id,
                 owner_id=owner,
                 session_id=session["session_id"],
@@ -9761,8 +10202,8 @@ class WorkbenchApiServer:
                             raise RuntimeError(
                                 "Agent runtime did not accept confirmed HChat attachment message"
                             )
-                        run = self.session_store.get_run_by_request(
-                            str(request_id),
+                        run = await asyncio.to_thread(
+                            self.session_store.get_run_by_request, str(request_id),
                             owner_id=resolved_owner,
                             agent_id=agent_id,
                         )
@@ -9807,7 +10248,9 @@ class WorkbenchApiServer:
                     # release result, but must not receive another owner's Run.
                     run_payload = {"run_id": record["run_id"]}
                 else:
-                    run = self.session_store.get_run(record["run_id"], owner_id=owner)
+                    run = await asyncio.to_thread(
+                        self.session_store.get_run, record["run_id"], owner_id=owner
+                    )
                     run_payload = {
                         "run_id": run["run_id"],
                         "request_id": run["request_id"],
@@ -9832,7 +10275,7 @@ class WorkbenchApiServer:
     async def handle_v1_session_command_invocation(self, request):
         """Admit one typed command against an owner-scoped, generation-bound Session."""
 
-        owner = self._v1_owner_id(request)
+        owner = self._strict_authenticated_owner(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
@@ -9890,13 +10333,16 @@ class WorkbenchApiServer:
                 raise ValueError("command context generation is invalid")
 
             session_id = str(request.match_info.get("session_id") or "")
-            session = self.session_store.get_session(
-                session_id, owner_id=owner, include_deleted=False
+            session = await asyncio.to_thread(
+                self.session_store.get_session, session_id, owner_id=owner, include_deleted=False
             )
             if int(session.get("context_generation") or 0) != context_generation:
                 raise SessionConflict("session context changed before command admission")
             runtime = self._runtime_map().get(str(session.get("agent_id") or ""))
             if runtime is None:
+                raise SessionNotFound("agent runtime not found")
+            if (self._is_governed_profile()
+                    and not self._can_view_deletion_revision(request, str(session["agent_id"]))):
                 raise SessionNotFound("agent runtime not found")
             if command == "forget":
                 denied = self._guard_agent_management_access(request, str(session["agent_id"]))
@@ -9993,14 +10439,9 @@ class WorkbenchApiServer:
                     }
                 )
 
-            actor = getattr(self.global_config, "authorized_id", None)
-            checker = getattr(runtime, "_is_authorized_user", None)
-            if type(actor) is not int or (
-                callable(checker) and not checker(actor)
-            ):
-                return self._v1_error(
-                    ValueError("command actor is not authorized"), status=403
-                )
+            # Session access above already binds the authenticated principal.
+            # Telegram actor membership applies only to Telegram ingress.
+            actor = owner
             from orchestrator import command_interaction_bridge
             from orchestrator.admin_local_testing import _format_slash_command_line
 
@@ -10037,6 +10478,7 @@ class WorkbenchApiServer:
                 "session_surface": command_surface,
                 "session_channel_key": client_id,
                 "owner_id": owner,
+                "_hashi_owner_id": owner,
                 "session_id": session_id,
                 "context_generation": context_generation,
                 "connection_binding": connection_binding,
@@ -10077,7 +10519,8 @@ class WorkbenchApiServer:
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
-            reservation = self.session_store.reserve_frontend_command_invocation(
+            reservation = await self._await_session_storage(
+                self.session_store.reserve_frontend_command_invocation,
                 session_id=session_id,
                 owner_id=owner,
                 client_id=client_id,
@@ -10132,7 +10575,8 @@ class WorkbenchApiServer:
                 }
             )
             response.setdefault("command_invocation", command_invocation)
-            completion = self.session_store.complete_frontend_command_invocation(
+            completion = await self._await_session_storage(
+                self.session_store.complete_frontend_command_invocation,
                 session_id=session_id,
                 owner_id=owner,
                 client_id=client_id,
@@ -10190,8 +10634,8 @@ class WorkbenchApiServer:
                     "text": str(payload.get("reason") or "cancelled_by_user"),
                 },
             )
-            run = self.session_store.get_run(
-                request.match_info["run_id"], owner_id=owner
+            run = await asyncio.to_thread(
+                self.session_store.get_run, request.match_info["run_id"], owner_id=owner
             )
             if run["session_id"] != request.match_info["session_id"]:
                 raise SessionNotFound("run not found in Session")
@@ -10203,9 +10647,11 @@ class WorkbenchApiServer:
             if response.status not in {200, 202}:
                 return response
             result = json.loads(response.text)
+            updated_run = await asyncio.to_thread(
+                self.session_store.get_run, run["run_id"], owner_id=owner
+            )
             return web.json_response(
-                {"ok": True, "run": self.session_store.get_run(run["run_id"], owner_id=owner),
-                 "cancellation": result}, status=response.status,
+                {"ok": True, "run": updated_run, "cancellation": result}, status=response.status,
             )
         except Exception as exc:
             return self._v1_error(exc)
@@ -10292,7 +10738,8 @@ class WorkbenchApiServer:
                 channel_key=channel_key,
             )
             session_id = request.match_info["session_id"]
-            feed = poll_frontend_feed(
+            feed = await asyncio.to_thread(
+                poll_frontend_feed,
                 self.session_store,
                 session_id,
                 owner_id=owner,
@@ -10321,9 +10768,8 @@ class WorkbenchApiServer:
                     ephemeral_replay_complete=False,
                     ephemeral_gap=True,
                 )
-                run = self.session_store.get_run_by_request(
-                    request_id,
-                    owner_id=owner,
+                run = await asyncio.to_thread(
+                    self.session_store.get_run_by_request, request_id, owner_id=owner,
                 )
                 if run["session_id"] != session_id:
                     raise SessionNotFound("request activity not found")
@@ -10392,40 +10838,44 @@ class WorkbenchApiServer:
                         ephemeral_epoch=current_epoch,
                         ephemeral_reset=epoch_reset,
                     )
-            accepted_event_ids: list[str] = []
-            worker_id = f"feed:{connector_id}:{endpoint_id}"
-            for event in feed["durable_events"]:
-                claims = self.session_store.claim_delivery_outbox(
-                    session_id=session_id,
-                    owner_id=owner,
-                    worker_id=worker_id,
-                    event_id=event["event_id"],
-                    connector_id=connector_id,
-                    endpoint_id=endpoint_id,
-                    limit=1,
-                    lease_seconds=30,
-                )
-                if not claims:
-                    continue
-                claim = claims[0]
-                self.session_store.record_frontend_delivery_receipt(
-                    session_id=session_id,
-                    owner_id=owner,
-                    receipt={
-                        "type": "hashi.delivery-receipt",
-                        "version": 1,
-                        "event_id": event["event_id"],
-                        "endpoint_id": endpoint_id,
-                        "status": "accepted",
-                        "proof": None,
-                    },
-                )
-                self.session_store.complete_delivery_outbox(
-                    outbox_id=claim["outbox_id"],
-                    lease_token=claim["lease_token"],
-                    status="completed",
-                )
-                accepted_event_ids.append(event["event_id"])
+            def accept_feed_events():
+                accepted_event_ids: list[str] = []
+                worker_id = f"feed:{connector_id}:{endpoint_id}"
+                for event in feed["durable_events"]:
+                    claims = self.session_store.claim_delivery_outbox(
+                        session_id=session_id,
+                        owner_id=owner,
+                        worker_id=worker_id,
+                        event_id=event["event_id"],
+                        connector_id=connector_id,
+                        endpoint_id=endpoint_id,
+                        limit=1,
+                        lease_seconds=30,
+                    )
+                    if not claims:
+                        continue
+                    claim = claims[0]
+                    self.session_store.record_frontend_delivery_receipt(
+                        session_id=session_id,
+                        owner_id=owner,
+                        receipt={
+                            "type": "hashi.delivery-receipt",
+                            "version": 1,
+                            "event_id": event["event_id"],
+                            "endpoint_id": endpoint_id,
+                            "status": "accepted",
+                            "proof": None,
+                        },
+                    )
+                    self.session_store.complete_delivery_outbox(
+                        outbox_id=claim["outbox_id"],
+                        lease_token=claim["lease_token"],
+                        status="completed",
+                    )
+                    accepted_event_ids.append(event["event_id"])
+                return accepted_event_ids
+
+            accepted_event_ids = await self._await_session_storage(accept_feed_events)
             return web.json_response(
                 {
                     "ok": True,
@@ -10445,7 +10895,8 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             payload = await request.json()
-            consumer = self.session_store.create_event_consumer(
+            consumer = await self._await_session_storage(
+                self.session_store.create_event_consumer,
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 consumer_id=str(payload.get("consumer_id") or "") or None,
@@ -10463,31 +10914,23 @@ class WorkbenchApiServer:
             if "sequence" not in payload:
                 raise ValueError("sequence is required")
             sequence = int(payload["sequence"])
-            matching_events = self.session_store.events(
-                request.match_info["session_id"],
-                owner_id=owner,
-                after_sequence=max(0, sequence - 1),
-                limit=1,
-            )
-            if (
-                not matching_events
-                or int(matching_events[0].get("sequence") or 0) != sequence
-            ):
-                raise ValueError("acknowledged event sequence is unavailable")
-            normalize_compatibility_operation(
-                "session_api.ack",
-                {
-                    "kind": "ack",
-                    "event_id": matching_events[0]["event_id"],
-                    "state": "received",
-                },
-            )
-            consumer = self.session_store.acknowledge_event_consumer(
-                session_id=request.match_info["session_id"],
-                owner_id=owner,
-                consumer_id=request.match_info["consumer_id"],
-                sequence=sequence,
-            )
+            def acknowledge_owned_event():
+                matching_events = self.session_store.events(
+                    request.match_info["session_id"], owner_id=owner,
+                    after_sequence=max(0, sequence - 1), limit=1,
+                )
+                if not matching_events or int(matching_events[0].get("sequence") or 0) != sequence:
+                    raise ValueError("acknowledged event sequence is unavailable")
+                normalize_compatibility_operation(
+                    "session_api.ack",
+                    {"kind": "ack", "event_id": matching_events[0]["event_id"], "state": "received"},
+                )
+                return self.session_store.acknowledge_event_consumer(
+                    session_id=request.match_info["session_id"], owner_id=owner,
+                    consumer_id=request.match_info["consumer_id"], sequence=sequence,
+                )
+
+            consumer = await self._await_session_storage(acknowledge_owned_event)
             return web.json_response({"ok": True, "consumer": consumer})
         except Exception as exc:
             return self._v1_error(exc)
@@ -10501,17 +10944,52 @@ class WorkbenchApiServer:
                 "session_api.control",
                 {"kind": "control", "action": "fresh"},
             )
-            self.session_store.get_session(
-                request.match_info["session_id"], owner_id=owner
-            )
-            session = self.session_store.start_fresh_generation(
-                request.match_info["session_id"], reason="session_api"
-            )
+            def fresh_owned_session():
+                self.session_store.get_session(request.match_info["session_id"], owner_id=owner)
+                return self.session_store.start_fresh_generation(
+                    request.match_info["session_id"], reason="session_api"
+                )
+
+            session = await self._await_session_storage(fresh_owned_session)
             return web.json_response({"ok": True, "session": session})
         except Exception as exc:
             return self._v1_error(exc)
 
+    async def _await_session_storage(self, operation, *args, **kwargs):
+        # A disconnected requester does not prove that a submitted write failed.
+        # Settle the single worker operation before unwinding; never replay it here.
+        task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    def _v1_attachment_session(self, *, session_id: str, owner_id: str) -> dict[str, Any]:
+        with self.session_store.attachment_storage_budget():
+            return self.session_store.get_session(session_id, owner_id=owner_id, include_deleted=False)
+
+    def _v1_attachment_metadata(self, *, session_id: str, owner_id: str, attachment_id: str) -> dict[str, Any]:
+        with self.session_store.attachment_storage_budget():
+            return self.session_store.attachment_upload_metadata(
+                session_id=session_id, owner_id=owner_id, attachment_id=attachment_id,
+            )
+
+    def _v1_commit_attachment(self, *, session_id: str, owner_id: str, attachment_id: str) -> dict[str, Any]:
+        with self.session_store.attachment_storage_budget():
+            return self.session_store.commit_attachment(
+                session_id=session_id, owner_id=owner_id, attachment_id=attachment_id,
+            )
+
     def _v1_stage_attachment(
+        self, *, session_id: str, owner_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        with self.session_store.attachment_storage_budget():
+            return self._v1_stage_attachment_locked(
+                session_id=session_id, owner_id=owner_id, payload=payload,
+            )
+
+    def _v1_stage_attachment_locked(
         self, *, session_id: str, owner_id: str, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
         """Apply the same Session retention policy to upload and Workzone media."""
@@ -10572,10 +11050,8 @@ class WorkbenchApiServer:
                 semantic_role == "voice_message"
             )
             if not voice_message:
-                session = self.session_store.get_session(
-                    request.match_info["session_id"],
-                    owner_id=owner,
-                    include_deleted=False,
+                session = await asyncio.to_thread(
+                    self._v1_attachment_session, session_id=request.match_info["session_id"], owner_id=owner,
                 )
                 runtime = self._runtime_map().get(session["agent_id"])
                 if runtime is not None:
@@ -10619,7 +11095,8 @@ class WorkbenchApiServer:
                         )
                         if transfer_response is not None:
                             return transfer_response
-            attachment = self._v1_stage_attachment(
+            attachment = await self._await_session_storage(
+                self._v1_stage_attachment,
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 payload=payload,
@@ -10642,34 +11119,36 @@ class WorkbenchApiServer:
             if len(reference.encode("utf-8")) > 4096 or "\x00" in reference:
                 raise ValueError("invalid Workzone attachment reference")
             session_id = request.match_info["session_id"]
-            session = self.session_store.get_session(
-                session_id, owner_id=owner, include_deleted=False
+            session = await asyncio.to_thread(
+                self._v1_attachment_session, session_id=session_id, owner_id=owner,
             )
             runtime = self._runtime_map().get(session["agent_id"])
             if runtime is None:
                 raise SessionNotFound("agent not found")
-            content, filename, media_type = self._resolve_workzone_attachment(
-                runtime, reference
-            )
-            attachment = self._v1_stage_attachment(
-                session_id=session_id,
-                owner_id=owner,
-                payload={
-                    "filename": filename,
-                    "media_type": media_type,
-                    "size_bytes": len(content),
-                    "sha256": hashlib.sha256(content).hexdigest(),
-                },
-            )
-            attachment_id = str(attachment["attachment_id"])
-            self.session_store.upload_attachment_bytes(
-                session_id=session_id, owner_id=owner,
-                attachment_id=attachment_id, payload=content,
-            )
-            committed = self.session_store.commit_attachment(
-                session_id=session_id, owner_id=owner,
-                attachment_id=attachment_id,
-            )
+            def stage_workzone_file():
+                with self._open_workzone_attachment(runtime, reference) as (source, filename, media_type):
+                    size, digest, _ = self._scan_workzone_attachment(source)
+                    attachment = self._v1_stage_attachment(
+                        session_id=session_id,
+                        owner_id=owner,
+                        payload={
+                            "filename": filename,
+                            "media_type": media_type,
+                            "size_bytes": size,
+                            "sha256": digest,
+                        },
+                    )
+                    attachment_id = str(attachment["attachment_id"])
+                    self.session_store.upload_attachment_stream(
+                        session_id=session_id, owner_id=owner,
+                        attachment_id=attachment_id, source=source,
+                    )
+                    return self._v1_commit_attachment(
+                        session_id=session_id, owner_id=owner,
+                        attachment_id=attachment_id,
+                    )
+
+            committed = await self._await_session_storage(stage_workzone_file)
             return web.json_response({"ok": True, "attachment": committed}, status=201)
         except Exception as exc:
             return self._v1_error(exc)
@@ -10681,7 +11160,7 @@ class WorkbenchApiServer:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
             session_id = request.match_info["session_id"]
-            self.session_store.get_session(session_id, owner_id=owner, include_deleted=False)
+            await asyncio.to_thread(self._v1_attachment_session, session_id=session_id, owner_id=owner)
             payload = await request.json()
             ids = payload.get("attachment_ids") if isinstance(payload, Mapping) else None
             if (not isinstance(ids, list) or not ids or len(ids) > MAX_SESSION_ATTACHMENTS_PER_MESSAGE
@@ -10700,7 +11179,8 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            attachment = self.session_store.commit_attachment(
+            attachment = await self._await_session_storage(
+                self._v1_commit_attachment,
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 attachment_id=request.match_info["attachment_id"],
@@ -10709,37 +11189,85 @@ class WorkbenchApiServer:
         except Exception as exc:
             return self._v1_error(exc)
 
-    async def _v1_attachment_upload_payload(self, request) -> bytes:
+    async def _v1_attachment_upload_chunks(self, request):
+        """Yield one upload field without asking aiohttp to buffer the request."""
+        from orchestrator.session_attachment_limits import AttachmentSizeExceeded
+
         content_type = str(getattr(request, "headers", {}).get("Content-Type") or "")
         if content_type.casefold().startswith("multipart/"):
             reader = await request.multipart()
+            ignored = 0
             while True:
                 part = await reader.next()
                 if part is None:
                     break
-                if str(getattr(part, "name", "") or "") in {
-                    "audio",
-                    "content",
-                    "file",
-                }:
-                    return bytes(await part.read(decode=False))
+                selected = str(getattr(part, "name", "") or "") in {"audio", "content", "file"}
+                while True:
+                    chunk = await part.read_chunk(size=1024 * 1024)
+                    if not chunk:
+                        break
+                    if selected:
+                        yield bytes(chunk)
+                    else:
+                        ignored += len(chunk)
+                        if ignored > MAX_SESSION_ATTACHMENT_BYTES:
+                            raise AttachmentSizeExceeded(ignored, MAX_SESSION_ATTACHMENT_BYTES, scope="multipart")
+                if selected:
+                    return
             raise ValueError("multipart upload requires a file or content field")
+        content = getattr(request, "content", None)
+        iterator = getattr(content, "iter_chunked", None)
+        if callable(iterator):
+            async for chunk in iterator(1024 * 1024):
+                yield bytes(chunk)
+            return
         read = getattr(request, "read", None)
         if not callable(read):
             raise ValueError("request body is unavailable")
-        return bytes(await read())
+        yield bytes(await read())
 
     async def handle_v1_attachment_upload(self, request):
+        from orchestrator.session_attachment_limits import AttachmentSizeExceeded
+
         owner = self._v1_owner_id(request)
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            attachment = self.session_store.upload_attachment_bytes(
-                session_id=request.match_info["session_id"],
-                owner_id=owner,
-                attachment_id=request.match_info["attachment_id"],
-                payload=await self._v1_attachment_upload_payload(request),
+            session_id = request.match_info["session_id"]
+            attachment_id = request.match_info["attachment_id"]
+            metadata = await asyncio.to_thread(
+                self._v1_attachment_metadata,
+                session_id=session_id, owner_id=owner, attachment_id=attachment_id,
             )
+            expected_size = int(metadata["size_bytes"])
+            digest, total = hashlib.sha256(), 0
+            with tempfile.TemporaryFile(mode="w+b", dir=self.session_store.attachment_files_root) as spool:
+                async for chunk in self._v1_attachment_upload_chunks(request):
+                    total += len(chunk)
+                    if total > MAX_SESSION_ATTACHMENT_BYTES:
+                        raise AttachmentSizeExceeded(total, MAX_SESSION_ATTACHMENT_BYTES)
+                    if total > expected_size:
+                        raise SessionConflict("attachment size does not match staged metadata")
+                    digest.update(chunk)
+                    spool.write(chunk)
+                if total != expected_size:
+                    raise SessionConflict("attachment size does not match staged metadata")
+                if digest.hexdigest() != str(metadata["sha256"]):
+                    raise SessionConflict("attachment digest does not match staged metadata")
+                spool.flush()
+                spool.seek(0)
+                upload = asyncio.create_task(asyncio.to_thread(
+                    self.session_store.upload_attachment_stream,
+                    session_id=session_id, owner_id=owner,
+                    attachment_id=attachment_id, source=spool,
+                ))
+                try:
+                    attachment = await asyncio.shield(upload)
+                except asyncio.CancelledError:
+                    # The local write may already have happened. Settle it
+                    # before closing its source; cancellation never replays.
+                    await asyncio.gather(upload, return_exceptions=True)
+                    raise
             return web.json_response({"ok": True, "attachment": attachment})
         except Exception as exc:
             return self._v1_error(exc)
@@ -10751,7 +11279,8 @@ class WorkbenchApiServer:
         if owner is None:
             return self._v1_error(ValueError("not authenticated"), status=401)
         try:
-            metadata, payload = self.session_store.attachment_bytes(
+            metadata, payload = await asyncio.to_thread(
+                self.session_store.attachment_bytes,
                 session_id=request.match_info["session_id"],
                 owner_id=owner,
                 attachment_id=request.match_info["attachment_id"],
@@ -10795,8 +11324,8 @@ class WorkbenchApiServer:
                 status=503,
             )
         try:
-            metadata, payload = self.session_store.audio_asset_bytes(
-                session_id=request.match_info["session_id"],
+            metadata, payload = await self._await_session_storage(
+                self.session_store.audio_asset_bytes, session_id=request.match_info["session_id"],
                 owner_id=owner,
                 asset_id=request.match_info["asset_id"],
             )
@@ -10821,8 +11350,8 @@ class WorkbenchApiServer:
                 SessionConflict("native audio archive is not enabled"), status=503
             )
         try:
-            asset = self.session_store.archive_audio_asset(
-                session_id=request.match_info["session_id"],
+            asset = await self._await_session_storage(
+                self.session_store.archive_audio_asset, session_id=request.match_info["session_id"],
                 owner_id=owner,
                 asset_id=request.match_info["asset_id"],
             )
@@ -10957,8 +11486,8 @@ class WorkbenchApiServer:
                     "revision": 1,
                 },
             )
-            approval = self.session_store.decide_approval(
-                approval_id=request.match_info["approval_id"],
+            approval = await self._await_session_storage(
+                self.session_store.decide_approval, approval_id=request.match_info["approval_id"],
                 owner_id=owner,
                 decision=decision,
             )
@@ -10974,12 +11503,10 @@ class WorkbenchApiServer:
             agent_id = str(request.match_info["agent_id"]).lower()
             if agent_id not in self._runtime_map():
                 raise SessionNotFound("agent not found")
-            return web.json_response(
-                {
-                    "ok": True,
-                    "promotion": self.session_store.promotion_status(agent_id=agent_id),
-                }
+            promotion = await asyncio.to_thread(
+                self.session_store.promotion_status, agent_id=agent_id
             )
+            return web.json_response({"ok": True, "promotion": promotion})
         except Exception as exc:
             return self._v1_error(exc)
 
@@ -11002,15 +11529,15 @@ class WorkbenchApiServer:
                     session_id = str(payload.get("session_id") or "").strip()
                     if not session_id:
                         raise ValueError("session_id is required for action=now")
-                    self.session_store.get_session(session_id, owner_id=owner)
+                    await asyncio.to_thread(self.session_store.get_session, session_id, owner_id=owner)
                     session_ids = [session_id]
                 result = runtime_session.promote_sessions(
                     runtime, session_ids=session_ids, trigger="session_api"
                 )
                 return web.json_response({"ok": True, "result": result})
             if action == "configure":
-                schedule = self.session_store.set_promotion_schedule(
-                    agent_id=agent_id,
+                schedule = await self._await_session_storage(
+                    self.session_store.set_promotion_schedule, agent_id=agent_id,
                     enabled=payload.get("enabled"),
                     local_time=payload.get("local_time"),
                     timezone_name=payload.get("timezone"),
@@ -11057,13 +11584,14 @@ class WorkbenchApiServer:
         filename = Path(str(attachment.get("filename") or "")).name
         if not filename or filename != str(attachment.get("filename") or ""):
             raise ValueError("invalid attachment filename")
+        encoded = attachment.get("content_b64")
+        if not isinstance(encoded, str):
+            raise ValueError("invalid attachment encoding")
         try:
-            payload = base64.b64decode(
-                str(attachment.get("content_b64") or ""), validate=True
-            )
+            payload = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error):
             raise ValueError("invalid attachment encoding") from None
-        if not payload or len(payload) > 25 * 1024 * 1024:
+        if len(payload) > 25 * 1024 * 1024:
             raise ValueError("attachment must contain at most 25 MiB")
         declared_size = attachment.get("size_bytes")
         if declared_size is not None and int(declared_size) != len(payload):
@@ -11075,17 +11603,21 @@ class WorkbenchApiServer:
         media_type = str(attachment.get("media_type") or "application/octet-stream")
         return payload, filename, media_type
 
-    def _resolve_workzone_attachment(self, runtime: Any, reference: str) -> tuple[bytes, str, str]:
+    @contextmanager
+    def _open_workzone_attachment(self, runtime: Any, reference: str):
         from orchestrator.workzone import active_workzone_slots, normalize_workzone_state
+        from orchestrator.session_attachment_authorization import _open_no_symlinks
+        import stat
 
         raw_reference = str(reference or "").strip()
-        relative = Path(raw_reference)
+        requested = Path(raw_reference)
         if (
             not raw_reference
-            or relative.is_absolute()
-            or any(part in {"", ".", ".."} for part in relative.parts)
+            or "\x00" in raw_reference
+            or any(part == ".." for part in requested.parts)
+            or (requested.drive and not requested.is_absolute())
         ):
-            raise ValueError("Workzone attachment must be a relative file reference")
+            raise ValueError("Workzone attachment must be a valid file reference")
         state = getattr(runtime, "_workzone_state", None)
         if state is None:
             state = dict(getattr(runtime, "metadata", {}) or {}).get("workzone_state")
@@ -11093,21 +11625,71 @@ class WorkbenchApiServer:
         if not slots:
             raise ValueError("no enabled Workzone is available for this Agent")
         for slot in slots:
-            root = Path(str(slot.get("path") or "")).resolve()
-            candidate = (root / relative).resolve()
-            if candidate.is_relative_to(root) and candidate.is_file():
+            try:
+                root = Path(str(slot.get("path") or "")).resolve(strict=True)
+                root_stat = root.stat()
+                candidate = (requested if requested.is_absolute() else root / requested).resolve(strict=True)
+            except (OSError, ValueError):
+                continue
+            if not candidate.is_relative_to(root) or candidate == root:
+                continue
+            try:
+                fd, ancestors = _open_no_symlinks(candidate, os.O_RDONLY)
                 try:
-                    if candidate.stat().st_size > 25 * 1024 * 1024:
-                        raise ValueError("Workzone attachment exceeds the 25 MiB limit")
-                    payload = candidate.read_bytes()
-                except OSError:
-                    raise ValueError("Workzone attachment could not be read") from None
-                return (
-                    payload,
-                    candidate.name,
+                    source = os.fdopen(fd, "rb")
+                except BaseException:
+                    os.close(fd)
+                    raise
+            except OSError:
+                raise ValueError("Workzone attachment could not be read safely") from None
+            with source:
+                root_fence = next(
+                    ((device, inode) for path, device, inode in ancestors if Path(path) == root),
+                    None,
+                )
+                if root != Path(root.anchor) and root_fence != (int(root_stat.st_dev), int(root_stat.st_ino)):
+                    raise ValueError("Workzone changed while opening the attachment")
+                observed = os.fstat(source.fileno())
+                if not stat.S_ISREG(observed.st_mode):
+                    raise ValueError("Workzone attachment is not a regular file")
+                if observed.st_size > MAX_SESSION_ATTACHMENT_BYTES:
+                    raise ValueError("Workzone attachment exceeds the configured Session attachment limit")
+                yield (
+                    source, candidate.name,
                     mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
                 )
+                return
         raise ValueError("Workzone attachment was not found in an enabled Workzone")
+
+    @staticmethod
+    def _scan_workzone_attachment(source, *, collect=False):
+        before = os.fstat(source.fileno())
+        digest = hashlib.sha256()
+        chunks, total = [], 0
+        source.seek(0)
+        while True:
+            chunk = source.read(min(1024 * 1024, MAX_SESSION_ATTACHMENT_BYTES - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SESSION_ATTACHMENT_BYTES:
+                raise ValueError("Workzone attachment exceeds the configured Session attachment limit")
+            digest.update(chunk)
+            if collect:
+                chunks.append(chunk)
+        after = os.fstat(source.fileno())
+        def signature(info):
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if signature(before) != signature(after) or total != after.st_size:
+            raise ValueError("Workzone attachment changed while being read")
+        source.seek(0)
+        return total, digest.hexdigest(), b"".join(chunks) if collect else None
+
+    def _resolve_workzone_attachment(self, runtime: Any, reference: str) -> tuple[bytes, str, str]:
+        # Compatibility callers still need bytes; canonical Session staging streams.
+        with self._open_workzone_attachment(runtime, reference) as (source, filename, media_type):
+            _, _, payload = self._scan_workzone_attachment(source, collect=True)
+            return payload, filename, media_type
 
     async def handle_tui_voice(self, request):
         """Read or change the selected Agent's shared semantic voice profile."""
@@ -11938,6 +12520,19 @@ class WorkbenchApiServer:
     def _has_admission_request_id(request_id):
         return isinstance(request_id, str) and bool(request_id.strip())
 
+    @staticmethod
+    def _recognized_chat_slash(runtime, text):
+        """Identify a known command without executing it or trusting chat text."""
+        from orchestrator.slash_command_audit import (
+            is_supported_slash_command, parse_slash_command_text,
+        )
+
+        try:
+            command, _ = parse_slash_command_text(text)
+        except ValueError:
+            return True
+        return command in {"telegram", "whatsapp", "forget"} or is_supported_slash_command(runtime, command)
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -12079,17 +12674,33 @@ class WorkbenchApiServer:
 
             request_ids = []
             if text and not uploads:
+                command_owner = (
+                    agentpresence_session_metadata.get("owner_id")
+                    if agentpresence_session_metadata is not None
+                    else self._strict_authenticated_owner(request)
+                )
+                anonymous_slash = text.startswith("/") and not command_owner
+                if anonymous_slash and self._recognized_chat_slash(runtime, text):
+                    return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+                if (text.startswith("/") and not anonymous_slash and self._is_governed_profile()
+                        and not self._can_view_deletion_revision(request, str(agent_name))):
+                    return web.json_response({"ok": False, "error": "agent not found"}, status=404)
                 if re.match(r"^/forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", text, re.IGNORECASE):
                     denied = self._guard_agent_management_access(request, str(agent_name))
                     if denied is not None:
                         return denied
                     session_metadata["_hashi_forget_authenticated"] = True
-                slash_result = await try_execute_slash_command_text(
-                    runtime,
-                    text,
-                    source_channel="api_chat",
-                    session_metadata=session_metadata,
-                )
+                slash_result = None
+                if not anonymous_slash:
+                    slash_result = await try_execute_slash_command_text(
+                        runtime,
+                        text,
+                        source_channel="api_chat",
+                        session_metadata={
+                            **session_metadata,
+                            "_hashi_owner_id": command_owner,
+                        },
+                    )
                 if slash_result is not None:
                     slash_result["agent"] = agent_name
                     slash_result["slash_command"] = True
@@ -12347,6 +12958,9 @@ class WorkbenchApiServer:
             # smuggle a previous PCM snapshot or a fabricated verification
             # result through the general compatibility metadata bag.
             protected_keys = {
+                # Resource ownership is resolved at the authenticated ingress;
+                # compatibility metadata must not select another user's data.
+                "owner_id",
                 CONNECTOR_EVIDENCE_METADATA_KEY,
                 AGENTPRESENCE_AUTHENTICATED_METADATA_KEY,
                 MESSAGE_CONTEXT_METADATA_KEY,
@@ -12553,6 +13167,7 @@ class WorkbenchApiServer:
         )
         if is_hchat_ingress:
             from orchestrator.hchat_freshness_gate import (
+                HChatMessageExpired,
                 _resolve_hchat_owner,
                 check_hchat_freshness_and_register,
                 hchat_payload_digest,
@@ -12612,12 +13227,52 @@ class WorkbenchApiServer:
                 or ""
             ).strip().upper()
             is_reply = is_hchat_terminal_reply(message_type, text)
+            bound_origin = None
+            if is_reply and in_reply_to:
+                from orchestrator.hchat_origin_binding import HChatOriginConflict, resolve_reply_origin
+                from remote.protocol_outbound import get_outbound_correlation
+
+                try:
+                    bound_origin = resolve_reply_origin(
+                        self.session_store,
+                        correlation=get_outbound_correlation(in_reply_to, local_instance=to_instance),
+                        in_reply_to=in_reply_to, conversation_id=conversation_id,
+                        from_instance=from_instance, from_agent=from_agent,
+                        to_instance=to_instance, to_agent=agent_name,
+                    )
+                except HChatOriginConflict:
+                    return web.json_response(
+                        {"ok": False, "error": "HChat reply does not match its source conversation",
+                         "error_code": "reply_correlation_mismatch"}, status=409,
+                    )
+                if bound_origin:
+                    from orchestrator.message_freshness import parse_rfc3339_utc
+
+                    signed_originated = context.get("originated_at")
+                    signed_time = parse_rfc3339_utc(signed_originated)
+                    submitted_time = parse_rfc3339_utc(originated_at)
+                    times_match = (
+                        signed_time == submitted_time if signed_time is not None and submitted_time is not None
+                        else signed_originated == originated_at
+                    )
+                    if str(context.get("message_id") or "").strip() != message_id or not times_match:
+                        return web.json_response(
+                            {"ok": False, "error": "HChat reply does not match authenticated message identity",
+                             "error_code": "reply_correlation_mismatch"}, status=409,
+                        )
+                    if (from_instance != to_instance and (
+                        context.get("network_authentication") != "shared_network_hmac"
+                        or not str(context.get("authenticated_peer") or "").strip()
+                    )):
+                        return web.json_response(
+                            {"ok": False, "error": "Authenticated HChat reply ingress is required",
+                             "error_code": "hchat_connector_evidence_required"}, status=401,
+                        )
             try:
-                owner_id = _resolve_hchat_owner(
-                    self.session_store,
-                    to_agent=agent_name,
+                owner_id = (bound_origin["owner_id"] if bound_origin else await asyncio.to_thread(
+                    _resolve_hchat_owner, self.session_store, to_agent=agent_name,
                     preferred_owner_id=SessionStore.owner_id_for(self.global_config),
-                )
+                ))
             except ValueError as exc:
                 return web.json_response(
                     {
@@ -12627,10 +13282,14 @@ class WorkbenchApiServer:
                     },
                     status=409,
                 )
-            target_session = self.session_store.resolve_primary_session(
-                owner_id=owner_id,
-                agent_id=agent_name,
-                establish=True,
+            target_session = (
+                await asyncio.to_thread(
+                    self.session_store.get_session, bound_origin["session_id"],
+                    owner_id=owner_id, agent_id=agent_name,
+                ) if bound_origin else await self._await_session_storage(
+                    self.session_store.resolve_primary_session,
+                    owner_id=owner_id, agent_id=agent_name, establish=True,
+                )
             )
             if message_type.strip().casefold() == "delivery_status":
                 from orchestrator.hchat_delivery_status import (
@@ -12700,8 +13359,8 @@ class WorkbenchApiServer:
                     session_metadata.get("system_exchange_terminal_text")
                     or delivery_status_display_text(status_notice)
                 ).strip()
-                displayed = self.session_store.append_presentation_message(
-                    session_id=target_session["session_id"],
+                displayed = await self._await_session_storage(
+                    self.session_store.append_presentation_message, session_id=target_session["session_id"],
                     owner_id=owner_id,
                     agent_id=agent_name,
                     role="assistant",
@@ -12771,6 +13430,11 @@ class WorkbenchApiServer:
                     "session_channel_key": "default",
                 }
             )
+            from orchestrator.message_freshness import classify_message_freshness
+
+            session_metadata["_frontend_message_age"] = classify_message_freshness(
+                "hchat", originated_at=originated_at, is_remote=True,
+            ).age_metadata()
             runtime_payload = {
                 "text": text,
                 "source": source,
@@ -12811,6 +13475,14 @@ class WorkbenchApiServer:
                     canonical_text=text,
                     attachment_binding=normalized_remote_attachments or [],
                     payload_to_execute=pending_execution_payload,
+                    age_policy=({"mode": "observe"} if bound_origin else None if is_reply else getattr(
+                        self.global_config, "hchat_request_age_policy", None
+                    )),
+                )
+            except HChatMessageExpired as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc), "error_code": "hchat_message_expired"},
+                    status=409,
                 )
             except (ValueError, ConfirmationConflictError) as exc:
                 return web.json_response(
@@ -12850,38 +13522,29 @@ class WorkbenchApiServer:
                     headers={"Cache-Control": "no-store"},
                 )
             if is_reply:
-                resolved_owner = _resolve_hchat_owner(
-                    self.session_store,
-                    to_agent=agent_name,
-                    preferred_owner_id=owner_id,
-                )
-                reply_session = self.session_store.resolve_primary_session(
-                    owner_id=resolved_owner,
-                    agent_id=agent_name,
-                    establish=True,
-                )
-                displayed = self.session_store.append_presentation_message(
-                    session_id=reply_session["session_id"],
-                    owner_id=resolved_owner,
-                    agent_id=agent_name,
-                    role="assistant",
-                    text=str(
-                        session_metadata.get("system_exchange_terminal_text")
-                        or text
-                    ),
-                    source="hchat-reply",
-                    idempotency_key=f"hchat-display:{message_id}",
-                    presentation_channel="hchat-reply",
-                    history_eligible=False,
-                    message_context={
-                        "system_exchange": True,
-                        "system_exchange_kind": "reply",
-                        "system_exchange_terminal": True,
-                        "hchat_message_id": message_id,
-                        "hchat_from_agent": from_agent,
-                        "hchat_from_instance": from_instance,
-                    },
-                )
+                from orchestrator.hchat_origin_binding import publish_hchat_reply
+
+                resolved_owner = owner_id
+                reply_session = target_session
+                try:
+                    displayed = publish_hchat_reply(
+                        self.session_store, session_id=reply_session["session_id"],
+                        owner_id=resolved_owner, agent_id=agent_name,
+                        text=str(session_metadata.get("system_exchange_terminal_text") or text),
+                        idempotency_key=f"hchat-display:{message_id}",
+                        expected_context_generation=(bound_origin["context_generation"] if bound_origin else None),
+                        message_context={
+                            "system_exchange": True, "system_exchange_kind": "reply",
+                            "system_exchange_terminal": True, "hchat_message_id": message_id,
+                            "hchat_from_agent": from_agent, "hchat_from_instance": from_instance,
+                            "hchat_payload_digest": logical_digest,
+                            "message_age": session_metadata.get("_frontend_message_age"),
+                        },
+                    )
+                except (SessionConflict, SessionNotFound) as exc:
+                    return web.json_response(
+                        {"ok": False, "error": str(exc), "error_code": "hchat_reply_conflict"}, status=409,
+                    )
                 return web.json_response(
                     {
                         "ok": True,
@@ -13120,8 +13783,8 @@ class WorkbenchApiServer:
                 request_id = str(existing["request_id"])
             response_payload = {"ok": True, "request_id": request_id}
             try:
-                run = self.session_store.get_run_by_request(
-                    request_id,
+                run = await asyncio.to_thread(
+                    self.session_store.get_run_by_request, request_id,
                     owner_id=resolved_owner,
                     agent_id=agent_name,
                 )
@@ -13186,17 +13849,33 @@ class WorkbenchApiServer:
                 request_id, owner_id=self._v1_owner_id(request), agent_id=agent_name,
             ))
             return web.json_response(response_payload)
+        command_owner = (
+            agentpresence_session_metadata.get("owner_id")
+            if agentpresence_session_metadata is not None
+            else self._strict_authenticated_owner(request)
+        )
+        anonymous_slash = text.startswith("/") and not command_owner
+        if anonymous_slash and self._recognized_chat_slash(runtime, text):
+            return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+        if (text.startswith("/") and not anonymous_slash and self._is_governed_profile()
+                and not self._can_view_deletion_revision(request, str(agent_name))):
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         if re.match(r"^/forget(?:@[A-Za-z0-9_]+)?(?:\s|$)", text, re.IGNORECASE):
             denied = self._guard_agent_management_access(request, str(agent_name))
             if denied is not None:
                 return denied
             session_metadata["_hashi_forget_authenticated"] = True
-        slash_result = await try_execute_slash_command_text(
-            runtime,
-            text,
-            source_channel="tui" if source.casefold() == "tui" else "api_chat",
-            session_metadata=session_metadata,
-        )
+        slash_result = None
+        if not anonymous_slash:
+            slash_result = await try_execute_slash_command_text(
+                runtime,
+                text,
+                source_channel="tui" if source.casefold() == "tui" else "api_chat",
+                session_metadata={
+                    **session_metadata,
+                    "_hashi_owner_id": command_owner,
+                },
+            )
         if slash_result is not None:
             slash_result["agent"] = agent_name
             slash_result["slash_command"] = True
@@ -13242,12 +13921,15 @@ class WorkbenchApiServer:
     async def handle_message_source_capabilities(self, _request):
         """Publish the single source-name contract used by admission validation."""
 
+        private_config = await asyncio.to_thread(
+            load_private_authorization_config, self.config_path.parent
+        )
         return web.json_response(
             {
                 "ok": True,
                 "message_source": public_source_capabilities(),
                 "private_authorization": (
-                    public_private_authorization_capabilities()
+                    public_private_authorization_capabilities(private_config)
                 ),
             }
         )
@@ -13274,7 +13956,7 @@ class WorkbenchApiServer:
             or not from_instance
             or not text
             or not message_id
-            or not originated_at
+            or (message_type.casefold() in {"agent_reply", "delivery_status"} and not originated_at)
             or idempotency_key != f"hchat:{message_id}"
         ):
             return web.json_response(
@@ -13402,17 +14084,16 @@ class WorkbenchApiServer:
                         },
                         status=409,
                     )
-                owner_id = _resolve_hchat_owner(
-                    self.session_store,
-                    to_agent=to_agent,
+                owner_id = await asyncio.to_thread(
+                    _resolve_hchat_owner, self.session_store, to_agent=to_agent,
                 )
-                session = self.session_store.resolve_primary_session(
-                    owner_id=owner_id,
+                session = await self._await_session_storage(
+                    self.session_store.resolve_primary_session, owner_id=owner_id,
                     agent_id=to_agent,
                     establish=True,
                 )
-                displayed = self.session_store.append_presentation_message(
-                    session_id=session["session_id"],
+                displayed = await self._await_session_storage(
+                    self.session_store.append_presentation_message, session_id=session["session_id"],
                     owner_id=owner_id,
                     agent_id=to_agent,
                     role="assistant",
@@ -13461,45 +14142,65 @@ class WorkbenchApiServer:
                     "in_reply_to": in_reply_to,
                 }
             }
+            from orchestrator.message_freshness import classify_message_freshness
+
+            hchat_metadata["_frontend_message_age"] = classify_message_freshness(
+                "hchat", originated_at=originated_at, is_remote=True,
+            ).age_metadata()
             from orchestrator.hchat_freshness_gate import (
+                HChatMessageExpired,
                 _resolve_hchat_owner,
                 check_hchat_freshness_and_register,
                 is_hchat_terminal_reply,
             )
 
             is_reply = is_hchat_terminal_reply(message_type, text)
-            is_fresh, confirmation = check_hchat_freshness_and_register(
-                store=self.session_store,
-                originated_at=originated_at,
-                is_remote=True,
-                to_agent=to_agent,
-                from_agent=from_agent,
-                from_instance=from_instance,
-                message_id=message_id,
-                text=message_text,
-                is_reply=is_reply,
-                transport="workbench_exchange",
-                connector_id="hchat_workbench_exchange",
-                idempotency_key=idempotency_key,
-                canonical_text=text,
-                payload_to_execute={
-                    "runtime_payload": {
-                        "text": message_text,
-                        "source": "hchat",
-                        "request_metadata": hchat_metadata,
-                        "idempotency_key": idempotency_key,
+            try:
+                is_fresh, confirmation = check_hchat_freshness_and_register(
+                    store=self.session_store,
+                    originated_at=originated_at,
+                    is_remote=True,
+                    to_agent=to_agent,
+                    from_agent=from_agent,
+                    from_instance=from_instance,
+                    message_id=message_id,
+                    text=message_text,
+                    is_reply=is_reply,
+                    transport="workbench_exchange",
+                    connector_id="hchat_workbench_exchange",
+                    idempotency_key=idempotency_key,
+                    canonical_text=text,
+                    age_policy=(None if is_reply else getattr(
+                        self.global_config, "hchat_request_age_policy", None
+                    )),
+                    payload_to_execute={
+                        "runtime_payload": {
+                            "text": message_text,
+                            "source": "hchat",
+                            "request_metadata": hchat_metadata,
+                            "idempotency_key": idempotency_key,
+                        },
+                        "status_notification": {
+                            "to_agent": from_agent,
+                            "target_instance": from_instance,
+                            "from_agent": to_agent,
+                            "source_instance": to_instance,
+                            "conversation_id": str(
+                                payload.get("conversation_id") or ""
+                            ).strip(),
+                        },
                     },
-                    "status_notification": {
-                        "to_agent": from_agent,
-                        "target_instance": from_instance,
-                        "from_agent": to_agent,
-                        "source_instance": to_instance,
-                        "conversation_id": str(
-                            payload.get("conversation_id") or ""
-                        ).strip(),
-                    },
-                },
-            )
+                )
+            except HChatMessageExpired as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc), "error_code": "hchat_message_expired"},
+                    status=409,
+                )
+            except ConfirmationConflictError as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc), "error_code": "hchat_freshness_rejected"},
+                    status=409,
+                )
             if confirmation is not None:
                 self._hchat_status_recovery_event.set()
             if not is_fresh and confirmation is not None:
@@ -13528,17 +14229,16 @@ class WorkbenchApiServer:
                     headers={"Cache-Control": "no-store"},
                 )
             if is_reply:
-                owner_id = _resolve_hchat_owner(
-                    self.session_store,
-                    to_agent=to_agent,
+                owner_id = await asyncio.to_thread(
+                    _resolve_hchat_owner, self.session_store, to_agent=to_agent,
                 )
-                session = self.session_store.resolve_primary_session(
-                    owner_id=owner_id,
+                session = await self._await_session_storage(
+                    self.session_store.resolve_primary_session, owner_id=owner_id,
                     agent_id=to_agent,
                     establish=True,
                 )
-                displayed = self.session_store.append_presentation_message(
-                    session_id=session["session_id"],
+                displayed = await self._await_session_storage(
+                    self.session_store.append_presentation_message, session_id=session["session_id"],
                     owner_id=owner_id,
                     agent_id=to_agent,
                     role="assistant",
@@ -14196,7 +14896,7 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "admin auth failed"}, status=403
             )
 
-        owner_id = self._v1_owner_id(request)
+        owner_id = self._strict_authenticated_owner(request)
         if owner_id is None:
             return web.json_response(
                 {"ok": False, "error": "not authenticated"}, status=401
@@ -14258,7 +14958,7 @@ class WorkbenchApiServer:
             command = ""
         elif not is_sys_command_line(command):
             command = command.strip()
-        owner_id = self._v1_owner_id(request)
+        owner_id = self._strict_authenticated_owner(request)
         if owner_id is None:
             return web.json_response(
                 {"ok": False, "error": "not authenticated"}, status=401
@@ -14269,6 +14969,9 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "agent not found"}, status=404
             )
+        if (self._is_governed_profile()
+                and not self._can_view_deletion_revision(request, str(agent_name))):
+            return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         if not command.strip():
             return web.json_response(
                 {"ok": False, "error": "command is required"}, status=400
@@ -14333,7 +15036,10 @@ class WorkbenchApiServer:
             return value.strip()
         return None
 
-    def _scheduler_job_record(self, *, agent_name: str, kind: str, job: dict, request=None) -> dict:
+    def _scheduler_job_record(
+        self, *, agent_name: str, kind: str, job: dict, request=None,
+        can_view_revision: bool | None = None,
+    ) -> dict:
         from orchestrator.her_v2.request_policy import job_effort_policy
         from orchestrator.skill_manager import scheduler_job_deletion_revision
 
@@ -14386,43 +15092,57 @@ class WorkbenchApiServer:
                     "applies_to": "her-v2",
                     "error": str(exc),
                 }
+        if can_view_revision is None:
+            can_view_revision = request is not None and (
+                self._can_view_deletion_revision(request, agent_name)
+                or self._scheduler_tool_authenticated(request, agent_name, "hashi_scheduler_delete")
+            )
         return {
             "kind": kind,
             "job_id": task_id,
             "enabled": bool(job.get("enabled", False)),
             "job": dict(job),
             **({"deletion_revision": scheduler_job_deletion_revision(job)}
-               if request is not None and (
-                   self._can_view_deletion_revision(request, agent_name)
-                   or self._scheduler_tool_authenticated(request, agent_name, "hashi_scheduler_delete"))
-               else {}),
+               if can_view_revision else {}),
             "last_run": last_run,
             "last_run_at": self._scheduler_last_run_at(last_run),
             "pending_recovery": pending_recovery,
             "her_v2_effort_policy": effort_policy,
         }
 
-    def _scheduler_tool_run(self, request, agent_name: str, tool: str):
-        from orchestrator.workbench_auth import scheduler_tool_token_claims
+    def _scheduler_tool_run(self, request, agent_name: str, tool: str, *, allow_expired_for_renewal=False):
+        from orchestrator.workbench_auth import scheduler_delegation_key, scheduler_tool_token_claims
         from orchestrator.session_store import StaleFencingToken
 
-        if self._is_governed_profile():
-            return None
         token = getattr(request, "headers", {}).get("X-Hashi-Scheduler-Token", "")
         if not token:
             return None
+        try:
+            secret = (scheduler_delegation_key(self.global_config.bridge_home)
+                      if self._is_governed_profile() else self.admin_token)
+        except (OSError, ValueError, AttributeError):
+            return None
         claims = scheduler_tool_token_claims(
-            self.admin_token, token,
+            secret, token,
             instance_id=str(getattr(self.global_config, "instance_id", "")),
             agent_id=agent_name, audience=f"{request.scheme}://{request.host}", tool=tool,
+            allow_expired_for_renewal=allow_expired_for_renewal,
         )
         if not claims or type(claims.get("fencing_token")) is not int:
             return None
         try:
-            owner = SessionStore.owner_id_for(self.global_config)
             run = self.session_store.get_run_by_request(
-                claims["request"], owner_id=owner, agent_id=agent_name,
+                claims["request"], agent_id=agent_name,
             )
+            if self._is_governed_profile():
+                session = self.session_store.get_session(run["session_id"], agent_id=agent_name)
+                owner = session["owner_id"]
+                if claims.get("owner_id") != owner or not self._governed_scheduler_access(
+                    owner, agent_name, tool, claims["request"]
+                ):
+                    return None
+            else:
+                owner = SessionStore.owner_id_for(self.global_config)
             if (run["run_id"] != claims.get("run_id")
                     or run["fencing_token"] != claims["fencing_token"]):
                 return None
@@ -14437,12 +15157,113 @@ class WorkbenchApiServer:
         except (SessionNotFound, StaleFencingToken, TypeError, ValueError):
             return None
 
+    async def handle_scheduler_token_renewal(self, request):
+        """Reissue only an already-delegated tool for the same live Run attempt."""
+        from orchestrator.workbench_auth import issue_scheduler_tool_token, scheduler_delegation_key
+
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return web.json_response({"ok": False, "error_code": "scheduler_renewal_invalid"}, status=400)
+        if not isinstance(payload, dict) or set(payload) != {"tool"}:
+            return web.json_response({"ok": False, "error_code": "scheduler_renewal_invalid"}, status=400)
+        tool = payload["tool"]
+        if not isinstance(tool, str) or not tool.startswith(("hashi_scheduler_", "hashi_superloop_")):
+            return web.json_response({"ok": False, "error_code": "scheduler_renewal_invalid"}, status=400)
+        agent = str(request.match_info.get("name") or "").strip()
+        binding = await asyncio.to_thread(
+            self._scheduler_tool_run, self._scheduler_request_snapshot(request), agent, tool,
+            allow_expired_for_renewal=True,
+        )
+        if binding is None:
+            return web.json_response({"ok": False, "error_code": "scheduler_run_not_authorized"}, status=401)
+        try:
+            secret = (scheduler_delegation_key(self.global_config.bridge_home)
+                      if self._is_governed_profile() else self.admin_token)
+            renewed = issue_scheduler_tool_token(
+                secret, instance_id=str(self.global_config.instance_id), agent_id=agent,
+                request_id=binding["request_id"], audience=f"{request.scheme}://{request.host}",
+                tools=[tool], run_id=binding["run_id"], fencing_token=binding["fencing_token"],
+                owner_id=binding["owner_id"] if self._is_governed_profile() else None,
+            )
+        except (OSError, ValueError, AttributeError):
+            return web.json_response({"ok": False, "error_code": "scheduler_delegation_unavailable"}, status=503)
+        return web.json_response({"ok": True, "token": renewed}, headers={"Cache-Control": "no-store"})
+
+    def _governed_scheduler_access(self, owner: str, agent_name: str, tool: str, request_id: str) -> bool:
+        """Use the Run's persisted principal and the existing Agent/project policy."""
+        if not isinstance(owner, str) or not owner.startswith("enterprise:") or self.identity_service is None:
+            return False
+        user_id = owner.removeprefix("enterprise:").strip()
+        user = self.identity_service.get_user(user_id) if user_id else None
+        org_id = str(getattr(self.global_config, "organization_id", "") or "").strip()
+        if user is None or user.status != "active" or user.org_id != org_id:
+            return False
+        rows = self._filter_enterprise_agent_rows_for_user(user, self._load_agent_rows())
+        target = next((row for row in rows if str(row.get("name") or "") == agent_name), None)
+        evaluator = self._enterprise_policy_evaluator()
+        if target is None or evaluator is None:
+            return False
+        projects = self._agent_project_ids(target)
+        if not self._enterprise_user_has_admin_role(user.id):
+            projects &= self._enterprise_visible_project_ids(user.id)
+        # Sessions do not currently record a project. Evaluate every applicable
+        # project instead of guessing one and silently bypassing its policy.
+        for project in sorted(projects) or [None]:
+            context = {"org_id": org_id, "project_id": project, "actor_id": user_id,
+                       "user_id": user_id, "agent_id": agent_name, "tool_name": tool,
+                       "request_id": request_id}
+            if not evaluator.evaluate("tool.execute", resource=f"tool:{tool}", context=context).allowed:
+                return False
+        return True
+
     def _scheduler_tool_authenticated(self, request, agent_name: str, tool: str) -> bool:
         return self._scheduler_tool_run(request, agent_name, tool) is not None
+
+    @staticmethod
+    def _scheduler_request_snapshot(request):
+        # Worker threads only read a frozen copy of the fields used by these checks.
+        headers = getattr(request, "headers", {}).copy()
+        return SimpleNamespace(
+            headers=headers, scheme=getattr(request, "scheme", "http"),
+            host=getattr(request, "host", ""),
+        )
+
+    async def _scheduler_mutation_authority(self, request, agent_name: str, tool: str):
+        snapshot = self._scheduler_request_snapshot(request)
+        return await asyncio.to_thread(mutation_authority, self, snapshot, agent_name, tool)
+
+    async def _scheduler_read_error_async(self, request, agent_name: str, tool: str):
+        snapshot = self._scheduler_request_snapshot(request)
+        return await asyncio.to_thread(self._scheduler_read_error, snapshot, agent_name, tool)
+
+    async def _scheduler_revision_visibility(self, request, agent_name: str) -> bool:
+        snapshot = self._scheduler_request_snapshot(request)
+        return await asyncio.to_thread(
+            lambda: self._can_view_deletion_revision(snapshot, agent_name)
+            or self._scheduler_tool_authenticated(snapshot, agent_name, "hashi_scheduler_delete")
+        )
+
+    def _scheduler_read_error(self, request, agent_name: str, tool: str):
+        if getattr(request, "headers", {}).get("X-Hashi-Scheduler-Token"):
+            # Conditional deletion reads this exact snapshot before performing
+            # the deletion, using the same single-tool scoped credential.
+            tools = (tool, "hashi_scheduler_delete") if tool == "hashi_scheduler_status" else (tool,)
+            if not any(self._scheduler_tool_authenticated(request, agent_name, name) for name in tools):
+                return web.json_response({"ok": False, "error_code": "scheduler_run_not_authorized"}, status=401)
+        elif self._is_governed_profile():
+            if self._strict_authenticated_owner(request) is None:
+                return web.json_response({"ok": False, "error": "not authenticated"}, status=401)
+            if not self._can_view_deletion_revision(request, agent_name):
+                return web.json_response({"ok": False, "error": "agent not found"}, status=404)
+        return None
 
     async def handle_agent_scheduler_jobs(self, request):
         """List this agent's authoritative HASHI Scheduler jobs."""
         agent_name = request.match_info.get("name")
+        denied = await self._scheduler_read_error_async(request, agent_name, "hashi_scheduler_list")
+        if denied is not None:
+            return denied
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
             return web.json_response(
@@ -14467,6 +15288,7 @@ class WorkbenchApiServer:
             )
         enabled = None if enabled_filter is None else enabled_filter == "true"
 
+        can_view_revision = await self._scheduler_revision_visibility(request, agent_name)
         kinds = ("cron", "heartbeat", "nudge") if kind == "all" else (kind,)
         records = []
         for job_kind in kinds:
@@ -14479,6 +15301,7 @@ class WorkbenchApiServer:
                         kind=job_kind,
                         job=job,
                         request=request,
+                        can_view_revision=can_view_revision,
                     )
                 )
         return web.json_response(
@@ -14499,7 +15322,7 @@ class WorkbenchApiServer:
         """Resolve one exact recovery batch through the Agent tool gateway."""
 
         agent_name = str(request.match_info.get("name") or "").strip()
-        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_recovery_resolve")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_scheduler_recovery_resolve")
         batch_id = str(request.match_info.get("batch_id") or "").strip()
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
@@ -14560,7 +15383,7 @@ class WorkbenchApiServer:
         """Create one Agent-owned scheduler task through the typed API."""
 
         agent_name = request.match_info.get("name")
-        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_create")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_scheduler_create")
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -14604,7 +15427,7 @@ class WorkbenchApiServer:
                 loop_meta = None
                 if loop_max is not None:
                     loop_meta = {"count": 0, "max": max(0, int(loop_max)), "task_summary": note}
-                job = invoke_mutation(self, binding, lambda: skill_manager.upsert_cron_job(
+                job = await self._await_session_storage(invoke_mutation, self, binding, lambda: skill_manager.upsert_cron_job(
                     task_id=task_id,
                     agent_name=agent_name,
                     schedule=schedule,
@@ -14632,7 +15455,7 @@ class WorkbenchApiServer:
                 loop_meta = None
                 if loop_max is not None:
                     loop_meta = {"count": 0, "max": max(0, int(loop_max)), "task_summary": note}
-                job = invoke_mutation(self, binding, lambda: skill_manager.upsert_heartbeat_job(
+                job = await self._await_session_storage(invoke_mutation, self, binding, lambda: skill_manager.upsert_heartbeat_job(
                     task_id=task_id,
                     agent_name=agent_name,
                     interval_seconds=interval_seconds,
@@ -14658,7 +15481,7 @@ class WorkbenchApiServer:
                         raise ValueError("interval_seconds must be at least 1")
                 max_nudges = max(0, int(payload.get("max_nudges", 0) or 0))
                 task_id = task_id or f"{agent_name}-nudge-{uuid4().hex[:8]}"
-                job = invoke_mutation(self, binding, lambda: skill_manager.create_nudge_job(
+                job = await self._await_session_storage(invoke_mutation, self, binding, lambda: skill_manager.create_nudge_job(
                     agent_name=agent_name,
                     interval_minutes=max(1, int(interval_minutes)),
                     exit_condition=exit_condition,
@@ -14671,13 +15494,17 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except (ConfigConflictError, ConfigDurabilityError) as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=409)
+        can_view_revision = await self._scheduler_revision_visibility(request, agent_name)
         return web.json_response(
             {
                 "ok": True,
                 "authority": "HASHI Scheduler",
                 "agent": agent_name,
                 "kind": kind,
-                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job, request=request),
+                "job": self._scheduler_job_record(
+                    agent_name=agent_name, kind=kind, job=job, request=request,
+                    can_view_revision=can_view_revision,
+                ),
             },
             status=201,
         )
@@ -14686,7 +15513,7 @@ class WorkbenchApiServer:
         """Update one owned scheduler task without trusting a model-supplied agent."""
 
         agent_name = request.match_info.get("name")
-        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_update")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_scheduler_update")
         job_id = str(request.match_info.get("job_id") or "").strip()
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
@@ -14717,7 +15544,7 @@ class WorkbenchApiServer:
             if not valid:
                 return web.json_response({"ok": False, "error": error or "invalid cron schedule"}, status=400)
         try:
-            ok, message, job = invoke_mutation(self, binding, lambda: skill_manager.update_owned_job(
+            ok, message, job = await self._await_session_storage(invoke_mutation, self, binding, lambda: skill_manager.update_owned_job(
                 kind, job_id, agent_name=agent_name, updates=payload
             ))
         except (ConfigConflictError, ConfigDurabilityError) as exc:
@@ -14726,13 +15553,17 @@ class WorkbenchApiServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         if not ok or job is None:
             return web.json_response({"ok": False, "error": message}, status=404)
+        can_view_revision = await self._scheduler_revision_visibility(request, agent_name)
         return web.json_response(
             {
                 "ok": True,
                 "authority": "HASHI Scheduler",
                 "agent": agent_name,
                 "kind": kind,
-                "job": self._scheduler_job_record(agent_name=agent_name, kind=kind, job=job, request=request),
+                "job": self._scheduler_job_record(
+                    agent_name=agent_name, kind=kind, job=job, request=request,
+                    can_view_revision=can_view_revision,
+                ),
             }
         )
 
@@ -14745,7 +15576,12 @@ class WorkbenchApiServer:
         agent_name = str(request.match_info.get("name") or "").strip()
         binding = None
         if getattr(request, "headers", {}).get("X-Hashi-Scheduler-Token"):
-            binding = self._scheduler_tool_run(request, agent_name, "hashi_scheduler_delete")
+            request_scope = SimpleNamespace(
+                headers=request.headers.copy(), scheme=request.scheme, host=request.host,
+            )
+            binding = await asyncio.to_thread(
+                self._scheduler_tool_run, request_scope, agent_name, "hashi_scheduler_delete"
+            )
             if binding is None:
                 return web.json_response({"ok": False, "error_code": "scheduler_run_not_active"}, status=401)
         else:
@@ -14759,8 +15595,8 @@ class WorkbenchApiServer:
             payload = await request.json()
         except Exception:
             payload = {}
-        if not isinstance(payload, dict) or payload.get("authorization") != "explicit_user_authorization":
-            return web.json_response({"ok": False, "error": "explicit confirmation required"}, status=403)
+        if not isinstance(payload, dict):
+            return web.json_response({"ok": False, "error": "invalid task confirmation"}, status=400)
         kind = str(payload.get("kind") or "").strip().lower()
         job_id = str(request.match_info.get("job_id") or "").strip()
         revision = payload.get("expected_revision")
@@ -14780,23 +15616,29 @@ class WorkbenchApiServer:
                 return web.json_response({"ok": False, "error_code": "snapshot_changed"}, status=409)
         scope = dict(operation="activity.scheduler.delete", agent_id=agent_name, kind=kind,
                      job_id=job_id, expected_revision=revision, only_disabled=only_disabled)
-        try:
+        def delete_with_approval():
             approval_guard = (
                 self.session_store.hold_operation_approval(binding=binding, scope=scope)
                 if binding is not None else nullcontext()
             )
             with approval_guard as approval:
                 if binding is not None and not approval["authorized"]:
-                    return web.json_response({
-                        "ok": False, "error_code": "approval_required", "approval": approval,
-                        "message": (f"Owner approval {approval['approval_id']} is {approval['state']}. "
-                                    "Use the existing PAO owner decision endpoint; tool text is not approval."),
-                        "decision_path": f"/api/v1/approvals/{approval['approval_id']}",
-                    }, status=403)
+                    return approval, None, None
                 ok, message = manager.delete_owned_job_if_unchanged(
                     kind, job_id, agent_name=str(getattr(runtime, "name", agent_name)),
                     expected_revision=revision, only_disabled=only_disabled,
                 )
+                return None, ok, message
+
+        try:
+            approval, ok, message = await self._await_session_storage(delete_with_approval)
+            if approval is not None:
+                return web.json_response({
+                    "ok": False, "error_code": "approval_required", "approval": approval,
+                    "message": (f"Owner approval {approval['approval_id']} is {approval['state']}. "
+                                "Use the existing PAO owner decision endpoint; tool text is not approval."),
+                    "decision_path": f"/api/v1/approvals/{approval['approval_id']}",
+                }, status=403)
         except StaleFencingToken:
             return web.json_response({"ok": False, "error_code": "scheduler_run_not_active"}, status=401)
         except (SchedulerJobChanged, ConfigConflictError):
@@ -14816,6 +15658,9 @@ class WorkbenchApiServer:
     async def handle_agent_scheduler_status(self, request):
         """Return one authoritative job definition and persisted scheduler state."""
         agent_name = request.match_info.get("name")
+        denied = await self._scheduler_read_error_async(request, agent_name, "hashi_scheduler_status")
+        if denied is not None:
+            return denied
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
             return web.json_response(
@@ -14842,6 +15687,7 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "job not found for agent"}, status=404
             )
+        can_view_revision = await self._scheduler_revision_visibility(request, agent_name)
         return web.json_response(
             {
                 "ok": True,
@@ -14852,6 +15698,7 @@ class WorkbenchApiServer:
                     kind=kind,
                     job=job,
                     request=request,
+                    can_view_revision=can_view_revision,
                 ),
             }
         )
@@ -14861,6 +15708,9 @@ class WorkbenchApiServer:
         from orchestrator import runtime_cross_session
 
         agent_name = request.match_info.get("name")
+        denied = await self._scheduler_read_error_async(request, agent_name, "hashi_scheduler_run_history")
+        if denied is not None:
+            return denied
         runtime = self._runtime_map().get(agent_name)
         if runtime is None:
             return web.json_response(
@@ -14927,7 +15777,7 @@ class WorkbenchApiServer:
     async def handle_agent_run_job(self, request):
         """Run one cron/heartbeat job immediately for a specific agent."""
         agent_name = request.match_info.get("name")
-        binding = mutation_authority(self, request, agent_name, "hashi_scheduler_rerun")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_scheduler_rerun")
         payload = await request.json()
         kind = str(payload.get("kind") or "cron").strip().lower()
         job_id = str(payload.get("job_id") or payload.get("id") or "").strip()
@@ -14945,15 +15795,6 @@ class WorkbenchApiServer:
             return web.json_response(
                 {"ok": False, "error": "job_id is required"}, status=400
             )
-        if (
-            payload.get("requested_by") == "hashi_tool_gateway"
-            and payload.get("authorization") != "explicit_user_authorization"
-        ):
-            return web.json_response(
-                {"ok": False, "error": "explicit single-job authorization is required"},
-                status=403,
-            )
-
         skill_manager = getattr(runtime, "skill_manager", None)
         if skill_manager is None:
             return web.json_response(
@@ -14999,6 +15840,9 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloops(self, request):
         agent_name = request.match_info.get("name")
+        denied = await self._scheduler_read_error_async(request, agent_name, "hashi_superloop_list")
+        if denied is not None:
+            return denied
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         include_deleted = str(request.query.get("include_deleted") or "").lower() == "true"
@@ -15018,7 +15862,7 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_create(self, request):
         agent_name = request.match_info.get("name")
-        binding = mutation_authority(self, request, agent_name, "hashi_superloop_create")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_superloop_create")
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
         try:
@@ -15028,7 +15872,7 @@ class WorkbenchApiServer:
         if not isinstance(payload, dict):
             return web.json_response({"ok": False, "error": "request body must be an object"}, status=400)
         try:
-            result = invoke_mutation(self, binding, lambda: self._superloop_service(agent_name).create_quickstart(
+            result = await self._await_session_storage(invoke_mutation, self, binding, lambda: self._superloop_service(agent_name).create_quickstart(
                 str(payload.get("goal") or ""),
                 task_title=str(payload.get("task_title") or "").strip() or None,
             ))
@@ -15043,6 +15887,9 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_get(self, request):
         agent_name = request.match_info.get("name")
+        denied = await self._scheduler_read_error_async(request, agent_name, "hashi_superloop_get")
+        if denied is not None:
+            return denied
         loop_id = str(request.match_info.get("loop_id") or "").strip()
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -15058,7 +15905,7 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_update(self, request):
         agent_name = request.match_info.get("name")
-        binding = mutation_authority(self, request, agent_name, "hashi_superloop_update")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_superloop_update")
         loop_id = str(request.match_info.get("loop_id") or "").strip()
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -15071,7 +15918,7 @@ class WorkbenchApiServer:
         action = str(payload.pop("action") or "").strip().lower()
         payload.pop("requested_by", None)
         try:
-            result = invoke_mutation(self, binding, lambda: self._superloop_service(agent_name).update_loop(
+            result = await self._await_session_storage(invoke_mutation, self, binding, lambda: self._superloop_service(agent_name).update_loop(
                 loop_id, action=action, arguments=payload
             ))
         except (FileNotFoundError, PermissionError):
@@ -15087,7 +15934,7 @@ class WorkbenchApiServer:
 
     async def handle_agent_superloop_delete(self, request):
         agent_name = request.match_info.get("name")
-        binding = mutation_authority(self, request, agent_name, "hashi_superloop_delete")
+        binding = await self._scheduler_mutation_authority(request, agent_name, "hashi_superloop_delete")
         loop_id = str(request.match_info.get("loop_id") or "").strip()
         if self._runtime_map().get(agent_name) is None:
             return web.json_response({"ok": False, "error": "agent not found"}, status=404)
@@ -15097,12 +15944,20 @@ class WorkbenchApiServer:
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        if payload.get("authorization") != "explicit_user_authorization":
-            return web.json_response({"ok": False, "error": "explicit loop deletion authorization is required"}, status=403)
         try:
             service = self._superloop_service(agent_name)
-            service.get_loop(loop_id)  # Preserve ownership denial before requesting approval.
-            result = invoke_mutation(self, binding, lambda: service.delete_loop(loop_id),
+            snapshot = await self._await_session_storage(
+                invoke_mutation, self, binding, lambda: service.get_loop(loop_id),
+            )
+            if str(snapshot["loop"].get("status") or "") == "deleted":
+                # No effect is dispatched: report the already-retained record,
+                # without consuming or requesting another operation decision.
+                return web.json_response({
+                    "authority": "HASHI Superloop", "agent": agent_name,
+                    "ok": True, "loop_id": loop_id, "status": "deleted",
+                    "already_deleted": True,
+                })
+            result = await self._await_session_storage(invoke_mutation, self, binding, lambda: service.delete_loop(loop_id),
                                      scope={"operation": "activity.superloop.delete",
                                             "agent_id": agent_name, "loop_id": loop_id})
         except (FileNotFoundError, PermissionError):
@@ -15438,6 +16293,14 @@ class WorkbenchApiServer:
             ),
             "agents": running_agents,
         }
+        # Successful startup is not the same as absence of a Worker. Transfer
+        # finalization needs both existing runtimes and starts in progress.
+        startup_tasks = getattr(orchestrator, "_startup_tasks", None)
+        if isinstance(startup_tasks, dict):
+            payload["agent_runtime_presence"] = sorted({
+                *(str(runtime.name) for runtime in self._runtime_list()),
+                *(str(name) for name in startup_tasks),
+            })
         startup = dict(getattr(orchestrator, "startup_status", {}) or {})
         # Health is a read-only projection. Connector and Remote lifecycle
         # owners update their own state; a status request must never perform
@@ -15867,7 +16730,14 @@ class WorkbenchApiServer:
         try:
             agent = str(request.match_info["name"])
             explicit = str(request.query.get("session_id") or "")
-            session = self.session_store.get_session(explicit, owner_id=owner, agent_id=agent, include_deleted=False) if explicit else self.session_store.resolve_primary_session(owner_id=owner, agent_id=agent)
+            session = (
+                await asyncio.to_thread(
+                    self.session_store.get_session, explicit, owner_id=owner,
+                    agent_id=agent, include_deleted=False,
+                ) if explicit else await asyncio.to_thread(
+                    self.session_store.resolve_primary_session, owner_id=owner, agent_id=agent,
+                )
+            )
             phase = "validate"
             limit = int(request.query.get("limit", 50))
             if not 1 <= limit <= 200:
@@ -15880,8 +16750,11 @@ class WorkbenchApiServer:
             if history_generation is not None and history_generation < 1:
                 raise ValueError("invalid history generation")
             phase = "read"
-            projection = build_chat_projection(self.session_store, session=session, owner_id=owner, limit=limit,
-                offset=offset, after_message_ordinal=cursor, known_history_generation=history_generation, include_command_ui=True)
+            projection = await asyncio.to_thread(
+                build_chat_projection, self.session_store, session=session, owner_id=owner, limit=limit,
+                offset=offset, after_message_ordinal=cursor, known_history_generation=history_generation,
+                include_command_ui=True,
+            )
             response = web.json_response({"ok": True, "chat_projection_version": 2, "projection": projection})
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -16008,7 +16881,15 @@ class WorkbenchApiServer:
             from orchestrator.reboot_receipts import clean_origin
 
             try:
+                raw_origin = origin
                 origin = clean_origin(origin)
+                # A session-bound notice from a different instance must never
+                # be published locally, even if an unrelated Session happens
+                # to have the same identifiers. Older local origins may omit it.
+                origin_instance = str(raw_origin.get("instance_id") or "").strip().upper()
+                local_instance = str(getattr(self.global_config, "instance_id", "") or "").strip().upper()
+                if origin_instance and origin_instance != local_instance:
+                    return web.json_response({"ok": False, "error": "notice target instance does not match"}, status=409)
                 publication_id = payload.get("publication_id")
                 if not origin.get("session_id") or not isinstance(publication_id, str) or not 1 <= len(publication_id) <= 200:
                     raise ValueError("Session-bound notice identity is required")
@@ -16045,9 +16926,9 @@ class WorkbenchApiServer:
                     {"ok": False, "error": "notice owner does not match"}, status=403
                 )
             try:
-                session = self.session_store.get_session(
-                    origin["session_id"], owner_id=owner, agent_id=agent_name,
-                    include_deleted=False,
+                session = await asyncio.to_thread(
+                    self.session_store.get_session, origin["session_id"],
+                    owner_id=owner, agent_id=agent_name, include_deleted=False,
                 )
             except SessionNotFound:
                 return web.json_response(
@@ -16128,3 +17009,4 @@ class WorkbenchApiServer:
         return web.json_response(
             {"ok": True, "agent": agent_name, "chat_id": int(chat_id)}
         )
+# HASHI-Fingerprint: hfp_f67090d3a53d4203a3d7780a4f184519

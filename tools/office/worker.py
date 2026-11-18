@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -28,12 +29,29 @@ def main():
     if len(raw) > LIMIT:
         raise ValueError("Oversized request")
     request = json.loads(raw)
+    if request.get("transport") == "file-v1":
+        request_id = str(request.get("request_id") or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", request_id):
+            raise ValueError("Invalid request identity")
+        name = f"request-{request_id}.json"
+        source = job / name
+        if (request.get("file") != name or source.is_symlink() or not source.is_file()
+                or source.resolve().parent != job):
+            raise ValueError("Invalid request file")
+        payload = source.read_bytes()
+        if (len(payload) != request.get("size")
+                or hashlib.sha256(payload).hexdigest() != request.get("sha256")):
+            raise ValueError("Request file failed integrity check")
+        request = json.loads(payload)
+        if request.get("request_id") != request_id:
+            raise ValueError("Request identity mismatch")
     if request.get("protocol") != PROTOCOL or request.get("deadline", 0) < time.time():
         raise ValueError("Invalid protocol or expired request")
     # Only the operator-qualified release directory is an application import root.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from engine import perform, OfficeError
+    from engine import perform, OfficeError, configure_budgets
     try:
+        configure_budgets(request.get("resource_budgets"))
         for name, version in request["pins"].items():
             if importlib.metadata.version(name) != version:
                 raise OfficeError("RUNTIME_VERSION_MISMATCH", "Office Runtime dependencies changed.")
@@ -59,12 +77,22 @@ def main():
                 "result": result, "sha256": hashlib.sha256(canonical(result)).hexdigest()}
     encoded = canonical(response)
     if len(encoded) > LIMIT:
-        result = {"status": "error", "code": "RESULT_LIMIT",
-                  "summary": "Result exceeds the Office IPC limit. Read a smaller target."}
-        response.update(result=result, sha256=hashlib.sha256(canonical(result)).hexdigest())
+        if request.get("response_transport") == "file-v1":
+            name = f"response-{request['request_id']}.json"
+            with (job / name).open("xb") as output:
+                output.write(encoded)
+                output.flush()
+            response = {"protocol": PROTOCOL, "request_id": request["request_id"],
+                        "transport": "file-v1", "file": name, "size": len(encoded),
+                        "sha256": hashlib.sha256(encoded).hexdigest()}
+        else:
+            result = {"status": "error", "code": "RESULT_LIMIT",
+                      "summary": "Result exceeds the Office IPC limit. Requalify the Office runtime."}
+            response.update(result=result, sha256=hashlib.sha256(canonical(result)).hexdigest())
     sys.stdout.buffer.write(canonical(response))
     sys.stdout.buffer.flush()
 
 
 if __name__ == "__main__":
     main()
+# HASHI-Fingerprint: hfp_1f6531d27fb24dc592c7da07f517631b

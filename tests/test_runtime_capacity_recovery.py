@@ -113,19 +113,22 @@ def _save(runtime, policy):
 
 
 @pytest.mark.asyncio
-async def test_off_keeps_the_original_single_call(tmp_path):
-    runtime = _runtime(tmp_path, [_capacity()])
+async def test_fallback_off_still_allows_same_target_recovery(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity(), _success()])
     waits = []
+    async def sleep(seconds):
+        waits.append(seconds)
     response = await generate_with_capacity_recovery(
         runtime,
         _item(),
         "original prompt",
         {"is_retry": False, "silent": True, "on_stream_event": None},
-        sleep=lambda seconds: waits.append(seconds),
+        sleep=sleep,
     )
-    assert response.error_code == "PROVIDER_CAPACITY_UNAVAILABLE"
-    assert len(runtime.backend_manager.calls) == 1
-    assert waits == []
+    assert response.is_success is True
+    assert len(runtime.backend_manager.calls) == 2
+    assert runtime.backend_manager.fallback_calls == []
+    assert waits == [60]
 
 
 @pytest.mark.asyncio
@@ -191,7 +194,7 @@ async def test_call_text_turn_never_waits_or_falls_back(tmp_path):
     sleeper.assert_not_awaited()
     assert runtime.backend_manager.fallback_calls == []
     recovery = response.stream_metadata["capacity_recovery"]
-    assert recovery["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+    assert recovery["blocking_reason"] == policy_owner.REASON_MEDIA_RECOVERY_UNAVAILABLE
     assert recovery["retry_delays_s"] == []
 
 
@@ -225,7 +228,7 @@ async def test_phone_and_voice_requests_never_enter_long_retry_waits(
     sleeper.assert_not_awaited()
     assert runtime.backend_manager.fallback_calls == []
     recovery = response.stream_metadata["capacity_recovery"]
-    assert recovery["blocking_reason"] == policy_owner.REASON_MODALITY_EXCLUDED
+    assert recovery["blocking_reason"] == policy_owner.REASON_MEDIA_RECOVERY_UNAVAILABLE
     assert recovery["retry_delays_s"] == []
 
 
@@ -755,3 +758,43 @@ async def test_effect_mode_b_never_switches_target_after_any_observed_effect(
         response.stream_metadata["capacity_recovery"]["blocking_reason"]
         == policy_owner.REASON_UNSAFE_CHECKPOINT
     )
+
+
+@pytest.mark.asyncio
+async def test_task_can_select_capacity_budget_without_enabling_fallback(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity(), _capacity(), _capacity(), _capacity(), _success()])
+    waits = []
+    async def sleep(seconds):
+        waits.append(seconds)
+    response = await generate_with_capacity_recovery(
+        runtime,
+        _item(request_metadata={"provider_recovery": {"capacity_delays_s": [0, 1, 2, 3]}}),
+        "original prompt",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=sleep,
+    )
+    assert response.is_success is True
+    assert waits == [0, 1, 2, 3]
+    assert len(runtime.backend_manager.calls) == 5
+    assert runtime.backend_manager.fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_task_capacity_wait_can_be_cancelled_without_another_call(tmp_path):
+    runtime = _runtime(tmp_path, [_capacity(), _success()])
+    waiting = asyncio.Event()
+    async def sleep(seconds):
+        waiting.set()
+        await asyncio.Event().wait()
+    task = asyncio.create_task(generate_with_capacity_recovery(
+        runtime,
+        _item(request_metadata={"provider_recovery": {"capacity_delays_s": [1]}}),
+        "original prompt",
+        {"is_retry": False, "silent": True, "on_stream_event": None},
+        sleep=sleep,
+    ))
+    await asyncio.wait_for(waiting.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(runtime.backend_manager.calls) == 1

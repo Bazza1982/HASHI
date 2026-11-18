@@ -10,7 +10,8 @@ from orchestrator.compute_services import (
     ComputeReference, ComputeRequirements, ComputeServiceDirectory,
     ComputeServicesConfig, ComputeServiceError,
 )
-from .openai_live import OpenAILiveProvider, provider_http_session, _response_bytes
+from orchestrator.lan_transport import local_or_lan_streaming_session
+from .openai_live import OpenAILiveProvider, _response_bytes
 from .protocol import LiveVoiceError, identifier
 from .provider import ProviderCapabilities
 
@@ -33,6 +34,9 @@ class SimulMTProvider(OpenAILiveProvider):
         self.node_id = node_id or os.environ.get("HASHI_SIMULMT_NODE", "")
         self.service_id = service_id or os.environ.get("HASHI_SIMULMT_SERVICE", "")
         self.bindings = {}
+
+    def http_session(self):
+        return local_or_lan_streaming_session()
 
     def credential(self, secrets):
         return ""  # The configured Compute client owns credential-reference resolution.

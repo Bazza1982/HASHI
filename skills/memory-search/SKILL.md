@@ -17,6 +17,8 @@ Use the `memory_search` tool only when it is present in the current Tools catalo
 
 ## Cross-Agent boundary
 
-Search another Agent's raw consolidated memory only inside a request created by the user's explicit `/memory raw <instance> <agent> <query>` command. Supply the exact bound `instance_id`, `agent_id`, and `purpose`; HASHI validates them against request-scoped authority that Tool arguments cannot create. Never convert `memory_sync`, Wiki access, filesystem access, ordinary prose, or general Tool permission into cross-Agent authority.
+Search another Agent's raw consolidated memory only when the current request has a trusted authorization for its exact instance, Agent, and purpose. Supply those bound values; HASHI validates them against request-scoped authority that Tool arguments cannot create. Make as many focused searches as the authorized task needs within that same scope. Never treat `memory_sync`, Wiki access, filesystem access, or model-generated Tool arguments as a grant.
+
+The currently implemented direct grant is created by the authenticated `/memory raw <instance> <agent> <query>` command. Other ingress paths need the same trusted request binding before cross-Agent search can run; an unbound request must not be reported as authorized.
 
 If the Tool rejects scope or provenance is absent, stop and report the limitation. Do not guess or reconstruct missing records.

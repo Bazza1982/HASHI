@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import hashlib
-import io
 import json
 import logging
-import re
 import sys
-import warnings
 from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -38,17 +34,14 @@ if __name__ == "__main__" and "--runtime-manifest" in sys.argv:
 from jsonschema import Draft7Validator
 
 from tools.gateway.context import GatewayContext, load_gateway_context
+from tools.legacy_screenshot import (
+    continuation_note, legacy_screenshot_page,
+)
 
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_VERSION = "1.0"
 
-_LEGACY_SCREENSHOT_TOOLS = {
-    "browser_screenshot",
-    "browser_session",
-    "desktop_screenshot",
-    "windows_screenshot",
-}
 _GATEWAY_EXPOSED_TOOL_NAMES = {
     "file_read": "hashi_file_read",
     "file_write": "hashi_file_write",
@@ -66,11 +59,26 @@ _SAFE_MCP_RESULT_KEYS = frozenset({
     "operation",
     "reason",
     "retryable",
+    "actual_bytes",
+    "limit_bytes",
     "recovery",
     "effect_state",
     "transport_state",
     "cleanup_confirmed",
     "runtime_protection",
+    "output_truncated",
+    "complete_content",
+    "output_original_chars",
+    "output_continuation",
+    "output_retention",
+    "content_text_truncated",
+    "content_continuations",
+    "file_read_continuation",
+    "image_continuation",
+    "image_next_offset",
+    "image_total",
+    "image_page_count_budget",
+    "image_page_byte_budget",
 })
 _SAFE_RUNTIME_PROTECTION_KEYS = frozenset({
     "qualification",
@@ -98,7 +106,10 @@ def _safe_mcp_result_details(details: Any) -> dict[str, Any]:
         if key not in details:
             continue
         value = details[key]
-        if key == "runtime_protection":
+        if key in {"actual_bytes", "limit_bytes"}:
+            if type(value) is int and value >= 0:
+                safe[key] = value
+        elif key == "runtime_protection":
             if isinstance(value, dict):
                 nested = {
                     nested_key: nested_value[:512] if isinstance(nested_value, str) else nested_value
@@ -108,6 +119,13 @@ def _safe_mcp_result_details(details: Any) -> dict[str, Any]:
                 }
                 if nested:
                     safe[key] = nested
+        elif key == "content_continuations" and isinstance(value, list):
+            safe[key] = [
+                {"index": item["index"], "reference": item["reference"][:128]}
+                for item in value
+                if isinstance(item, dict) and type(item.get("index")) is int
+                and isinstance(item.get("reference"), str)
+            ]
         elif value is None or isinstance(value, (str, int, float, bool)):
             safe[key] = value[:512] if isinstance(value, str) else value
     return safe
@@ -115,93 +133,21 @@ def _safe_mcp_result_details(details: Any) -> dict[str, Any]:
 
 def exposed_tool_name(internal_name: str) -> str:
     return _GATEWAY_EXPOSED_TOOL_NAMES.get(internal_name, internal_name)
-_LEGACY_SCREENSHOT_PATTERN = re.compile(
-    r"(?P<data_url>data:(?P<mime>image/[a-z0-9.+-]+);base64,"
-    r"(?P<data_payload>[A-Za-z0-9+/=]*))|"
-    r"(?P<label>(?:^screenshot:|\[screenshot\]\s+base64:))"
-    r"(?P<label_payload>[A-Za-z0-9+/=]*)",
-    flags=re.IGNORECASE | re.MULTILINE,
-)
-
-
-def _normalize_legacy_screenshot(payload: str) -> tuple[dict[str, str], int]:
-    from PIL import Image
-
-    from tools.media_read import (
-        IMAGE_MAX_BYTES,
-        MediaReadError,
-        _jpeg_bytes,
-    )
-
-    if len(payload) > ((IMAGE_MAX_BYTES + 2) // 3) * 4:
-        raise MediaReadError("encoded screenshot exceeds the source safety limit")
-    try:
-        raw = base64.b64decode(payload, validate=True)
-    except ValueError as exc:
-        raise MediaReadError("screenshot returned malformed base64") from exc
-    if not raw or len(raw) > IMAGE_MAX_BYTES:
-        raise MediaReadError("screenshot is empty or exceeds the source safety limit")
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(raw)) as image:
-                image.seek(0)
-                encoded, _size = _jpeg_bytes(image.copy())
-    except MediaReadError:
-        raise
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-        raise MediaReadError("screenshot dimensions exceed the decode safety limit") from exc
-    except Exception as exc:
-        raise MediaReadError(f"screenshot decode failed: {exc}") from exc
-    return (
-        {
-            "type": "image",
-            "mimeType": "image/jpeg",
-            "data": base64.b64encode(encoded).decode("ascii"),
-        },
-        len(encoded),
-    )
-
-
 def _bridge_legacy_screenshot_output(
-    tool_name: str,
-    output: str,
+    tool_name: str, output: str, continuation_reference: str | None = None,
+    *, frame_budget: int | None = None, byte_budget: int | None = None,
 ) -> tuple[list[dict[str, Any]] | None, bool]:
-    """Convert legacy screenshot strings into bounded MCP image blocks."""
-    if tool_name not in _LEGACY_SCREENSHOT_TOOLS:
+    """Project the first bounded image page; the owner retains any continuation."""
+    page = legacy_screenshot_page(
+        tool_name, output, frame_budget=frame_budget, byte_budget=byte_budget,
+    )
+    if page is None:
         return None, False
-    matches = list(_LEGACY_SCREENSHOT_PATTERN.finditer(output))
-    if not matches:
-        return None, False
-    from tools.media_read import MAX_TOTAL_IMAGE_BYTES
-
-    content: list[dict[str, Any]] = []
-    cursor = 0
-    image_count = 0
-    total_image_bytes = 0
-    errors: list[str] = []
-    for match in matches:
-        text = output[cursor : match.start()].strip()
-        if text:
-            content.append({"type": "text", "text": text})
-        payload = match.group("data_payload") or match.group("label_payload") or ""
-        try:
-            if image_count >= 6:
-                raise ValueError("screenshot omitted after the 6-image safety limit")
-            image, image_bytes = _normalize_legacy_screenshot(payload)
-            if total_image_bytes + image_bytes > MAX_TOTAL_IMAGE_BYTES:
-                raise ValueError("screenshot omitted at the total image-byte safety limit")
-            content.append(image)
-            image_count += 1
-            total_image_bytes += image_bytes
-        except ValueError as exc:
-            errors.append(str(exc))
-            content.append({"type": "text", "text": f"Screenshot unavailable: {exc}"})
-        cursor = match.end()
-    trailing = output[cursor:].strip()
-    if trailing:
-        content.append({"type": "text", "text": trailing})
-    return content, image_count == 0 and bool(errors)
+    content = page["content"]
+    if page["next_offset"] is not None:
+        content.append({"type": "text", "text": continuation_note(
+            continuation_reference, page["next_offset"], page["total"])})
+    return content, page["is_error"]
 
 
 class ToolGateway:
@@ -318,7 +264,12 @@ class ToolGateway:
         content = result.content
         bridge_error = False
         if content is None:
-            content, bridge_error = _bridge_legacy_screenshot_output(internal_name, result.output)
+            owner_details = result.details or {}
+            content, bridge_error = _bridge_legacy_screenshot_output(
+                internal_name, result.output, owner_details.get("image_continuation"),
+                frame_budget=owner_details.get("image_page_count_budget"),
+                byte_budget=owner_details.get("image_page_byte_budget"),
+            )
         return self._result(
             result.output,
             result.is_error or bridge_error,
@@ -334,6 +285,7 @@ class ToolGateway:
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         safe_content: list[dict[str, Any]] = []
+        image_filtered = False
         for block in content or []:
             if not isinstance(block, dict):
                 continue
@@ -353,6 +305,10 @@ class ToolGateway:
                         "data": block["data"],
                     }
                 )
+            elif kind == "image" and not self.context.vision_enabled:
+                image_filtered = True
+        if image_filtered and not safe_content:
+            safe_content.append({"type": "text", "text": "Image content is unavailable in this non-vision context."})
         if not safe_content:
             safe_content = [{"type": "text", "text": output}]
         safe_details = _safe_mcp_result_details(details)

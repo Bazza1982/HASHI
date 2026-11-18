@@ -95,7 +95,6 @@ async def test_installed_cli_file_tools_return_to_authoritative_owner(tmp_path):
             "hashi_file_write", {"path":str(outside), "content":"unsafe"}, "write")
         assert denied["isError"] is True
         assert not outside.exists()
-        descriptor = dict(context.audit["tool_gateway_proxy"])
         invocation.close()
         rejected = await gateway.call("hashi_file_read", {"path":str(note)}, "revoked")
         assert rejected["isError"] is True
@@ -104,6 +103,62 @@ async def test_installed_cli_file_tools_return_to_authoritative_owner(tmp_path):
         proxy = getattr(adapter, "_browser_gateway_proxy", None)
         if proxy:
             await asyncio.to_thread(proxy.close)
+
+@pytest.mark.asyncio
+async def test_installed_cli_recovers_large_owner_tool_result(tmp_path, monkeypatch):
+    from tools.gateway.mcp_stdio import ToolGateway
+
+    facade = _Facade()
+    config = SimpleNamespace(
+        instance_id="HASHI4", project_root=Path(__file__).resolve().parents[1],
+        bridge_home=tmp_path, secrets_path=tmp_path / "secret.json",
+    )
+    audit = {**_pao_audit(tmp_path, facade), "global_config": config}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    original = "long result 🦋\n" * 10_000 + "final marker"
+    registry = ToolRegistry(
+        ["file_read"], access_root=workspace, workspace_dir=workspace, secrets={},
+        audit_context={"agent_name": "fixture"},
+    )
+    actual_dispatch = registry._dispatch
+
+    async def synthetic(name, arguments, *, tool_call_id=""):
+        if name == "file_read":
+            return original
+        return await actual_dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(registry, "_dispatch", synthetic)
+    adapter = SimpleNamespace(tool_registry=registry, config=SimpleNamespace(workspace_dir=workspace),
+                              global_config=config)
+    invocation = prepare_hashi_mcp(adapter, backend="codex-cli", audit_context=audit)
+    try:
+        context = load_gateway_context(Path(invocation["context_path"]))
+        gateway = ToolGateway(context)
+        first = await gateway.call("hashi_file_read", {"path": str(workspace / "fixture.txt")}, "read")
+        assert not first["isError"], first
+        reference = first["structuredContent"]["hashi"]["details"]["output_continuation"]
+        parts = []
+        offset = 0
+        for page in range(100):
+            response = await gateway.call(
+                "tool_output_read", {"reference": reference, "offset": offset}, f"page-{page}",
+            )
+            assert not response["isError"], response
+            data = json.loads(response["content"][0]["text"])
+            parts.append(data["text"])
+            if data["complete"]:
+                break
+            offset = data["next_offset"]
+        else:
+            pytest.fail("owner proxy continuation did not finish")
+        assert "".join(parts) == original
+    finally:
+        invocation.close()
+        proxy = getattr(adapter, "_browser_gateway_proxy", None)
+        if proxy:
+            await asyncio.to_thread(proxy.close)
+
 
 @pytest.mark.asyncio
 async def test_cli_browser_gateway_uses_owner_registry_and_core_facade(tmp_path):
@@ -247,3 +302,63 @@ async def test_cli_context_publishes_only_owning_worker_proxy(tmp_path):
         if proxy is not None:
             await asyncio.to_thread(proxy.close)
 # HASHI-Fingerprint: hfp_7c9dcfd71f854fe18d24f90d38c02b99
+
+
+@pytest.mark.asyncio
+async def test_installed_cli_screenshot_continuation_uses_live_owner_scope(tmp_path, monkeypatch):
+    import base64
+    import io
+    from PIL import Image
+    from tools.gateway.mcp_stdio import ToolGateway
+
+    facade = _Facade()
+    facade.capability_status = lambda: {
+        "instance_id": "HASHI4",
+        "capabilities": [{
+            "capability_id": "cap-browser", "capability_kind": "browser_control",
+            "browser_id": "chrome", "browser_name": "Google Chrome",
+            "supported_actions": ["screenshot"], "expires_at": time.time() + 90,
+        }],
+    }
+    config = SimpleNamespace(
+        instance_id="HASHI4", project_root=Path(__file__).resolve().parents[1],
+        bridge_home=tmp_path, secrets_path=tmp_path / "secret.json",
+    )
+    audit = {**_pao_audit(tmp_path, facade), "global_config": config}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ToolRegistry(["browser_screenshot"], access_root=workspace, workspace_dir=workspace,
+                            secrets={}, audit_context={"agent_name": "fixture"})
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 20), "purple").save(buf, format="PNG")
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    original_dispatch = registry._dispatch
+
+    async def synthetic(name, arguments, *, tool_call_id=""):
+        if name == "browser_screenshot":
+            return "\n".join(f"[screenshot] base64:{payload}" for _ in range(7))
+        return await original_dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(registry, "_dispatch", synthetic)
+    adapter = SimpleNamespace(tool_registry=registry, config=SimpleNamespace(workspace_dir=workspace),
+                              global_config=config)
+    invocation = prepare_hashi_mcp(adapter, backend="codex-cli", audit_context=audit)
+    try:
+        gateway = ToolGateway(load_gateway_context(Path(invocation["context_path"])))
+        first = await gateway.call("browser_screenshot", {"url": "https://example.com"}, "first")
+        assert not first["isError"], first
+        detail = first["structuredContent"]["hashi"]["details"]
+        assert sum(block["type"] == "image" for block in first["content"]) == 6
+        reference, offset = detail["image_continuation"], detail["image_next_offset"]
+        page = await gateway.call("tool_output_read", {"reference": reference, "offset": offset}, "page")
+        assert not page["isError"], page
+        assert sum(block["type"] == "image" for block in page["content"]) == 1
+        invocation.close()
+        revoked = await gateway.call("tool_output_read", {"reference": reference, "offset": offset}, "revoked")
+        assert revoked["isError"]
+        assert not any(block["type"] == "image" for block in revoked["content"])
+    finally:
+        invocation.close()
+        proxy = getattr(adapter, "_browser_gateway_proxy", None)
+        if proxy:
+            await asyncio.to_thread(proxy.close)

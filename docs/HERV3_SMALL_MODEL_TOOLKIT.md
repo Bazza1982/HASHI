@@ -55,9 +55,8 @@ also carry this option, but **do not enable globally for initial tests**.
 Instances whose allowed_tools uses the * wildcard must additionally list the
 toolkit tools explicitly (for example tool_find, project_locate,
 code_search, git_inspect, file_manage, text_replace, data_inspect).
-A wildcard alone does not adopt the new tools, so instances without this
-configuration keep their prior behaviour unchanged (the same precedent as
-media_read and vision_inspect).
+A wildcard alone does not adopt the new toolkit tools, so instances without
+this configuration keep their prior toolkit behaviour unchanged.
 
 In HERV3 on-demand mode, the initial model payload offers a small starter set
 and a few goal-matched suggestions. A `tool_find` call activates matching
@@ -65,6 +64,10 @@ already-allowed tool schemas on the next provider call. This is a
 request-local presentation view, **not** a new allowlist or permission gate;
 every invocation still crosses the original Tool Registry, Workzone boundaries,
 availability, fingerprint checks and audit. A larger HERV3 model can opt in too.
+The current Run-bound long-result reader and tool catalogue remain visible when
+available. Discoveries accumulate during the request while they remain allowed;
+selecting more tools may increase the model payload, and revocation is reflected
+by the live Registry catalogue.
 
 Example:
 

@@ -36,10 +36,27 @@ MAX_RESPONSE_BYTES = 48 * 1024 * 1024
 MAX_ACTIVE_SCOPES = 32
 
 
+def browser_proxy_timeout(arguments: dict, default: float, grace: float) -> float | None:
+    selected = arguments.get("timeout_ms")
+    if type(selected) is not int or selected <= 0:
+        return default
+    extra = arguments.get("wait_ms")
+    extra = extra if type(extra) is int and extra > 0 else 0
+    try:
+        return max(default, (selected + extra) / 1000 + grace)
+    except OverflowError:
+        # An explicit timeout larger than the platform can represent is effectively unbounded.
+        return None
+
+
 class BrowserGatewayProxy:
-    def __init__(self, registry: Any, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self, registry: Any, loop: asyncio.AbstractEventLoop, *,
+        max_active_scopes: int = MAX_ACTIVE_SCOPES,
+    ) -> None:
         self.registry = registry
         self.loop = loop
+        self.max_active_scopes = max(1, int(max_active_scopes))
         self._lock = threading.Lock()
         self._scopes: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, set] = {}
@@ -159,7 +176,8 @@ class BrowserGatewayProxy:
                             if dispatch_id:
                                 proxy._calls[(matched, dispatch_id)] = future
                     try:
-                        result = future.result(timeout=None if all_tools else 75)
+                        timeout = None if all_tools else browser_proxy_timeout(arguments, 75, 10)
+                        result = future.result(timeout=timeout)
                     except FutureTimeout:
                         future.cancel()
                         raise TimeoutError("browser action timed out") from None
@@ -242,7 +260,7 @@ class BrowserGatewayProxy:
             scope.update(_gateway_all_tools=True, _gateway_store=store,
                          _gateway_binding=binding)
         with self._lock:
-            if len(self._scopes) >= MAX_ACTIVE_SCOPES:
+            if len(self._scopes) >= self.max_active_scopes:
                 raise RuntimeError("browser gateway has too many active request scopes")
             token = secrets.token_urlsafe(48)
             self._scopes[token] = scope

@@ -101,6 +101,18 @@ return a specific pre-dispatch recovery denial. No empty/partial target set is
 treated as permission. A malformed optional extension still cannot freeze an
 otherwise complete baseline.
 
+If loading the policy itself fails, ToolRegistry can use a previously complete
+snapshot for exact typed file reads, writes and patches only when the instance,
+runtime binding, installer selector and policy bytes still match. The response
+reports degraded qualification; it does not claim the failed refresh succeeded.
+Existing multi-link targets remain unavailable during this fallback because their
+other names cannot be established from a path alone. Commands, process control,
+and files without a verifiable prior boundary remain unavailable. Tool catalogue,
+user questions and public web search/fetch continue under their existing grants.
+If policy bytes, runtime binding or the selector change, the old snapshot is not
+used. Policy bytes are checked even if file timestamps and size are unchanged.
+Normal qualification resumes when the loader recovers.
+
 New processes and adoption are separate: they always require strict current
 installation qualification, including the full executable file closure. A
 retained target snapshot cannot authorize a new MCP process or Worker.

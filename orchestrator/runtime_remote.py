@@ -13,8 +13,10 @@ import aiohttp
 
 from orchestrator import remote_lifecycle, runtime_pending, ui_language
 from orchestrator.agent_move.manager import record_agent_move_admin_outcome
+from orchestrator.agent_move_ui import render_clone_warnings
 from orchestrator.agent_move.coordinator import (
     ClonePreparationError,
+    MovePreparationError,
     cancel_outbound_move,
     continue_outbound_move,
     get_outbound_move,
@@ -359,16 +361,18 @@ def resolve_transfer_instance(
 
 def _move_target_error(target: str, instances: dict) -> str | None:
     try:
-        _instance_id, entry = resolve_transfer_instance(instances, target)
+        resolve_transfer_instance(instances, target)
     except AgentMoveError as exc:
         return f"⚠️ <code>{html.escape(str(exc))}</code>"
-    if entry.get("active") is False:
-        key = "remote.move.target_unavailable"
-    elif "capabilities" in entry and "agent_move_receive_v1" not in (entry.get("capabilities") or []):
-        key = "remote.move.target_unsupported"
-    else:
-        return None
-    return ui_language.tr(key, target=html.escape(str(target)))
+    # Cached discovery is a hint only. The coordinator verifies the selected
+    # receiver's identity and actual capabilities over the authenticated route.
+    return None
+
+
+def _transfer_target_label(label: str, entry: dict[str, Any]) -> str:
+    if entry.get("active") is False and not entry.get("local"):
+        return f"{label} · {ui_language.tr('remote.move.last_check_unavailable')}"
+    return label
 
 
 async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> None:
@@ -379,10 +383,9 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
             data = json.load(f)
         agents = data if isinstance(data, list) else data.get("agents", [])
         agent_names = [
-            ag.get("name") or ag.get("id")
+            (ag.get("name") or ag.get("id"), ag.get("is_active", True) is not False)
             for ag in agents
-            if (ag.get("name") or ag.get("id"))
-            and ag.get("is_active", True) is not False
+            if isinstance(ag, dict) and (ag.get("name") or ag.get("id"))
             and ag.get("transfer_state") != "moved_out_pending_reboot"
         ]
     except Exception:
@@ -395,11 +398,11 @@ async def move_show_agent_picker(runtime: Any, update: Any, instances: dict) -> 
     rows = [
         [
             InlineKeyboardButton(
-                f"🤖 {name}",
+                f"🤖 {name}" + (" · " + ui_language.tr("remote.move.inactive") if not active else ""),
                 callback_data=_move_callback_data(runtime, f"move:agent:{name}"),
             )
         ]
-        for name in agent_names
+        for name, active in agent_names
     ]
     markup = InlineKeyboardMarkup(rows)
     instance_id = str(
@@ -424,9 +427,9 @@ async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, inst
     ).upper()
     for name, inst in instances.items():
         instance_id = str(inst.get("instance_id") or name).upper()
-        if instance_id == current_instance or inst.get("active") is False:
+        if instance_id == current_instance:
             continue
-        label = inst.get("display_name", name)
+        label = _transfer_target_label(str(inst.get("display_name", name)), inst)
         rows.append(
             [
                 InlineKeyboardButton(
@@ -454,18 +457,38 @@ async def move_show_target_picker(runtime: Any, update: Any, agent_id: str, inst
 
 async def move_show_options(runtime: Any, update: Any, agent_id: str, target: str) -> None:
     """Step 3: show move options."""
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
+    rows = []
+    for mode in ("identity_memory", "workspace"):
+        rows.append([InlineKeyboardButton(
             ui_language.tr(f"remote.move.mode.{mode}"),
             callback_data=_move_callback_data(runtime, f"move:exec:{agent_id}:{target}:{mode}"),
-        )] for mode in ("identity_memory", "workspace")
-    ] + [[InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")]])
+        )])
+        rows.append([
+            InlineKeyboardButton(
+                ui_language.tr(f"remote.move.target_state.{state}"),
+                callback_data=_move_callback_data(runtime, f"move:exec:{agent_id}:{target}:{mode}:{state}"),
+            ) for state in ("active", "inactive")
+        ])
+        rows.append([InlineKeyboardButton(
+            ui_language.tr("remote.move.history.retain_default"),
+            callback_data=_move_callback_data(runtime, f"move:exec:{agent_id}:{target}:{mode}:default:retain_source"),
+        )])
+        rows.append([
+            InlineKeyboardButton(
+                ui_language.tr(f"remote.move.history.retain_{state}"),
+                callback_data=_move_callback_data(runtime, f"move:exec:{agent_id}:{target}:{mode}:{state}:retain_source"),
+            ) for state in ("active", "inactive")
+        ])
+    rows.append([InlineKeyboardButton(ui_language.tr("remote.move.button.keep"), callback_data="move:cancel")])
+    markup = InlineKeyboardMarkup(rows)
     sender = update.callback_query.edit_message_text if getattr(update, "callback_query", None) else lambda text, **kwargs: runtime._reply_text(update, text, **kwargs)
     await sender(
         f"{card_title('📦', 'Move agent')}\n\n"
         f"<b>{html.escape(ui_language.tr('common.agent'))}</b> · <code>{html.escape(agent_id)}</code>\n"
         f"<b>{html.escape(ui_language.tr('common.target'))}</b> · <code>{html.escape(target)}</code>\n\n"
-        f"{ui_language.tr('remote.move.choose_safe')}",
+        f"{ui_language.tr('remote.move.choose_safe')}\n\n"
+        f"{ui_language.tr('remote.move.target_state.explanation')}\n\n"
+        f"{ui_language.tr('remote.move.history.retain_explanation')}",
         parse_mode="HTML",
         reply_markup=markup,
     )
@@ -482,6 +505,8 @@ async def do_move(
     sync: bool = False,
     dry_run: bool = False,
     transfer_mode: str | None = None,
+    history_mode: str | None = None,
+    desired_target_active: bool | None = None,
 ) -> None:
     chat_id = update.effective_chat.id
 
@@ -553,6 +578,8 @@ async def do_move(
                 resolved_target,
                 source_instance=source_instance,
                 transfer_mode=transfer_mode,
+                history_mode=history_mode,
+                desired_target_active=desired_target_active,
             )
             await runtime._send_text(
                 chat_id,
@@ -570,6 +597,8 @@ async def do_move(
             source_instance=source_instance,
             transfer_mode=transfer_mode,
             keep_source=keep_source,
+            history_mode=history_mode,
+            desired_target_active=desired_target_active,
         )
         package_id = str(result["package_id"])
         confirmation_key = "remote.move.confirm_move"
@@ -594,6 +623,16 @@ async def do_move(
             _render_move_prepared(result),
             parse_mode="HTML",
             reply_markup=markup,
+        )
+    except MovePreparationError as exc:
+        await runtime._send_text(
+            chat_id,
+            ui_language.tr("remote.move.failed", error=html.escape(str(exc))),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                ui_language.tr("remote.move.reconcile_cancel"),
+                callback_data=f"move:abort:{exc.package_id}",
+            )]]),
         )
     except (AgentMoveError, OSError) as exc:
         await runtime._send_text(
@@ -653,10 +692,8 @@ async def clone_show_target_picker(
         instances.items(),
         key=lambda item: str(item[1].get("instance_id") or item[0]),
     ):
-        if entry.get("active") is False:
-            continue
         instance_id = str(entry.get("instance_id") or key).upper()
-        label = str(entry.get("display_name") or instance_id)
+        label = _transfer_target_label(str(entry.get("display_name") or instance_id), entry)
         if instance_id == current:
             label = f"{label} · {ui_language.tr('common.current')}"
         rows.append(
@@ -744,6 +781,20 @@ async def clone_show_options(
             ],
             [
                 InlineKeyboardButton(
+                    ui_language.tr("remote.clone.button.backup"),
+                    callback_data=_move_callback_data(
+                        runtime, f"clone:exec:{agent_id}:{target}:{history_mode}:backup",
+                    ),
+                ),
+                InlineKeyboardButton(
+                    ui_language.tr("remote.clone.button.preview_backup"),
+                    callback_data=_move_callback_data(
+                        runtime, f"clone:exec:{agent_id}:{target}:{history_mode}:backupdry",
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     ui_language.tr("remote.move.button.keep"),
                     callback_data="clone:cancel",
                 )
@@ -772,22 +823,14 @@ async def do_clone(
     dry_run: bool = False,
     history_mode: str = "none",
     transfer_mode: str | None = "workspace",
+    desired_target_active: bool | None = None,
+    retain_telegram_backup: bool = False,
 ) -> None:
     chat_id = update.effective_chat.id
     # Clone snapshots durable state and leaves source execution/queues alone.
     # Move's drain gate is not applicable; packaging still checks consistency.
     try:
-        resolved_target, entry = resolve_transfer_instance(instances, target)
-        if entry.get("active") is False:
-            raise AgentMoveError(f"target instance '{resolved_target}' is unavailable")
-        if (
-            not entry.get("local")
-            and "capabilities" in entry
-            and "agent_transfer_lifecycle_v1" not in (entry.get("capabilities") or [])
-        ):
-            raise AgentMoveError(
-                f"target instance '{resolved_target}' has not adopted clone support"
-            )
+        resolved_target, _entry = resolve_transfer_instance(instances, target)
         operation = "preview" if dry_run else "prepare"
         await runtime._send_text(
             chat_id,
@@ -811,6 +854,8 @@ async def do_clone(
                 target_agent_id=target_agent_id,
                 history_mode=history_mode,
                 transfer_mode=transfer_mode,
+                desired_target_active=desired_target_active,
+                retain_telegram_backup=retain_telegram_backup,
             )
             await runtime._send_text(
                 chat_id,
@@ -828,6 +873,8 @@ async def do_clone(
             target_agent_id=target_agent_id,
             history_mode=history_mode,
             transfer_mode=transfer_mode,
+            desired_target_active=desired_target_active,
+            retain_telegram_backup=retain_telegram_backup,
         )
         text, markup = _clone_transaction_card(result)
         await runtime._send_text(
@@ -887,6 +934,24 @@ def _clone_transaction_card(result: dict[str, Any]) -> tuple[str, InlineKeyboard
     return text, InlineKeyboardMarkup(rows)
 
 
+def _clone_backup_notice(result: dict[str, Any], *, complete: bool = False) -> str:
+    if not result.get("retain_telegram_backup"):
+        return ""
+    if complete:
+        key = (
+            "remote.clone.backup_confirmed" if result.get("telegram_backup_confirmed") is True
+            else "remote.clone.backup_absent" if result.get("telegram_backup_present") is False
+            else "remote.clone.backup_unconfirmed"
+        )
+    else:
+        key = (
+            "remote.clone.backup_expected" if result.get("telegram_backup_present") is True
+            else "remote.clone.backup_absent" if result.get("telegram_backup_present") is False
+            else "remote.clone.backup_unconfirmed"
+        )
+    return "\n\n" + ui_language.tr(key)
+
+
 def _render_clone_preview(result: dict[str, Any]) -> str:
     history = _render_history_summary(result)
     return (
@@ -901,7 +966,9 @@ def _render_clone_preview(result: dict[str, Any]) -> str:
         f"<b>{html.escape(ui_language.tr('remote.move.schedules'))}</b> · "
         f"<code>{int(result.get('schedule_count') or 0)}</code>\n"
         f"{history}\n\n"
-        f"{ui_language.tr('remote.clone.preview_clean', target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+        f"{ui_language.tr('remote.clone.preview_inactive' if result.get('desired_target_active') is False else 'remote.clone.preview_clean', target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+        f"{_clone_backup_notice(result)}"
+        f"{render_clone_warnings(result)}"
     )
 
 
@@ -916,15 +983,20 @@ def _render_clone_prepared(result: dict[str, Any]) -> str:
         f"<code>{html.escape(str(result.get('target_instance')))}</code>\n"
         f"<b>{html.escape(ui_language.tr('remote.move.package_id'))}</b> · "
         f"<code>{html.escape(str(result.get('package_id')))}</code>\n"
-        f"{history}\n\n"
-        f"{ui_language.tr('remote.clone.prepared_safe')}"
+        f"{history}\n"
+        f"{_render_transfer_access_scope(result)}\n\n"
+        f"{ui_language.tr('remote.clone.prepared_inactive' if result.get('desired_target_active') is False else 'remote.clone.prepared_safe')}"
+        f"{_clone_backup_notice(result)}"
+        f"{render_clone_warnings(result)}"
     )
 
 
 def _render_clone_complete(result: dict[str, Any]) -> str:
     return (
         f"{card_title('✅', 'Agent clone complete')}\n\n"
-        f"{ui_language.tr('remote.clone.complete', source_agent=html.escape(str(result.get('agent_id'))), target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+        f"{ui_language.tr('remote.clone.complete_inactive' if result.get('desired_target_active') is False else 'remote.clone.complete', source_agent=html.escape(str(result.get('agent_id'))), target_agent=html.escape(str(result.get('target_agent_id'))), target=html.escape(str(result.get('target_instance'))))}"
+        f"{_clone_backup_notice(result, complete=True)}"
+        f"{render_clone_warnings(result)}"
     )
 
 
@@ -975,8 +1047,35 @@ def _render_move_prepared(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_transfer_access_scope(result: dict[str, Any]) -> str:
+    plan = result.get("access_scope_plan")
+    if not isinstance(plan, dict) or not plan.get("requested") or not plan.get("effective"):
+        return ""
+    return ui_language.tr(
+        "remote.move.access_scope_preview",
+        requested=html.escape(str(plan["requested"])),
+        effective=html.escape(str(plan["effective"])),
+    )
+
+
 def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    access_scope = _render_transfer_access_scope(result)
+    if access_scope:
+        lines.append(access_scope)
+    pending_count = result.get("source_retained_pending_count") or 0
+    if isinstance(pending_count, int) and pending_count > 0:
+        lines.append(ui_language.tr("remote.move.source_pending_retained", count=pending_count))
+    retained_workspace = result.get("retained_source_workspace")
+    if retained_workspace:
+        lines.append(ui_language.tr(
+            "remote.move.source_workspace_retained", path=html.escape(str(retained_workspace)),
+        ))
+    elif (result.get("source_workspace_retention") or {}).get("status") == "missing":
+        lines.append(ui_language.tr("remote.move.source_workspace_missing"))
+    if result.get("operation") == "move" and "desired_target_active" in result:
+        key = "remote.move.target_remains_inactive" if result["desired_target_active"] is False else "remote.move.target_will_start"
+        lines.append(ui_language.tr(key))
     if result.get("history_mode"):
         lines.append(_render_history_summary(result))
     mode = result.get("transfer_mode")
@@ -1021,6 +1120,8 @@ def _render_move_review_notes(result: dict[str, Any]) -> list[str]:
 def _render_history_summary(result: dict[str, Any]) -> str:
     summary = result.get("conversation_continuity_summary") or {}
     mode = str(result.get("history_mode") or "none")
+    if mode == "retain_source":
+        return ui_language.tr("remote.move.history.retained_notice")
     return ui_language.tr(
         "remote.move.history_summary",
         mode=html.escape(ui_language.tr(f"remote.clone.history.{mode}")),
@@ -1319,9 +1420,9 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
             getattr(getattr(runtime, "global_config", None), "instance_id", None) or "HASHI"
         ).upper()
         for name, inst in instances.items():
-            if str(inst.get("instance_id") or name).upper() == current_instance or inst.get("active") is False:
+            if str(inst.get("instance_id") or name).upper() == current_instance:
                 continue
-            label = inst.get("display_name", name)
+            label = _transfer_target_label(str(inst.get("display_name", name)), inst)
             rows.append(
                 [
                     InlineKeyboardButton(
@@ -1360,9 +1461,14 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
 
     if action == "exec" and len(parts) >= 4:
         agent_id = parts[2]
-        target_mode = parts[3].split(":", 1)
+        target_mode = parts[3].split(":", 3)
         target = target_mode[0]
         mode = target_mode[1] if len(target_mode) > 1 else "plain"
+        state = target_mode[2] if len(target_mode) > 2 else None
+        history_mode = target_mode[3] if len(target_mode) > 3 else None
+        if state not in {None, "default", "active", "inactive"} or history_mode not in {None, "retain_source"}:
+            await query.edit_message_text(ui_language.tr("remote.move.selection_expired"))
+            return
 
         keep = mode == "keep"
         sync = mode == "sync"
@@ -1374,7 +1480,13 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
                 parse_mode="HTML",
             )
             return
-        await runtime._do_move(update, agent_id, target, instances, keep_source=False, sync=sync, dry_run=dry, transfer_mode=mode if mode in {"identity_memory", "workspace"} else None)
+        await runtime._do_move(
+            update, agent_id, target, instances, keep_source=False, sync=sync,
+            dry_run=dry,
+            transfer_mode=mode if mode in {"identity_memory", "workspace"} else None,
+            history_mode=history_mode,
+            desired_target_active=None if state in {None, "default"} else state == "active",
+        )
         return
 
     if action in {"commit", "continue", "abort"} and len(parts) >= 3:
@@ -1402,6 +1514,7 @@ async def _handle_move_callback(runtime: Any, update: Any, context: Any) -> None
             if selected_runtime is not None:
                 selected_runtime._agent_move_quiesced = True
                 selected_runtime._agent_move_target_instance = target_instance
+                selected_runtime._agent_move_quiesce_package_id = package_id
 
             if action == "commit":
                 delayed, busy = await _move_preflight(
@@ -1533,10 +1646,8 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
         current = str(runtime.global_config.instance_id or "HASHI").upper()
         rows = []
         for key, entry in sorted(instances.items()):
-            if entry.get("active") is False:
-                continue
             instance_id = str(entry.get("instance_id") or key).upper()
-            label = str(entry.get("display_name") or instance_id)
+            label = _transfer_target_label(str(entry.get("display_name") or instance_id), entry)
             if instance_id == current:
                 label = f"{label} · {ui_language.tr('common.current')}"
             rows.append(
@@ -1595,7 +1706,11 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
                 ui_language.tr("remote.clone.selection_expired")
             )
             return
-        dry_run = execution == "dry"
+        if execution not in {"clone", "dry", "backup", "backupdry"}:
+            await query.edit_message_text(ui_language.tr("remote.clone.selection_expired"))
+            return
+        dry_run = execution in {"dry", "backupdry"}
+        backup = execution in {"backup", "backupdry"}
         instances = await load_clone_instances(runtime)
         await do_clone(
             runtime,
@@ -1605,6 +1720,8 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
             instances,
             dry_run=dry_run,
             history_mode=history_mode,
+            desired_target_active=False if backup else None,
+            retain_telegram_backup=backup,
         )
         return
     if action == "prepare" and len(parts) >= 3:
@@ -1618,6 +1735,8 @@ async def _handle_clone_callback(runtime: Any, update: Any, context: Any) -> Non
                 target_agent_id=state.get("requested_target_agent_id"),
                 history_mode=str(state.get("history_mode") or "none"),
                 transfer_mode=state.get("transfer_mode") or "workspace",
+                desired_target_active=state.get("desired_target_active"),
+                retain_telegram_backup=state.get("retain_telegram_backup") is True,
             )
         except (AgentMoveError, OSError) as exc:
             await query.edit_message_text(ui_language.tr("remote.clone.failed", error=html.escape(str(exc))), parse_mode="HTML")
@@ -1878,6 +1997,26 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
 
     if arg == "on":
         remote_lifecycle.clear_disabled_state(cfg["root"])
+        try:
+            global_config = getattr(runtime, "global_config", None)
+            secrets_path = getattr(global_config, "secrets_path", None)
+            if (
+                secrets_path
+                and getattr(global_config, "deployment_profile", "personal") == "personal"
+            ):
+                from orchestrator.workbench_auth import ensure_remote_runtime_access
+
+                await asyncio.to_thread(ensure_remote_runtime_access, secrets_path, cfg["root"])
+        except Exception as exc:
+            await runtime._reply_text(
+                update,
+                ui_language.tr(
+                    "remote.lifecycle.activation_failed",
+                    reason=html.escape(f"{type(exc).__name__}: {exc}"),
+                ),
+                parse_mode="HTML",
+            )
+            return
         if alive:
             await runtime._reply_text(
                 update,
@@ -1958,3 +2097,4 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         f"{ui_language.tr('remote.invalid_help')}",
         parse_mode="HTML",
     )
+# HASHI-Fingerprint: hfp_ede0522f2a9645a9b1e65c787078c930

@@ -2,7 +2,10 @@
 
 Functional owner: PAO
 Engineering layer: Functions
-Decision: Network ingress messages must be verified for freshness before Run creation.
+The Session API, ordinary HChat requests and Telegram messages treat age as
+informational by default. Some reply and Exchange paths retain their existing
+handling until independently migrated.
+Authentication, replay prevention and idempotency are separate decisions.
 """
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import re
 from typing import Any, Callable
+from collections.abc import Mapping
 
 FRESHNESS_TELEGRAM_SECONDS: int = 30
 FRESHNESS_WORKBENCH_LOCAL_SECONDS: int = 30
@@ -19,7 +23,7 @@ CONFIRMATION_EXPIRY_SECONDS: int = 15 * 60  # 15 minutes
 FUTURE_CLOCK_SKEW_TOLERANCE_SECONDS: float = 5.0
 
 _RFC3339_UTC_PATTERN = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$",
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$",
     re.IGNORECASE,
 )
 
@@ -63,20 +67,75 @@ class FreshnessResult:
             "expires_at": self.expires_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
+    def age_metadata(self) -> dict[str, Any]:
+        """Describe the sender's time without inventing an unknown age."""
+        return {
+            "reason": self.reason,
+            "originated_at": self.originated_at_iso,
+            "received_at": self.received_at_iso,
+            "age_seconds": (
+                round(self.age_seconds, 3) if self.originated_at is not None else None
+            ),
+        }
+
+
+def normalize_session_message_age_policy(value: Any) -> dict[str, Any]:
+    """Normalize an explicitly selected Session API age policy.
+
+    The default only reports message age. A selected expiry is a hard
+    deadline, while a selected confirmation policy retains the old flow.
+    This is independent of transport authentication and replay protection.
+    """
+    if value is None:
+        value = {}
+    if not isinstance(value, Mapping) or set(value) - {"mode", "max_age_seconds"}:
+        raise ValueError("session_message_age_policy must contain only mode and max_age_seconds")
+    raw_mode = value.get("mode", "observe")
+    if not isinstance(raw_mode, str) or not raw_mode.strip():
+        raise ValueError("session_message_age_policy.mode must be observe, confirm, or expire")
+    mode = raw_mode.strip().lower()
+    if mode not in {"observe", "confirm", "expire"}:
+        raise ValueError("session_message_age_policy.mode must be observe, confirm, or expire")
+    max_age = value.get("max_age_seconds")
+    if max_age is not None and (type(max_age) is not int or max_age < 1):
+        raise ValueError("session_message_age_policy.max_age_seconds must be a positive integer")
+    if mode == "expire" and max_age is None:
+        raise ValueError("session_message_age_policy.expire requires max_age_seconds")
+    if mode == "observe" and max_age is not None:
+        raise ValueError("session_message_age_policy.observe does not enforce max_age_seconds")
+    return {"mode": mode, "max_age_seconds": max_age}
+
+
+def normalize_hchat_request_age_policy(value: Any) -> dict[str, Any]:
+    """Use the same optional age-policy shape for ordinary HChat requests."""
+    try:
+        return normalize_session_message_age_policy(value)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("session_message_age_policy", "hchat_request_age_policy")) from exc
+
+
+def normalize_telegram_message_age_policy(value: Any) -> dict[str, Any]:
+    """Normalize an optional policy for ordinary Telegram messages."""
+    try:
+        return normalize_session_message_age_policy(value)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("session_message_age_policy", "telegram_message_age_policy")) from exc
+
 
 def parse_rfc3339_utc(value: str | datetime | None) -> datetime | None:
-    """Parse an RFC 3339 UTC timestamp strictly.
+    """Normalize an aware RFC 3339 timestamp to UTC.
 
-    Returns None if missing, malformed, or not timezone-aware UTC.
+    Returns None if missing, malformed, or lacking an established offset.
     """
     if value is None:
         return None
     if isinstance(value, datetime):
-        if value.tzinfo is None:
+        try:
+            if value.tzinfo is None or value.utcoffset() is None:
+                return None
+            return value.astimezone(timezone.utc)
+        except (ValueError, TypeError, OverflowError):
             return None
-        if value.utcoffset() != timedelta(0):
-            return None
-        return value.astimezone(timezone.utc)
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -86,9 +145,9 @@ def parse_rfc3339_utc(value: str | datetime | None) -> datetime | None:
         return None
     try:
         # Standard fromisoformat handles 'Z' in Python 3.11+
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text[:-1] + "+00:00" if text[-1].casefold() == "z" else text)
         return dt.astimezone(timezone.utc)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -116,6 +175,7 @@ def classify_message_freshness(
     is_remote: bool = False,
     received_at: datetime | None = None,
     clock: Callable[[], float | datetime] | None = None,
+    threshold_seconds: int | None = None,
 ) -> FreshnessResult:
     """Classify the freshness of an ingress message.
 
@@ -142,7 +202,13 @@ def classify_message_freshness(
     else:
         rec_dt = datetime.now(timezone.utc)
 
-    threshold = resolve_freshness_threshold(entrypoint or ingress_type or "workbench", is_remote=is_remote)
+    if threshold_seconds is not None and (
+        type(threshold_seconds) is not int or threshold_seconds < 1
+    ):
+        raise ValueError("threshold_seconds must be a positive integer")
+    threshold = threshold_seconds or resolve_freshness_threshold(
+        entrypoint or ingress_type or "workbench", is_remote=is_remote
+    )
     expires_dt = rec_dt + timedelta(seconds=CONFIRMATION_EXPIRY_SECONDS)
 
     if originated_at is None or (isinstance(originated_at, str) and not originated_at.strip()):

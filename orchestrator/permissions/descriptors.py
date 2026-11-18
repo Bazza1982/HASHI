@@ -37,6 +37,9 @@ _FILE_ACTIONS = {
 }
 _CONTROL_TOOLS = frozenset({"ask_user", "get_user_answer"})
 _UNRESTRICTED_EXECUTORS = frozenset({"shell", "bash"})
+DESCRIBED_TOOL_NAMES = frozenset(_FILE_ACTIONS) | _CONTROL_TOOLS | _UNRESTRICTED_EXECUTORS | frozenset({
+    "run_script", "file_search", "verification_run", "http_request", "web_fetch", "process_kill",
+})
 
 
 def _validate_json(value: Any, *, depth: int = 0, active: set[int] | None = None) -> None:
@@ -175,8 +178,29 @@ def describe_tool(
             # header can. Origin permission alone cannot promise receive-only I/O.
         else:
             actions = ["send", "upload"]
+            if arguments.get("follow_redirects") is True:
+                # A 303 continuation is a read under the same request decision.
+                actions.append("fetch")
+        file_body = arguments.get("body_file") if tool_name == "http_request" else None
+        if file_body is not None:
+            if not isinstance(file_body, str) or not file_body.strip() or arguments.get("body") is not None:
+                raise ValueError("HTTP file body must be one explicit file without an inline body")
+            if "upload" not in actions:
+                actions.append("upload")
+        file_response = arguments.get("response_file") if tool_name == "http_request" else None
+        if file_response is not None and (not isinstance(file_response, str) or not file_response.strip()):
+            raise ValueError("HTTP response file must be an explicit file")
         scope = _network_scope(raw_url, tuple(actions), cwd)
         scopes = [scope]
+        source_scope = None
+        if file_body is not None:
+            source_scope = normalize_scope("file", file_body, ("read",), cwd=cwd)
+            scopes.append(source_scope)
+        if file_response is not None:
+            target_scope = normalize_scope("file", file_response, ("create", "write"), cwd=cwd)
+            if source_scope is not None and target_scope.resource == source_scope.resource:
+                raise ValueError("HTTP request and response files must differ")
+            scopes.append(target_scope)
         if tool_name == "http_request" and arguments.get("credential") is not None:
             name = arguments["credential"]
             if not isinstance(name, str) or not name or len(name) > 64:

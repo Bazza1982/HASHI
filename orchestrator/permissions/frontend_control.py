@@ -112,6 +112,10 @@ class PermissionCommandProjection:
         self.backend_manager = getattr(runtime, "backend_manager", None)
 
     def _is_authorized_user(self, actor):
+        from orchestrator.frontend_command_context import is_frontend_command_principal
+
+        if is_frontend_command_principal(self, actor):
+            return True
         return (type(actor) is int and actor == self.global_config.authorized_id
                 and (not callable(self._actor) or bool(self._actor(actor))))
 

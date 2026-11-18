@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -163,12 +163,15 @@ def _json(value: Any) -> str:
 
 
 def _frontend_intent_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Exclude only the per-attempt server request ID from request intent."""
+    """Exclude per-attempt server observations from client request intent."""
 
     normalized = deepcopy(dict(payload))
     message_context = normalized.get("message_context")
     if not isinstance(message_context, dict):
         return normalized
+    # Delivery age and receipt time change on retries. The winning observation
+    # remains in the stored Message, but it must not create a second intent.
+    message_context.pop("message_age", None)
     frontend_ingress = message_context.get("frontend_ingress")
     if not isinstance(frontend_ingress, dict):
         return normalized
@@ -210,7 +213,12 @@ def _json_object(value: str | None) -> dict[str, Any]:
 
 def conversation_continuity_digest(payload: Mapping[str, Any]) -> str:
     body = {key: value for key, value in payload.items() if key != "capsule_digest"}
-    return hashlib.sha256(_json(body).encode("utf-8")).hexdigest()
+    encoder = json.JSONEncoder(ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256()
+    for fragment in encoder.iterencode(body):
+        for offset in range(0, len(fragment), 16 * 1024):
+            digest.update(fragment[offset:offset + 16 * 1024].encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _continuity_origin_ref(
@@ -237,6 +245,22 @@ class SessionStoreError(RuntimeError):
     code = "session_store_error"
 
 
+class SessionStorageBusy(SessionStoreError):
+    """The selected local attachment storage wait expired before completion."""
+    code = "session_storage_busy"
+
+
+def attachment_storage_wait_ms() -> int:
+    raw = os.environ.get("HASHI_ATTACHMENT_STORAGE_WAIT_MS", "1500")
+    try:
+        wait_ms = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("HASHI_ATTACHMENT_STORAGE_WAIT_MS must be an integer") from None
+    if not 1 <= wait_ms <= 60000:
+        raise ValueError("HASHI_ATTACHMENT_STORAGE_WAIT_MS must be between 1 and 60000")
+    return wait_ms
+
+
 class SessionNotFound(SessionStoreError):
     code = "session_not_found"
 
@@ -247,6 +271,10 @@ class SessionConflict(SessionStoreError):
 
 class IdempotencyConflict(SessionConflict):
     code = "idempotency_conflict"
+
+
+class ExistingRunNotFound(SessionConflict):
+    """A receipt lookup found no matching prior acceptance."""
 
 
 class StaleFencingToken(SessionConflict):
@@ -454,6 +482,25 @@ def validate_conversation_continuity_capsule(
 
 
 @dataclass(frozen=True)
+class ConversationContinuityBinding:
+    """Internal transfer context established by the caller's trusted boundary.
+
+    This value is not a credential. Only transfer and offline backfill owners
+    construct it after establishing their own authority and exact targets.
+    """
+
+    source_owner_id: str
+    target_owner_id: str
+    source_instance: str
+    target_instance: str
+    source_agent_id: str
+    target_agent_id: str
+    transfer_id: str
+    history_mode: str
+    capsule_digest: str
+
+
+@dataclass(frozen=True)
 class AcceptedRun:
     session_id: str
     run_id: str
@@ -506,6 +553,7 @@ class SessionStore:
         except OSError:
             pass
         self._lock = threading.RLock()
+        self._attachment_storage_context = threading.local()
         self._initialize()
 
     @classmethod
@@ -545,15 +593,42 @@ class SessionStore:
         """Commit or roll back, then deterministically release the file handle."""
 
         connection = self._connect()
-        if busy_timeout_ms is not None:
-            connection.execute(
-                f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}"
-            )
         try:
+            if busy_timeout_ms is None:
+                busy_timeout_ms = getattr(self._attachment_storage_context, "wait_ms", None)
+            if busy_timeout_ms is not None:
+                connection.execute(
+                    f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}"
+                )
             with connection:
                 yield connection
         finally:
             connection.close()
+
+    @contextmanager
+    def attachment_storage_budget(self) -> Iterator[None]:
+        """Bound lock waits for one attachment operation in its worker thread."""
+        wait_ms = attachment_storage_wait_ms()
+        if not self._lock.acquire(timeout=wait_ms / 1000):
+            raise SessionStorageBusy("attachment storage is busy; inspect the operation before retrying")
+        previous = getattr(self._attachment_storage_context, "wait_ms", None)
+        self._attachment_storage_context.wait_ms = wait_ms
+        try:
+            try:
+                yield
+            except sqlite3.OperationalError as exc:
+                code = getattr(exc, "sqlite_errorcode", -1)
+                if isinstance(code, int) and (code & 0xff) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    raise SessionStorageBusy(
+                        "attachment storage is busy; inspect the operation before retrying"
+                    ) from exc
+                raise
+        finally:
+            if previous is None:
+                del self._attachment_storage_context.wait_ms
+            else:
+                self._attachment_storage_context.wait_ms = previous
+            self._lock.release()
 
     def _initialize(self) -> None:
         with self._lock, self._connection() as connection:
@@ -579,6 +654,17 @@ class SessionStore:
         """Repair legacy projections without extending the service critical path."""
 
         with self._lock, self._connection() as connection:
+            # Existing databases already at this schema version skip the full
+            # schema initializer. Install the additive lookup index during
+            # deferred maintenance so startup and idle maintenance stay cheap.
+            if not connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                ("runs_agent_idempotency",),
+            ).fetchone():
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS runs_agent_idempotency "
+                    "ON runs(agent_id, idempotency_key, session_id)"
+                )
             missing_workzone = connection.execute(
                 """
                 SELECT 1 FROM sessions AS s
@@ -816,6 +902,8 @@ class SessionStore:
                 );
                 CREATE INDEX IF NOT EXISTS runs_session_created
                     ON runs(session_id, created_at, run_id);
+                CREATE INDEX IF NOT EXISTS runs_agent_idempotency
+                    ON runs(agent_id, idempotency_key, session_id);
 
                 CREATE TABLE IF NOT EXISTS run_attempts (
                     run_id TEXT NOT NULL,
@@ -1567,6 +1655,10 @@ class SessionStore:
                         ON live_fragments(call_id, call_epoch, start_ms);
                     """
                 )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS live_fragments_call_sequence "
+                "ON live_fragments(owner_id, session_id, call_id, sequence)"
+            )
             schema_version_row = connection.execute(
                 "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
             ).fetchone()
@@ -2914,6 +3006,63 @@ class SessionStore:
             "created_at": created_at,
         }
 
+    def agent_lifecycle_operation(
+        self, *, owner_id: str, agent_id: str, request_id: str
+    ) -> dict[str, Any] | None:
+        """Read a single owner's exact lifecycle receipt without replaying it."""
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().casefold()
+        operation = str(request_id or "").strip()
+        if not owner or not agent or not operation:
+            raise ValueError("lifecycle operation identity is required")
+        client = f"backend_api:agent-management:{owner}"
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT i.invocation_json, i.state, i.response_json, s.agent_id
+                FROM frontend_command_invocations AS i
+                JOIN sessions AS s ON s.session_id=i.session_id AND s.owner_id=i.owner_id
+                WHERE i.owner_id=? AND i.client_id=? AND i.request_id=?
+                """,
+                (owner, client, operation),
+            ).fetchall()
+        matched = []
+        for row in rows:
+            try:
+                invocation = json.loads(str(row["invocation_json"]))
+                args = invocation.get("arguments")
+                if (
+                    str(row["agent_id"]).casefold() != agent
+                    or invocation.get("command") != "agent-lifecycle"
+                    or invocation.get("connector_id") != "backend_api"
+                    or invocation.get("request_id") != operation
+                    or not isinstance(args, list)
+                    or len(args) != 4
+                    or args[0] != "lifecycle.set_active"
+                    or str(args[1]).casefold() != agent
+                    or args[3] not in {"active", "inactive"}
+                ):
+                    continue
+                response = (
+                    json.loads(str(row["response_json"]))
+                    if row["state"] == "completed" and row["response_json"]
+                    else {}
+                )
+                if not isinstance(response, dict):
+                    raise ValueError("invalid lifecycle receipt")
+                matched.append({
+                    "agent_id": str(args[1]),
+                    "target_generation": str(args[2]),
+                    "desired_active": args[3] == "active",
+                    "state": str(row["state"]),
+                    "response": response,
+                })
+            except (AttributeError, ValueError, TypeError):
+                raise SessionConflict("lifecycle receipt is unreadable") from None
+        if len(matched) > 1:
+            raise SessionConflict("lifecycle receipt identity is ambiguous")
+        return matched[0] if matched else None
+
     def reserve_frontend_command_invocation(
         self,
         *,
@@ -3272,6 +3421,47 @@ class SessionStore:
             raise SessionNotFound(str(session_id))
         return self._session_dict(row)
 
+    def conversation_history_agents(
+        self, *, owner_id: str, after: str = "", limit: int = 100,
+    ) -> dict[str, Any]:
+        """List one owner's conversation Agent IDs, including departed Agents."""
+        owner = str(owner_id or "").strip()
+        cursor = str(after or "")
+        if not owner or len(cursor) > 256 or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("history agent page parameters are invalid")
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT agent_id FROM sessions
+                WHERE instance_id=? AND owner_id=? AND session_kind='conversation'
+                  AND status != 'deleted' AND agent_id > ?
+                ORDER BY agent_id LIMIT ?
+                """,
+                (self.instance_id, owner, cursor, limit + 1),
+            ).fetchall()
+        ids = [str(row["agent_id"]) for row in rows]
+        return {
+            "agents": ids[:limit],
+            "next_cursor": ids[limit - 1] if len(ids) > limit else None,
+        }
+
+    def has_conversation_history_agent(self, *, owner_id: str, agent_id: str) -> bool:
+        owner = str(owner_id or "").strip()
+        agent = str(agent_id or "").strip().lower()
+        if not owner or not agent:
+            return False
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM sessions
+                WHERE instance_id=? AND owner_id=? AND agent_id=?
+                  AND session_kind='conversation' AND status != 'deleted'
+                LIMIT 1
+                """,
+                (self.instance_id, owner, agent),
+            ).fetchone()
+        return row is not None
+
     def list_sessions(
         self,
         *,
@@ -3280,6 +3470,7 @@ class SessionStore:
         include_archived: bool = False,
         include_internal: bool = False,
         limit: int = 100,
+        repair_titles: bool = True,
     ) -> list[dict[str, Any]]:
         clauses = ["instance_id = ?", "owner_id = ?", "status != 'deleted'"]
         params: list[Any] = [self.instance_id, str(owner_id)]
@@ -3300,7 +3491,7 @@ class SessionStore:
                 params,
             ).fetchall()
             changed = False
-            for row in rows:
+            for row in (rows if repair_titles else ()):
                 if (
                     str(row["title_source"]) != "system"
                     or not is_system_session_title(str(row["title"]))
@@ -3400,6 +3591,23 @@ class SessionStore:
                 (str(session_id), str(idempotency_key)),
             ).fetchone()
         return None if row is None else self._run_dict(row)
+
+    def find_run_by_agent_idempotency(
+        self, *, agent_id: str, owner_id: str, idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Find a prior connector Run even if its owner changed active Sessions."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """SELECT r.*, m.text AS user_text FROM runs AS r
+                   JOIN sessions AS s ON s.session_id=r.session_id
+                   JOIN messages AS m ON m.message_id=r.user_message_id
+                   WHERE s.instance_id=? AND s.owner_id=? AND r.agent_id=?
+                     AND r.idempotency_key=?""",
+                (self.instance_id, str(owner_id), str(agent_id).lower(), str(idempotency_key)),
+            ).fetchall()
+        if len(rows) > 1:
+            raise IdempotencyConflict("connector identity is bound to multiple Runs")
+        return None if not rows else self._run_dict(rows[0])
 
     def list_active_runs(
         self,
@@ -4418,6 +4626,7 @@ class SessionStore:
         fingerprint_policy: Mapping[str, Any] | None = None,
         expected_context_generation: int | None = None,
         agent_workspace: Path | str | None = None,
+        replay_only: bool = False,
     ) -> AcceptedRun:
         from orchestrator.fingerprint.models import FingerprintPolicy
         frozen_fingerprint = FingerprintPolicy.from_snapshot(dict(fingerprint_policy or {})).snapshot()
@@ -4458,7 +4667,7 @@ class SessionStore:
                 (self.instance_id, str(agent_id).lower()),
             ).fetchone():
                 raise SessionConflict("pcm_forget_in_progress")
-            if expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):
+            if not replay_only and expected_context_generation is not None and int(session["context_generation"]) != int(expected_context_generation):
                 raise SessionConflict("session_context_generation_changed")
             audio_rows: list[sqlite3.Row] = []
             attachment_rows: list[sqlite3.Row] = []
@@ -4679,10 +4888,22 @@ class SessionStore:
                         == str(existing_hchat.get("message_id") or "")
                         and str(incoming_hchat.get("payload_digest") or "")
                         == str(existing_hchat.get("payload_digest") or "")
+                        and all(
+                            str(incoming_hchat.get(field) or "") == str(existing_hchat.get(field) or "")
+                            for field in ("conversation_id", "in_reply_to", "to_instance", "message_type")
+                        )
                     )
                 if not request_matches:
                     raise IdempotencyConflict(
                         "idempotency key is already bound to a different request"
+                    )
+                if (
+                    replay_only
+                    and expected_context_generation is not None
+                    and int(existing["context_generation"]) != int(expected_context_generation)
+                ):
+                    raise IdempotencyConflict(
+                        "idempotency key is already bound to a different context generation"
                     )
                 if legacy_media_matches and not legacy_request_matches and stored_digest != digest:
                     # Upgrade pre-workspace media digests in place. Older
@@ -4707,6 +4928,8 @@ class SessionStore:
                     context_generation=int(existing["context_generation"]),
                     replayed=True,
                 )
+            if replay_only:
+                raise ExistingRunNotFound("no prior Run was accepted for this request")
             run_id = _new_id("run")
             message_id = _new_id("msg")
             generation = int(session["context_generation"])
@@ -5000,9 +5223,12 @@ class SessionStore:
         delivery_route: Mapping[str, Any] | None = None,
         expected_context_generation: int | None = None,
         _connection: sqlite3.Connection | None = None,
+        _run_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist frontend-visible standard content outside model history."""
 
+        if _run_id is not None and (_connection is None or not str(_run_id).strip()):
+            raise ValueError("a Run-bound presentation requires its fenced transaction")
         clean = str(text or "").strip()
         normalized_role = str(role or "").strip().casefold()
         normalized_source = str(source or "").strip()
@@ -5107,6 +5333,7 @@ class SessionStore:
                     str(existing["session_id"]) != str(session_id)
                     or str(existing["role"]) != normalized_role
                     or str(existing["source"]) != normalized_source
+                    or str(existing["run_id"] or "") != str(_run_id or "")
                     or str(existing["content_hash"]) != content_hash
                     or _json_object(existing["message_context_json"]) != context
                     or bool(existing["history_eligible"]) != bool(history_eligible)
@@ -5130,11 +5357,12 @@ class SessionStore:
                     context_generation, role, author_id, source,
                     message_context_json, content_json, text, visibility,
                     history_eligible, content_hash, created_at
-                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'visible', ?, ?, ?)
                 """,
                 (
                     message_id,
                     str(session_id),
+                    str(_run_id) if _run_id is not None else None,
                     ordinal,
                     int(session["context_generation"]),
                     normalized_role,
@@ -5154,7 +5382,7 @@ class SessionStore:
             presentation_event = self._append_event(
                 connection,
                 session_id=str(session_id),
-                run_id=None,
+                run_id=str(_run_id) if _run_id is not None else None,
                 kind="frontend.message.recorded",
                 status="recorded",
                 phase="presentation",
@@ -6513,6 +6741,23 @@ class SessionStore:
         )
         return materialized, source, target
 
+    def attachment_upload_metadata(
+        self, *, session_id: str, owner_id: str, attachment_id: str
+    ) -> dict[str, Any]:
+        """Resolve one owner's staged or committed attachment before reading bytes."""
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM session_attachments
+                   WHERE attachment_id=? AND session_id=? AND owner_id=?""",
+                (str(attachment_id), str(session_id), str(owner_id)),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound("attachment not found")
+        result = dict(row)
+        if str(result["state"]) not in {"staged", "committed"}:
+            raise SessionConflict("attachment is no longer available for upload")
+        return result
+
     def upload_attachment_bytes(
         self,
         *,
@@ -6636,10 +6881,30 @@ class SessionStore:
         if source.is_symlink():
             raise ValueError("attachment symlinks are not supported")
         try:
-            source_size = source.stat().st_size
+            with source.open("rb") as handle:
+                return self.upload_attachment_stream(
+                    session_id=session_id, owner_id=owner_id,
+                    attachment_id=attachment_id, source=handle,
+                )
         except OSError as exc:
             raise SessionConflict("attachment source is unavailable") from exc
-        if not source.is_file():
+
+    def upload_attachment_stream(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        attachment_id: str,
+        source: Any,
+    ) -> dict[str, Any]:
+        """Copy an already-open regular file, checking identity and the staged digest."""
+        import stat
+
+        try:
+            before = os.fstat(source.fileno())
+        except (OSError, ValueError, AttributeError) as exc:
+            raise SessionConflict("attachment source is unavailable") from exc
+        if not stat.S_ISREG(before.st_mode):
             raise ValueError("attachment source must be a regular file")
         with self._lock, self._connection() as connection:
             row = connection.execute(
@@ -6652,16 +6917,50 @@ class SessionStore:
         attachment = dict(row)
         if str(attachment["state"]) not in {"staged", "committed"}:
             raise SessionConflict("attachment is no longer available for upload")
-        if str(attachment["media_type"]).casefold().startswith("audio/"):
-            raise ValueError("streaming Session upload requires file-backed media")
+        is_audio = str(attachment["media_type"]).casefold().startswith("audio/")
         existing_asset = str(attachment.get("asset_id") or "")
         if existing_asset:
-            self._validated_attachment_file(attachment)
+            if is_audio:
+                try:
+                    self.audio_assets.describe(existing_asset, owner_id=owner_id, session_id=session_id)
+                except AudioAssetError as exc:
+                    raise SessionConflict("staged audio asset is unavailable") from exc
+            else:
+                self._validated_attachment_file(attachment)
             return attachment
         if attachment["state"] != "staged":
             raise SessionConflict("only staged attachments can be uploaded")
-        if source_size != int(attachment["size_bytes"]):
+        expected_size = int(attachment["size_bytes"])
+        if before.st_size != expected_size:
             raise SessionConflict("attachment size does not match staged metadata")
+        if is_audio:
+            audio_format = normalize_audio_format(
+                Path(str(attachment["filename"])).suffix,
+                mime_type=str(attachment["media_type"]),
+            )
+            asset = self.audio_assets.create_stream(
+                source, owner_id=owner_id, session_id=session_id,
+                direction="input", mime_type=str(attachment["media_type"]),
+                audio_format=audio_format, expected_size=expected_size,
+                expected_sha256=str(attachment["sha256"]), asset_id=str(attachment_id),
+                filename=str(attachment["filename"]), duration_ms=attachment.get("duration_ms"),
+                retention_seconds=int(attachment.get("retention_seconds") or DEFAULT_RETENTION_SECONDS),
+                retention_indefinite=bool(attachment.get("retention_indefinite")),
+                correlation={"attachment_id": str(attachment_id)}, canonical_managed=True,
+            )
+            with self._lock, self._connection() as connection:
+                connection.execute(
+                    """UPDATE session_attachments SET asset_id=?, uploaded_at=?,
+                           duration_ms=COALESCE(duration_ms, ?), retention_expires_at=?
+                       WHERE attachment_id=? AND state='staged'""",
+                    (str(asset["asset_id"]), _utc_now(), asset.get("duration_ms"),
+                     asset.get("retention_expires_at"), str(attachment_id)),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM session_attachments WHERE attachment_id=?",
+                    (str(attachment_id),),
+                ).fetchone()
+            return dict(updated)
 
         target = self._attachment_file_path(
             str(attachment_id), str(attachment["filename"])
@@ -6670,13 +6969,19 @@ class SessionStore:
         digest = hashlib.sha256()
         observed_size = 0
         try:
-            with source.open("rb") as input_handle, partial.open("xb") as output_handle:
-                while chunk := input_handle.read(8 * 1024 * 1024):
+            source.seek(0)
+            with partial.open("xb") as output_handle:
+                while chunk := source.read(1024 * 1024):
                     observed_size += len(chunk)
+                    if observed_size > expected_size:
+                        raise SessionConflict("attachment changed while being copied")
                     digest.update(chunk)
                     output_handle.write(chunk)
                 output_handle.flush()
-            if observed_size != int(attachment["size_bytes"]):
+            after = os.fstat(source.fileno())
+            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            if before_identity != after_identity or observed_size != expected_size:
                 raise SessionConflict("attachment changed while being copied")
             if digest.hexdigest() != str(attachment["sha256"]):
                 raise SessionConflict("attachment digest does not match staged metadata")
@@ -10002,6 +10307,7 @@ class SessionStore:
         owner_id: str | None = None,
         context_generation: int | None = None,
         limit: int = 200,
+        before_ordinal: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return visible UI history, including presentation-only messages."""
 
@@ -10024,9 +10330,10 @@ class SessionStore:
                 LEFT JOIN runs AS r ON r.run_id = m.run_id
                 WHERE m.session_id=? AND m.context_generation IN ({placeholders})
                   AND m.visibility='visible'
+                  AND (? IS NULL OR m.ordinal < ?)
                 ORDER BY m.ordinal DESC LIMIT ?
                 """,
-                (str(session_id), *generations, bounded),
+                (str(session_id), *generations, before_ordinal, before_ordinal, bounded),
             ).fetchall()
         return [self._message_dict(row) for row in reversed(rows)]
 
@@ -10399,6 +10706,45 @@ class SessionStore:
             ).fetchall()
         return [str(row["owner_id"]) for row in rows]
 
+    @staticmethod
+    def _history_owner_ids(
+        connection: sqlite3.Connection, *, instance_id: str, agent_id: str
+    ) -> list[str]:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT s.owner_id FROM sessions AS s
+            JOIN messages AS m ON m.session_id=s.session_id
+            LEFT JOIN runs AS r ON r.run_id=m.run_id
+            WHERE s.instance_id=? AND s.agent_id=? AND s.status != 'deleted'
+              AND m.visibility='visible' AND m.history_eligible=1
+              AND m.role IN ('user', 'assistant')
+              AND (m.run_id IS NULL OR r.state IN
+                   ('completed', 'failed', 'stopped', 'superseded', 'interrupted'))
+            ORDER BY s.owner_id
+            """,
+            (instance_id, str(agent_id).strip().lower()),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def conversation_history_owner_ids(self, *, agent_id: str) -> list[str]:
+        """Identify owners with exportable history without reading its contents."""
+        with self._lock, self._connection() as connection:
+            return self._history_owner_ids(
+                connection, instance_id=self.instance_id, agent_id=agent_id
+            )
+
+    @staticmethod
+    def existing_conversation_history_owner_ids(
+        database: Path, *, instance_id: str, agent_id: str
+    ) -> list[str]:
+        """Read existing history ownership without initializing or migrating it."""
+        if not database.is_file():
+            return []
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            return SessionStore._history_owner_ids(
+                connection, instance_id=instance_id, agent_id=agent_id
+            )
+
     def export_conversation_continuity(
         self,
         *,
@@ -10573,6 +10919,7 @@ class SessionStore:
         agent_id: str,
         transfer_id: str,
         history_mode: str,
+        owner_binding: ConversationContinuityBinding | None = None,
     ) -> dict[str, Any]:
         """Atomically prepend validated history and retain stable import provenance."""
         owner = str(owner_id or "").strip()
@@ -10581,14 +10928,29 @@ class SessionStore:
         mode = str(history_mode or "").strip().lower()
         if mode not in CONVERSATION_HISTORY_MODES:
             raise ValueError("unsupported conversation history mode")
+        if owner_binding is not None and not isinstance(
+            owner_binding, ConversationContinuityBinding
+        ):
+            raise SessionConflict("conversation continuity owner binding is invalid")
         validated = validate_conversation_continuity_capsule(
             capsule,
-            owner_id=owner,
+            owner_id=owner_binding.source_owner_id if owner_binding else owner,
+            source_agent_id=owner_binding.source_agent_id if owner_binding else None,
             transfer_id=transfer,
             history_mode=mode,
         )
         payload = validated["payload"]
         capsule_digest = str(validated["capsule_digest"])
+        if owner_binding is not None and (
+            owner_binding.target_owner_id != owner
+            or owner_binding.target_agent_id != agent
+            or owner_binding.transfer_id != transfer
+            or owner_binding.history_mode != mode
+            or owner_binding.source_instance != str(payload.get("source_instance") or "").upper()
+            or owner_binding.target_instance != self.instance_id
+            or not hmac.compare_digest(owner_binding.capsule_digest, capsule_digest)
+        ):
+            raise SessionConflict("conversation continuity owner binding does not match transfer")
         normalized_sessions = list(validated["sessions"])
         message_count = int(validated["message_count"])
 
@@ -10969,6 +11331,7 @@ class SessionStore:
 
             details = {
                 "transfer_id": transfer,
+                "source_owner_id": str(validated["owner_id"]),
                 "history_mode": mode,
                 "target_session_ids": sorted(set(mapping.values())),
                 "created_session_ids": created_session_ids,
@@ -11422,6 +11785,69 @@ class SessionStore:
                 "transfer_id": transfer,
                 "session_ids": session_ids,
                 "replayed": False,
+            }
+
+    def archive_retained_agent_sessions(
+        self, *, agent_id: str, transfer_id: str,
+    ) -> dict[str, Any]:
+        """Retain each owner's history without binding it to a later same-name Agent."""
+        agent = str(agent_id or "").strip().lower()
+        transfer = str(transfer_id or "").strip()
+        marker = "__retain_source_all_partitions__"
+        if not agent or not transfer:
+            raise ValueError("agent_id and transfer_id are required")
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM conversation_continuity_retirements WHERE transfer_id=?",
+                (transfer,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["owner_id"]) != marker or str(existing["agent_id"]) != agent:
+                    raise SessionConflict("conversation retirement transfer ID is already in use")
+                return {
+                    "transfer_id": transfer,
+                    "session_ids": json.loads(existing["session_ids_json"]),
+                    "replayed": True,
+                    "retained_on_source": True,
+                }
+            rows = connection.execute(
+                """
+                SELECT session_id FROM sessions
+                WHERE instance_id=? AND agent_id=? AND status != 'deleted'
+                ORDER BY session_id
+                """,
+                (self.instance_id, agent),
+            ).fetchall()
+            session_ids = [str(row["session_id"]) for row in rows]
+            archived_at = _utc_now()
+            for session_id in session_ids:
+                connection.execute(
+                    """
+                    UPDATE sessions SET status='archived', is_default=0,
+                        revision=revision+1, history_generation=history_generation+1,
+                        updated_at=? WHERE session_id=?
+                    """,
+                    (archived_at, session_id),
+                )
+                connection.execute("DELETE FROM channel_bindings WHERE session_id=?", (session_id,))
+                self._append_event(
+                    connection, session_id=session_id, run_id=None,
+                    kind="session.history_retained_on_source", status="archived",
+                    phase="migration", summary="Conversation history retained on source after Agent move",
+                    detail={"transfer_id": transfer},
+                )
+            connection.execute(
+                """
+                INSERT INTO conversation_continuity_retirements(
+                    transfer_id, owner_id, agent_id, session_ids_json, retired_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (transfer, marker, agent, _json(session_ids), archived_at),
+            )
+            return {
+                "transfer_id": transfer, "session_ids": session_ids,
+                "replayed": False, "retained_on_source": True,
             }
 
     def archive_agent_sessions(self, agent_id: str) -> list[str]:

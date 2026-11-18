@@ -11,8 +11,9 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import uuid
 
-from .execution import Observation, observe, output_facts, target_for, finish_owned
-from .models import FileVersion, FingerprintPolicy, RunIdentity, relative_target
+from .execution import (observe, output_facts, target_for, finish_owned,
+                        dispatch_without_optional_evidence)
+from .models import FingerprintPolicy, RunIdentity, relative_target
 from .runtime import context_identity, context_policy
 from .service import FingerprintAudit, utc_now
 
@@ -93,10 +94,15 @@ async def dispatch_shell(registry, tool_name, arguments, *, tool_call_id):
     if not policy.enabled:
         return await registry._dispatch_observed(tool_name, arguments, tool_call_id=tool_call_id)
     audit = FingerprintAudit(registry.canonical_audit)
-    identity = context_identity(context)
-    audit.validate_identity(identity)
-    operation_id = uuid.uuid4().hex
     call_id = tool_call_id or uuid.uuid4().hex
+    try:
+        identity = context_identity(context)
+        audit.validate_identity(identity)
+    except Exception:
+        if policy.required:
+            raise
+        return await dispatch_without_optional_evidence(registry, tool_name, arguments, tool_call_id=call_id)
+    operation_id = uuid.uuid4().hex
     # This is trusted observer configuration, NOT command text or a model argument.
     requested = context.get("fingerprint_observation_paths", ())
     targets = requested if isinstance(requested, (tuple, list)) else ()
@@ -106,19 +112,26 @@ async def dispatch_shell(registry, tool_name, arguments, *, tool_call_id):
             target = target_for(registry, {"path": raw})
             snapshot = await asyncio.to_thread(observe, target[0])
             observations.append((target, snapshot))
-        except (OSError, ValueError):
+        except Exception:
+            if policy.required:
+                raise
             gaps.append("target_unavailable")
     if not observations:
         gaps.append("no_bounded_file_observation")
     prepared = {"operation_id": operation_id, "identity": asdict(identity),
         "tool_call_id": call_id, "tool_name": tool_name, "policy_version": policy.version,
         "started_at": utc_now(), "coverage": matrix(), "gaps": gaps}
-    # Shell text cannot be safely classified as read-only. When Fingerprint is
-    # ON, no potentially mutating command may run before this durability gate.
-    await asyncio.to_thread(
-        audit.append, "fingerprint_execution_started", prepared,
-        request_id=identity.request_id,
-    )
+    # Opaque shell may mutate. Required mode retains its pre-effect barrier;
+    # optional evidence failure must not suppress an admitted operation.
+    try:
+        await asyncio.to_thread(
+            audit.append, "fingerprint_execution_started", prepared,
+            request_id=identity.request_id,
+        )
+    except Exception:
+        if policy.required:
+            raise
+        return await dispatch_without_optional_evidence(registry, tool_name, arguments, tool_call_id=call_id)
     evidence = "persisted"
     error = None
     try:

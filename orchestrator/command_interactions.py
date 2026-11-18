@@ -28,6 +28,7 @@ from orchestrator.sys_command_contract import (
 VERSION = 1
 MAX_TEXT = 65536
 MAX_REQUEST_TEXT = MAX_SYS_COMMAND_CHARS + 4096
+MAX_INPUT_TEXT = MAX_TEXT
 MAX_BUTTONS = 100
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
 _UNSET = object()
@@ -89,7 +90,7 @@ def validate_operation(payload: Any) -> None:
     if op == "act" and (not isinstance(payload.get("button_id"), str) or not ID_PATTERN.fullmatch(payload["button_id"])):
         raise InteractionError("command_menu_request_invalid", 400)
     if "input_text" in payload and (
-        op != "act" or not isinstance(payload["input_text"], str) or len(payload["input_text"]) > 500
+        op != "act" or not isinstance(payload["input_text"], str) or len(payload["input_text"]) > MAX_INPUT_TEXT
     ):
         raise InteractionError("command_menu_input_invalid", 422)
     if "reply_reference" in payload:
@@ -174,6 +175,9 @@ class Menu:
     parse_mode: str = "HTML"
     rows: list = field(default_factory=list)
     actions: dict = field(default_factory=dict)
+    page: int = 0
+    page_actions: dict = field(default_factory=dict)
+    navigation: list = field(default_factory=list)
     closed: bool = False
     presentation_message_id: str | None = None
 
@@ -199,18 +203,55 @@ def markup_rows(value: Any) -> list:
     if not isinstance(value, Mapping) or "inline_keyboard" not in value:
         raise InteractionError("command_menu_markup_unsupported", 422)
     rows = value["inline_keyboard"]
-    if not isinstance(rows, (list, tuple)) or len(rows) > MAX_BUTTONS:
+    if not isinstance(rows, (list, tuple)):
         raise InteractionError("command_menu_markup_invalid", 422)
-    total = 0
     output = []
     for row in rows:
         if not isinstance(row, (list, tuple)):
             raise InteractionError("command_menu_markup_invalid", 422)
-        total += len(row)
-        if total > MAX_BUTTONS:
-            raise InteractionError("command_menu_too_large", 422)
         output.append(list(row))
     return output
+
+
+def _pages(rows: list) -> list[list]:
+    """Keep every action while fitting each projection's existing block budget."""
+    if sum(len(row) for row in rows) <= MAX_BUTTONS:
+        return [rows]
+    limit = MAX_BUTTONS - 2  # reserve room for previous/next navigation
+    pages: list[list] = [[]]
+    count = 0
+    for row in rows:
+        offset = 0
+        while offset < len(row):
+            if count == limit:
+                pages.append([])
+                count = 0
+            take = min(limit - count, len(row) - offset)
+            pages[-1].append(row[offset:offset + take])
+            offset += take
+            count += take
+    return pages
+
+
+def _refresh_page_actions(menu: Menu) -> None:
+    for key in menu.page_actions:
+        menu.actions.pop(key, None)
+    menu.page_actions.clear()
+    menu.navigation.clear()
+    pages = _pages(menu.rows)
+    menu.page = min(menu.page, len(pages) - 1)
+    if menu.closed or len(pages) == 1:
+        return
+    for target, label in (
+        (menu.page - 1, f"‹ {menu.page}/{len(pages)}"),
+        (menu.page + 1, f"{menu.page + 2}/{len(pages)} ›"),
+    ):
+        if 0 <= target < len(pages):
+            key = "act_" + secrets.token_urlsafe(18)
+            menu.page_actions[key] = target
+            # The bridge's durable invocation checks all issued action IDs.
+            menu.actions[key] = (None, ("command-menu-page", target))
+            menu.navigation.append({"text": label, "button_id": key, "disabled": False})
 
 
 class MenuStore:
@@ -276,7 +317,11 @@ class MenuStore:
         except (TypeError, ValueError) as exc:
             raise InteractionError("command_menu_request_invalid", 400) from exc
         if _request_text_size(payload, encoded) > MAX_REQUEST_TEXT:
-            raise InteractionError("command_menu_request_too_large", 413)
+            raise InteractionError(
+                "command_menu_request_too_large", 413,
+                f"Command and quoted data exceed the {MAX_REQUEST_TEXT} character limit. "
+                "Use an excerpt or shorten the command.",
+            )
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         key = (binding, request_id)
         # All local menu writes for an Agent are serialized. The normal command
@@ -306,9 +351,13 @@ class MenuStore:
             return result
 
     def render(self, menu: Menu) -> dict:
+        pages = _pages(menu.rows)
+        rows = copy.deepcopy(pages[menu.page]) if not menu.closed else []
+        if not menu.closed and menu.navigation:
+            rows.append(copy.deepcopy(menu.navigation))
         return {"version": VERSION, "menu_id": menu.id, "revision": menu.revision,
                 "expires_at": int(menu.expires_at * 1000), "closed": menu.closed,
-                "rows": copy.deepcopy(menu.rows) if not menu.closed else []}
+                "rows": rows}
 
     def message(self, menu: Menu, *, deleted: bool = False) -> dict:
         parse_mode = str(menu.parse_mode or "").strip().casefold()
@@ -421,9 +470,14 @@ class Capture:
                             actions[key] = (callback, resolved[0])
                             item = {"text": label, "button_id": key, "disabled": False}
                             field=button.get("hashi_text_input")
-                            if isinstance(field, Mapping) and callback.startswith(("voice:manual:save","call:manualsave:","getfile:path:")):
+                            if isinstance(field, Mapping) and callback.startswith(("voice:manual:save","call:manualsave:","getfile:path:","wz:p:")):
+                                limit = field.get("max_length", 500)
+                                value = field.get("value", "")
+                                if (type(limit) is not int or not 1 <= limit <= MAX_INPUT_TEXT
+                                        or not isinstance(value, str) or len(value) > MAX_INPUT_TEXT):
+                                    raise InteractionError("command_menu_input_invalid", 422)
                                 item["text_input"]={"label":str(field.get("label",""))[:100],
-                                    "value":str(field.get("value",""))[:500],"max_length":500}
+                                    "value":value,"max_length":limit}
                         else:
                             item["reason"] = "callback_unavailable"
                 elif not special and url and callback is None:
@@ -434,6 +488,9 @@ class Capture:
         menu.text, menu.parse_mode = text, str(parse_mode or "")
         menu.rows, menu.actions = rows, actions
         menu.closed = not bool(rows)
+        menu.page = 0
+        menu.page_actions.clear()
+        _refresh_page_actions(menu)
         self._record(menu)
 
     async def capture_reply(self, text: str, **kwargs):
@@ -512,7 +569,7 @@ class CapturedMessage:
 
 
 class CapturedQuery:
-    def __init__(self, capture: Capture, menu: Menu, data: str, actor_id: int):
+    def __init__(self, capture: Capture, menu: Menu, data: str, actor_id: int | str):
         self.capture = capture
         self.data = data
         self.id = secrets.token_urlsafe(18)
@@ -553,11 +610,13 @@ def _disable_action_rows(menu: Menu, reason: str) -> None:
             rows.append(projected)
     menu.rows = rows
     menu.actions.clear()
+    menu.page_actions.clear()
+    menu.navigation.clear()
     menu.closed = False
 
 
 async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
-                         capture: Capture, *, actor_id: int,
+                         capture: Capture, *, actor_id: int | str,
                          authorize: Callable[[str], bool],
                          invoke: Callable[[tuple, CapturedQuery], Awaitable[Any]]) -> dict:
     """Called inside once(); reserve the revision before invoking any callback."""
@@ -569,12 +628,26 @@ async def perform_action(store: MenuStore, binding: Binding, payload: Mapping,
     action = menu.actions.get(payload.get("button_id"))
     if action is None:
         raise InteractionError("command_menu_button_invalid", 400)
+    visible_rows = store.render(menu)["rows"]
+    if not any(item.get("button_id") == payload.get("button_id")
+               for row in visible_rows for item in row):
+        raise InteractionError("command_menu_button_invalid", 400)
+    if payload.get("button_id") in menu.page_actions:
+        if payload.get("input_text") is not None:
+            raise InteractionError("command_menu_input_invalid", 422)
+        menu.page = menu.page_actions[payload["button_id"]]
+        menu.revision += 1
+        _refresh_page_actions(menu)
+        capture._record(menu)
+        return capture.result()
     data, fingerprint = action
     field=next((item.get("text_input") for row in menu.rows for item in row
         if item.get("button_id")==payload.get("button_id")), None)
     input_text=payload.get("input_text")
     if field is not None:
-        if not isinstance(input_text,str) or not input_text.strip() or len(input_text)>500:
+        limit = field.get("max_length", 500)
+        if (type(limit) is not int or not 1 <= limit <= MAX_INPUT_TEXT
+                or not isinstance(input_text,str) or not input_text.strip() or len(input_text)>limit):
             raise InteractionError("command_menu_input_invalid",422)
     elif input_text is not None:
         raise InteractionError("command_menu_input_invalid",422)

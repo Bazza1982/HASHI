@@ -54,8 +54,12 @@ that proposal is superseded.
   contract and must remain local.
 - `/privacy 2` presents the known risk and requires a deliberate acceptance.
   Activation checks a local detector canary, the active HERV3 target, every
-  configured provider profile, and persistent state. Downgrades require
-  separate confirmation. Incompatible switches fail before provider use.
+  configured provider profile, and persistent state. An authenticated owner
+  who explicitly commands a lower level has already confirmed that exact
+  change; its write checks that the previously observed level is still current.
+  Menu-based downgrade choices continue to show the consequence and request
+  confirmation. Delegated or unbound callers do not inherit the direct-owner
+  confirmation. Incompatible switches fail before provider use.
 
 ## Evidence
 

@@ -61,6 +61,53 @@ def _catalog(tmp_path: Path, *, credential_ref: str | None = None) -> VoiceCatal
     return VoiceCatalog.load(instance_path=path, project_root=tmp_path)
 
 
+@pytest.mark.asyncio
+async def test_shared_tts_lan_hostname_uses_checked_connection_and_blocks_dns_rebinding(monkeypatch):
+    import socket
+    from aiohttp import web
+    from orchestrator import lan_transport
+
+    calls, resolved = [], []
+    async def handler(request):
+        calls.append((request.host, request.path))
+        return web.Response(body=b"fixture audio", content_type="audio/wav")
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    class Delegate:
+        async def resolve(self, host, selected_port=0, family=socket.AF_UNSPEC):
+            resolved.append(host)
+            address = "127.0.0.1" if len(resolved) == 1 else "8.8.8.8"
+            return [{"hostname": host, "host": address, "port": selected_port,
+                     "family": socket.AF_INET, "proto": 0, "flags": 0}]
+        async def close(self): pass
+
+    private = lan_transport.is_private_lan_address
+    monkeypatch.setattr(lan_transport, "is_private_lan_address", lambda host: host == "127.0.0.1" or private(host))
+    monkeypatch.setattr(lan_transport.aiohttp.resolver, "DefaultResolver", Delegate)
+    service = {"location": "lan", "base_url": f"http://speaker.test:{port}/v1",
+               "model": "fixture", "max_response_bytes": 1024, "timeout_seconds": 5}
+    provider = OpenAICompatibleTTSProvider(service_id="fixture", service=service)
+    try:
+        audio, mime = await provider._request({"input": "fixture"})
+        assert audio == b"fixture audio"
+        assert mime == "audio/wav"
+        assert resolved == ["speaker.test"]
+        assert calls == [(f"speaker.test:{port}", "/v1/audio/speech")]
+        with pytest.raises(OpenAICompatibleTTSError, match="LAN destination"):
+            await provider._request({"input": "fixture"})
+        with pytest.raises(ValueError, match="no permitted private address"):
+            await provider.prepare_performance("fixture")
+        assert len(calls) == 1
+    finally:
+        await runner.cleanup()
+
+
 def test_configured_service_builds_the_shared_openai_compatible_adapter(tmp_path):
     catalog = _catalog(tmp_path)
     provider = build_provider(
@@ -182,3 +229,4 @@ async def test_adapter_fails_before_network_when_credential_reference_is_missing
             stem="reply",
             voice_name="voice-1",
         )
+# HASHI-Fingerprint: hfp_f1a8b41f7a724e30999e78011b2babb8

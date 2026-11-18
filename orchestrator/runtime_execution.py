@@ -189,7 +189,7 @@ async def create_execution(runtime, item, frozen):
 
 async def process_sessions(runtime, process_item):
     queue = runtime.queue
-    capacity = limit((runtime.config.extra or {}).get("max_concurrent_sessions"), "max_concurrent_sessions", 2, 8)
+    capacity = limit((runtime.config.extra or {}).get("max_concurrent_sessions"), "max_concurrent_sessions", 2)
     runtime._session_executions = {}
     runtime._session_execution_tasks = {}
     busy = set()

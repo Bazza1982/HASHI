@@ -82,6 +82,7 @@ class TurnServices(CommentaryPort):
         downstream: CommentaryPort | None,
         commentary_interval_s: float = 150.0,
         companion_enabled: bool = False,
+        companion_mode: str = "advisory",
         companion_interval_s: float = 300.0,
         companion_judge: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -91,6 +92,9 @@ class TurnServices(CommentaryPort):
         self.downstream = downstream
         self.commentary_interval_s = max(120.0, min(180.0, float(commentary_interval_s)))
         self.companion_enabled = bool(companion_enabled)
+        if companion_mode not in {"advisory", "enforce"}:
+            raise ValueError("companion_mode must be advisory or enforce")
+        self.companion_mode = companion_mode
         self.companion_interval_s = max(1.0, float(companion_interval_s))
         self.companion_judge = companion_judge
         self.clock = clock

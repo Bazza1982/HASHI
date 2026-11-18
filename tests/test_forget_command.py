@@ -22,7 +22,9 @@ class Runtime:
         self.session_store = store
 
     def _is_authorized_user(self, actor):
-        return actor == 7
+        from orchestrator.frontend_command_context import is_frontend_command_principal
+
+        return is_frontend_command_principal(self, actor) or actor == 7
 
     def _is_command_allowed(self, command):
         return True

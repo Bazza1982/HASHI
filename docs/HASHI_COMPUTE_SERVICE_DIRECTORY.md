@@ -36,11 +36,14 @@ array. Each node has:
 - an optional secret reference, never an inline credential; and
 - enablement and a bounded discovery timeout.
 
-`local` accepts loopback only. `lan` accepts a literal RFC 1918 IPv4 address
-only. `internet` requires HTTPS and rejects local/private addresses. Embedded
-credentials, redirects, queries, fragments, and base URL paths are rejected.
-The configured location is authoritative: a manifest cannot relabel or widen
-the privacy boundary.
+`local` accepts loopback only. `lan` accepts an explicitly configured hostname
+or an RFC 1918, carrier-grade NAT, or IPv6 unique-local address. Before each
+LAN connection, hostname results are checked and the connection uses an allowed
+address while retaining the configured host for HTTP and TLS. Public and known
+metadata addresses are excluded. `internet` requires HTTPS and rejects
+local/private address literals. Embedded credentials, redirects, queries,
+fragments, and base URL paths are rejected. The configured location is
+authoritative: a manifest cannot relabel or widen the privacy boundary.
 
 Example (illustrative address only):
 
@@ -273,8 +276,10 @@ The node origin and manifest remain in `compute_services.json`. Each new
 transcription rereads this selector, discovers and resolves that exact local/LAN
 audio-to-text service and POSTs multipart audio to its advertised
 `openai.audio.transcriptions` interface. There is no internet/local Whisper
-fallback after an explicit Compute selection. Uploads are bounded to 8 MiB;
-the service enforces its advertised duration limit. Redirects, malformed JSON,
+fallback after an explicit Compute selection. The owner may set
+`max_compute_input_bytes` in the transcription configuration to match the
+selected service; the default is 8 MiB. The service enforces its advertised
+duration limit. Redirects, malformed JSON,
 oversized responses and invalid text fail closed. Cancellation propagates.
 Missing configuration preserves the existing isolated/local transcription
 contract. No native transcription dependency is installed in Core.

@@ -390,6 +390,74 @@ async def test_tool_registry_auto_registers_file_write_artifact_with_enterprise_
 
 
 @pytest.mark.asyncio
+async def test_enterprise_metadata_alone_does_not_narrow_existing_tool_grant(tmp_path):
+    workspace = tmp_path / "workspace"
+    other = tmp_path / "workzone"
+    workspace.mkdir()
+    other.mkdir()
+    (other / "note.txt").write_text("preserved", encoding="utf-8")
+    registry = ToolRegistry(
+        allowed_tools=["file_read", "file_search", "shell", "http_request", "browser_get_text"],
+        access_root=workspace, access_roots=[other], workspace_dir=workspace, secrets={},
+        audit_context={"org_id": "ORG-001", "project_id": "prj-research",
+                       "project_workspace_root": str(workspace)},
+    )
+    result = await registry.execute("file_read", {"path": str(other / "note.txt")})
+    assert not result.is_error and "preserved" in result.output
+    search = await registry.execute("file_search", {"query": "note", "roots": [str(other)]})
+    assert not search.is_error and "note.txt" in search.output
+    assert registry._check_enterprise_shell_gate("shell", tool_call_id="") is None
+    assert registry._check_enterprise_browser_gate("browser_get_text", tool_call_id="") is None
+    assert registry._check_enterprise_network_gate(
+        "http_request", {"url": "https://example.com"}, tool_call_id=""
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_enterprise_explicit_narrowing_cannot_be_widened_by_request_metadata(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    other = tmp_path / "other"
+    workspace.mkdir()
+    other.mkdir()
+    (other / "note.txt").write_text("restricted", encoding="utf-8")
+    registry = ToolRegistry(
+        allowed_tools=["file_read", "media_read", "shell", "http_request", "browser_get_text"],
+        access_root=workspace, access_roots=[other], workspace_dir=workspace, secrets={},
+        audit_context={"org_id": "ORG-001", "project_id": "prj-research",
+                       "enterprise_workspace_root": str(workspace),
+                       "enterprise_shell_enabled": False, "enterprise_browser_enabled": False,
+                       "enterprise_network_allow_hosts": []},
+    )
+    monkeypatch.setattr(registry, "tool_availability", lambda _name: {"available": True})
+    wide = {"enterprise_workspace_root": str(tmp_path), "enterprise_shell_enabled": True,
+            "enterprise_browser_enabled": True, "enterprise_network_allow_hosts": ["*"]}
+    result = await registry.execute_with_audit_context(
+        "file_read", {"path": str(other / "note.txt")}, audit_context=wide,
+    )
+    assert result.is_error and "workspace_escape" in result.output
+    for name, args in [("shell", {"command": "true"}),
+                       ("media_read", {"path": str(other / "note.txt")}),
+                       ("http_request", {"url": "https://example.com"}),
+                       ("browser_get_text", {})]:
+        denial = registry.evaluate_admission_with_audit_context(name, args, audit_context=wide)
+        assert denial is not None and denial.is_error and "enterprise" in denial.output
+
+
+@pytest.mark.asyncio
+async def test_enterprise_path_policy_checks_the_actual_relative_execution_path(tmp_path):
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (tmp_path / "outside.txt").write_text("outside policy", encoding="utf-8")
+    registry = ToolRegistry(
+        allowed_tools=["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+        audit_context={"enterprise_workspace_root": str(selected)},
+    )
+    result = await registry.execute("file_read", {"path": "outside.txt"})
+    assert result.is_error and "workspace_escape" in result.output
+    assert "outside policy" not in result.output
+
+
+@pytest.mark.asyncio
 async def test_tool_registry_enterprise_path_gate_blocks_workspace_escape(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -442,7 +510,7 @@ async def test_tool_registry_enterprise_path_gate_blocks_workspace_escape(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_enterprise_shell_gate_defaults_closed(tmp_path):
+async def test_tool_registry_enterprise_shell_gate_honours_explicit_disable(tmp_path):
     registry = ToolRegistry(
         allowed_tools=["bash"],
         access_root=tmp_path,
@@ -453,6 +521,7 @@ async def test_tool_registry_enterprise_shell_gate_defaults_closed(tmp_path):
             "workspace_dir": str(tmp_path),
             "org_id": "ORG-001",
             "project_id": "prj-research",
+            "enterprise_shell_enabled": False,
         },
     )
 
@@ -491,7 +560,7 @@ async def test_tool_registry_enterprise_shell_gate_can_be_explicitly_enabled(tmp
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_enterprise_network_gate_defaults_closed(tmp_path):
+async def test_tool_registry_enterprise_network_gate_honours_empty_allowlist(tmp_path):
     registry = ToolRegistry(
         allowed_tools=["http_request"],
         access_root=tmp_path,
@@ -502,6 +571,7 @@ async def test_tool_registry_enterprise_network_gate_defaults_closed(tmp_path):
             "workspace_dir": str(tmp_path),
             "org_id": "ORG-001",
             "project_id": "prj-research",
+            "enterprise_network_allow_hosts": [],
         },
     )
 
@@ -562,7 +632,7 @@ async def test_tool_registry_enterprise_network_gate_supports_wildcards(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_enterprise_browser_gate_defaults_closed(tmp_path):
+async def test_tool_registry_enterprise_browser_gate_honours_explicit_disable(tmp_path):
     registry = ToolRegistry(
         allowed_tools=["browser_get_text"],
         access_root=tmp_path,
@@ -573,6 +643,7 @@ async def test_tool_registry_enterprise_browser_gate_defaults_closed(tmp_path):
             "workspace_dir": str(tmp_path),
             "org_id": "ORG-001",
             "project_id": "prj-research",
+            "enterprise_browser_enabled": False,
         },
     )
 

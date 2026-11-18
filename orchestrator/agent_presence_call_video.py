@@ -13,7 +13,7 @@ from urllib.parse import urlencode, urlsplit
 
 import aiohttp
 
-from orchestrator.frontend_call.contract import CallError
+from orchestrator.frontend_call.contract import CallError, video_transport_limit
 
 OUTPUT_PROTOCOL = "call-output/1"
 AP_PROTOCOL = "ap-call-video/1"
@@ -200,7 +200,7 @@ class AgentPresenceCallVideo:
             data = await self.request(
                 "GET",
                 "/v1/call/video/reference?" + urlencode(self.scope()),
-                maximum=MAX_IMAGE,
+                maximum=video_transport_limit("MAX_REFERENCE_BYTES", MAX_IMAGE),
                 binary=True,
             )
             if (
@@ -269,7 +269,7 @@ class AgentPresenceCallVideo:
 
     async def prepare(self, utterance_id, media, *, epoch):
         self.require_active(epoch)
-        if not isinstance(media, bytes) or not 0 < len(media) <= MAX_MEDIA:
+        if not isinstance(media, bytes) or not 0 < len(media) <= video_transport_limit("MAX_MEDIA_BYTES", MAX_MEDIA):
             raise CallError("call_video_av_required", 502)
         # Only one pending/playing utterance is owned by AP. Wait without
         # holding the control lock so interruption/end always has priority.

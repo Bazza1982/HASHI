@@ -14,7 +14,6 @@ from adapters.her_v2_provider import (
 )
 from adapters.openrouter_api import _APIResult
 from orchestrator.her_v2.cognitive_control import (
-    COGNITIVE_DECISION_TOOL,
     StageCognitiveController,
     canonical_tool_arguments,
     canonical_tool_result,
@@ -365,7 +364,8 @@ def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
     assert interrupt.cycle_period == 5
     assert interrupt.cycle_repetitions == 3
     assert interrupt.cycle_tools == _TOOLS
-    assert controller.awaiting_decision is True
+    assert controller.awaiting_decision is False
+    assert controller.interrupt_payload()["cognitive_state"]["tools_withheld"] is False
 
 
 def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
@@ -391,7 +391,7 @@ def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
     assert interrupt.cycle_period == 1
     assert interrupt.cycle_repetitions == 3
     assert interrupt.cycle_tools == ("file_read",)
-    assert controller.awaiting_decision is True
+    assert controller.awaiting_decision is False
 
 
 @pytest.mark.parametrize(
@@ -730,7 +730,50 @@ async def test_evidence_progress_resets_stall_before_later_stagnation():
 
 
 @pytest.mark.asyncio
-async def test_revised_direction_reopens_only_named_tools_and_repeat_escalates():
+async def test_repeated_reads_are_advisory_and_preserve_owner_tool_grant():
+    base = _Registry(("probe_a", "probe_b"))
+    registry = _CognitiveControlToolRegistry(base, _request(Stage.EXECUTION))
+    for index in range(3):
+        result = await registry.execute("probe_a", {"path": "same"}, f"read-{index}")
+
+    assert "HASHI_COGNITIVE_ADVISORY" in result.output
+    assert registry.controller.awaiting_decision is False
+    assert set(registry.allowed_tool_names()) == {"probe_a", "probe_b"}
+    later = await registry.execute("probe_b", {"path": "other"}, "next")
+    assert not later.is_error
+    assert [row[0] for row in base.calls] == ["probe_a", "probe_a", "probe_a", "probe_b"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["advisory", "enforce"])
+async def test_companion_observation_follows_selected_policy(mode):
+    class Services:
+        companion_mode = mode
+
+        def take_intervention(self):
+            return "Consider checking progress."
+
+        def tool_started(self, *args):
+            pass
+
+        def tool_completed(self, *args, **kwargs):
+            pass
+
+    base = _Registry(("probe_a",))
+    registry = _CognitiveControlToolRegistry(base, _request(Stage.EXECUTION), turn_services=Services())
+    result = await registry.execute("probe_a", {"path": "target"}, "call")
+    if mode == "advisory":
+        assert not result.is_error
+        assert [row[0] for row in base.calls] == ["probe_a"]
+        assert "HASHI_AGENT_COMPANION_ADVISORY" in result.output
+    else:
+        assert result.is_error
+        assert base.calls == []
+        assert "HASHI_AGENT_COMPANION_INTERVENTION" in result.output
+
+
+@pytest.mark.asyncio
+async def test_repeated_cycle_remains_advisory_and_keeps_all_granted_tools():
     base = _Registry()
     registry = _CognitiveControlToolRegistry(base, _request(Stage.PLANNING))
 
@@ -742,25 +785,10 @@ async def test_revised_direction_reopens_only_named_tools_and_repeat_escalates()
                 f"call-{cycle}-{index}",
             )
 
-    assert "HASHI_COGNITIVE_INTERRUPT" in result.output
-    assert _tool_names(registry.get_tool_definitions()) == [COGNITIVE_DECISION_TOOL]
-
-    decision = await registry.execute(
-        COGNITIVE_DECISION_TOOL,
-        {
-            "decision": "REVISE_DIRECTION",
-            "new_focus": "representation-agreement",
-            "revised_direction": "Inspect a different representation.",
-            "expected_change": "A representation-specific mismatch.",
-            "stop_condition": "Stop after one pass or the first mismatch.",
-            "requested_tools": list(_TOOLS),
-        },
-        "decision-1",
-    )
-
-    assert decision.is_error is False
+    assert "HASHI_COGNITIVE_ADVISORY" in result.output
     assert _tool_names(registry.get_tool_definitions()) == list(_TOOLS)
 
+    advisories = 0
     for cycle in range(3):
         for index, name in enumerate(_TOOLS):
             result = await registry.execute(
@@ -768,23 +796,11 @@ async def test_revised_direction_reopens_only_named_tools_and_repeat_escalates()
                 {"path": f"artifact-{index}"},
                 f"repeat-{cycle}-{index}",
             )
-
-    payload = registry.controller.interrupt_payload()
-    assert payload["interrupt"]["code"] == "NO_MEANINGFUL_PROGRESS"
-    assert payload["interrupt"]["repeated_after_intervention"] is True
-    decision_schema = registry.get_tool_definitions()[0]
-    assert decision_schema["function"]["parameters"]["properties"]["decision"][
-        "enum"
-    ] == ["FINALIZE", "BLOCKED"]
-
-    blocked = await registry.execute(
-        COGNITIVE_DECISION_TOOL,
-        {"decision": "BLOCKED", "summary": "No distinct evidence is available."},
-        "decision-2",
-    )
-    assert blocked.is_error is False
-    assert registry.get_tool_definitions() == []
-    assert registry.cognitive_final_response_required is True
+            advisories += "HASHI_COGNITIVE_ADVISORY" in result.output
+            assert not result.is_error
+    assert advisories == 0
+    assert _tool_names(registry.get_tool_definitions()) == list(_TOOLS)
+    assert registry.cognitive_final_response_required is False
 
 
 def test_v1_new_hypothesis_payload_is_normalised_as_inflight_alias():
@@ -798,6 +814,8 @@ def test_v1_new_hypothesis_payload_is_normalised_as_inflight_alias():
             is_error=False,
         )
     assert interrupt is not None
+    # In-flight legacy decisions may still arrive from an older stage.
+    controller._mode = "decision_required"
 
     decision, rejected = controller.decide(
         {
@@ -808,12 +826,14 @@ def test_v1_new_hypothesis_payload_is_normalised_as_inflight_alias():
             "stop_condition": "Stop after one alternate probe.",
             "requested_tools": ["probe_a"],
         },
-        available_tools=["probe_a"],
+        available_tools=["probe_a", "probe_b"],
     )
 
     assert rejected is False
     assert decision["decision"] == "REVISE_DIRECTION"
     assert decision["legacy_alias_used"] is True
+    assert controller.active_tool_allowlist is None
+    assert decision["tools_reopened"] == ["probe_a", "probe_b"]
 
 
 @pytest.mark.asyncio
@@ -832,60 +852,21 @@ async def test_delegated_registry_keeps_authority_narrow_at_cognitive_boundary()
             f"delegated-{cycle}",
         )
 
-    assert "HASHI_COGNITIVE_INTERRUPT" in result.output
-    assert _tool_names(registry.get_tool_definitions()) == [COGNITIVE_DECISION_TOOL]
+    assert "HASHI_COGNITIVE_ADVISORY" in result.output
+    assert _tool_names(registry.get_tool_definitions()) == ["probe_a"]
     assert [call[0] for call in base.calls] == ["probe_a"] * 3
 
-    rejected = await registry.execute(
-        COGNITIVE_DECISION_TOOL,
-        {
-            "decision": "REVISE_DIRECTION",
-            "new_focus": "alternate-probe",
-            "revised_direction": "Use the non-delegated probe.",
-            "expected_change": "A different probe result.",
-            "stop_condition": "One probe.",
-            "requested_tools": ["probe_b"],
-        },
-        "delegated-decision",
-    )
+    rejected = await registry.execute("probe_b", {}, "delegated-denial")
 
     assert rejected.is_error is True
-    assert json.loads(rejected.output)["unknown_tools"] == ["probe_b"]
-    assert _tool_names(registry.get_tool_definitions()) == [COGNITIVE_DECISION_TOOL]
+    assert _tool_names(registry.get_tool_definitions()) == ["probe_a"]
+    assert [call[0] for call in base.calls] == ["probe_a"] * 3
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("decision_payload", "expected_tools", "expected_decision"),
-    [
-        (
-            {
-                "decision": "REVISE_DIRECTION",
-                "new_focus": "alternate-source",
-                "revised_direction": "Inspect the alternate source.",
-                "expected_change": "A different value.",
-                "stop_condition": "One alternate inspection.",
-                "requested_tools": ["probe_a"],
-            },
-            ["probe_a"],
-            "REVISE_DIRECTION",
-        ),
-        (
-            {
-                "decision": "FINALIZE",
-                "summary": "The repeated probes already answer the question.",
-            },
-            [],
-            "FINALIZE",
-        ),
-    ],
-)
-async def test_hashi_gateway_tool_loop_enters_typed_decision_boundary(
+async def test_hashi_gateway_tool_loop_continues_after_repeat_advisory(
     monkeypatch,
     tmp_path,
-    decision_payload,
-    expected_tools,
-    expected_decision,
 ):
     config = SimpleNamespace(
         name="agent1",
@@ -912,7 +893,8 @@ async def test_hashi_gateway_tool_loop_enters_typed_decision_boundary(
         del headers, on_stream_event
         payloads.append(payload)
         call_number = len(payloads)
-        if call_number <= 3:
+        if call_number <= 4:
+            assert [item["function"]["name"] for item in payload.get("tools", [])] == ["probe_a"]
             return _APIResult(
                 text="",
                 tool_calls=[
@@ -924,29 +906,9 @@ async def test_hashi_gateway_tool_loop_enters_typed_decision_boundary(
                 ],
                 finish_reason="tool_calls",
             )
-        if call_number == 4:
-            assert [item["function"]["name"] for item in payload.get("tools", [])] == [
-                COGNITIVE_DECISION_TOOL
-            ]
-            return _APIResult(
-                text="",
-                tool_calls=[
-                    {
-                        "id": "decision-1",
-                        "type": "function",
-                        "function": {
-                            "name": COGNITIVE_DECISION_TOOL,
-                            "arguments": json.dumps(decision_payload),
-                        },
-                    }
-                ],
-                finish_reason="tool_calls",
-            )
-        assert [
-            item["function"]["name"] for item in payload.get("tools", [])
-        ] == expected_tools
+        assert [item["function"]["name"] for item in payload.get("tools", [])] == ["probe_a"]
         return _APIResult(
-            text="completed after a distinct cognitive decision",
+            text="completed after further inspection",
             tool_calls=None,
             finish_reason="stop",
         )
@@ -956,14 +918,14 @@ async def test_hashi_gateway_tool_loop_enters_typed_decision_boundary(
     response = await adapter.generate_response("finish safely", "request-1")
 
     assert response.is_success is True
-    assert response.text == "completed after a distinct cognitive decision"
+    assert response.text == "completed after further inspection"
     assert len(payloads) == 5
     registry.note_provider_completion()
     state = registry.controller.snapshot()
-    assert state["last_decision"] == expected_decision
+    assert state["last_decision"] is None
     assert state["mode"] == "completed"
     assert any(
-        "HASHI_COGNITIVE_INTERRUPT" in str(message.get("content") or "")
+        "HASHI_COGNITIVE_ADVISORY" in str(message.get("content") or "")
         for message in payloads[3]["messages"]
     )
 
@@ -1006,9 +968,7 @@ async def test_stage_provider_installs_control_and_exports_typed_state():
                         {"path": f"artifact-{index}"},
                         f"provider-{cycle}-{index}",
                     )
-            assert _tool_names(self.tool_registry.get_tool_definitions()) == [
-                COGNITIVE_DECISION_TOOL
-            ]
+            assert _tool_names(self.tool_registry.get_tool_definitions()) == list(_TOOLS)
             return BackendResponse(
                 text=json.dumps(
                     {
@@ -1051,7 +1011,7 @@ async def test_stage_provider_installs_control_and_exports_typed_state():
     assert response.data["disposition"] == "COMPLETED"
     assert response.cognitive_control["mode"] == "completed"
     assert response.cognitive_control["interrupt_count"] == 1
-    assert response.cognitive_control["last_decision"] == "IMPLICIT_FINALIZE"
+    assert response.cognitive_control["last_decision"] is None
     assert "HASHI tool-boundary cognitive control" in manager.backend.sys_prompt
     assert "HASHI persistent TaskState" in manager.backend.sys_prompt
     assert (

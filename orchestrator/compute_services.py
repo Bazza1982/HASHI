@@ -13,7 +13,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field, replace
-from ipaddress import ip_address, ip_network
+from ipaddress import ip_address
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -27,6 +27,9 @@ from orchestrator.config_json import (
     new_config_json,
     read_config_json,
     write_config_json,
+)
+from orchestrator.lan_transport import (
+    LanDestinationError, configured_media_session, lan_host_is_admissible,
 )
 
 
@@ -49,9 +52,6 @@ _FORMAT = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,31}$")
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,31})\}")
 _CREDENTIAL_REF = re.compile(
     r"(?:env://[A-Z][A-Z0-9_]{0,100}|secrets://[A-Za-z0-9][A-Za-z0-9_-]{0,100})"
-)
-_PRIVATE_LAN_NETWORKS = tuple(
-    ip_network(cidr) for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _AVAILABLE_STATUSES = frozenset({"ready", "healthy"})
@@ -87,16 +87,6 @@ def _plain_text(value: Any, *, maximum: int, code: str) -> str:
     if not text or len(text) > maximum or any(ord(char) < 32 for char in text):
         raise ComputeServiceError(code)
     return text
-
-
-def _private_lan_literal(host: str) -> bool:
-    try:
-        address = ip_address(host)
-    except ValueError:
-        return False
-    return address.version == 4 and any(
-        address in network for network in _PRIVATE_LAN_NETWORKS
-    )
 
 
 def _validate_path(
@@ -214,7 +204,9 @@ def validate_compute_node(value: Any) -> ComputeNode:
     if location == "local":
         valid_location = hostname in _LOOPBACK_HOSTS
     elif location == "lan":
-        valid_location = _private_lan_literal(hostname)
+        valid_location = (
+            hostname.rstrip(".") not in _LOOPBACK_HOSTS and lan_host_is_admissible(hostname)
+        )
     else:
         valid_location = parsed.scheme == "https"
         if valid_location:
@@ -1634,9 +1626,9 @@ class ComputeServiceClient:
     async def _get_json(self, node: ComputeNode, path: str) -> Mapping[str, Any]:
         headers = self._headers(node)
         try:
-            async with self.session_factory(
+            async with configured_media_session(
+                self.session_factory, {"location": node.location, "base_url": node.base_url},
                 timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
-                trust_env=False,
             ) as session:
                 async with session.get(
                     node.url(path),
@@ -1675,6 +1667,7 @@ class ComputeServiceClient:
             raise
         except (
             aiohttp.ClientError,
+            LanDestinationError,
             OSError,
             TimeoutError,
         ) as exc:
@@ -1711,9 +1704,9 @@ class ComputeServiceClient:
         if form_data is None:
             headers["Content-Type"] = "application/json"
         try:
-            async with self.session_factory(
+            async with configured_media_session(
+                self.session_factory, {"location": node.location, "base_url": node.base_url},
                 timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
-                trust_env=False,
             ) as session:
                 async with session.post(
                     resolved.interface_url(protocol),
@@ -1753,7 +1746,7 @@ class ComputeServiceClient:
             raise
         except ComputeServiceError:
             raise
-        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+        except (aiohttp.ClientError, LanDestinationError, OSError, TimeoutError) as exc:
             raise ComputeServiceError("compute_node_unreachable") from exc
 
     async def transcribe(
@@ -1763,9 +1756,12 @@ class ComputeServiceClient:
         *,
         filename: str = "utterance.wav",
         language: str | None = None,
+        max_input_bytes: int = 8 * 1024 * 1024,
     ) -> Mapping[str, Any]:
         """Submit one bounded audio upload to the discovered STT interface."""
-        if not isinstance(audio, bytes) or not 1 <= len(audio) <= 8 * 1024 * 1024:
+        if type(max_input_bytes) is not int or max_input_bytes < 1:
+            raise ComputeServiceError("compute_audio_input_invalid")
+        if not isinstance(audio, bytes) or not 1 <= len(audio) <= max_input_bytes:
             raise ComputeServiceError("compute_audio_input_invalid")
         if not isinstance(filename, str) or re.fullmatch(
             r"utterance\.(?:wav|ogg|mp3|m4a|webm|flac|mp4|aac)", filename
@@ -1812,9 +1808,9 @@ class ComputeServiceClient:
             "Content-Type": "application/json",
         }
         try:
-            async with self.session_factory(
+            async with configured_media_session(
+                self.session_factory, {"location": node.location, "base_url": node.base_url},
                 timeout=aiohttp.ClientTimeout(total=node.timeout_seconds),
-                trust_env=False,
             ) as session:
                 async with session.post(
                     resolved.interface_url(protocol),
@@ -1851,7 +1847,7 @@ class ComputeServiceClient:
             raise
         except ComputeServiceError:
             raise
-        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+        except (aiohttp.ClientError, LanDestinationError, OSError, TimeoutError) as exc:
             raise ComputeServiceError("compute_node_unreachable") from exc
 
     async def probe_health(

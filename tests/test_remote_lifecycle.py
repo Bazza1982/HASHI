@@ -1075,4 +1075,68 @@ async def test_startup_manager_uses_portable_remote_root(monkeypatch, tmp_path):
     await manager._ensure_remote_lifecycle()
 
     assert calls == [(str(portable_root), tmp_path / "code")]
+
+@pytest.mark.asyncio
+async def test_remote_acl_reconciliation_occurs_only_in_optional_lifecycle(monkeypatch, tmp_path):
+    from orchestrator import workbench_auth
+
+    calls = []
+    secret = tmp_path / "secrets.json"
+    secret.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workbench_auth, "ensure_remote_runtime_access",
+                        lambda path, root: calls.append(("acl", path, root)), raising=False)
+
+    async def ensure(root):
+        calls.append(("start", root))
+        return {"ok": True, "action": "already_running", "settings": SimpleNamespace(port=8766)}
+
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", ensure)
+    kernel = SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path,
+                             bridge_home=tmp_path, secrets_path=secret,
+                             deployment_profile="personal"),
+                             startup_status={"services_ready": True})
+    await StartupManager(kernel, console_handler=None)._ensure_remote_lifecycle()
+    assert calls == [("acl", secret, tmp_path), ("start", tmp_path)]
+    assert kernel.startup_status["services_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_remote_acl_failure_does_not_mark_local_services_unready(monkeypatch, tmp_path):
+    from orchestrator import workbench_auth
+
+    def unavailable(_path, _root):
+        raise RuntimeError("synthetic Remote identity failure")
+    monkeypatch.setattr(workbench_auth, "ensure_remote_runtime_access", unavailable, raising=False)
+    start = AsyncMock()
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", start)
+    kernel = SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path,
+                             bridge_home=tmp_path, secrets_path=tmp_path / "secrets.json",
+                             deployment_profile="personal"),
+                             startup_status={"services_ready": True})
+    await StartupManager(kernel, console_handler=None)._ensure_remote_lifecycle()
+    assert kernel.startup_status["services_ready"] is True
+    assert kernel.startup_status["degraded"] is True
+    assert any(issue.get("component") == "remote" for issue in kernel.startup_status["issues"])
+    start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_repair_acl_for_manually_disabled_remote(monkeypatch, tmp_path):
+    from orchestrator import workbench_auth
+
+    remote_lifecycle.write_disabled_state(tmp_path)
+    monkeypatch.setattr(workbench_auth, "ensure_remote_runtime_access",
+                        lambda *_args: pytest.fail("disabled Remote resolved a consumer"))
+    async def ensure(root):
+        assert root == tmp_path
+        return {"ok": True, "action": "skipped"}
+    monkeypatch.setattr(remote_lifecycle, "ensure_remote_started", ensure)
+    kernel = SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path,
+                             bridge_home=tmp_path, secrets_path=tmp_path / "secrets.json",
+                             deployment_profile="personal"),
+                             startup_status={"services_ready": True})
+    await StartupManager(kernel, console_handler=None)._ensure_remote_lifecycle()
+    assert kernel.startup_status["services_ready"] is True
+    assert kernel.remote_lifecycle_status["action"] == "skipped"
+
 # HASHI-Fingerprint: hfp_860039726b17432386100672ecb74352

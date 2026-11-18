@@ -139,6 +139,9 @@ def deliver_hchat_draft(
     sender: SendHChatCallable | None = None,
     attachments: list[Path] | None = None,
     attempt_id: str | None = None,
+    message_id: str | None = None,
+    originated_at: str | None = None,
+    _group_origin=None,
 ) -> HChatDeliveryResult:
     sender_fn = sender or _load_send_hchat()
     clean_from = (from_agent or "").strip()
@@ -154,6 +157,12 @@ def deliver_hchat_draft(
     sender_kwargs = {}
     if attachments:
         sender_kwargs["attachments"] = [Path(path) for path in attachments]
+    if message_id:
+        sender_kwargs["message_id"] = message_id
+    if originated_at:
+        sender_kwargs["originated_at"] = originated_at
+    if _group_origin is not None:
+        sender_kwargs["_group_origin"] = _group_origin
     submission = capture_hchat_submission(sender_fn, target, clean_from, message, **sender_kwargs)
     success = submission.handled
     error = submission.failure.render() if submission.failure else None
@@ -207,12 +216,27 @@ def hchat_delivery_receipt_text(
         title = ui_language.tr(
             "hchat.delivery.failed", locale=locale, target=result.target
         )
-    parts = [
-        title,
+    parts = [title]
+    if result.delivery_status == "group_result":
+        display_states = {
+            "queued", "sent", "awaiting_confirmation", "confirmed", "discarded",
+            "expired", "superseded", "unconfirmed", "failed",
+        }
+        for recipient in result.recipient_results:
+            if not recipient.recipient:
+                continue
+            state = recipient.status if recipient.status in display_states else (
+                "unconfirmed" if recipient.accepted is None
+                else "queued" if recipient.handled else "failed"
+            )
+            parts.append(ui_language.tr(
+                "hchat.delivery." + state, locale=locale, target=recipient.recipient,
+            ))
+    parts.extend([
         "",
         ui_language.tr("hchat.delivery.message", locale=locale),
         result.message,
-    ]
+    ])
     if not result.success or result.failure:
         parts.extend(
             [
@@ -251,6 +275,14 @@ def hchat_delivery_log_fields(result: HChatDeliveryResult) -> dict[str, object]:
         "hchat_delivery_latency_ms": result.latency_ms,
         "hchat_retry_count": result.retry_count,
         "hchat_accepted": result.accepted,
+        **({"hchat_recipients": [
+            {
+                "recipient": item.recipient, "message_id": item.message_id,
+                "status": item.status, "accepted": item.accepted,
+                **({"failure": item.failure.diagnostic()} if item.failure else {}),
+            }
+            for item in result.recipient_results
+        ]} if result.recipient_results else {}),
         **({"hchat_failure": result.failure.diagnostic()} if result.failure else {}),
     }
 

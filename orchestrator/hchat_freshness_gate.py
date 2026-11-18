@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from orchestrator.message_freshness import (
     classify_freshness,
+    normalize_session_message_age_policy,
     parse_rfc3339_utc,
 )
 from orchestrator.ingress_confirmation import (
@@ -23,6 +24,10 @@ from orchestrator.ingress_confirmation import (
 )
 
 logger = logging.getLogger("HASHI.HChatFreshnessGate")
+
+
+class HChatMessageExpired(ValueError):
+    """An operator-selected HChat age policy rejected this message."""
 
 _HCHAT_OUTER_ENVELOPE = re.compile(
     r"^\[hchat from [^\]]+\]\s*(?P<body>.*)$", re.IGNORECASE | re.DOTALL
@@ -177,6 +182,7 @@ def check_hchat_freshness_and_register(
     canonical_text: str | None = None,
     attachment_binding: Any = None,
     clock: Callable[[], float | datetime] | None = None,
+    age_policy: Mapping[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     """Check freshness of an incoming HChat message.
 
@@ -184,6 +190,30 @@ def check_hchat_freshness_and_register(
         (True, None) if the message is fresh.
         (False, confirmation_record) if the message is stale/missing and registered.
     """
+    # Until original-owner/session reply routing is migrated, retain the old
+    # confirmation behavior for replies; ordinary requests default to observe.
+    selected_policy = normalize_session_message_age_policy(
+        {"mode": "confirm"} if age_policy is None and is_reply else age_policy
+    )
+    stable_idempotency_key = str(idempotency_key or f"hchat:{message_id}")
+    source_message_id = f"{from_instance}:{from_agent}:{message_id}"
+    message_kind = "hchat_reply" if is_reply else "hchat_request"
+    payload_digest = hchat_payload_digest(
+        message_id=message_id, originated_at=originated_at, from_agent=from_agent,
+        from_instance=from_instance, to_agent=to_agent, is_reply=is_reply,
+        text=canonical_text if canonical_text is not None else text,
+        attachment_binding=attachment_binding,
+    )
+    existing = IngressConfirmationService(store, clock=clock).find_hchat_by_identity(
+        agent_id=to_agent, owner_id=owner_id, source_message_id=source_message_id,
+        idempotency_key=stable_idempotency_key, payload_digest=payload_digest,
+        message_kind=message_kind,
+    )
+    if existing is not None:
+        return False, existing
+    if selected_policy["mode"] == "observe":
+        return True, None
+
     now_dt = received_at or datetime.now(timezone.utc)
     freshness = classify_freshness(
         entrypoint="hchat",
@@ -191,10 +221,13 @@ def check_hchat_freshness_and_register(
         is_remote=is_remote,
         received_at=now_dt,
         clock=clock,
+        threshold_seconds=selected_policy["max_age_seconds"],
     )
 
     if freshness.is_fresh:
         return True, None
+    if selected_policy["mode"] == "expire":
+        raise HChatMessageExpired(f"HChat message age policy rejected: {freshness.reason}")
 
     # Stale or invalid -> Register confirmation
     delay_str = format_delay_display(freshness.delay_seconds)
@@ -204,7 +237,6 @@ def check_hchat_freshness_and_register(
 
     preview = (text or "")[:120].strip()
     action_label = "仍然显示" if is_reply else "仍然执行"
-    message_kind = "hchat_reply" if is_reply else "hchat_request"
 
     if is_reply:
         card_text = (
@@ -234,12 +266,10 @@ def check_hchat_freshness_and_register(
     session_id = session["session_id"]
     context_gen = session.get("context_generation", 1)
 
-    stable_idempotency_key = str(idempotency_key or f"hchat:{message_id}")
     # Every HChat transport belongs to one logical connector family.  A retry
     # that falls back from protocol to Workbench/Remote/Exchange must resolve
     # to the same immutable confirmation rather than create a second card and
     # a second executable decision.
-    source_message_id = f"{from_instance}:{from_agent}:{message_id}"
 
     saved_payload = dict(payload_to_execute or {})
     saved_payload.update({
@@ -257,16 +287,6 @@ def check_hchat_freshness_and_register(
         "idempotency_key": stable_idempotency_key,
     })
 
-    payload_digest = hchat_payload_digest(
-        message_id=message_id,
-        originated_at=freshness.originated_at_iso or originated_at,
-        from_agent=from_agent,
-        from_instance=from_instance,
-        to_agent=to_agent,
-        is_reply=is_reply,
-        text=canonical_text if canonical_text is not None else text,
-        attachment_binding=attachment_binding,
-    )
     saved_payload["payload_digest"] = payload_digest
 
     display_metadata = {

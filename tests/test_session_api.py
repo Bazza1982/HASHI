@@ -61,7 +61,7 @@ class _MultipartPart:
     async def text(self):
         return self._value
 
-    async def read_chunk(self):
+    async def read_chunk(self, size=1024 * 1024):
         if self._read:
             return b""
         self._read = True
@@ -163,7 +163,14 @@ class _Runtime:
             display_text=request_metadata.get("session_message_display_text"),
             content=request_metadata.get("session_message_content"),
             response_preferences=request_metadata.get("response_preferences"),
+            agent_workspace=getattr(self, "workspace_dir", None),
         )
+        if getattr(self, "workspace_dir", None) is not None and self.last_request_content:
+            self.last_request_content = self.server.session_store.rebind_request_content_attachments(
+                session_id=accepted.session_id,
+                owner_id=request_metadata["owner_id"],
+                request_content=self.last_request_content,
+            )
         return accepted.request_id
 
     async def enqueue_api_text(
@@ -244,6 +251,18 @@ def _server(
     )
     runtime.server = server
     return server, runtime
+
+
+def _command_server(tmp_path):
+    server, runtime = _server(tmp_path)
+    server.admin_token = "session-command-test-token"
+    return server, runtime
+
+
+def _command_request(*args, **kwargs):
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers["X-Workbench-Token"] = "session-command-test-token"
+    return _Request(*args, headers=headers, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -483,13 +502,14 @@ def test_live_phone_resolver_uses_authoritative_pcm_and_same_session_history(tmp
 
 
 @pytest.mark.asyncio
-async def test_session_workzone_reference_stages_committed_managed_bytes(tmp_path):
+@pytest.mark.parametrize("absolute,large", [(False, False), (True, False), (True, True)])
+async def test_session_workzone_reference_stages_committed_managed_bytes(tmp_path, monkeypatch, absolute, large):
     from orchestrator.frontend_delivery import tui_run_delivery_policy
 
     server, runtime = _server(tmp_path)
     zone = tmp_path / "zone"
     zone.mkdir()
-    content = b"inside the workzone"
+    content = b"x" * (26 * 1024 * 1024) if large else b"inside the workzone"
     (zone / "report.txt").write_bytes(content)
     runtime._workzone_state = {
         "revision": 1,
@@ -502,9 +522,17 @@ async def test_session_workzone_reference_stages_committed_managed_bytes(tmp_pat
     session = server.session_store.resolve_primary_session(
         owner_id=owner, agent_id="lily", establish=True
     )
+    monkeypatch.setattr(
+        server.session_store, "upload_attachment_bytes",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("ordinary file must stream")),
+    )
+    monkeypatch.setattr(
+        server, "_resolve_workzone_attachment",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("canonical staging must not buffer")),
+    )
     response = await server.handle_v1_workzone_attachment_stage(
         _Request(
-            {"reference": "report.txt"},
+            {"reference": str(zone / "report.txt") if absolute else "report.txt"},
             match_info={"session_id": session["session_id"]},
         )
     )
@@ -580,7 +608,7 @@ async def test_session_workzone_reference_requires_session_owner_before_file_rea
     server, _runtime = _server(tmp_path)
     monkeypatch.setattr(server, "_v1_owner_id", lambda request: None)
     monkeypatch.setattr(
-        server, "_resolve_workzone_attachment",
+        server, "_open_workzone_attachment",
         lambda *_args: (_ for _ in ()).throw(
             AssertionError("unowned Workzone must not be read")
         ),
@@ -696,12 +724,14 @@ async def test_unqualified_session_api_is_not_advertised(tmp_path):
     assert capabilities["private_authorization"]["raw_secret_on_wire"] is False
     assert unavailable.status == 503
     assert json.loads(unavailable.text)["code"] == "session_api_not_ready"
+    assert "disabled in the instance settings" in json.loads(unavailable.text)["error"]
 
 
 @pytest.mark.asyncio
 async def test_personal_instance_enables_standard_frontend_attachments_by_default(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
+    monkeypatch.setenv("HASHI_ATTACHMENT_STORAGE_WAIT_MS", "2400")
     config_path = tmp_path / "agents.json"
     secrets_path = tmp_path / "secrets.json"
     config_path.write_text(
@@ -724,9 +754,12 @@ async def test_personal_instance_enables_standard_frontend_attachments_by_defaul
 
     assert global_config.persistent_session_v1 is True
     assert capabilities["session_api_version"] == "1.0"
+    assert capabilities["agent_history_search"]["max_query_characters"] == 16384
+    assert capabilities["agent_history_search"]["max_request_bytes"] >= 16384 * 12
     assert capabilities["frontend_connector"]["multi_attachment"] is True
     assert capabilities["frontend_connector"]["atomic_run_admission"] is True
     assert capabilities["frontend_connector"]["attachment_stage_idempotency"] is True
+    assert capabilities["frontend_connector"]["attachment_storage_wait_ms"] == 2400
     assert capabilities["frontend_connector"]["feed"] == {
         "version": "2.0",
         "transport": "cursor-polling",
@@ -955,6 +988,69 @@ async def test_frontend_connector_admits_ordered_multi_attachment_as_one_run(
 
 
 @pytest.mark.asyncio
+async def test_long_canvas_attachment_is_readable_in_full_from_target_workspace(tmp_path):
+    from tools.builtins import BuiltinExecutionResult, execute_file_read
+
+    server, runtime = _server(tmp_path)
+    runtime.workspace_dir = tmp_path / "target-workspace"
+    runtime.workspace_dir.mkdir()
+    created = json.loads((await server.handle_v1_sessions_create(
+        _Request({"agent_id": "lily", "title": "Long Canvas"})
+    )).text)
+    session_id = created["session"]["session_id"]
+    text = "Canvas full selection: " + ("选🎨 and literal paths /tmp/example\n" * 9000) + "END"
+    payload = text.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    stage = await server.handle_v1_attachment_stage(_Request({
+        "filename": "canvas-context.txt", "media_type": "text/plain",
+        "size_bytes": len(payload), "sha256": digest, "idempotency_key": "canvas-stage-one",
+    }, match_info={"session_id": session_id}))
+    assert stage.status == 201
+    attachment_id = json.loads(stage.text)["attachment"]["attachment_id"]
+    match = {"session_id": session_id, "attachment_id": attachment_id}
+    upload = await server.handle_v1_attachment_upload(_Request(
+        match_info=match, headers={"Content-Type": "text/plain"}, body=payload))
+    assert upload.status == 200
+    assert (await server.handle_v1_attachment_commit(_Request(match_info=match))).status == 200
+    result = await server.handle_v1_session_runs_create(_Request({
+        "idempotency_key": "canvas-run-one", "surface": "workbench",
+        "message": {"content": [
+            {"type": "text", "text": "Read the full Canvas attachment."},
+            {"type": "attachment", "attachment_id": attachment_id},
+        ]},
+    }, match_info={"session_id": session_id}))
+    assert result.status == 202, result.text
+    assert runtime.enqueue_request_calls == 1
+    part = next(item for item in runtime.last_request_content["parts"]
+                if item.get("attachment_id") == attachment_id)
+    attachment = Path(part["local_ref"])
+    assert attachment.parents[2].name == ".attachments"
+    workspace = attachment.parents[3]
+    assert workspace.is_relative_to(tmp_path)
+    assert hashlib.sha256(attachment.read_bytes()).hexdigest() == digest
+
+    chunks = []
+    cursor = None
+    while True:
+        args = {"path": str(attachment)}
+        if cursor:
+            args["cursor"] = cursor
+        page = await execute_file_read(args, workspace, workspace)
+        assert isinstance(page, BuiltinExecutionResult)
+        content = page.output.partition("\n")[2]
+        cursor = page.details["file_read_continuation"]
+        if cursor:
+            marker = f"\n[truncated by HASHI; next_cursor={cursor}]"
+            assert content.endswith(marker)
+            content = content[:-len(marker)]
+        chunks.append(content)
+        if not cursor:
+            break
+    assert len(chunks) > 1
+    assert "".join(chunks) == text
+
+
+@pytest.mark.asyncio
 async def test_frontend_connector_rejects_multi_attachment_atomically(tmp_path):
     server, runtime = _server(tmp_path)
     created = json.loads(
@@ -1024,7 +1120,7 @@ async def test_session_api_command_invocation_dispatches_with_bound_session_meta
 ):
     from orchestrator import command_interaction_bridge, slash_command_audit
 
-    server, _runtime = _server(tmp_path)
+    server, _runtime = _command_server(tmp_path)
     session = server.session_store.resolve_primary_session(
         owner_id="user:7", agent_id="lily", establish=True
     )
@@ -1065,7 +1161,7 @@ async def test_session_api_command_invocation_dispatches_with_bound_session_meta
         "context_generation": session["context_generation"],
     }
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             request_payload,
             match_info={"session_id": session["session_id"]},
         )
@@ -1078,6 +1174,8 @@ async def test_session_api_command_invocation_dispatches_with_bound_session_meta
     assert seen["payload"]["op"] == "open"
     assert seen["payload"]["command"] == "/model balanced"
     assert seen["metadata"]["connector_id"] == "session_api"
+    assert seen["metadata"]["actor_id"] == "user:7"
+    assert seen["metadata"]["_hashi_owner_id"] == "user:7"
     assert seen["metadata"]["session_surface"] == "session-api"
     assert seen["metadata"]["ingress_transport"] == "session-api-command"
     assert seen["metadata"]["source_channel"] == "session_api_command"
@@ -1104,7 +1202,7 @@ async def test_session_api_command_invocation_dispatches_with_bound_session_meta
         server.session_store.db_path, instance_id="HASHI1"
     )
     replay = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             request_payload,
             match_info={"session_id": session["session_id"]},
         )
@@ -1117,13 +1215,51 @@ async def test_session_api_command_invocation_dispatches_with_bound_session_meta
 
 
 @pytest.mark.asyncio
+async def test_session_command_uses_authenticated_owner_without_telegram(tmp_path, monkeypatch):
+    from orchestrator import command_interaction_bridge, slash_command_audit
+
+    server, _runtime = _command_server(tmp_path)
+    server.global_config.authorized_id = 0
+    server.global_config.owner_scope_id = "local:alice"
+    session = server.session_store.resolve_primary_session(
+        owner_id="local:alice", agent_id="lily", establish=True
+    )
+    seen = {}
+    monkeypatch.setattr(slash_command_audit, "is_supported_slash_command", lambda *_: True)
+
+    async def dispatch(_runtime, _payload, metadata):
+        seen.update(metadata)
+        return {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr(command_interaction_bridge, "dispatch_command_interaction", dispatch)
+    request = {
+        "command": "model", "arguments": [], "client_id": "session-client-123456",
+        "request_id": "request-without-telegram-123456",
+        "context_generation": session["context_generation"],
+    }
+    response = await server.handle_v1_session_command_invocation(
+        _command_request(request, match_info={"session_id": session["session_id"]})
+    )
+    assert response.status == 200, response.text
+    assert seen["actor_id"] == "local:alice"
+    assert seen["_hashi_owner_id"] == "local:alice"
+
+    foreign_session = server.session_store.create_session(owner_id="local:bob", agent_id="lily")
+    rejected = await server.handle_v1_session_command_invocation(
+        _command_request({**request, "request_id": "foreign-request-123456"},
+                 match_info={"session_id": foreign_session["session_id"]})
+    )
+    assert rejected.status in {403, 404}
+
+
+@pytest.mark.asyncio
 async def test_session_api_sys_accepts_shared_limit_and_preserves_exact_prompt(
     tmp_path, monkeypatch
 ):
     from orchestrator import command_interaction_bridge, slash_command_audit
     from orchestrator.sys_command_contract import MAX_SYS_PROMPT_CHARS
 
-    server, _runtime = _server(tmp_path)
+    server, _runtime = _command_server(tmp_path)
     session = server.session_store.resolve_primary_session(
         owner_id="user:7", agent_id="lily", establish=True
     )
@@ -1151,7 +1287,7 @@ async def test_session_api_sys_accepts_shared_limit_and_preserves_exact_prompt(
     )
     arguments = ["3", "save", prompt]
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             {
                 "command": "sys",
                 "arguments": arguments,
@@ -1183,9 +1319,9 @@ async def test_session_api_sys_accepts_shared_limit_and_preserves_exact_prompt(
 async def test_session_api_non_sys_commands_keep_existing_argument_limits(
     tmp_path, arguments
 ):
-    server, _runtime = _server(tmp_path)
+    server, _runtime = _command_server(tmp_path)
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             {
                 "command": "model",
                 "arguments": arguments,
@@ -1207,9 +1343,9 @@ async def test_session_api_non_sys_commands_keep_existing_argument_limits(
 async def test_session_api_sys_oversize_uses_shared_typed_error(tmp_path):
     from orchestrator.sys_command_contract import MAX_SYS_PROMPT_CHARS
 
-    server, _runtime = _server(tmp_path)
+    server, _runtime = _command_server(tmp_path)
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             {
                 "command": "sys",
                 "arguments": ["3", "save", "🙂" * (MAX_SYS_PROMPT_CHARS + 1)],
@@ -1239,7 +1375,7 @@ async def test_signed_tui_sys_command_relay_preserves_text_and_connector_identit
         json.dumps({"hashi_remote_shared_token": "test-network-secret"}),
         encoding="utf-8",
     )
-    server, _runtime = _server(tmp_path)
+    server, _runtime = _command_server(tmp_path)
     session = server.session_store.resolve_primary_session(
         owner_id="user:7", agent_id="lily", establish=True
     )
@@ -1279,7 +1415,7 @@ async def test_signed_tui_sys_command_relay_preserves_text_and_connector_identit
     )
 
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             {
                 "command": "sys",
                 "arguments": arguments,
@@ -1312,7 +1448,7 @@ async def test_tui_command_invocation_rejects_stale_session_generation(
 ):
     from orchestrator import command_interaction_bridge, slash_command_audit
 
-    server, _runtime = _server(tmp_path)
+    server, _runtime = _command_server(tmp_path)
     session = server.session_store.resolve_primary_session(
         owner_id="user:7", agent_id="lily", establish=True
     )
@@ -1325,7 +1461,7 @@ async def test_tui_command_invocation_rejects_stale_session_generation(
         lambda *_args: pytest.fail("stale command must not dispatch"),
     )
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             {
                 "command": "model",
                 "arguments": [],
@@ -1342,13 +1478,17 @@ async def test_tui_command_invocation_rejects_stale_session_generation(
 
 
 @pytest.mark.asyncio
-async def test_tui_command_invocation_rejects_untrusted_request_metadata(tmp_path):
-    server, _runtime = _server(tmp_path)
+@pytest.mark.parametrize("untrusted", [
+    {"message_source": "telegram"},
+    {"_hashi_owner_id": "user:other", "owner_id": "user:other"},
+])
+async def test_tui_command_invocation_rejects_untrusted_request_metadata(tmp_path, untrusted):
+    server, _runtime = _command_server(tmp_path)
     session = server.session_store.resolve_primary_session(
         owner_id="user:7", agent_id="lily", establish=True
     )
     response = await server.handle_v1_session_command_invocation(
-        _Request(
+        _command_request(
             {
                 "command": "model",
                 "arguments": [],
@@ -1356,7 +1496,7 @@ async def test_tui_command_invocation_rejects_untrusted_request_metadata(tmp_pat
                 "request_id": "command-request-123456",
                 "ui_locale": "en",
                 "context_generation": session["context_generation"],
-                "request_metadata": {"message_source": "telegram"},
+                "request_metadata": untrusted,
             },
             match_info={"session_id": session["session_id"]},
         )
@@ -1581,6 +1721,30 @@ async def test_tui_and_workbench_legacy_chat_share_default_conversation_binding(
             "session_channel_key": "default",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_chat_metadata_cannot_choose_command_owner(tmp_path, monkeypatch):
+    from orchestrator import workbench_api
+
+    server, _runtime = _command_server(tmp_path)
+    observed = []
+
+    async def dispatch(_runtime, _text, *, source_channel, session_metadata):
+        observed.append((source_channel, session_metadata))
+        return {"ok": True}
+
+    monkeypatch.setattr(workbench_api, "try_execute_slash_command_text", dispatch)
+    request = _command_request({
+        "agent": "lily", "text": "/model", "source": "workbench_ui_chat",
+        "request_metadata": {"owner_id": "user:other", "_hashi_owner_id": "user:other"},
+    })
+    request.content_type = "application/json"
+
+    response = await server.handle_chat(request)
+    assert response.status == 200
+    assert observed[0][1]["owner_id"] == "user:7"
+    assert observed[0][1]["_hashi_owner_id"] == "user:7"
 
 
 @pytest.mark.asyncio
@@ -3203,3 +3367,557 @@ async def test_session_patch_archives_and_restores_without_deleting_records(tmp_
         for message in server.session_store.messages(session["session_id"], owner_id=owner)
     ] == ["Persistent message"]
 # HASHI-Fingerprint: hfp_e8fcaf14d72b4d6bba89c5a6777a3203
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multipart,audio", [(False, False), (True, False), (False, True)])
+async def test_real_http_large_attachment_stream_respects_selected_capacity(tmp_path, monkeypatch, multipart, audio):
+    import aiohttp
+    import io
+    import struct
+    from aiohttp import web
+    from orchestrator import audio_assets, session_store, workbench_api
+
+    maximum = 70 * 1024 * 1024
+    monkeypatch.setattr(session_store, "MAX_SESSION_ATTACHMENT_BYTES", maximum)
+    monkeypatch.setattr(session_store, "MAX_SESSION_ATTACHMENT_TOTAL_BYTES", maximum)
+    monkeypatch.setattr(workbench_api, "MAX_SESSION_ATTACHMENT_BYTES", maximum)
+    monkeypatch.setattr(audio_assets, "MAX_AUDIO_ASSET_BYTES", maximum)
+    server, _runtime = _server(tmp_path)
+    owner = server._v1_owner_id(_Request())
+    monkeypatch.setattr(server, "_v1_owner_id", lambda request: owner)
+    session = server.session_store.resolve_primary_session(owner_id=owner, agent_id="lily", establish=True)
+    size = 65 * 1024 * 1024
+    if audio:
+        header = (b"RIFF" + struct.pack("<I", 36 + size) + b"WAVEfmt " +
+                  struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16) +
+                  b"data" + struct.pack("<I", size))
+        data, filename, media_type = header + bytes(size), "large.wav", "audio/wav"
+    else:
+        data, filename, media_type = b"x" * size, "large.txt", "text/plain"
+    staged = server.session_store.stage_attachment(
+        session_id=session["session_id"], owner_id=owner, filename=filename,
+        media_type=media_type, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(),
+    )
+    app = web.Application(client_max_size=64 * 1024 * 1024)
+    app.router.add_put("/sessions/{session_id}/attachments/{attachment_id}/content", server.handle_v1_attachment_upload)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    url = "http://127.0.0.1:{}/sessions/{}/attachments/{}/content".format(
+        port, session["session_id"], staged["attachment_id"],
+    )
+    if multipart:
+        body = aiohttp.FormData()
+        body.add_field("file", io.BytesIO(data), filename="large.txt", content_type="text/plain")
+    else:
+        body = data
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as client:
+            async with client.put(url, data=body) as response:
+                result = await response.json()
+                assert response.status == 200, result
+        server.session_store.commit_attachment(
+            session_id=session["session_id"], owner_id=owner, attachment_id=staged["attachment_id"],
+        )
+        row = server.session_store.attachment_upload_metadata(
+            session_id=session["session_id"], owner_id=owner, attachment_id=staged["attachment_id"],
+        )
+        if audio:
+            info, path = server.session_store.audio_assets.authorized_path(
+                staged["attachment_id"], owner_id=owner, session_id=session["session_id"],
+            )
+            assert info["duration_ms"] == round(size * 1000 / 32000)
+        else:
+            path = server.session_store._validated_attachment_file(row)
+        assert path.stat().st_size == len(data)
+        with path.open("rb") as stored:
+            assert hashlib.file_digest(stored, "sha256").hexdigest() == hashlib.sha256(data).hexdigest()
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_attachment_upload_rejects_wrong_owner_digest_and_actual_capacity(tmp_path, monkeypatch):
+    from orchestrator import session_store, workbench_api
+
+    monkeypatch.setattr(session_store, "MAX_SESSION_ATTACHMENT_BYTES", 10)
+    monkeypatch.setattr(workbench_api, "MAX_SESSION_ATTACHMENT_BYTES", 4)
+    server, _runtime = _server(tmp_path)
+    owner = server._v1_owner_id(_Request())
+    session = server.session_store.resolve_primary_session(owner_id=owner, agent_id="lily", establish=True)
+    staged = server.session_store.stage_attachment(
+        session_id=session["session_id"], owner_id=owner, filename="data.txt",
+        media_type="text/plain", size_bytes=5, sha256=hashlib.sha256(b"12345").hexdigest(),
+    )
+    match = {"session_id": session["session_id"], "attachment_id": staged["attachment_id"]}
+    response = await server.handle_v1_attachment_upload(
+        _Request(match_info=match, headers={"Content-Type": "text/plain"}, body=b"12345")
+    )
+    assert response.status == 413
+    assert json.loads(response.text)["maximum_bytes"] == 4
+    monkeypatch.setattr(workbench_api, "MAX_SESSION_ATTACHMENT_BYTES", 10)
+    response = await server.handle_v1_attachment_upload(
+        _Request(match_info=match, headers={"Content-Type": "text/plain"}, body=b"other")
+    )
+    assert response.status == 409
+    assert "digest" in json.loads(response.text)["error"]
+    monkeypatch.setattr(server, "_v1_owner_id", lambda request: "user:other")
+    response = await server.handle_v1_attachment_upload(
+        _Request(match_info=match, headers={"Content-Type": "text/plain"}, body=b"12345")
+    )
+    assert response.status == 404
+
+
+
+@pytest.mark.asyncio
+async def test_workzone_audio_is_streamed_and_retains_format_and_digest(tmp_path, monkeypatch):
+    import io
+    import wave
+    server, runtime = _server(tmp_path)
+    zone = tmp_path / "audio-zone"
+    zone.mkdir()
+    stream = io.BytesIO()
+    with wave.open(stream, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(bytes(3200))
+    payload = stream.getvalue()
+    (zone / "voice.wav").write_bytes(payload)
+    runtime._workzone_state = {"revision": 1, "slots": [{
+        "slot_id": "main", "path": str(zone), "enabled": True, "available": True,
+    }]}
+    owner = server._v1_owner_id(_Request())
+    session = server.session_store.resolve_primary_session(owner_id=owner, agent_id="lily", establish=True)
+    monkeypatch.setattr(
+        server.session_store, "upload_attachment_bytes",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("audio must stream")),
+    )
+    response = await server.handle_v1_workzone_attachment_stage(_Request(
+        {"reference": str(zone / "voice.wav")}, match_info={"session_id": session["session_id"]},
+    ))
+    assert response.status == 201, response.text
+    attachment = json.loads(response.text)["attachment"]
+    metadata, actual = server.session_store.attachment_bytes(
+        session_id=session["session_id"], owner_id=owner, attachment_id=attachment["attachment_id"],
+    )
+    assert actual == payload and metadata["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert metadata["duration_ms"] == 100
+
+
+@pytest.mark.asyncio
+async def test_attachment_sqlite_contention_keeps_status_responsive_and_returns_busy(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3
+    import time
+
+    monkeypatch.setenv("HASHI_ATTACHMENT_STORAGE_WAIT_MS", "600")
+    server, _runtime = _server(tmp_path)
+    store = server.session_store
+    session = store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)
+    session_id = session["session_id"]
+    content = b"fixture"
+    payload = {"filename": "fixture.txt", "media_type": "text/plain", "size_bytes": len(content),
+               "sha256": hashlib.sha256(content).hexdigest(), "idempotency_key": "contention-stage"}
+    request = _Request(payload, match_info={"session_id": session_id})
+
+    async def check_while_locked(handler):
+        connection = sqlite3.connect(store.db_path, isolation_level=None)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
+            operation = asyncio.create_task(handler())
+            await asyncio.sleep(0.05)
+            assert not operation.done()
+            response = await server.handle_v1_capabilities(_Request())
+            assert response.status == 200
+            assert time.monotonic() - started < 0.4
+            busy = await asyncio.wait_for(operation, 3)
+            assert busy.status == 503 and json.loads(busy.text)["code"] == "session_storage_busy"
+        finally:
+            connection.rollback()
+            connection.close()
+
+    await check_while_locked(lambda: server.handle_v1_attachment_stage(request))
+    first = await server.handle_v1_attachment_stage(request)
+    assert first.status == 201
+    attachment_id = json.loads(first.text)["attachment"]["attachment_id"]
+    repeated = await server.handle_v1_attachment_stage(request)
+    assert json.loads(repeated.text)["attachment"]["attachment_id"] == attachment_id
+    match = {"session_id": session_id, "attachment_id": attachment_id}
+    uploaded = await server.handle_v1_attachment_upload(_Request(match_info=match,
+        headers={"Content-Type": "text/plain"}, body=content))
+    assert uploaded.status == 200
+    commit_request = _Request(match_info=match)
+    await check_while_locked(lambda: server.handle_v1_attachment_commit(commit_request))
+    committed = await server.handle_v1_attachment_commit(commit_request)
+    assert committed.status == 200
+    record = json.loads(committed.text)["attachment"]
+    assert record["state"] == "committed"
+    replay = await server.handle_v1_attachment_commit(commit_request)
+    assert json.loads(replay.text)["attachment"]["committed_at"] == record["committed_at"]
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM session_attachments WHERE session_id=?", (session_id,)).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_attachment_stage_settles_once_and_can_reconcile_by_key(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+
+    server, _runtime = _server(tmp_path)
+    store = server.session_store
+    session_id = store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)["session_id"]
+    payload = {"filename": "fixture.txt", "media_type": "text/plain", "size_bytes": 1,
+               "sha256": hashlib.sha256(b"x").hexdigest(), "idempotency_key": "cancelled-stage"}
+    request = _Request(payload, match_info={"session_id": session_id})
+    started, release = threading.Event(), threading.Event()
+    original = server._v1_stage_attachment
+    calls = []
+    def delayed(**kwargs):
+        calls.append("submitted")
+        started.set()
+        assert release.wait(5)
+        return original(**kwargs)
+    monkeypatch.setattr(server, "_v1_stage_attachment", delayed)
+    task = asyncio.create_task(server.handle_v1_attachment_stage(request))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    monkeypatch.setattr(server, "_v1_stage_attachment", original)
+    recovered = await server.handle_v1_attachment_stage(request)
+    assert recovered.status == 201 and calls == ["submitted"]
+    attachment_id = json.loads(recovered.text)["attachment"]["attachment_id"]
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute("SELECT attachment_id FROM session_attachments WHERE session_id=?", (session_id,)).fetchall()
+    assert rows == [(attachment_id,)]
+
+
+@pytest.mark.asyncio
+async def test_invalid_search_or_attachment_budget_does_not_hide_other_capabilities(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHI_HISTORY_SEARCH_MAX_QUERY_CHARS", "bad")
+    monkeypatch.setenv("HASHI_ATTACHMENT_STORAGE_WAIT_MS", "bad")
+    server, _runtime = _server(tmp_path)
+    server.global_config.persistent_session_v1 = True
+    response = await server.handle_v1_capabilities(_Request())
+    assert response.status == 200
+    data = json.loads(response.text)
+    assert data["session_api_version"] == "1.0"
+    assert data["agent_history_search"]["available"] is False
+    assert data["agent_history_search"]["configuration_error"] == "invalid_history_search_budget"
+    assert data["frontend_connector"]["attachment_storage_wait_ms"] is None
+    assert data["frontend_connector"]["attachment_storage_wait_configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_attachment_inprocess_lock_timeout_is_reported_without_blocking_loop(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    monkeypatch.setenv("HASHI_ATTACHMENT_STORAGE_WAIT_MS", "300")
+    server, _runtime = _server(tmp_path)
+    store = server.session_store
+    session_id = store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)["session_id"]
+    held, release = threading.Event(), threading.Event()
+    def lock_store():
+        with store._lock:
+            held.set()
+            release.wait(3)
+    thread = threading.Thread(target=lock_store)
+    thread.start()
+    try:
+        assert await asyncio.to_thread(held.wait, 2)
+        payload = {"filename": "x.txt", "media_type": "text/plain", "size_bytes": 1,
+                   "sha256": hashlib.sha256(b"x").hexdigest(), "idempotency_key": "inprocess-wait"}
+        start = time.monotonic()
+        operation = asyncio.create_task(server.handle_v1_attachment_stage(
+            _Request(payload, match_info={"session_id": session_id})))
+        await asyncio.sleep(0.04)
+        assert time.monotonic() - start < 0.2
+        response = await asyncio.wait_for(operation, 2)
+        assert response.status == 503 and json.loads(response.text)["code"] == "session_storage_busy"
+    finally:
+        release.set()
+        await asyncio.to_thread(thread.join, 2)
+    response = await server.handle_v1_attachment_stage(_Request(payload, match_info={"session_id": session_id}))
+    assert response.status == 201
+
+
+@pytest.mark.asyncio
+async def test_session_update_and_snapshot_do_not_block_status_during_sqlite_writer(tmp_path):
+    import asyncio
+    import sqlite3
+    import time
+
+    server, _runtime = _server(tmp_path)
+    store = server.session_store
+    session = store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)
+    session_id = session["session_id"]
+    connection = sqlite3.connect(store.db_path, isolation_level=None)
+    update = snapshot = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        start = time.monotonic()
+        update = asyncio.create_task(server.handle_v1_session_patch(_Request(
+            {"expected_revision": session["revision"], "title": "new title"},
+            match_info={"session_id": session_id})))
+        await asyncio.sleep(0.05)
+        assert not update.done()
+        snapshot = asyncio.create_task(server.handle_v1_session_snapshot(
+            _Request(match_info={"session_id": session_id})))
+        await asyncio.sleep(0.05)
+        assert not snapshot.done()
+        response = await server.handle_v1_capabilities(_Request())
+        assert response.status == 200
+        assert time.monotonic() - start < 0.5
+    finally:
+        connection.rollback()
+        connection.close()
+    updated = await asyncio.wait_for(update, 3)
+    observed = await asyncio.wait_for(snapshot, 3)
+    assert updated.status == 200 and observed.status == 200
+    assert json.loads(updated.text)["session"]["title"] == "new title"
+
+@pytest.mark.asyncio
+async def test_command_reservation_keeps_status_responsive_and_dispatches_once(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    from orchestrator import command_interaction_bridge, slash_command_audit
+
+    server, _runtime = _command_server(tmp_path)
+    session = server.session_store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)
+    started = threading.Event()
+    original = server.session_store.reserve_frontend_command_invocation
+    calls = []
+
+    def observed_reservation(**kwargs):
+        started.set()
+        return original(**kwargs)
+
+    async def dispatch(_runtime, _payload, _metadata):
+        calls.append(1)
+        return {"ok": True, "http_status": 200}
+
+    monkeypatch.setattr(server.session_store, "reserve_frontend_command_invocation", observed_reservation)
+    monkeypatch.setattr(slash_command_audit, "is_supported_slash_command", lambda _runtime, _command: True)
+    monkeypatch.setattr(command_interaction_bridge, "dispatch_command_interaction", dispatch)
+    payload = {
+        "command": "model", "arguments": ["balanced"], "client_id": "session-api-client-7",
+        "request_id": "command-request-123456", "ui_locale": "en",
+        "context_generation": session["context_generation"],
+    }
+
+    def request():
+        return _command_request(payload, match_info={"session_id": session["session_id"]})
+
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    task = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        task = asyncio.create_task(server.handle_v1_session_command_invocation(request()))
+        assert await asyncio.to_thread(started.wait, 2)
+        assert not task.done()
+        before = time.monotonic()
+        status = await server.handle_v1_capabilities(_Request())
+        assert status.status == 200
+        assert time.monotonic() - before < 1
+        connection.rollback()
+        result = await asyncio.wait_for(task, 3)
+        assert result.status == 200, result.text
+        replay = await server.handle_v1_session_command_invocation(request())
+        assert replay.status == 200
+        assert json.loads(replay.text)["replayed"] is True
+        assert calls == [1]
+    finally:
+        connection.rollback()
+        connection.close()
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
+@pytest.mark.asyncio
+async def test_promotion_configuration_keeps_status_responsive_during_database_writer(tmp_path, monkeypatch):
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    server, _runtime = _server(tmp_path)
+    started = threading.Event()
+    original = server.session_store.set_promotion_schedule
+
+    def observed_schedule(**kwargs):
+        started.set()
+        return original(**kwargs)
+
+    monkeypatch.setattr(server.session_store, "set_promotion_schedule", observed_schedule)
+    connection = sqlite3.connect(server.session_store.db_path, isolation_level=None)
+    task = None
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        task = asyncio.create_task(server.handle_v1_promotion_post(_Request(
+            {"action": "configure", "enabled": False, "local_time": "04:30"},
+            match_info={"agent_id": "lily"},
+        )))
+        assert await asyncio.to_thread(started.wait, 2)
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        before = time.monotonic()
+        status = await server.handle_v1_capabilities(_Request())
+        assert status.status == 200
+        assert time.monotonic() - before < 1
+        connection.rollback()
+        result = await asyncio.wait_for(task, 3)
+        assert result.status == 200, result.text
+        assert json.loads(result.text)["schedule"]["local_time"] == "04:30"
+        readback = await server.handle_v1_promotion_get(_Request(match_info={"agent_id": "lily"}))
+        assert json.loads(readback.text)["promotion"]["schedule"]["enabled"] == 0
+    finally:
+        connection.rollback()
+        connection.close()
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
+@pytest.mark.asyncio
+async def test_capabilities_describe_long_draft_defaults_without_claiming_worker_configuration(tmp_path):
+    server, _runtime = _server(tmp_path)
+    response = await server.handle_v1_capabilities(_Request())
+    capability = json.loads(response.text)["telegram_long_draft"]
+    assert capability == {
+        "version": 1,
+        "idle_actions": ["remind", "submit"],
+        "default_idle_action": "remind",
+        "default_idle_seconds": 300,
+        "configurable_idle_seconds": True,
+        "explicit_submit_excludes_unconfirmed_voice": True,
+        "draft_persistence": "process_memory",
+    }
+
+@pytest.mark.asyncio
+async def test_chat_projection_waits_off_loop_for_store_lock(tmp_path):
+    import asyncio
+    import threading
+    import time
+
+    server, _runtime = _server(tmp_path)
+    session = server.session_store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)
+    locked, release = threading.Event(), threading.Event()
+
+    def hold_lock():
+        with server.session_store._lock:
+            locked.set()
+            release.wait(3)
+
+    thread = threading.Thread(target=hold_lock)
+    thread.start()
+    task = None
+    try:
+        assert await asyncio.to_thread(locked.wait, 2)
+        task = asyncio.create_task(server.handle_chat_projection(_Request(
+            match_info={"name": "lily"}, query={"session_id": session["session_id"]},
+        )))
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        before = time.monotonic()
+        assert (await server.handle_v1_capabilities(_Request())).status == 200
+        assert time.monotonic() - before < 1
+    finally:
+        release.set()
+        await asyncio.to_thread(thread.join, 2)
+    response = await asyncio.wait_for(task, 3)
+    assert response.status == 200, response.text
+    assert json.loads(response.text)["projection"]["session_id"] == session["session_id"]
+@pytest.mark.asyncio
+async def test_capabilities_advertise_selected_private_proof_budget_without_secrets(tmp_path):
+    server, _runtime = _server(tmp_path)
+    (tmp_path / "secrets.json").write_text(json.dumps({
+        "hashi_private_shared_credentials": {
+            "credentials": {"team": {"secret": "synthetic-secret-long-enough", "scopes": ["read.fixture"]}},
+            "policy": {"max_proofs_per_message": 24, "max_resources_per_message": 80,
+                       "max_ttl_seconds": 1200, "default_ttl_seconds": 600},
+        }
+    }), encoding="utf-8")
+    for response in (await server.handle_v1_capabilities(_Request()),
+                     await server.handle_message_source_capabilities(_Request())):
+        payload = json.loads(response.text)
+        assert payload["private_authorization"]["max_proofs_per_message"] == 24
+        assert payload["private_authorization"]["max_resources_per_message"] == 80
+        assert payload["private_authorization"]["max_ttl_seconds"] == 1200
+        assert "synthetic-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_quote_source_exact_visible_message_obeys_session_owner(tmp_path):
+    server, _ = _server(tmp_path)
+    store = server.session_store
+    session = store.create_session(owner_id="user:7", agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="quote-source-run", text="PRIVATE_CANONICAL", display_text="visible 🌸" * 1000,
+        source="workbench", idempotency_key="quote-source",
+        message_context={"private_marker": "PRIVATE_CONTEXT"},
+    )
+    request = _Request(match_info={"session_id": session["session_id"], "message_id": accepted.message_id})
+    response = await server.handle_v1_session_quote_source(request)
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert payload["message"]["text"] == "visible 🌸" * 1000
+    assert payload["message"]["message_id"] == accepted.message_id
+    assert "PRIVATE_CANONICAL" not in response.text
+    assert "PRIVATE_CONTEXT" not in response.text
+    assert "no-store" in response.headers["Cache-Control"]
+
+    wrong_session = store.create_session(owner_id="user:7", agent_id="lily")
+    wrong = await server.handle_v1_session_quote_source(_Request(match_info={
+        "session_id": wrong_session["session_id"], "message_id": accepted.message_id}))
+    assert wrong.status == 404
+
+    other = store.create_session(owner_id="user:8", agent_id="lily")
+    other_msg = store.append_presentation_message(
+        session_id=other["session_id"], owner_id="user:8", agent_id="lily", role="assistant",
+        text="other-owner", source="test", idempotency_key="other", history_eligible=True,
+    )
+    denied = await server.handle_v1_session_quote_source(_Request(match_info={
+        "session_id": other["session_id"], "message_id": other_msg["message_id"]}))
+    assert denied.status == 404
+
+    with store._connection() as connection:
+        connection.execute("UPDATE messages SET visibility='forgotten' WHERE message_id=?", (accepted.message_id,))
+        connection.commit()
+    hidden = await server.handle_v1_session_quote_source(request)
+    assert hidden.status == 404
+
+
+@pytest.mark.asyncio
+async def test_quote_source_route_reads_a_synthetic_session_over_http(tmp_path, monkeypatch):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    monkeypatch.setattr(WorkbenchApiServer, "_persistent_session_v1_ready", lambda self: True)
+    server, _ = _server(tmp_path)
+    session = server.session_store.create_session(owner_id="user:7", agent_id="lily")
+    message = server.session_store.append_presentation_message(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        role="assistant", text="synthetic old source", source="test",
+        idempotency_key="quote-http", history_eligible=True,
+    )
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.get(
+            f"/api/v1/sessions/{session['session_id']}/messages/{message['message_id']}/quote-source"
+        )
+        assert response.status == 200
+        assert (await response.json())["message"]["text"] == "synthetic old source"

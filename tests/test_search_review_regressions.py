@@ -35,21 +35,23 @@ def file_link(link, target):
 
 
 def protect(registry, *paths):
-    # Use the same existing runtime policy projection as real tool dispatch.
-    from orchestrator.live_runtime_protection import LiveRuntimePolicy, policy_cache_key
-    registry._live_runtime_policy_cache = LiveRuntimePolicy(
-        code_root=registry.workspace_dir, bridge_home=registry.workspace_dir,
-        runtime_roots=(), protected_write_paths=(),
-        protected_read_paths=tuple(path.resolve() for path in paths),
-        service_targets=(), core_pid=None, policy_path=registry.workspace_dir / "policy.json")
-    registry._live_runtime_policy_cache_key = policy_cache_key(
-        registry.audit_context["global_config"], registry.audit_context.get("live_runtime_prefix"))
+    # Exercise the actual policy loader and its byte-identity cache contract.
+    config = registry.audit_context["global_config"]
+    config.project_root = registry.workspace_dir / "fixture-source"
+    config.bridge_home = registry.workspace_dir / "fixture-instance"
+    config.project_root.mkdir(parents=True, exist_ok=True)
+    policy = config.bridge_home / "state" / "platform" / "live-runtime-protection.json"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(json.dumps({"schema": 1, "protected_read_paths":
+                                  [str(path.resolve()) for path in paths]}), encoding="utf-8")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["symlink", "junction"])
-@pytest.mark.parametrize("mode", ["path", "content"])
+@pytest.mark.parametrize("mode", ["path", "content", "regex_python", "regex_ripgrep"])
 async def test_linked_descendants_protected_across_cursor_pages(tmp_path, kind, mode):
+    if mode == "regex_ripgrep" and __import__("shutil").which("rg") is None:
+        pytest.skip("ripgrep regex engine is unavailable")
     registry, repo, _ = registry_for(tmp_path)
     target = repo / "physical"
     nested = target / "nested"
@@ -60,9 +62,13 @@ async def test_linked_descendants_protected_across_cursor_pages(tmp_path, kind, 
     directory_link(repo / "alias", target, kind)
     directory_link(nested / "back", repo, kind)
     protect(registry, private)
-    args = dict(query="*.txt" if mode == "path" else "needle", mode=mode,
-                match="glob" if mode == "path" else "literal",
-                roots=[str(repo)], options={"follow_links": True}, profile="expanded",
+    options = {"follow_links": True}
+    if mode.startswith("regex_"):
+        options["regex_engine"] = mode.removeprefix("regex_")
+    args = dict(query="*.txt" if mode == "path" else "needle",
+                mode="content" if mode.startswith("regex_") else mode,
+                match="glob" if mode == "path" else "regex" if mode.startswith("regex_") else "literal",
+                roots=[str(repo)], options=options, profile="expanded",
                 exclude=["physical"], max_results=1)
     matches, errors = [], []
     for _ in range(12):
@@ -79,6 +85,40 @@ async def test_linked_descendants_protected_across_cursor_pages(tmp_path, kind, 
     assert len(matches) == 2
     assert any(item["code"] == "link_cycle" for item in errors)
     assert not any(item["code"] == "depth_budget" for item in errors)
+
+
+@pytest.mark.asyncio
+async def test_list_and_log_query_enforce_actual_protected_paths(tmp_path):
+    registry, repo, _ = registry_for(tmp_path)
+    private = repo / "private"
+    private.mkdir()
+    (private / "secret.txt").write_text("needle confidential", encoding="utf-8")
+    (repo / "public.txt").write_text("needle public", encoding="utf-8")
+    protect(registry, private)
+
+    listing = await registry.execute("file_list", {
+        "path": str(repo), "recursive": True, "max_results": 100,
+    })
+    assert not listing.is_error, listing.output
+    entries = listing.output.splitlines()
+    assert any("public.txt" in line for line in entries)
+    assert not any(line.startswith("[dir] private") for line in entries)
+    assert not any(line.strip().startswith("private" + os.sep) for line in entries)
+    assert "permission_denied" in listing.output
+
+    direct = await registry.execute("file_list", {"path": str(private)})
+    assert direct.is_error
+    assert direct.details["reason"] == "live_runtime_protection"
+    relative = await registry.execute("file_list", {"path": "private"})
+    assert relative.is_error and relative.details["reason"] == "live_runtime_protection"
+    secret = await registry.execute("log_query", {
+        "path": str(private / "secret.txt"), "terms": ["needle"],
+    })
+    assert secret.is_error
+    public = await registry.execute("log_query", {
+        "path": str(repo / "public.txt"), "terms": ["needle"],
+    })
+    assert not public.is_error and "needle public" in public.output
 
 
 def scanner_config(root, **extra):
@@ -236,8 +276,12 @@ async def test_protected_discovery_root_is_denied_before_metadata_inspection(tmp
     candidate = make_repo(repo, "checkout")
     protect(registry, candidate)
 
-    def forbidden_read(*args, **kwargs):
-        pytest.fail("protected discovery root reached the metadata reader")
+    real_read = Path.read_text
+
+    def forbidden_read(path, *args, **kwargs):
+        if path == candidate or path.is_relative_to(candidate):
+            pytest.fail("protected discovery root reached the metadata reader")
+        return real_read(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", forbidden_read)
     result = await registry.execute(

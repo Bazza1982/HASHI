@@ -1,7 +1,6 @@
 """Local management and portable evidence CLI; never exposed as a model tool."""
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +27,8 @@ def configure_parser(subparsers):
     settings.add_argument("--config", type=Path)
     settings.add_argument("--actor", required=True)
     settings.add_argument("--expected-revision", required=True)
+    settings.add_argument("--mode", choices=("best-effort", "required"),
+                          help="Explicit pre-effect audit policy; default preserves current choice")
     repair = actions.add_parser("repair", help="Rebuild projections without replaying business tools")
     repair.add_argument("path", type=Path)
     repair.add_argument("--home", type=Path)
@@ -71,15 +72,19 @@ def run(args) -> int:
             snapshot = admin.read_fingerprint_policy()
             result = {"configured": "ON" if snapshot.policy.enabled else "OFF",
                       "config_revision": snapshot.revision, "policy_version": snapshot.policy.version,
+                      "mode": "required" if snapshot.policy.required else "best-effort",
                       "runtime_adoption": "not_verified", "coverage": matrix()}
         elif action == "set":
             admin, audit = _management(args)
             current = admin.read_fingerprint_policy()
+            mode = getattr(args, "mode", None)
+            required = current.policy.required if mode is None else mode == "required"
             updated = FingerprintPolicy(enabled=args.value == "on", marking=current.policy.marking,
-                                        export_content=current.policy.export_content)
+                                        export_content=current.policy.export_content, required=required)
             receipt = admin.write_fingerprint_policy(updated,
                 expected_revision=args.expected_revision, actor_id=args.actor, audit=audit)
             result = {"configured": args.value.upper(), "config_revision": receipt.revision,
+                      "mode": "required" if receipt.policy.required else "best-effort",
                       "applies_to": "future Run admissions; existing Runs retain their frozen policy"}
         elif action == "inspect":
             from .verify import inspect

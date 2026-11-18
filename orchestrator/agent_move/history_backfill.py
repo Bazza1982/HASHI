@@ -22,14 +22,17 @@ from typing import Any, Iterator
 
 from orchestrator.agent_move.package import (
     AgentMoveError,
+    authenticated_conversation_command_owner,
     configured_conversation_owner_id,
     export_conversation_continuity_snapshot,
+    source_conversation_owner_id,
 )
 from orchestrator.agent_incarnation import valid_agent_lifecycle_id
 from orchestrator.config_json import read_config_json, write_config_json
 from orchestrator.instance_lock import InstanceLock
 from orchestrator.pathing import build_bridge_paths
 from orchestrator.session_store import (
+    ConversationContinuityBinding,
     SessionStore,
     SessionStoreError,
     validate_conversation_continuity_capsule,
@@ -38,6 +41,7 @@ from tools.private_files import protect_private_file
 
 
 MANIFEST_SCHEMA_VERSION = 1
+MULTI_SOURCE_MANIFEST_SCHEMA_VERSION = 2
 _MANIFEST_KEYS = {
     "schema_version",
     "batch_id",
@@ -46,6 +50,7 @@ _MANIFEST_KEYS = {
     "expected_entry_count",
     "entries",
 }
+_MULTI_SOURCE_MANIFEST_KEYS = (_MANIFEST_KEYS - {"owner_id"}) | {"source_owners"}
 _ENTRY_KEYS = {
     "source_instance",
     "source_agent_id",
@@ -167,10 +172,15 @@ def _session_database(root: Path, *, role: str) -> Path:
 
 
 def validate_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
-    if set(payload) != _MANIFEST_KEYS:
-        raise AgentMoveError("history backfill manifest keys are invalid")
-    if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    version = payload.get("schema_version")
+    if type(version) is not int or version not in {
+        MANIFEST_SCHEMA_VERSION, MULTI_SOURCE_MANIFEST_SCHEMA_VERSION,
+    }:
         raise AgentMoveError("unsupported history backfill manifest schema")
+    expected_keys = (_MANIFEST_KEYS if version == MANIFEST_SCHEMA_VERSION
+                     else _MULTI_SOURCE_MANIFEST_KEYS)
+    if set(payload) != expected_keys:
+        raise AgentMoveError("history backfill manifest keys are invalid")
     batch_id = str(payload.get("batch_id") or "").strip()
     target_instance = str(payload.get("target_instance") or "").strip().upper()
     owner_id = str(payload.get("owner_id") or "").strip()
@@ -178,8 +188,21 @@ def validate_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise AgentMoveError("history backfill batch_id is invalid")
     if not _IDENTIFIER.fullmatch(target_instance):
         raise AgentMoveError("history backfill target_instance is invalid")
-    if not owner_id.startswith("user:") or not owner_id[5:].isdigit():
-        raise AgentMoveError("history backfill owner_id is invalid")
+    if version == MANIFEST_SCHEMA_VERSION and not owner_id:
+        raise AgentMoveError("history backfill owner_id is missing")
+    source_owners: dict[str, str] = {}
+    if version == MULTI_SOURCE_MANIFEST_SCHEMA_VERSION:
+        raw_owners = payload.get("source_owners")
+        if not isinstance(raw_owners, Mapping) or not raw_owners:
+            raise AgentMoveError("history backfill source owners are missing")
+        for raw_instance, raw_owner in raw_owners.items():
+            if not isinstance(raw_instance, str) or not isinstance(raw_owner, str):
+                raise AgentMoveError("history backfill source owner mapping is invalid")
+            instance = raw_instance.strip().upper()
+            owner = raw_owner.strip()
+            if not _IDENTIFIER.fullmatch(instance) or not owner or instance in source_owners:
+                raise AgentMoveError("history backfill source owner mapping is invalid")
+            source_owners[instance] = owner
     entries = payload.get("entries")
     expected = payload.get("expected_entry_count")
     if not isinstance(expected, int) or expected < 1 or expected > 500:
@@ -230,7 +253,13 @@ def validate_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
             "target_agent_id": target_agent,
             "target_agent_lifecycle_id": target_lifecycle,
         }
-        identity_digest = hashlib.sha256(_canonical_json(identity)).hexdigest()[:20]
+        if version == MULTI_SOURCE_MANIFEST_SCHEMA_VERSION:
+            if source_instance not in source_owners:
+                raise AgentMoveError("history backfill source owner mapping is incomplete")
+            digest_identity = {**identity, "source_owner_id": source_owners[source_instance]}
+        else:
+            digest_identity = identity
+        identity_digest = hashlib.sha256(_canonical_json(digest_identity)).hexdigest()[:20]
         normalized_entries.append(
             {
                 **identity,
@@ -238,24 +267,31 @@ def validate_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "capsule_name": f"{identity_digest}.conversation-capsule.json",
             }
         )
+    if (version == MULTI_SOURCE_MANIFEST_SCHEMA_VERSION
+            and set(source_owners) != {entry["source_instance"] for entry in normalized_entries}):
+        raise AgentMoveError("history backfill source owner mapping does not match entries")
     return {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "schema_version": version,
         "batch_id": batch_id,
         "target_instance": target_instance,
-        "owner_id": owner_id,
+        **({"owner_id": owner_id} if version == MANIFEST_SCHEMA_VERSION
+           else {"source_owners": source_owners}),
         "expected_entry_count": expected,
         "entries": normalized_entries,
     }
 
 
-def _validate_target(manifest: Mapping[str, Any], target_root: Path) -> None:
+def _source_owner(manifest: Mapping[str, Any], entry: Mapping[str, Any]) -> str:
+    if manifest["schema_version"] == MANIFEST_SCHEMA_VERSION:
+        return str(manifest["owner_id"])
+    return str(manifest["source_owners"][entry["source_instance"]])
+
+
+def _validate_target_identity(manifest: Mapping[str, Any], target_root: Path) -> None:
     _session_database(target_root, role="target")
     target_instance = _configured_instance_id(target_root)
     if target_instance != manifest["target_instance"]:
         raise AgentMoveError("history backfill target instance does not match manifest")
-    target_owner = configured_conversation_owner_id(target_root)
-    if target_owner != manifest["owner_id"]:
-        raise AgentMoveError("history backfill target owner does not match manifest")
     targets = _agent_lifecycle_ids(target_root)
     for entry in manifest["entries"]:
         actual = targets.get(entry["target_agent_id"].casefold())
@@ -269,6 +305,32 @@ def _validate_target(manifest: Mapping[str, Any], target_root: Path) -> None:
             raise AgentMoveError(
                 f"target Agent {entry['target_agent_id']!r} lifecycle does not match"
             )
+
+
+
+def _validate_target(manifest: Mapping[str, Any], target_root: Path) -> str:
+    _validate_target_identity(manifest, target_root)
+    return (authenticated_conversation_command_owner(target_root)
+            or configured_conversation_owner_id(target_root))
+
+
+def _owner_binding(
+    manifest: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    capsule: Mapping[str, Any],
+    target_owner_id: str,
+) -> ConversationContinuityBinding:
+    return ConversationContinuityBinding(
+        source_owner_id=_source_owner(manifest, entry),
+        target_owner_id=target_owner_id,
+        source_instance=str(entry["source_instance"]),
+        target_instance=str(manifest["target_instance"]),
+        source_agent_id=str(entry["source_agent_id"]),
+        target_agent_id=str(entry["target_agent_id"]),
+        transfer_id=str(entry["transfer_id"]),
+        history_mode="move",
+        capsule_digest=str(capsule["capsule_digest"]),
+    )
 
 
 def _capsule_path(capsule_dir: Path, entry: Mapping[str, Any]) -> Path:
@@ -288,8 +350,6 @@ def export_history_capsules(
     expected_instance = str(source_instance or "").strip().upper()
     if _configured_instance_id(root) != expected_instance:
         raise AgentMoveError("history backfill source instance does not match config")
-    if configured_conversation_owner_id(root) != manifest["owner_id"]:
-        raise AgentMoveError("history backfill source owner does not match manifest")
     _session_database(root, role="source")
     entries = [
         entry
@@ -298,6 +358,9 @@ def export_history_capsules(
     ]
     if not entries:
         raise AgentMoveError("manifest has no entries for this source instance")
+    actual_owner = source_conversation_owner_id(root, operation="backfill")
+    if any(_source_owner(manifest, entry) != actual_owner for entry in entries):
+        raise AgentMoveError("history backfill source owner does not match manifest")
     source_lifecycles = _agent_lifecycle_ids(root)
     for entry in entries:
         actual = source_lifecycles.get(entry["source_agent_id"].casefold())
@@ -324,7 +387,7 @@ def export_history_capsules(
             agent_id=entry["source_agent_id"],
             transfer_id=entry["transfer_id"],
             history_mode="move",
-            explicit_owner_id=manifest["owner_id"],
+            explicit_owner_id=_source_owner(manifest, entry),
         )
         path = _capsule_path(destination, entry)
         replayed = False
@@ -380,7 +443,7 @@ def _load_capsules(
             capsule = dict(read_config_json(path))
             validate_conversation_continuity_capsule(
                 capsule,
-                owner_id=manifest["owner_id"],
+                owner_id=_source_owner(manifest, entry),
                 source_agent_id=entry["source_agent_id"],
                 transfer_id=entry["transfer_id"],
                 history_mode="move",
@@ -453,18 +516,20 @@ def _plan_from_snapshot(
     manifest: Mapping[str, Any],
     capsules: list[dict[str, Any]],
     snapshot_path: Path,
+    *,
+    target_owner_id: str,
 ) -> dict[str, Any]:
     store = SessionStore(snapshot_path, instance_id=manifest["target_instance"])
     target_state: list[dict[str, Any]] = []
     for entry in manifest["entries"]:
         sessions = store.list_sessions(
-            owner_id=manifest["owner_id"],
+            owner_id=target_owner_id,
             agent_id=entry["target_agent_id"],
             include_archived=True,
             limit=500,
         )
         target_capsule = store.export_conversation_continuity(
-            owner_id=manifest["owner_id"],
+            owner_id=target_owner_id,
             agent_id=entry["target_agent_id"],
             source_instance=manifest["target_instance"],
             transfer_id=(
@@ -490,7 +555,7 @@ def _plan_from_snapshot(
             messages = _message_projection(
                 store,
                 session_id=session["session_id"],
-                owner_id=manifest["owner_id"],
+                owner_id=target_owner_id,
             )
             target_state.append(
                 {
@@ -511,17 +576,18 @@ def _plan_from_snapshot(
     entries: list[dict[str, Any]] = []
     for entry, capsule in zip(manifest["entries"], capsules, strict=True):
         before = _message_count(
-            store, owner_id=manifest["owner_id"], agent_id=entry["target_agent_id"]
+            store, owner_id=target_owner_id, agent_id=entry["target_agent_id"]
         )
         result = store.import_conversation_continuity(
             capsule,
-            owner_id=manifest["owner_id"],
+            owner_id=target_owner_id,
             agent_id=entry["target_agent_id"],
             transfer_id=entry["transfer_id"],
             history_mode="move",
+            owner_binding=_owner_binding(manifest, entry, capsule, target_owner_id),
         )
         after = _message_count(
-            store, owner_id=manifest["owner_id"], agent_id=entry["target_agent_id"]
+            store, owner_id=target_owner_id, agent_id=entry["target_agent_id"]
         )
         summary = capsule.get("summary") or {}
         entries.append(
@@ -554,8 +620,10 @@ def dry_run_history_backfill(
 ) -> dict[str, Any]:
     root = Path(target_root).expanduser().resolve()
     manifest = validate_manifest(manifest_payload)
-    _validate_target(manifest, root)
-    result, _capsule_rows = _prepare_plan(root, manifest, capsule_dir)
+    target_owner = _validate_target(manifest, root)
+    result, _capsule_rows = _prepare_plan(
+        root, manifest, capsule_dir, target_owner_id=target_owner
+    )
     return result
 
 
@@ -563,6 +631,8 @@ def _prepare_plan(
     root: Path,
     manifest: Mapping[str, Any],
     capsule_dir: Path | str,
+    *,
+    target_owner_id: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     capsules = _load_capsules(manifest, capsule_dir)
     with tempfile.TemporaryDirectory(prefix="hashi-history-backfill-plan-") as name:
@@ -574,9 +644,12 @@ def _prepare_plan(
             raise AgentMoveError(
                 "target SessionStore contains non-terminal Runs; backfill is blocked"
             )
-        plan = _plan_from_snapshot(manifest, capsules, snapshot)
+        plan = _plan_from_snapshot(
+            manifest, capsules, snapshot, target_owner_id=target_owner_id
+        )
     digest_payload = {
         "manifest": manifest,
+        "target_owner_id": target_owner_id,
         "target_state_digest": plan["target_state_digest"],
         "entries": plan["entries"],
     }
@@ -585,7 +658,9 @@ def _prepare_plan(
         "mode": "dry-run",
         "batch_id": manifest["batch_id"],
         "target_instance": manifest["target_instance"],
-        "owner_id": manifest["owner_id"],
+        **({"owner_id": manifest["owner_id"]} if manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
+           else {"source_owners": dict(manifest["source_owners"])}),
+        "target_owner_id": target_owner_id,
         "target_state_digest": plan["target_state_digest"],
         "plan_digest": hashlib.sha256(_canonical_json(digest_payload)).hexdigest(),
         "target_writes": 0,
@@ -731,17 +806,46 @@ def apply_history_backfill(
     capsule_dir: Path | str,
     expected_plan_digest: str,
     backup_dir: Path | str,
+    expected_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(target_root).expanduser().resolve()
     manifest = validate_manifest(manifest_payload)
-    _validate_target(manifest, root)
+    _validate_target_identity(manifest, root)
     expected = str(expected_plan_digest or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise AgentMoveError("expected_plan_digest must be a SHA-256 digest")
+    frozen_target_owner = None
+    if expected_plan is not None:
+        if (
+            not isinstance(expected_plan, Mapping)
+            or expected_plan.get("mode") != "dry-run"
+            or expected_plan.get("batch_id") != manifest["batch_id"]
+            or expected_plan.get("target_instance") != manifest["target_instance"]
+            or (manifest["schema_version"] == MANIFEST_SCHEMA_VERSION
+                and expected_plan.get("owner_id") != manifest["owner_id"])
+            or (manifest["schema_version"] == MULTI_SOURCE_MANIFEST_SCHEMA_VERSION
+                and expected_plan.get("source_owners") != manifest["source_owners"])
+            or expected_plan.get("plan_digest") != expected
+            or not isinstance(expected_plan.get("target_owner_id"), str)
+            or not str(expected_plan.get("target_owner_id") or "").strip()
+        ):
+            raise AgentMoveError("history backfill plan changed; run dry-run again")
+        frozen_target_owner = str(expected_plan["target_owner_id"]).strip()
     backup = Path(backup_dir).expanduser().absolute()
     with _locked_target(root):
-        _validate_target(manifest, root)
-        plan, capsules = _prepare_plan(root, manifest, capsule_dir)
+        _validate_target_identity(manifest, root)
+        # The optional full dry-run receipt supplies the previously selected
+        # partition. Its digest is rechecked against the current target state;
+        # the receipt is operation data, not a user authentication credential.
+        active_owner = authenticated_conversation_command_owner(
+            root, allow_expired_context=frozen_target_owner is not None,
+        )
+        if frozen_target_owner and active_owner and frozen_target_owner != active_owner:
+            raise AgentMoveError("authenticated command owner does not match the backfill plan")
+        target_owner = frozen_target_owner or active_owner or configured_conversation_owner_id(root)
+        plan, capsules = _prepare_plan(
+            root, manifest, capsule_dir, target_owner_id=target_owner
+        )
         if plan["plan_digest"] != expected:
             raise AgentMoveError("history backfill plan changed; run dry-run again")
         backup_receipt = _backup_target(root, backup, manifest)
@@ -761,10 +865,11 @@ def apply_history_backfill(
                 attempted_transfers.append(entry["transfer_id"])
                 result = store.import_conversation_continuity(
                     capsule,
-                    owner_id=manifest["owner_id"],
+                    owner_id=target_owner,
                     agent_id=entry["target_agent_id"],
                     transfer_id=entry["transfer_id"],
                     history_mode="move",
+                    owner_binding=_owner_binding(manifest, entry, capsule, target_owner),
                 )
                 results.append(
                     {
@@ -819,14 +924,17 @@ def history_backfill_status(
 ) -> dict[str, Any]:
     root = Path(target_root).expanduser().resolve()
     manifest = validate_manifest(manifest_payload)
-    _validate_target(manifest, root)
+    _validate_target_identity(manifest, root)
     with tempfile.TemporaryDirectory(prefix="hashi-history-backfill-status-") as name:
         snapshot = Path(name) / "sessions.sqlite3"
         _snapshot_sqlite(root / "state" / "sessions.sqlite3", snapshot)
         store = SessionStore(snapshot, instance_id=manifest["target_instance"])
         entries = []
+        target_owner = authenticated_conversation_command_owner(root)
         for entry in manifest["entries"]:
-            status = store.conversation_continuity_import_status(entry["transfer_id"])
+            status = _checked_import_status(store, manifest, entry, target_owner)
+            if status is not None:
+                target_owner = str(status["owner_id"])
             entries.append(
                 {
                     "target_agent_id": entry["target_agent_id"],
@@ -845,16 +953,36 @@ def history_backfill_status(
     }
 
 
+def _checked_import_status(
+    store: SessionStore,
+    manifest: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    target_owner_id: str | None,
+) -> dict[str, Any] | None:
+    status = store.conversation_continuity_import_status(entry["transfer_id"])
+    if status is not None and (
+        not isinstance(status.get("owner_id"), str)
+        or not str(status.get("owner_id") or "").strip()
+        or (target_owner_id is not None and status.get("owner_id") != target_owner_id)
+        or status.get("agent_id") != entry["target_agent_id"]
+        or status.get("history_mode") != "move"
+        or (status.get("source_owner_id") or status.get("owner_id"))
+        != _source_owner(manifest, entry)
+    ):
+        raise AgentMoveError("history backfill import ownership does not match this plan")
+    return status
+
+
 def rollback_history_backfill(
     target_root: Path | str,
     manifest_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     root = Path(target_root).expanduser().resolve()
     manifest = validate_manifest(manifest_payload)
-    _validate_target(manifest, root)
+    _validate_target_identity(manifest, root)
     results = []
     with _locked_target(root):
-        _validate_target(manifest, root)
+        _validate_target_identity(manifest, root)
         if _has_nonterminal_runs(
             root / "state" / "sessions.sqlite3",
             instance_id=manifest["target_instance"],
@@ -866,6 +994,14 @@ def rollback_history_backfill(
             root / "state" / "sessions.sqlite3",
             instance_id=manifest["target_instance"],
         )
+        # Use the owner frozen in the import receipts, not today's unrelated
+        # legacy config. A live authenticated caller can address only its own
+        # partition. Check every claim before removing any one of them.
+        target_owner = authenticated_conversation_command_owner(root)
+        for entry in manifest["entries"]:
+            status = _checked_import_status(store, manifest, entry, target_owner)
+            if status is not None:
+                target_owner = str(status["owner_id"])
         for entry in reversed(manifest["entries"]):
             result = store.rollback_conversation_continuity(entry["transfer_id"])
             results.append(

@@ -3302,18 +3302,40 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     @staticmethod
     def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
+        # The target may use another OS. Preserve native path separators instead
+        # of interpreting a Windows path as POSIX shell escaping.
+        original = str(text or "")
+        value = original.lstrip()
+        if not value:
+            return None, text
+        quoted_token = False
+        if value[0] in ("'", '"'):
+            quoted_token = True
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end < 0:
+                return None, text
+            token, rest = value[1:end], value[end + 1:]
+        elif value.startswith("@") and len(value) > 1 and value[1] in ("'", '"'):
+            quoted_token = True
+            quote = value[1]
+            end = value.find(quote, 2)
+            if end < 0:
+                return None, text
+            token, rest = "@" + value[2:end], value[end + 1:]
+        else:
+            parts = value.split(None, 1)
+            token = parts[0]
+            rest = parts[1] if len(parts) == 2 else ""
+        if not token.startswith("@") or len(token) == 1 or token.startswith("@@"):
+            return None, text
+        if quoted_token and rest and not rest[0].isspace():
+            return None, text
         try:
-            # Workzone references are target-relative protocol paths, never
-            # native Windows paths. Keep caption quote removal platform-neutral.
-            parts = shlex.split(str(text or ""), posix=True)
+            caption = " ".join(shlex.split(rest, posix=True)).strip()
         except ValueError:
             return None, text
-        if not parts or not parts[0].startswith("@") or len(parts[0]) == 1:
-            return None, text
-        reference = parts[0][1:]
-        if reference.startswith("@"):
-            return None, text
-        return reference, " ".join(parts[1:]).strip()
+        return token[1:], caption
 
     async def _stage_path_attachment(self, value: str) -> bool:
         chat = self.query_one("#chat-history", ChatHistory)
@@ -3796,7 +3818,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 state = "current · connected"
             elif target.available:
                 icon = "[hashi.secondary]○[/]"
-                state = f"available · {target.route_kind}"
+                state = target.reason or f"available · {target.route_kind}"
             else:
                 icon = "[hashi.error]×[/]"
                 state = target.reason or "unavailable"
@@ -3804,8 +3826,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         if len(targets) == 1:
             chat.write(
                 markup(
-                    "[hashi.success]No trusted peers available. Hashi Remote must be "
-                    "on and handshaken on both instances.[/]"
+                    "[hashi.success]No peers discovered. Check Hashi Remote "
+                    "and configured instance routes.[/]"
                 )
             )
         chat.write(markup("[hashi.success]Use: /instance <id> · /instance current · /instance refresh[/]"))
@@ -3828,8 +3850,17 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             targets = await self._instance_resolver.discover(refresh=True)
             target = next((item for item in targets if item.instance_id == requested), None)
             if target is None:
-                chat.write(markup(f"[hashi.error]Instance '{requested}' was not found through local Hashi Remote.[/]"))
-                return
+                # A configured route can exist while its peer cache is empty.
+                # The Remote proxy resolves it and verifies the actual target.
+                remote_url = getattr(self._instance_resolver, "_remote_url", None)
+                if not remote_url:
+                    chat.write(markup(f"[hashi.error]Instance '{requested}' was not found through local Hashi Remote.[/]"))
+                    return
+                target = InstanceTarget(
+                    instance_id=requested, display_name=requested, current=False,
+                    available=True, transport="remote", remote_url=remote_url,
+                    reason="identity checked on connect",
+                )
             if not target.available:
                 chat.write(markup(f"[hashi.error]Cannot switch to {requested}: {target.reason or 'unavailable'}.[/]"))
                 return

@@ -3,6 +3,7 @@ HASHI Flow — Flow Runner
 工作流执行核心引擎，解析 YAML 并按 DAG 顺序执行步骤
 """
 
+import copy
 import json
 import logging
 import re
@@ -101,6 +102,14 @@ class FlowRunner:
         self.workflow = self._load_workflow()
         workflow_meta = self.workflow.get("workflow", {})
         self.event_logger.workflow_id = workflow_meta.get("id")
+        if self._workflow_migration_report:
+            self.event_logger.emit(
+                "workflow.migration.retired_controls",
+                component="engine.runner",
+                level="WARNING",
+                message="Retired workflow controls were ignored in memory",
+                data={"fields": list(self._workflow_migration_report)},
+            )
         self.state = TaskState(self.run_id, runs_root=self.runs_root)
         self.state.set_workflow_metadata(
             workflow_id=workflow_meta.get("id"),
@@ -687,7 +696,11 @@ class FlowRunner:
                     # 终止权限；只有明确不可恢复、基础设施故障或外部 stop
                     # 才能结束这条执行路径。
                     while True:
+                        if self._check_signals() == "stopped":
+                            return self._cancelled_result()
                         recovered = self._handle_failure(step, result)
+                        if self._check_signals() == "stopped":
+                            return self._cancelled_result()
                         if not recovered:
                             self._escalate_to_orchestrator(step, result)
                             return {
@@ -708,7 +721,7 @@ class FlowRunner:
                         )
                         self._emit_event(
                             "step.retrying",
-                            "Step is retrying after verified Debug recovery",
+                            "Step is retrying after Debug reported recovery",
                             {"step_id": step["id"], "attempt": next_attempt},
                             step_id=step["id"],
                         )
@@ -787,7 +800,10 @@ class FlowRunner:
                         while error_type not in infrastructure_errors:
                             if self._check_signals() == "stopped":
                                 return self._cancelled_result()
-                            if not self._handle_failure(step, result):
+                            recovered = self._handle_failure(step, result)
+                            if self._check_signals() == "stopped":
+                                return self._cancelled_result()
+                            if not recovered:
                                 break
                             self._notify_step_event(
                                 step,
@@ -802,7 +818,7 @@ class FlowRunner:
                             )
                             self._emit_event(
                                 "step.retrying",
-                                "Step is retrying after verified Debug recovery",
+                                "Step is retrying after Debug reported recovery",
                                 {"step_id": step["id"], "attempt": next_attempt},
                                 step_id=step["id"],
                             )
@@ -1148,6 +1164,18 @@ class FlowRunner:
             self.logger.warning("[Debug] 未配置 debug_agent，跳过自动恢复")
             return False
 
+        history = self._recovery_history.setdefault(step["id"], [])
+        recovery_policy = error_handling.get("recovery", {}) or {}
+        selected_budget = recovery_policy.get("max_attempts")
+        if selected_budget is not None and len(history) >= selected_budget:
+            self._emit_event(
+                "handler.recovery.exhausted",
+                "The selected Debug recovery budget was exhausted",
+                {"step_id": step["id"], "max_attempts": selected_budget},
+                step_id=step["id"],
+            )
+            return False
+
         self.logger.info(f"[Debug] 启动 Debug Agent: {debug_agent}")
         self._emit_event(
             "handler.invoke.started",
@@ -1156,7 +1184,6 @@ class FlowRunner:
             step_id=step["id"],
         )
 
-        history = self._recovery_history.setdefault(step["id"], [])
         failed_step = {
             "step_id": step["id"],
             "error": failure_result.get("error"),
@@ -1176,7 +1203,7 @@ class FlowRunner:
             "payload": {
                 "step_id": step["id"],
                 "prompt": (
-                    "Diagnose the failed workflow step, perform a materially changed "
+                    "Diagnose the failed workflow step, perform an appropriate "
                     "recovery action, verify it, and return the Debug Agent JSON contract.\n\n"
                     f"Failure evidence:\n{json.dumps(failed_step, ensure_ascii=False, indent=2)}\n\n"
                     "Previous recovery attempts:\n"
@@ -1193,17 +1220,31 @@ class FlowRunner:
         }
 
         result = self._send_task_via_hchat(debug_agent, debug_message)
+        if not isinstance(result, dict):
+            result = {
+                "status": "failed",
+                "error_type": "invalid_recovery_output",
+                "error_message": "Debug Agent result must be a mapping",
+            }
         validation_error = self._validate_recovery_result(result, history)
         recovered = validation_error is None
         if recovered:
-            history.append(
-                {
-                    "diagnosis": result["diagnosis"].strip(),
-                    "evidence": list(result["evidence"]),
-                    "fix_applied": result["fix_applied"].strip(),
-                    "changes_made": list(result.get("changes_made", [])),
-                }
-            )
+            signature = {
+                "diagnosis": result["diagnosis"].strip(),
+                "evidence": list(result["evidence"]),
+                "fix_applied": result["fix_applied"].strip(),
+                "changes_made": list(result.get("changes_made", [])),
+            }
+            if signature in history:
+                self.event_logger.emit(
+                    "handler.recovery.repeated_description",
+                    component="engine.runner",
+                    level="WARNING",
+                    message="Debug recovery description matches an earlier report",
+                    step_id=step["id"],
+                    data={"step_id": step["id"], "previous_attempts": len(history)},
+                )
+            history.append(signature)
         elif result.get("status") == "recovered":
             result = {
                 **result,
@@ -1229,7 +1270,10 @@ class FlowRunner:
 
     @staticmethod
     def _validate_recovery_result(result: dict, history: list[dict]) -> str | None:
-        """Require auditable evidence and reject an exact repeated recovery action."""
+        """Require a structured recovery report; repeated prose is advisory."""
+        del history
+        if not isinstance(result, dict):
+            return "Debug Agent result must be a mapping"
         if result.get("status") != "recovered":
             return "Debug Agent did not report a recovered status"
 
@@ -1250,14 +1294,6 @@ class FlowRunner:
         ):
             return "Recovered Debug result changes_made must be a list of non-empty strings"
 
-        signature = {
-            "diagnosis": diagnosis.strip(),
-            "evidence": list(evidence),
-            "fix_applied": fix_applied.strip(),
-            "changes_made": list(changes_made),
-        }
-        if signature in history:
-            return "Debug Agent repeated an already attempted recovery action"
         return None
 
     def _run_evaluator(self):
@@ -1484,22 +1520,74 @@ class FlowRunner:
     # =========================================================================
 
     def _load_workflow(self) -> dict:
-        # Candidate 机制：如果存在 candidate 文件，优先加载
+        # Candidate selection and original source bytes remain unchanged.
         candidate_path = self.workflow_path.with_name(
             self.workflow_path.stem + "_candidate" + self.workflow_path.suffix
         )
-        if candidate_path.exists():
-            self.logger.info(f"[FlowRunner] 发现 candidate 文件: {candidate_path}，优先加载")
-            self._using_candidate = True
-            self._candidate_path = candidate_path
-            document = load_workflow_file(candidate_path)
-            self._validate_workflow_contract(document.data, document.graph_validation)
-            return document.data
-        self._using_candidate = False
-        self._candidate_path = None
-        document = load_workflow_file(self.workflow_path)
+        self._using_candidate = candidate_path.exists()
+        self._candidate_path = candidate_path if self._using_candidate else None
+        selected_path = candidate_path if self._using_candidate else self.workflow_path
+        document = load_workflow_file(selected_path)
         self._validate_workflow_contract(document.data, document.graph_validation)
-        return document.data
+        normalized, report = self._migrate_retired_workflow_controls(document.data)
+        self._workflow_migration_report = report
+        return normalized
+
+    @staticmethod
+    def _migrate_retired_workflow_controls(workflow: dict) -> tuple[dict, list[str]]:
+        """Ignore known retired controls in schema locations only.
+
+        Source files are not edited. Copy each control mapping before removing
+        fields so YAML aliases used as business data retain their values.
+        """
+        normalized = copy.deepcopy(workflow)
+        report: list[str] = []
+
+        def strip(parent: dict, key: str, fields: set[str], prefix: str) -> None:
+            value = parent.get(key)
+            if not isinstance(value, dict):
+                return
+            selected = dict(value)
+            for field in sorted(fields.intersection(selected)):
+                selected.pop(field)
+                report.append(f"{prefix}.{field}")
+            parent[key] = selected
+
+        error_fields = {"max_attempts", "max_retries", "max_total_attempts",
+                        "on_max_exceeded", "retry_strategy"}
+        strip(normalized, "error_handling", error_fields, "error_handling")
+        error_handling = normalized.get("error_handling")
+        if isinstance(error_handling, dict):
+            strip(error_handling, "retry_policy",
+                  {"max_attempts", "max_retries", "max_total_attempts"},
+                  "error_handling.retry_policy")
+        strip(normalized, "evaluation", {"auto_apply", "improvement_threshold"}, "evaluation")
+        steps = normalized.get("steps")
+        if isinstance(steps, list):
+            normalized["steps"] = list(steps)
+            for index, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    continue
+                selected = dict(step)
+                for field in sorted({"timeout_seconds", "wait_for_human_timeout_seconds"}.intersection(selected)):
+                    selected.pop(field)
+                    report.append(f"steps[{index}].{field}")
+                normalized["steps"][index] = selected
+        agents = normalized.get("agents")
+        if isinstance(agents, dict) and isinstance(agents.get("workers"), list):
+            agents = dict(agents)
+            workers = list(agents["workers"])
+            agents["workers"] = workers
+            normalized["agents"] = agents
+            for index, worker in enumerate(workers):
+                if not isinstance(worker, dict):
+                    continue
+                selected = dict(worker)
+                for field in sorted({"max_attempts", "max_retries", "timeout_seconds"}.intersection(selected)):
+                    selected.pop(field)
+                    report.append(f"agents.workers[{index}].{field}")
+                workers[index] = selected
+        return normalized, report
 
     def _generate_run_id(self) -> str:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1741,6 +1829,16 @@ class FlowRunner:
         if not isinstance(error_handling, dict):
             problems.append("error_handling must be a mapping")
         else:
+            recovery = error_handling.get("recovery")
+            if recovery is not None:
+                if not isinstance(recovery, dict):
+                    problems.append("error_handling.recovery must be a mapping")
+                elif "max_attempts" in recovery and (
+                    isinstance(recovery["max_attempts"], bool)
+                    or not isinstance(recovery["max_attempts"], int)
+                    or recovery["max_attempts"] < 0
+                ):
+                    problems.append("error_handling.recovery.max_attempts must be a non-negative integer")
             debug_agent = error_handling.get("debug_agent")
             if debug_agent is not None and debug_agent not in worker_ids:
                 problems.append(f"error_handling references unknown debug agent: {debug_agent}")
@@ -1757,29 +1855,6 @@ class FlowRunner:
                     f"{unrecoverable.get('action')}"
                 )
 
-        retired = {
-            "auto_apply",
-            "improvement_threshold",
-            "max_attempts",
-            "max_retries",
-            "max_total_attempts",
-            "on_max_exceeded",
-            "retry_strategy",
-            "timeout_seconds",
-            "wait_for_human_timeout_seconds",
-        }
-
-        def walk(value):
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    if key in retired:
-                        problems.append(f"retired workflow field: {key}")
-                    walk(child)
-            elif isinstance(value, list):
-                for child in value:
-                    walk(child)
-
-        walk(workflow)
         if problems:
             raise ValueError("Invalid Nagare workflow contract: " + "; ".join(problems))
 

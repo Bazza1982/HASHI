@@ -1,6 +1,5 @@
 """Observable Office lifecycle, isolation and durable edit tests (real files)."""
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -35,6 +34,21 @@ def call(gateway, name, arguments, call_id):
     return asyncio.run(gateway.execute(name, arguments, call_id))
 
 
+def test_real_word_file_with_long_work_root(office_manifest, tmp_path):
+    work_root = tmp_path / ("long-office-working-directory-" * 3)
+    assert len(str(work_root)) > 100
+    runtime = OfficeRuntime({"manifest": str(office_manifest), "state_root": str(tmp_path / "state"),
+                             "work_root": str(work_root)})
+    gateway = OfficeGateway(runtime, read_roots=(tmp_path,), write_roots=(tmp_path,), cwd=tmp_path,
+                            context={"agent_name": "office-a", "hashi_session_id": "long-path",
+                                     "request_id": "long-path", "instance_id": "TEST"})
+    created = call(gateway, "office_create", {"format": "docx", "output": "long.docx",
+                   "content": "# Long path\n\nContent"}, "create")
+    assert created["status"] == "ok", created
+    saved = call(gateway, "office_finish", {"file_id": created["file_id"]}, "finish")
+    assert saved["status"] == "ok" and (tmp_path / "long.docx").is_file(), saved
+
+
 def test_actual_workbook_edit_reopen_and_idempotence(office, tmp_path):
     created = call(office, "office_create", {"format": "xlsx", "output": "sales.xlsx",
                    "content": "Name,Amount\n甲,10\n乙,20"}, "create")
@@ -62,9 +76,17 @@ def test_cross_session_handles_and_changed_source_are_denied(office, tmp_path):
     assert call(office, "office_finish", {"file_id": file_id}, "save")["status"] == "ok"
     inspected = call(office, "office_inspect", {"path": str(tmp_path / "report.docx")}, "inspect")
     (tmp_path / "report.docx").write_bytes(b"changed externally")
-    conflict = call(office, "office_edit", {"file_id": inspected["file_id"],
-                    "action": "append_section", "content": "extra"}, "edit")
-    assert conflict["code"] == "SOURCE_CHANGED"
+    edited = call(office, "office_edit", {"file_id": inspected["file_id"],
+                  "action": "append_section", "content": "extra"}, "edit")
+    assert edited["status"] == "ok", edited
+    assert edited["data"]["source_provenance"] == "changed"
+    saved = call(office, "office_finish", {"file_id": inspected["file_id"],
+                 "output": str(tmp_path / "edited-copy.docx")}, "copy")
+    assert saved["status"] == "ok", saved
+    assert saved["data"]["source_provenance"] == "changed"
+    conflict = call(office, "office_finish", {"file_id": inspected["file_id"],
+                    "output": str(tmp_path / "report.docx")}, "overwrite")
+    assert conflict["code"] == "ORIGINAL_PROTECTED"
     assert (tmp_path / "report.docx").read_bytes() == b"changed externally"
 
 
@@ -101,3 +123,40 @@ def test_failed_edit_retains_prior_version(office):
     assert failure["status"] == "error"
     read = call(office, "office_read", {"file_id": file_id, "target": "Sheet1!A1:B2"}, "read")
     assert read["data"]["rows"] == [["A", "B"], [1, 2]]
+# HASHI-Fingerprint: hfp_cc53e51a78da421691d877b7c22e61be
+
+
+
+def test_real_word_inspect_through_authorized_alias_and_save_copy(office, tmp_path):
+    import os
+
+    created = call(office, "office_create", {"format": "docx", "output": "original.docx",
+                   "content": "# Original\n\nBefore"}, "create-alias-source")
+    assert created["status"] == "ok", created
+    finished = call(office, "office_finish", {"file_id": created["file_id"]}, "finish-alias-source")
+    assert finished["status"] == "ok", finished
+    source = tmp_path / "original.docx"
+    original_bytes = source.read_bytes()
+    alias = tmp_path / "document-alias.docx"
+    try:
+        os.symlink(source, alias)
+    except (OSError, NotImplementedError) as error:
+        pytest.skip(f"symlink creation unavailable: {type(error).__name__}")
+
+    opened = call(office, "office_inspect", {"path": str(alias)}, "inspect-alias")
+    assert opened["status"] == "ok", opened
+    edited = call(office, "office_edit", {"file_id": opened["file_id"],
+                  "action": "append_section", "content": "After alias"}, "edit-alias")
+    assert edited["status"] == "ok", edited
+    saved = call(office, "office_finish", {"file_id": opened["file_id"],
+                 "output": str(tmp_path / "alias-copy.docx")}, "save-alias-copy")
+    assert saved["status"] == "ok", saved
+    saved_path = tmp_path / "alias-copy.docx"
+    assert saved_path.is_file()
+    reopened = call(office, "office_inspect", {"path": str(saved_path)}, "reopen-alias-copy")
+    assert reopened["status"] == "ok", reopened
+    read = call(office, "office_read", {"file_id": reopened["file_id"],
+                "target": "paragraph:1-10", "view": "text"}, "read-alias-copy")
+    assert read["status"] == "ok", read
+    assert "After alias" in str(read["data"])
+    assert source.read_bytes() == original_bytes

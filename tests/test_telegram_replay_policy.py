@@ -369,6 +369,89 @@ async def test_normal_immediate_final_is_not_relabelled_as_catch_up(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_notice_delivery_retries_only_proven_unsent_attempts(tmp_path, unknown):
+    from types import SimpleNamespace
+    from orchestrator.frontend_notice_delivery import deliver_notice
+
+    route, store, owner, session, _accepted, runtime = setup_delivery(tmp_path)
+    kernel = SimpleNamespace(
+        global_cfg=runtime.global_config, session_store=store,
+        _runtime_map=lambda: {"agent1": runtime},
+    )
+    origin = dict(
+        surface="telegram", chat_id=7, owner_id=owner, session_id=session["session_id"],
+        context_generation=1, delivery_route=route,
+    )
+    sends = []
+
+    async def send_notice(*_args, **kwargs):
+        sends.append(kwargs["operation_id"])
+        if unknown:
+            return {"sent": False, "delivery_state": "unknown"}
+        if len(sends) <= 6:
+            return {"sent": False, "retry_safe": True, "retry_after": 1}
+        return {"sent": True, "message_id": 501}
+
+    results = []
+    for _attempt in range(7):
+        results.append(await deliver_notice(
+            kernel, agent_id="agent1", origin=origin, text="Transfer complete",
+            publication_id="agent-transfer:clone-1:completed", send_notice=send_notice,
+        ))
+
+    events = [event for event in store.events(session["session_id"], owner_id=owner)
+              if event["event_id"] == results[0]["delivery_event_id"]]
+    assert len(events) == 1
+    if unknown:
+        assert sends == ["agent-transfer:clone-1:completed"]
+        assert task(store, events[0])["state"] == "unknown"
+    else:
+        assert sends == ["agent-transfer:clone-1:completed"] * 7
+        assert task(store, events[0])["state"] == "completed"
+        assert results[-1]["sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_transfer_result_notice_remains_deliverable_after_long_outage(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.frontend_notice_delivery import deliver_notice
+
+    route, store, owner, session, _accepted, runtime = setup_delivery(tmp_path)
+    kernel = SimpleNamespace(
+        global_cfg=runtime.global_config, session_store=store,
+        _runtime_map=lambda: {"agent1": runtime},
+    )
+    origin = dict(
+        surface="telegram", chat_id=7, owner_id=owner, session_id=session["session_id"],
+        context_generation=1, delivery_route=route,
+    )
+    sends = []
+
+    async def send_notice(*_args, **_kwargs):
+        sends.append(True)
+        return ({"sent": False, "retry_safe": True} if len(sends) == 1
+                else {"sent": True, "message_id": 501})
+
+    first = await deliver_notice(
+        kernel, agent_id="agent1", origin=origin, text="Transfer complete",
+        publication_id="agent-transfer:long-offline:completed", send_notice=send_notice,
+        recovery_category="transfer_result",
+    )
+    event = next(event for event in store.events(session["session_id"], owner_id=owner)
+                 if event["event_id"] == first["delivery_event_id"])
+    age_event(store, event, 4 * 60 * 60)
+    second = await deliver_notice(
+        kernel, agent_id="agent1", origin=origin, text="Transfer complete",
+        publication_id="agent-transfer:long-offline:completed", send_notice=send_notice,
+        recovery_category="transfer_result",
+    )
+    assert sends == [True, True]
+    assert second["sent"] is True
+    assert task(store, event)["state"] == "completed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("seconds,expected", [(590, "completed"), (601, "expired")])
 async def test_native_notice_sender_uses_same_deadline_and_original_timestamp(
     tmp_path, seconds, expected

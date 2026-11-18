@@ -425,7 +425,7 @@ async def test_download_media_keeps_duplicate_names_distinct_and_inside_media_di
 @pytest.mark.asyncio
 async def test_handle_sticker_enqueues_reaction(tmp_path):
     runtime = _runtime(tmp_path)
-    update = _update(sticker=SimpleNamespace(emoji="✨"))
+    update = _update(update_id=876, message_id=44, sticker=SimpleNamespace(emoji="✨"))
 
     await runtime_media.handle_sticker(runtime, update, SimpleNamespace())
 
@@ -435,9 +435,69 @@ async def test_handle_sticker_enqueues_reaction(tmp_path):
             "prompt": "User sent a sticker (emoji: ✨). React warmly.",
             "source": "sticker",
             "summary": "✨",
-            "request_metadata": {"ingress_transport": "telegram"},
+            "request_metadata": runtime.enqueued[0]["request_metadata"],
+            "idempotency_key": "telegram-ingress:tg:zelda:123:44:876",
         }
     ]
+    assert runtime.enqueued[0]["request_metadata"]["ingress_transport"] == "telegram"
+    assert runtime.enqueued[0]["request_metadata"]["_frontend_message_age"]["age_seconds"] is None
+
+
+def test_telegram_media_reuses_staged_attachment_for_the_same_update(tmp_path, monkeypatch):
+    from orchestrator import runtime_session
+    from orchestrator.session_store import IdempotencyConflict, SessionStore
+    from orchestrator.telegram_media_admission import admit_telegram_media
+
+    runtime = _runtime(tmp_path)
+    runtime.media_dir.mkdir(parents=True)
+    runtime.session_store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI3")
+    session = runtime.session_store.ensure_default_session(owner_id="user:1", agent_id="zelda")
+    monkeypatch.setattr(runtime_session, "resolve_request_session", lambda *args, **kwargs:
+        (session, "user:1", "telegram", "123"))
+    first_file = runtime.media_dir / "first.txt"
+    second_file = runtime.media_dir / "second.txt"
+    first_file.write_bytes(b"same received content")
+    second_file.write_bytes(b"same received content")
+
+    def admit(path):
+        content, _ = runtime_media._single_attachment_request(
+            "Inspect this attachment", media_kind="Document", filename="report.txt",
+            local_path=path, transport={"mime_type": "text/plain"},
+        )
+        return admit_telegram_media(
+            runtime, chat_id=123, prompt="Inspect this attachment", request_content=content,
+            request_metadata={"ingress_transport": "telegram"}, idempotency_key="telegram-ingress:update-1",
+        )
+
+    first = admit(first_file)
+    second = admit(second_file)
+    first_id = first[2]["session_message_content"][-1]["attachment_id"]
+    assert second[2]["session_message_content"][-1]["attachment_id"] == first_id
+    second_file.write_bytes(b"different received content")
+    with pytest.raises(IdempotencyConflict):
+        admit(second_file)
+    assert runtime.session_store.attachment_canonical_part(
+        session_id=session["session_id"], owner_id="user:1", attachment_id=first_id, item_index=1,
+    )["size_bytes"] == len(b"same received content")
+
+
+@pytest.mark.asyncio
+async def test_telegram_batch_replay_does_not_duplicate_a_received_file_or_sticker(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime_long.begin_batch(runtime, 123)
+    document = _update(
+        update_id=501, message_id=51, caption=None,
+        document=SimpleNamespace(file_name="contract.txt", file_id="file-1"),
+    )
+    await runtime_media.handle_document(runtime, document, SimpleNamespace())
+    await runtime_media.handle_document(runtime, document, SimpleNamespace())
+    assert len(runtime._long_buffer) == 1
+    assert runtime.app.bot.get_file_calls == 1
+    sticker = _update(update_id=502, message_id=52, sticker=SimpleNamespace(emoji="✨"))
+    await runtime_media.handle_sticker(runtime, sticker, SimpleNamespace())
+    await runtime_media.handle_sticker(runtime, sticker, SimpleNamespace())
+    assert len(runtime._long_buffer) == 2
+    assert runtime._long_buffer_kinds == ["document", "sticker"]
 
 
 @pytest.mark.asyncio
@@ -589,16 +649,19 @@ async def test_safevoice_confirmation_adds_local_transcript_to_long_batch(
         "orchestrator.voice_transcriber.get_transcriber",
         lambda: _Transcriber(),
     )
-    update = _update(voice=SimpleNamespace(file_id="voice-1"))
+    update = _update(update_id=901, message_id=90, voice=SimpleNamespace(file_id="voice-1"))
 
+    await runtime_media.handle_voice(runtime, update, SimpleNamespace())
     await runtime_media.handle_voice(runtime, update, SimpleNamespace())
 
     assert runtime.enqueued == []
+    assert runtime.app.bot.get_file_calls == 1
     assert len(runtime._long_pending_voice_keys) == 1
     pending_key = next(iter(runtime._long_pending_voice_keys))
     assert pending_key.startswith("long-")
     pending = runtime._pending_voice.pop(pending_key)
     assert pending["long_batch"] is True
+    assert pending["telegram_ingress_key"] == "telegram-ingress:tg:zelda:123:90:901"
     assert runtime_long.resolve_voice_confirmation(runtime, pending_key, pending) is True
 
     submission = runtime_long.consume_batch(runtime, 123)
@@ -646,3 +709,128 @@ def test_session_boundary_discards_native_and_workbench_voice_confirmations():
     assert runtime._native_voice_transcripts["req-native"]["status"] == "discarded"
     assert release_event.is_set()
     assert runtime._workbench_voice_confirmations["voice-one"]["state"] == "discarded"
+
+@pytest.mark.asyncio
+async def test_long_voice_transcription_retains_arrival_order(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime_long.begin_batch(runtime, 123, "before voice")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Transcriber:
+        async def transcribe(self, _path):
+            started.set()
+            await release.wait()
+            return "voice in the middle"
+
+    monkeypatch.setattr("orchestrator.voice_transcriber.get_transcriber", lambda: Transcriber())
+    update = _update(update_id=901, message_id=90, voice=SimpleNamespace(file_id="voice-1"))
+    task = asyncio.create_task(runtime_media.handle_voice(runtime, update, SimpleNamespace()))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert runtime_long.collect_text(runtime, 123, "after voice")
+        release.set()
+        await asyncio.wait_for(task, 2)
+        pending_key = next(iter(runtime._long_pending_voice_keys))
+        pending = runtime._pending_voice.pop(pending_key)
+        assert runtime_long.resolve_voice_confirmation(runtime, pending_key, pending)
+        submission = runtime_long.consume_batch(runtime, 123)
+        assert submission.prompt.index("before voice") < submission.prompt.index("voice in the middle")
+        assert submission.prompt.index("voice in the middle") < submission.prompt.index("after voice")
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_discarded_long_voice_cannot_escape_into_new_batch(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime_long.begin_batch(runtime, 123, "old batch")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Transcriber:
+        async def transcribe(self, _path):
+            started.set()
+            await release.wait()
+            return "old voice"
+
+    monkeypatch.setattr("orchestrator.voice_transcriber.get_transcriber", lambda: Transcriber())
+    update = _update(update_id=902, message_id=91, voice=SimpleNamespace(file_id="voice-2"))
+    task = asyncio.create_task(runtime_media.handle_voice(runtime, update, SimpleNamespace()))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        runtime_long.discard_batch(runtime)
+        runtime_long.begin_batch(runtime, 123, "new batch")
+        release.set()
+        await asyncio.wait_for(task, 2)
+        assert runtime.enqueued == []
+        assert runtime._long_buffer == ["new batch"]
+        assert runtime._pending_voice == {}
+        assert any("voice was not submitted" in item["text"] for item in runtime.replies)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        runtime_long.discard_batch(runtime)
+
+@pytest.mark.asyncio
+async def test_submit_during_voice_transcription_excludes_it_once(tmp_path, monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = _runtime(tmp_path)
+    original_enqueue = runtime.enqueue_request
+
+    async def enqueue(*args, **kwargs):
+        await original_enqueue(*args, **kwargs)
+        return "req-accepted"
+
+    runtime.enqueue_request = enqueue
+    runtime_long.begin_batch(runtime, 123, "send this text")
+    started, release = asyncio.Event(), asyncio.Event()
+    keys = []
+    original_register = runtime_long.register_voice_confirmation
+
+    def capture_key(*args, **kwargs):
+        key = original_register(*args, **kwargs)
+        keys.append(key)
+        return key
+
+    class Transcriber:
+        async def transcribe(self, _path):
+            started.set()
+            await release.wait()
+            return "unconfirmed voice"
+
+    monkeypatch.setattr(runtime_long, "register_voice_confirmation", capture_key)
+    monkeypatch.setattr("orchestrator.voice_transcriber.get_transcriber", lambda: Transcriber())
+    update = _update(update_id=903, message_id=92, voice=SimpleNamespace(file_id="voice-3"))
+    task = asyncio.create_task(runtime_media.handle_voice(runtime, update, SimpleNamespace()))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        await runtime_long.cmd_end(runtime, _update(), SimpleNamespace())
+        assert runtime.enqueued == []
+        assert runtime._long_buffer_state == runtime_long.LONG_BATCH_CLOSING
+        release.set()
+        await asyncio.wait_for(task, 2)
+        finalizer = runtime._long_finalize_task
+        if finalizer is not None:
+            await asyncio.wait_for(finalizer, 2)
+        assert len(runtime.enqueued) == 1
+        assert runtime.enqueued[0]["prompt"] == "send this text"
+        assert keys and keys[0] not in runtime._pending_voice
+        assert any("Unconfirmed voice transcripts excluded: 1" in item["text"] for item in runtime.replies)
+
+        class Query:
+            data = f"safevoice:yes:{keys[0]}"
+            from_user = SimpleNamespace(id=1)
+
+            async def edit_message_text(self, *_args, **_kwargs):
+                return None
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+        await FlexibleAgentRuntime.callback_safevoice(runtime, SimpleNamespace(callback_query=Query()), SimpleNamespace())
+        assert len(runtime.enqueued) == 1
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        runtime_long.discard_batch(runtime)

@@ -39,10 +39,8 @@ Do NOT just forward the user's message. Rewrite it as a clear engineering spec.
 
 After launching Codex:
 
-1. **Check if the process is still running:**
-   ```
-   tasklist | findstr codex
-   ```
+1. **Track the specific invocation** using its managed receipt or process handle/PID
+   and check that invocation's liveness and terminal status.
 
 2. **Read the output log for progress:**
    ```
@@ -74,9 +72,9 @@ If the task failed, read the error log carefully and either:
 
 ## Safety rules
 
-- **No re-delegation.** If Codex fails or produces partial results, do NOT delegate again to Codex automatically. Report the failure to the user and let them decide. You may retry ONCE if the failure was clearly transient (e.g. network timeout), but never more than that. Infinite delegation loops waste resources and produce garbage.
-- **Timeout.** If the Codex process has been running for more than 15 minutes with no new log output, assume it is stuck. Kill it (`taskkill /F /IM codex.exe /T`), report the timeout to the user, and do not retry automatically.
-- **No self-workspace editing.** Never point Codex at your own workspace directory. Always target the actual project directory the user's task is about.
+- **Recovery.** Inspect the actual result and reconcile uncertain effects before retrying. Correct the cause and continue the already-authorized task using task-appropriate bounded retry/backoff or the owner's selected budget. Ask only when recovery requires a material new decision or exceeds authorized scope.
+- **Process ownership.** Silence alone is not failure. Use provider events, liveness and the task's selected deadline; a confirmed stop must target only the invocation and its owned descendants. Reconcile effects before retrying.
+- **Target scope.** Use the actual authorized project or smallest useful subtree, including a project inside the Agent workspace when requested. Preserve unrelated runtime-owned files and existing user changes.
 - **Timestamped logs.** Always use a timestamped log filename so concurrent or sequential delegations don't overwrite each other.
 
 ## Important rules
@@ -86,4 +84,4 @@ If the task failed, read the error log carefully and either:
 - Always capture output to a log file so you can review what happened.
 - Do not blindly trust "success" — verify the output when possible.
 - If the task is very large, break it into smaller Codex invocations.
-- The workspace directory for Codex should be the target project directory, not your own workspace.
+- The workspace directory for Codex should be the authorized target project directory.

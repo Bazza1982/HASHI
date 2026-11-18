@@ -12,6 +12,7 @@ from adapters.openrouter_api import (
     _APIResult,
     _annotate_stream_exception,
     _iter_provider_stream_lines,
+    _live_camera_request_extensions,
     _provider_request_id,
     _read_http_error_body,
     _request_wire_evidence,
@@ -106,7 +107,8 @@ async def call_native_chat(adapter, payload, headers, on_stream_event) -> _APIRe
     }
     guard = adapter._new_her_v2_stream_inactivity_guard()
     async with adapter.client.stream(
-        "POST", adapter._chat_completions_url(), json=payload, headers=headers
+        "POST", adapter._chat_completions_url(), json=payload, headers=headers,
+        **_live_camera_request_extensions(payload),
     ) as response:
         await _read_http_error_body(response)
         capacity_error = _native_capacity_error(response)

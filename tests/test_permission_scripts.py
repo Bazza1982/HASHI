@@ -1,5 +1,6 @@
 """Offline script scope and Worker entry behavior; no OS sandbox is claimed."""
 import base64
+import json
 from dataclasses import asdict
 from hashlib import sha256
 import sys
@@ -136,6 +137,91 @@ def test_fixed_worker_captures_only_its_script_output_and_restores_process_strea
     assert (tmp_path / "stdout.txt").read_text(encoding="utf-8") == "finished\n"
     assert (tmp_path / "outputs/result.txt").read_text(encoding="utf-8") == "SNAPSHOT"
     assert (tmp_path / "inputs/input.txt").read_text(encoding="utf-8") == "snapshot"
+
+
+def test_fixed_worker_reports_potentially_truncated_standard_streams(tmp_path, monkeypatch):
+    """A successful process must not present capped output as certainly complete."""
+    from orchestrator.permissions.script_runner import RestrictedScriptRuns
+    from orchestrator.permissions.script_worker import main
+
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / "task.py").write_text(
+        "import sys\n"
+        "sys.stdout.write('x' * (128 * 1024 + 1))\n"
+        "sys.stderr.write('y' * (64 * 1024 + 1))\n", encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["script_worker.py", str(tmp_path)])
+    main()
+    monkeypatch.setattr(
+        RestrictedScriptRuns, "_small_file",
+        staticmethod(lambda path, _maximum: path.read_bytes()),
+    )
+    collector = RestrictedScriptRuns.__new__(RestrictedScriptRuns)
+    result = json.loads(collector._collect(
+        {"scratch": tmp_path, "arguments": {"outputs": []}}, 0, False,
+    ))
+    assert result["state"] == "completed"
+    assert len(result["stdout"]) == 128 * 1024
+    assert len(result["stderr"]) == 64 * 1024
+    assert result["stdout_status"] == "possibly_truncated_at_capture_limit"
+    assert result["stderr_status"] == "possibly_truncated_at_capture_limit"
+
+    # The exact boundary is indistinguishable from a clipped stream.
+    (tmp_path / "stdout.txt").write_bytes(b"x" * (128 * 1024))
+    (tmp_path / "stderr.txt").write_bytes(b"y" * (64 * 1024 - 1))
+    result = json.loads(collector._collect(
+        {"scratch": tmp_path, "arguments": {"outputs": []}}, 0, False,
+    ))
+    assert result["stdout_status"] == "possibly_truncated_at_capture_limit"
+    assert "stderr_status" not in result
+
+
+def test_script_result_budget_discloses_both_omitted_streams(tmp_path, monkeypatch):
+    from orchestrator.permissions.script_runner import RestrictedScriptRuns
+
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / "stdout.txt").write_bytes(b"\0" * (128 * 1024))
+    (tmp_path / "stderr.txt").write_bytes(b"\0" * (64 * 1024))
+    monkeypatch.setattr(
+        RestrictedScriptRuns, "_small_file",
+        staticmethod(lambda path, _maximum: path.read_bytes()),
+    )
+    collector = RestrictedScriptRuns.__new__(RestrictedScriptRuns)
+    result = json.loads(collector._collect(
+        {"scratch": tmp_path, "arguments": {"outputs": []}}, 0, False,
+    ))
+    assert result["stdout_status"] == "omitted_for_result_budget"
+    assert result["stderr_status"] == "omitted_for_result_budget"
+    assert "omitted" in result["stdout"].lower()
+    assert "omitted" in result["stderr"].lower()
+
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native held-file read")
+def test_script_capture_status_survives_native_read_and_result_rendering(tmp_path):
+    from types import SimpleNamespace
+
+    from orchestrator.permissions.file_results import render_helper_result
+    from orchestrator.permissions.script_runner import RestrictedScriptRuns
+
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / "stdout.txt").write_bytes(b"x" * (128 * 1024))
+    (tmp_path / "stderr.txt").write_bytes(b"normal")
+    collector = RestrictedScriptRuns.__new__(RestrictedScriptRuns)
+    payload = collector._collect(
+        {"scratch": tmp_path, "arguments": {"outputs": []}}, 0, False,
+    )
+    rendered = render_helper_result(
+        SimpleNamespace(tool_name="run_script"), {},
+        {"data": base64.b64encode(payload.encode("utf-8")).decode(), "outcome": "succeeded"},
+    )
+    result = json.loads(rendered)
+    assert result["stdout_status"] == "possibly_truncated_at_capture_limit"
+    assert result["stderr"] == "normal"
+    assert "stderr_status" not in result
+
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native held input handle")

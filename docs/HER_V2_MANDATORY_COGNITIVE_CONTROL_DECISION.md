@@ -2,6 +2,11 @@
 
 # HERV2 Mandatory Cognitive Control Decision
 
+> Superseded on 2026-11-17 by the approved remediation plan: semantic cycle
+> detection is advisory and cannot withhold authorized tools or force a
+> decision. This document retains the earlier decision as historical context;
+> current behavior is in the product design section 3.2.2.
+
 | Field | Accepted value |
 |---|---|
 | Status | Accepted; permanent safety invariant |

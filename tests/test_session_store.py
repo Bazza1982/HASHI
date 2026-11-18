@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,8 @@ import pytest
 from orchestrator import runtime_session
 from orchestrator.frontend_contracts import build_frontend_ingress_envelope
 from orchestrator.session_store import (
+    ConversationContinuityBinding,
+    ExistingRunNotFound,
     IdempotencyConflict,
     SessionConflict,
     SessionNotFound,
@@ -25,6 +28,27 @@ from tools.registry import ToolRegistry
 
 def _store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
+
+
+def test_replay_only_checks_request_identity_and_never_creates_a_run(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    args = dict(session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+                request_id="original", text="do this once", source="session-api",
+                idempotency_key="same-key")
+    with pytest.raises(ExistingRunNotFound):
+        store.accept_run(**args, replay_only=True)
+    assert store.find_run_by_idempotency(
+        session_id=session["session_id"], owner_id="user:7", idempotency_key="same-key"
+    ) is None
+    first = store.accept_run(**args)
+    retry = store.accept_run(**dict(args, request_id="retry"), replay_only=True)
+    assert retry.replayed and retry.run_id == first.run_id and retry.request_id == "original"
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(**dict(args, text="different action"), replay_only=True)
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(**args, expected_context_generation=first.context_generation + 1,
+                         replay_only=True)
 
 
 def test_idle_maintenance_does_not_take_a_sqlite_write_lock(tmp_path, monkeypatch):
@@ -47,6 +71,32 @@ def test_idle_maintenance_does_not_take_a_sqlite_write_lock(tmp_path, monkeypatc
         statement.strip().upper().startswith("BEGIN IMMEDIATE")
         for statement in statements
     )
+
+
+def test_deferred_maintenance_installs_replay_lookup_index_for_existing_schema(tmp_path):
+    store = _store(tmp_path)
+    session = store.ensure_default_session(owner_id="user:7", agent_id="lily")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="legacy-index", text="keep this", source="telegram",
+        idempotency_key="telegram:one",
+    )
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("DROP INDEX runs_agent_idempotency")
+    reopened = _store(tmp_path)
+    with sqlite3.connect(store.db_path) as connection:
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(runs)")}
+    assert "runs_agent_idempotency" not in indexes
+
+    reopened.run_deferred_maintenance()
+
+    with sqlite3.connect(store.db_path) as connection:
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(runs)")}
+    assert "runs_agent_idempotency" in indexes
+    restored = reopened.find_run_by_agent_idempotency(
+        owner_id="user:7", agent_id="lily", idempotency_key="telegram:one"
+    )
+    assert restored["run_id"] == accepted.run_id
 
 
 def test_terminal_failure_exposes_bounded_effect_reconciliation(tmp_path):
@@ -317,11 +367,11 @@ def test_failed_run_retains_owner_scoped_provider_details_after_reopen(tmp_path,
         )
 
 
-def test_attachment_stage_idempotency_reuses_metadata_and_rejects_conflicts(tmp_path):
+@pytest.mark.parametrize("payload", [b"stable attachment bytes", b""])
+def test_attachment_stage_idempotency_reuses_metadata_and_rejects_conflicts(tmp_path, payload):
     store = _store(tmp_path)
     owner = "user:7"
     session = store.ensure_default_session(owner_id=owner, agent_id="lily")
-    payload = b"stable attachment bytes"
     metadata = {
         "session_id": session["session_id"],
         "owner_id": owner,
@@ -348,6 +398,12 @@ def test_attachment_stage_idempotency_reuses_metadata_and_rejects_conflicts(tmp_
         owner_id=owner,
         attachment_id=first["attachment_id"],
     )
+    stored_metadata, stored_payload = store.attachment_bytes(
+        session_id=session["session_id"], owner_id=owner,
+        attachment_id=first["attachment_id"],
+    )
+    assert stored_metadata["size_bytes"] == len(payload)
+    assert stored_payload == payload
     committed_replay = store.stage_attachment(**metadata)
     assert committed_replay["attachment_id"] == first["attachment_id"]
     assert committed_replay["state"] == "committed"
@@ -505,6 +561,15 @@ def test_message_bound_attachment_becomes_indefinite(tmp_path):
             (attachment["attachment_id"],),
         ).fetchone()
     assert tuple(row) == (1, None)
+    # A visible message remains retrievable long after the temporary TTL.
+    assert store.cleanup_attachments(now=datetime(2100, 1, 1, tzinfo=timezone.utc)) == []
+    metadata, content = store.attachment_bytes(
+        session_id=session["session_id"],
+        owner_id=owner,
+        attachment_id=attachment["attachment_id"],
+    )
+    assert bool(metadata["retention_indefinite"]) is True
+    assert content == payload
 
 
 @pytest.mark.asyncio
@@ -1520,7 +1585,7 @@ def test_conversation_continuity_import_is_atomic_on_mid_insert_failure(tmp_path
     assert imported["imported_messages"] == 2
 
 
-def test_conversation_continuity_rejects_owner_change_and_rolls_back_only_imported_history(tmp_path):
+def test_conversation_continuity_requires_bound_owner_mapping_and_rolls_back_only_imported_history(tmp_path):
     source = SessionStore(tmp_path / "source" / "state" / "sessions.sqlite3", instance_id="HASHI2")
     source_session = source.ensure_default_session(owner_id="user:7", agent_id="lily")
     _complete(
@@ -1550,18 +1615,33 @@ def test_conversation_continuity_rejects_owner_change_and_rolls_back_only_import
             history_mode="move",
         )
 
+    binding = ConversationContinuityBinding(
+        source_owner_id="user:7", target_owner_id="user:8",
+        source_instance="HASHI2", target_instance="HASHI3",
+        source_agent_id="lily", target_agent_id="kasumi-clone",
+        transfer_id="transfer-0002", history_mode="copy",
+        capsule_digest=capsule["capsule_digest"],
+    )
+    with pytest.raises(SessionConflict, match="binding"):
+        target.import_conversation_continuity(
+            capsule, owner_id="user:8", agent_id="kasumi-clone",
+            transfer_id="transfer-0002", history_mode="copy",
+            owner_binding=replace(binding, target_instance="HASHI9"),
+        )
     imported = target.import_conversation_continuity(
         capsule,
-        owner_id="user:7",
+        owner_id="user:8",
         agent_id="kasumi-clone",
         transfer_id="transfer-0002",
         history_mode="copy",
+        owner_binding=binding,
     )
-    session = target.get_session(imported["target_session_ids"][0], owner_id="user:7")
+    assert imported["source_owner_id"] == "user:7"
+    session = target.get_session(imported["target_session_ids"][0], owner_id="user:8")
     _complete(
         target,
         session_id=session["session_id"],
-        owner_id="user:7",
+        owner_id="user:8",
         agent_id="kasumi-clone",
         request_id="after-import",
         key="after-import",
@@ -1570,7 +1650,7 @@ def test_conversation_continuity_rejects_owner_change_and_rolls_back_only_import
     )
 
     rolled_back = target.rollback_conversation_continuity("transfer-0002")
-    remaining = target.messages(session["session_id"], owner_id="user:7")
+    remaining = target.messages(session["session_id"], owner_id="user:8")
 
     assert rolled_back["removed_messages"] == 2
     assert [item["text"] for item in remaining] == ["target survives", "still here"]
@@ -2659,6 +2739,44 @@ def test_accept_run_excludes_only_the_server_request_id_from_client_intent(
                 idempotency_key="same-client-intent",
                 instance_id="HASHI2",
             ),
+        )
+
+
+def test_message_age_observation_does_not_break_retry_idempotency(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    context = _frontend_context(
+        "req-age-first", session_id=session["session_id"], idempotency_key="age-retry"
+    )
+    context["message_age"] = {
+        "reason": "fresh", "originated_at": "2026-11-17T00:00:00Z",
+        "received_at": "2026-11-17T00:00:10Z", "age_seconds": 10,
+    }
+    first = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-age-first", text="same request", source="session-api",
+        idempotency_key="age-retry", message_context=context,
+    )
+    retry_context = _frontend_context(
+        "req-age-retry", session_id=session["session_id"], idempotency_key="age-retry"
+    )
+    retry_context["message_age"] = {
+        "reason": "stale", "originated_at": "2026-11-17T00:00:00Z",
+        "received_at": "2026-11-17T00:02:00Z", "age_seconds": 120,
+    }
+    retry = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="lily",
+        request_id="req-age-retry", text="same request", source="session-api",
+        idempotency_key="age-retry", message_context=retry_context,
+    )
+    assert retry.replayed and retry.run_id == first.run_id
+    assert store.get_run(first.run_id, owner_id=owner)["message_context"]["message_age"] == context["message_age"]
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(
+            session_id=session["session_id"], owner_id=owner, agent_id="lily",
+            request_id="req-age-conflict", text="different request", source="session-api",
+            idempotency_key="age-retry", message_context=retry_context,
         )
 
 
@@ -4077,3 +4195,61 @@ def test_hchat_idempotency_replays_across_transport_specific_envelopes(tmp_path)
             idempotency_key=logical_message["idempotency_key"],
             message_context={"hchat_message": conflicting},
         )
+
+
+@pytest.mark.parametrize("field", ["conversation_id", "in_reply_to", "to_instance"])
+def test_hchat_cross_transport_retry_cannot_rebind_the_conversation_or_target(tmp_path, field):
+    store = _store(tmp_path)
+    session = store.resolve_primary_session(owner_id="user:7", agent_id="lily", establish=True)
+    logical = {"message_id": "bound-message", "message_type": "agent_message",
+        "idempotency_key": "hchat:bound-message", "payload_digest": "sha256:" + "a" * 64,
+        "conversation_id": "conversation-1", "in_reply_to": "request-1", "to_instance": "HASHI3"}
+    store.accept_run(session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+        request_id="request-original", text="protocol envelope", source="protocol:message",
+        idempotency_key=logical["idempotency_key"], message_context={"hchat_message": logical})
+    changed = dict(logical)
+    changed[field] = "different"
+    with pytest.raises(IdempotencyConflict):
+        store.accept_run(session_id=session["session_id"], owner_id="user:7", agent_id="lily",
+            request_id="request-retry", text="exchange envelope", source="hchat-exchange",
+            idempotency_key=logical["idempotency_key"], message_context={"hchat_message": changed})
+
+
+
+def test_open_stream_attachment_rejects_changed_contents_and_wrong_owner(tmp_path):
+    store = _store(tmp_path)
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="lily")
+    source = tmp_path / "selected.txt"
+    source.write_bytes(b"before")
+    staged = store.stage_attachment(
+        session_id=session["session_id"], owner_id=owner,
+        filename="selected.txt", media_type="text/plain", size_bytes=6,
+        sha256=hashlib.sha256(b"before").hexdigest(),
+    )
+    source.write_bytes(b"after!")
+    with source.open("rb") as handle:
+        with pytest.raises(SessionNotFound):
+            store.upload_attachment_stream(
+                session_id=session["session_id"], owner_id="user:other",
+                attachment_id=staged["attachment_id"], source=handle,
+            )
+        with pytest.raises(SessionConflict, match="digest"):
+            store.upload_attachment_stream(
+                session_id=session["session_id"], owner_id=owner,
+                attachment_id=staged["attachment_id"], source=handle,
+            )
+    assert not list(store.attachment_files_root.glob("*.partial"))
+
+def test_continuity_digest_preserves_canonical_bytes_without_serializing_whole_document(monkeypatch):
+    from orchestrator import session_store as owner
+
+    payload = {"type": "history", "sessions": [{"text": "汉字 😀 " * 150_000}],
+               "capsule_digest": "ignored-existing-value"}
+    body = {key: value for key, value in payload.items() if key != "capsule_digest"}
+    encoded = json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    expected = hashlib.sha256(encoded).hexdigest()
+    def reject_whole_document(_value):
+        raise AssertionError("continuity hashing must not serialize the entire document at once")
+    monkeypatch.setattr(owner, "_json", reject_whole_document)
+    assert owner.conversation_continuity_digest(payload) == expected

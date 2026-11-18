@@ -15,13 +15,8 @@ from tools.developer_toolkit import _tool_find_selections
 _STARTER_TOOLS = (
     "tool_find", "project_locate", "code_search", "git_inspect",
     "file_manage", "text_replace", "data_inspect", "file_read", "shell",
-    "ask_user", "get_user_answer",
+    "ask_user", "get_user_answer", "tool_catalog", "tool_output_read",
 )
-
-# Bounded request-local presentation: later tool_find discoveries accumulate
-# onto earlier ones (never silently drop an already-revealed, still-authorised
-# schema), capped so the model payload stays compact for small models.
-_MAX_DISCOVERED = 48
 
 
 class OnDemandToolView:
@@ -53,7 +48,10 @@ class OnDemandToolView:
         # Ignore Ollama's historical ["core"] presentation tier *only* in
         # this opt-in view; the original registry still validates permission.
         all_definitions = self._base.get_tool_definitions(tiers=None)
-        visible = self._starter | self._discovered
+        # Project the current base catalogue every time: a Run-bound result
+        # reader may appear after this view was created, and revoked tools
+        # must disappear without retaining separate authority here.
+        visible = set(_STARTER_TOOLS) | self._starter | self._discovered
         return [
             item for item in all_definitions
             if str((item.get("function") or {}).get("name") or "") in visible
@@ -78,8 +76,6 @@ class OnDemandToolView:
         revealed = set(_tool_find_selections(arguments, available))
         # Accumulate within this request and keep only still-authorised names.
         self._discovered = (self._discovered | revealed) & set(available)
-        if len(self._discovered) > _MAX_DISCOVERED:
-            self._discovered = set(sorted(self._discovered)[:_MAX_DISCOVERED])
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
         result = await self._base.execute(tool_name, arguments, tool_call_id)
@@ -109,3 +105,4 @@ def on_demand_requested(
         return False
     options = tool_options.get("herv3_tool_presentation")
     return isinstance(options, dict) and options.get("mode") == "on_demand"
+# HASHI-Fingerprint: hfp_d1e42e5767954415972dfe81ecff118e

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -21,6 +22,9 @@ from .models import (
 
 class HERv2ConfigurationError(ValueError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 REMOVED_HER_V2_LIMIT_FIELDS = frozenset(
@@ -81,47 +85,21 @@ REMOVED_HER_V2_SAFETY_SWITCH_FIELDS = frozenset(
 )
 
 
-def _reject_removed_limits(
+def _ignore_retired_fields(
     raw: Mapping[str, Any],
     *,
     fields: frozenset[str],
     location: str,
-) -> None:
-    found: set[str] = set()
+) -> dict[str, Any]:
+    """Ignore retired controls only at the schema level that owned them.
 
-    def visit(value: Any, prefix: str = "") -> None:
-        if isinstance(value, Mapping):
-            for key, item in value.items():
-                name = str(key)
-                path = f"{prefix}.{name}" if prefix else name
-                if name in fields:
-                    found.add(path)
-                visit(item, path)
-        elif isinstance(value, (list, tuple)):
-            for index, item in enumerate(value):
-                visit(item, f"{prefix}[{index}]")
-
-    visit(raw)
-    if not found:
-        return
-    raise HERv2ConfigurationError(
-        f"{location} contains removed execution limit field(s): "
-        f"{', '.join(sorted(found))}. HER v2 permits the meaningful-progress "
-        "liveness detector, one typed fresh-connection provider recovery, and the "
-        "explicitly designed Reviewed remediation boundary; legacy generic ceilings "
-        "must not be applied to Execution, Replanning, or Assured Review."
-    )
-
-
-def _reject_removed_safety_switches(raw: Mapping[str, Any]) -> None:
-    found = REMOVED_HER_V2_SAFETY_SWITCH_FIELDS.intersection(raw)
-    if not found:
-        return
-    raise HERv2ConfigurationError(
-        "her_v2 contains removed safety switch field(s): "
-        f"{', '.join(sorted(found))}. Cognitive control is permanently active "
-        "for every HER v2 Agent and cannot be configured or disabled."
-    )
+    Matching names in nested provider data are not necessarily HER controls.
+    Keep the caller's input unchanged and never log field values.
+    """
+    found = fields.intersection(raw)
+    if found:
+        logger.warning("Ignoring retired HER configuration fields at %s: %s", location, ", ".join(sorted(found)))
+    return {key: value for key, value in raw.items() if key not in found}
 
 
 @dataclass(frozen=True)
@@ -143,11 +121,12 @@ class ProviderProfile:
             raise HERv2ConfigurationError(
                 f"profile {self.name!r} must select a model"
             )
-        _reject_removed_limits(
-            self.options,
-            fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
-            location=f"her_v2.profiles.{self.name}.options",
-        )
+        if not isinstance(self.options, Mapping):
+            raise HERv2ConfigurationError(f"profile {self.name!r} options must be an object")
+        object.__setattr__(self, "options", _ignore_retired_fields(
+            self.options, fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
+            location=f"her_v2.profiles.{self.name}",
+        ))
 
 
 @dataclass(frozen=True)
@@ -323,12 +302,26 @@ class HERv2Config:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> HERv2Config:
-        _reject_removed_safety_switches(raw)
-        _reject_removed_limits(
-            raw,
-            fields=REMOVED_HER_V2_LIMIT_FIELDS,
+        raw = _ignore_retired_fields(
+            raw, fields=REMOVED_HER_V2_LIMIT_FIELDS | REMOVED_HER_V2_SAFETY_SWITCH_FIELDS,
             location="her_v2",
         )
+        # Normalize legacy profiles before V3 chooses its main and auxiliary
+        # lanes. Nested application/provider objects are intentionally opaque.
+        for name in ("main", "auxiliary"):
+            if isinstance(raw.get(name), Mapping):
+                raw[name] = _ignore_retired_fields(
+                    raw[name], fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
+                    location=f"her_v2.{name}",
+                )
+        if isinstance(raw.get("profiles"), Mapping):
+            raw["profiles"] = {
+                name: _ignore_retired_fields(
+                    value, fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
+                    location=f"her_v2.profiles.{name}",
+                ) if isinstance(value, Mapping) else value
+                for name, value in raw["profiles"].items()
+            }
         try:
             raw = normalise_v3_config(raw)
         except (TypeError, ValueError) as exc:
@@ -340,11 +333,6 @@ class HERv2Config:
         for name, value in profiles_raw.items():
             if not isinstance(value, Mapping):
                 raise HERv2ConfigurationError(f"profile {name!r} must be an object")
-            _reject_removed_limits(
-                value,
-                fields=REMOVED_HER_V2_PROFILE_LIMIT_FIELDS,
-                location=f"her_v2.profiles.{name}",
-            )
             known = {
                 "engine",
                 "model",

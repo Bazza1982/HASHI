@@ -501,3 +501,113 @@ async def test_xai_api_adapter_generate_imagine_response(tmp_path):
 
     assert response.is_success is True
     assert "https://example.com/image.png" in response.text
+
+
+def test_xai_responses_keeps_live_camera_structured_and_expires_only_camera(tmp_path):
+    import base64
+    from datetime import datetime, timedelta, timezone
+    from orchestrator.frontend_call.transient_live_media import (
+        bind_live_frames, live_frames_for, project_live_frame_messages,
+    )
+    from orchestrator.multimodal_contract import InputCapability
+
+    config = SimpleNamespace(name="camera", workspace_dir=tmp_path, system_md=None, model="grok-4.5")
+    adapter = XaiApiAdapter(config, SimpleNamespace(
+        hermes_home=None, xai_api_base_url="https://api.x.ai/v1", xai_use_responses_api=False,
+    ), api_key="static")
+    adapter.resolve_input_capability = lambda: InputCapability(
+        provider="xai-api", model="grok-4.5", input_modalities=frozenset({"text", "image"}),
+        input_transports={"image": ("data_url",)}, limits={},
+    )
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    ordinary = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"ordinary").decode()
+    camera = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"camera").decode()
+    now = datetime.now(timezone.utc)
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "camera", [{
+        "data_url": camera, "captured_at": now.isoformat(), "frame_sequence": 1,
+    }], freshness_seconds=1)
+    frames = live_frames_for(runtime, "camera", now=now)
+    messages = [
+        {"role": "system", "content": "system policy"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Compare."},
+            {"type": "image_url", "image_url": {"url": ordinary}},
+        ]},
+    ]
+    adapter._append_transient_images(messages, frames)
+    payload = adapter._build_payload(messages)
+    assert isinstance(payload["input"], list)
+    parts = payload["input"][0]["content"]
+    assert [part["image_url"] for part in parts if part["type"] == "input_image"] == [ordinary, camera]
+    assert "system policy" in json.dumps(parts)
+    assert not any(camera in part.get("text", "") for part in parts)
+
+    projected, omitted = project_live_frame_messages(
+        payload["input"], retain_tags=True, now=now + timedelta(seconds=2),
+    )
+    assert omitted == 1
+    parts = projected[0]["content"]
+    assert [part["image_url"] for part in parts if part["type"] == "input_image"] == [ordinary]
+    assert any(part["type"] == "input_text" and "expired" in part.get("text", "").lower() for part in parts)
+
+
+@pytest.mark.asyncio
+async def test_xai_auth_refresh_does_not_resend_expired_camera_or_log_it(tmp_path):
+    import asyncio
+    import base64
+    import httpx
+    from datetime import datetime, timezone
+    from orchestrator.frontend_call.transient_live_media import bind_live_frames, live_frames_for
+    from orchestrator.multimodal_contract import InputCapability
+
+    config = SimpleNamespace(name="camera", workspace_dir=tmp_path, system_md=None, model="grok-4.5")
+    adapter = XaiApiAdapter(config, SimpleNamespace(
+        hermes_home=None, xai_api_base_url="https://api.x.ai/v1", xai_use_responses_api=False,
+    ), api_key="static")
+    adapter._base_url = "https://api.x.ai/v1"
+    adapter._bearer_token = "test-only"
+    adapter.resolve_input_capability = lambda: InputCapability(
+        provider="xai-api", model="grok-4.5", input_modalities=frozenset({"text", "image"}),
+        input_transports={"image": ("data_url",)}, limits={},
+    )
+    jpeg = bytes.fromhex("ffd8ffc00008080010001000ffd9")
+    ordinary = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"ordinary").decode()
+    camera = "data:image/jpeg;base64," + base64.b64encode(jpeg + b"camera").decode()
+    now = datetime.now(timezone.utc)
+    runtime = SimpleNamespace()
+    bind_live_frames(runtime, "camera", [{
+        "data_url": camera, "captured_at": now.isoformat(), "frame_sequence": 1,
+    }], freshness_seconds=1)
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Compare."},
+        {"type": "image_url", "image_url": {"url": ordinary}},
+    ]}]
+    adapter._append_transient_images(messages, live_frames_for(runtime, "camera", now=now))
+    payload = adapter._build_payload(messages)
+    requests = []
+    async def transport(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(401, json={"error": "expired"}, request=request)
+        return httpx.Response(200, json={"output_text": "Finished."}, request=request)
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+    async def refresh(*, force_refresh=False):
+        assert force_refresh
+        await asyncio.sleep(1.2)
+        adapter._bearer_token = "fresh-test"
+    adapter._resolve_bearer = refresh
+    evidence = []
+    adapter._provider_protocol_forensic_sink = lambda kind, record: evidence.append(record) or "test:wire"
+
+    result = await adapter._call_api_once(payload, adapter._xai_headers(), None)
+
+    assert result.text == "Finished."
+    assert len(requests) == 2
+    assert camera in json.dumps(requests[0])
+    assert camera not in json.dumps(requests[1])
+    assert ordinary in json.dumps(requests[1])
+    assert "expired" in json.dumps(requests[1]).lower()
+    assert camera not in json.dumps(evidence)
+    assert ordinary in json.dumps(evidence)
+    await adapter.client.aclose()

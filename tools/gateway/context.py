@@ -136,6 +136,8 @@ class GatewayContext:
             .rstrip("/")
         )
         global_config = effective_audit.get("global_config")
+        if global_config is not None:
+            audit["_scheduler_governed"] = getattr(global_config, "deployment_profile", "personal") != "personal"
         if allowed_tools.intersection({"ask_user", "get_user_answer"}) and audit.get("request_id") and registry.secrets.get("workbench_admin_token"):
             from orchestrator.run_questions import issue_tool_token
             scoped_secrets["run_question_token"] = issue_tool_token(registry.secrets["workbench_admin_token"],
@@ -221,7 +223,7 @@ class GatewayContext:
                 if global_config is not None
                 else {}
             ),
-            owner_tool_definitions=(registry.get_tool_definitions()
+            owner_tool_definitions=(registry.get_tool_definitions_with_audit_context(effective_audit)
                 if audit.get("tool_gateway_required") else []),
             canonical_audit=(
                 {} if audit.get("tool_gateway_required") else _json_safe(canonical.descriptor()) or {}

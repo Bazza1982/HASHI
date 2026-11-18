@@ -94,6 +94,25 @@ def test_live_core_private_and_service_paths_cannot_be_granted_by_a_broad_worksp
     assert not permits(code / next(iter(CORE_SOURCE_PATHS)), "write")
     assert not permits(runtime / "Lib" / "module.py", "write")
 
+    from orchestrator.permissions.descriptors import describe_tool
+
+    upload = describe_tool(
+        "http_request",
+        {"url": "https://api.example.com/upload", "method": "POST",
+         "body_file": str(bridge / "secrets.json")},
+        cwd=tmp_path, read_roots=(tmp_path,),
+    )
+    file_scope = next(scope for scope in upload.scopes if scope.kind == "file")
+    assert not policy.permits(file_scope)
+
+    download = describe_tool(
+        "http_request",
+        {"url": "https://api.example.com/data", "response_file": str(bridge / "secrets.json")},
+        cwd=tmp_path, read_roots=(tmp_path,),
+    )
+    file_scope = next(scope for scope in download.scopes if scope.kind == "file")
+    assert not policy.permits(file_scope)
+
 
 @pytest.mark.asyncio
 async def test_failed_executor_close_attempts_all_owners_and_is_retryable():

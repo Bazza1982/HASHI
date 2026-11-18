@@ -75,6 +75,36 @@ def test_vision_tool_is_explicitly_opt_in(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_wildcard_exposes_configured_local_vision_and_honours_opt_out(tmp_path, monkeypatch):
+    image_path = tmp_path / "photo.png"
+    Image.new("RGB", (32, 24), "blue").save(image_path)
+    provider = _FakeProvider()
+    monkeypatch.setattr("tools.vision_inspect.LlamaCppVisionProvider", lambda _options: provider)
+    options = {"vision_inspect": {"endpoint": "http://127.0.0.1:8081/v1"}}
+    registry = ToolRegistry(["*"], tmp_path, tmp_path, {}, tool_options=options)
+    assert registry.is_allowed("vision_inspect")
+    assert "vision_inspect" in {item["function"]["name"] for item in registry.get_tool_definitions()}
+    result = await registry.execute("vision_inspect", {
+        "image_ref": str(image_path), "question": "What is happening?",
+    })
+    assert not result.is_error
+    assert json.loads(result.output)["answer"] == "A person is repairing a bicycle."
+
+    disabled = ToolRegistry(["*", "vision_inspect"], tmp_path, tmp_path, {}, tool_options={
+        "vision_inspect": {"endpoint": "http://127.0.0.1:8081/v1", "enabled": False},
+    })
+    assert not disabled.is_allowed("vision_inspect")
+    assert "vision_inspect" not in {item["function"]["name"] for item in disabled.get_tool_definitions()}
+
+
+def test_wildcard_does_not_automatically_enable_remote_vision(tmp_path):
+    registry = ToolRegistry(["*"], tmp_path, tmp_path, {}, tool_options={
+        "vision_inspect": {"provider": "openrouter", "endpoint": "https://example.com/v1"},
+    })
+    assert not registry.is_allowed("vision_inspect")
+
+
+@pytest.mark.asyncio
 async def test_vision_inspect_resolves_attachment_and_returns_bounded_json(tmp_path):
     media_root = tmp_path / "remote"
     image_ref = _write_attachment(media_root)
@@ -167,7 +197,10 @@ async def test_llama_cpp_provider_sends_openai_multimodal_request():
 
 def test_llama_cpp_provider_blocks_unlisted_remote_host():
     with pytest.raises(VisionInspectError, match="allowed_hosts"):
-        LlamaCppVisionProvider({"endpoint": "http://example.com:8081/v1"})
+        LlamaCppVisionProvider({
+            "endpoint": "http://example.com:8081/v1",
+            "allowed_hosts": ["different.example"],
+        })
 
 
 def test_vision_provider_uses_unbounded_configurable_idle_timeout():
@@ -366,3 +399,232 @@ def test_backend_manager_builds_scoped_vision_media_roots(tmp_path):
         tmp_path / "media" / "text-agent",
         tmp_path / "state" / "remote_attachments" / "hashi1",
     ]
+
+
+def test_backend_manager_projects_configured_wildcard_media_capabilities(tmp_path):
+    from types import SimpleNamespace
+
+    manager = _manager(tmp_path)
+    adapter_config = AgentConfig(
+        name="text-agent", engine="her-v2", workspace_dir=tmp_path / "workspace",
+        system_md=tmp_path / "agent.md", model="text-model", is_active=True,
+    )
+    backend = SimpleNamespace(tool_registry=None)
+    manager._attach_tool_registry({
+        "allowed": ["*"], "vision_inspect": {"endpoint": "http://127.0.0.1:8081/v1"},
+    }, adapter_config, backend=backend)
+    assert backend.tool_registry is not None
+    assert backend.tool_registry.is_allowed("media_read")
+    assert backend.tool_registry.is_allowed("vision_inspect")
+
+
+
+@pytest.mark.asyncio
+async def test_vision_long_question_and_complete_result_are_recoverable(tmp_path, monkeypatch):
+    source = tmp_path / "long-vision.png"
+    Image.new("RGB", (24, 24), "blue").save(source)
+    question = ("question detail " * 220) + "QUESTION-TAIL"
+    answer = ("answer detail " * 900) + "ANSWER-TAIL"
+    observations = [f"observation-{i}-" + ("x" * 1600) for i in range(25)]
+    captured = {}
+
+    def handler(request):
+        captured["request"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+            "answer": answer, "observations": observations, "uncertainties": ["uncertain-tail"],
+        })}}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = LlamaCppVisionProvider({"endpoint": "http://127.0.0.1:8081/v1"}, client=client)
+    monkeypatch.setattr("tools.vision_inspect.LlamaCppVisionProvider", lambda _options: provider)
+    registry = ToolRegistry(
+        ["vision_inspect"], tmp_path, tmp_path, {},
+        audit_context={"instance_id": "NP", "agent_name": "fixture", "owner_id": "owner",
+                       "hashi_session_id": "session", "hashi_run_id": "run", "request_id": "request"},
+    )
+    try:
+        first = await registry.execute("vision_inspect", {"image_ref": str(source), "question": question})
+        assert not first.is_error, first.output
+        assert captured["request"]["messages"][0]["content"][0]["text"].endswith(question)
+        reference = first.details["output_continuation"]
+        parts, offset = [], 0
+        for _ in range(100):
+            result = await registry.execute("tool_output_read", {"reference": reference, "offset": offset})
+            assert not result.is_error, result.output
+            page = json.loads(result.output)
+            parts.append(page["text"])
+            if page["complete"]:
+                break
+            offset = page["next_offset"]
+        else:
+            pytest.fail("vision result continuation did not terminate")
+        value = json.loads("".join(parts))
+        assert value["answer"] == answer
+        assert value["observations"] == observations
+        assert value["uncertainties"] == ["uncertain-tail"]
+        denied = await registry.execute_with_audit_context(
+            "tool_output_read", {"reference": reference, "offset": 0},
+            audit_context={"hashi_run_id": "other", "request_id": "other"},
+        )
+        assert denied.is_error and "ANSWER-TAIL" not in denied.output
+    finally:
+        await client.aclose()
+@pytest.mark.asyncio
+async def test_configured_remote_vision_endpoint_needs_no_duplicate_allowlist():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "visible"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = LlamaCppVisionProvider(
+            {"endpoint": "https://vision.example/v1"}, client=client
+        )
+        result = await provider.inspect(image_bytes=b"fixture", question="Describe", detail="brief")
+
+    assert result.answer == "visible"
+    assert len(seen) == 1
+    assert str(seen[0].url) == "https://vision.example/v1/chat/completions"
+
+
+def test_vision_enterprise_network_policy_uses_configured_host_not_model_arguments(tmp_path):
+    registry = ToolRegistry(
+        ["vision_inspect"], tmp_path, tmp_path, {},
+        tool_options={"vision_inspect": {"endpoint": "https://vision.example/v1"}},
+        audit_context={"enterprise_network_allow_hosts": ["other.example"]},
+    )
+    denied = registry._check_enterprise_network_gate(
+        "vision_inspect", {"url": "https://other.example"}, tool_call_id="fixture"
+    )
+    assert denied is not None
+    assert "vision.example" in denied.output
+
+
+@pytest.mark.asyncio
+async def test_vision_does_not_follow_redirects_even_with_injected_following_client():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("Authorization"), request.content))
+        return httpx.Response(307, headers={"location": "https://other.example/receive"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle), follow_redirects=True) as client:
+        provider = OpenRouterVisionProvider(
+            {"endpoint": "https://vision.example/v1", "allowed_hosts": ["vision.example"]},
+            secrets={"openrouter_key": "fixture-key"}, client=client,
+        )
+        with pytest.raises(VisionInspectError):
+            await provider.inspect(image_bytes=b"private image", question="Describe", detail="brief")
+
+    assert len(seen) == 1
+    assert seen[0][0] == "https://vision.example/v1/chat/completions"
+@pytest.mark.parametrize("endpoint", [
+    "ftp://vision.example/v1", "http://user:secret@vision.example/v1",
+    "http://vision.example:bad/v1", "http:///missing-host",
+])
+def test_vision_rejects_malformed_or_embedded_credential_endpoint(endpoint):
+    with pytest.raises(VisionInspectError):
+        LlamaCppVisionProvider({"endpoint": endpoint})
+
+
+def test_vision_explicit_empty_policy_keeps_remote_denied():
+    with pytest.raises(VisionInspectError, match="allowed_hosts"):
+        LlamaCppVisionProvider({"endpoint": "https://vision.example/v1", "allowed_hosts": []})
+    assert LlamaCppVisionProvider({"endpoint": "https://vision.example/v1",
+        "allowed_hosts": ["VISION.EXAMPLE"]}).endpoint == "https://vision.example/v1"
+
+
+@pytest.mark.asyncio
+async def test_vision_endpoint_preserves_configured_path_and_query():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "visible"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = LlamaCppVisionProvider(
+            {"endpoint": "https://VISION.example/v1/?mode=selected"}, client=client
+        )
+        await provider.inspect(image_bytes=b"fixture", question="Describe", detail="brief")
+
+    assert seen == ["https://vision.example/v1/chat/completions?mode=selected"]
+
+
+@pytest.mark.asyncio
+async def test_vision_registry_enforces_selected_network_policy_before_provider(tmp_path, monkeypatch):
+    photo = tmp_path / "fixture.png"
+    Image.new("RGB", (4, 4), "blue").save(photo)
+    calls = []
+
+    def construct(_options):
+        calls.append(True)
+        return _FakeProvider()
+
+    monkeypatch.setattr("tools.vision_inspect.LlamaCppVisionProvider", construct)
+    registry = ToolRegistry(
+        ["vision_inspect"], tmp_path, tmp_path, {},
+        tool_options={"vision_inspect": {"endpoint": "https://vision.example/v1"}},
+        audit_context={"enterprise_network_allow_hosts": ["other.example"]},
+    )
+    result = await registry.execute(
+        "vision_inspect", {"image_ref": str(photo), "question": "What is happening?",
+                           "url": "https://other.example"},
+    )
+    assert result.is_error
+    assert "vision.example" in result.output
+    assert not calls
+
+
+def test_vision_network_policies_intersect_for_selected_destination(tmp_path):
+    registry = ToolRegistry(
+        ["vision_inspect"], tmp_path, tmp_path, {},
+        tool_options={"vision_inspect": {"endpoint": "https://vision.example/v1"},
+                      "network": {"allow_hosts": ["vision.example"]}},
+        audit_context={"enterprise_network_allow_hosts": ["vision.example"]},
+    )
+    assert registry._check_enterprise_network_gate("vision_inspect", {}, tool_call_id="test") is None
+    registry.tool_options["network"]["allow_hosts"] = ["other.example"]
+    assert registry._check_enterprise_network_gate("vision_inspect", {}, tool_call_id="test") is not None
+@pytest.mark.asyncio
+async def test_vision_provider_error_does_not_expose_endpoint_query():
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = LlamaCppVisionProvider(
+            {"endpoint": "https://vision.example/v1?key=fixture-private"}, client=client,
+        )
+        with pytest.raises(VisionInspectError) as failure:
+            await provider.inspect(image_bytes=b"fixture", question="Describe", detail="brief")
+
+    assert "fixture-private" not in str(failure.value)
+    assert "403" in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_vision_rechecks_changed_selected_destination_at_dispatch(tmp_path, monkeypatch):
+    photo = tmp_path / "fixture.png"
+    Image.new("RGB", (4, 4), "blue").save(photo)
+    calls = []
+
+    def construct(_options):
+        calls.append(True)
+        return _FakeProvider()
+
+    monkeypatch.setattr("tools.vision_inspect.LlamaCppVisionProvider", construct)
+    registry = ToolRegistry(
+        ["vision_inspect"], tmp_path, tmp_path, {},
+        tool_options={"vision_inspect": {"endpoint": "https://approved.example/v1"}},
+        audit_context={"enterprise_network_allow_hosts": ["approved.example"]},
+    )
+    assert registry._check_enterprise_network_gate("vision_inspect", {}, tool_call_id="fixture") is None
+    registry.tool_options["vision_inspect"]["endpoint"] = "https://different.example/v1"
+    result = await registry._dispatch(
+        "vision_inspect", {"image_ref": str(photo), "question": "What is happening?"},
+        tool_call_id="fixture",
+    )
+    output = result.output if hasattr(result, "output") else result
+    assert output.startswith("Error: enterprise network egress denied")
+    assert calls == []

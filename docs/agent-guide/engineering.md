@@ -9,6 +9,11 @@ Choose the owning PCM, PAO, HERV3 or Frontend Connector boundary. Ordinary produ
 ## Distinctions
 A Git checkout, qualified artifact, running process and live acceptance are different evidence. A successful file save can have a durability warning; a stale revision cannot be retried as a new edit. Fingerprint records evidence and never replays effects.
 
+Codex preflight checks that its actual working directory exists; it does not
+enumerate unrelated workspace entries or fail a turn because an unused link is
+broken. A requested file or link is checked by its owning operation, under the
+same Workzone boundary, when it is accessed.
+
 ## Authoritative documents
 - [Architecture](../../ARCHITECTURE.md) and [engineering rules](../../AGENTS.md).
 - [Layered runtime boundaries](../HASHI_LAYERED_RUNTIME_BOUNDARIES.md).

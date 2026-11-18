@@ -2,8 +2,8 @@
 
 The repository that owns ``tui.py`` is always the launch instance.  Other
 instances are discovered exclusively through that instance's local Hashi
-Remote sidecar.  A peer is switchable only after a successful protocol
-handshake and only when it advertises the restricted TUI proxy capability.
+Remote sidecar. Discovery is a hint; the Remote proxy verifies the route and
+target when the user actually connects.
 """
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def local_workbench_urls(workbench_port: int) -> list[str]:
 
 @dataclass(frozen=True)
 class InstanceTarget:
-    """A verified route that can become the TUI's active instance."""
+    """A connection candidate; a remote candidate is verified on connection."""
 
     instance_id: str
     display_name: str
@@ -236,12 +236,10 @@ class InstanceResolver:
             properties = peer.get("properties") if isinstance(peer.get("properties"), dict) else {}
             handshake = str(properties.get("handshake_state") or peer.get("handshake_state") or "").lower()
             live_status = str(properties.get("live_status") or peer.get("live_status") or "unknown").lower()
-            handshake_ok = handshake == "handshake_accepted"
-            available = handshake_ok
-            if not handshake_ok:
-                reason = "handshake required"
-            else:
-                reason = ""
+            # A cached handshake failure or old peer metadata cannot establish
+            # current availability. The proxy performs a live signed check.
+            available = True
+            reason = "identity checked on connect"
             targets.append(
                 InstanceTarget(
                     instance_id=instance_id,

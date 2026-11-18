@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -20,6 +22,14 @@ def _scheduler_endpoint(audit_context: Mapping[str, Any] | None) -> tuple[str, s
     return workbench_endpoint(audit_context, require_agent=True)
 
 
+def governed_scheduler_context(audit_context: Mapping[str, Any] | None) -> bool:
+    context = audit_context or {}
+    config = context.get("global_config")
+    profile = getattr(config, "deployment_profile", None)
+    return (profile != "personal" if profile is not None
+            else context.get("_scheduler_governed") is True)
+
+
 
 def scheduler_tool_credential(secrets, audit_context, allowed_tools):
     """Keep the administrative key inside the trusted runtime, outside MCP context."""
@@ -27,9 +37,21 @@ def scheduler_tool_credential(secrets, audit_context, allowed_tools):
     if scoped:
         return str(scoped)
     config = (audit_context or {}).get("global_config")
-    if getattr(config, "deployment_profile", "personal") != "personal":
+    governed = getattr(config, "deployment_profile", "personal") != "personal"
+    owner = (audit_context or {}).get("owner_id") if governed else None
+    if governed and (not isinstance(owner, str) or not owner.startswith("enterprise:")
+                     or not owner.removeprefix("enterprise:").strip()):
         return ""
-    secret = secrets.get("workbench_admin_token")
+    secret = secrets.get("workbench_admin_token") if not governed else None
+    if governed:
+        root = getattr(config, "bridge_home", None)
+        if root is not None:
+            from orchestrator.workbench_auth import scheduler_delegation_key
+
+            try:
+                secret = scheduler_delegation_key(root)
+            except (OSError, ValueError):
+                return ""
     request = (audit_context or {}).get("request_id")
     instance = getattr(config, "instance_id", None) or (audit_context or {}).get("instance_id")
     agent = (audit_context or {}).get("agent_name")
@@ -42,7 +64,35 @@ def scheduler_tool_credential(secrets, audit_context, allowed_tools):
                                      request_id=str(request), audience=base_url,
                                      run_id=(audit_context or {}).get("hashi_run_id"),
                                      fencing_token=(audit_context or {}).get("hashi_fencing_token"),
+                                     owner_id=owner,
                                      tools=[tool for tool in allowed_tools if tool.startswith(("hashi_scheduler_", "hashi_superloop_"))])
+
+def _scheduler_credential_needs_renewal(credential: str) -> bool:
+    """Inspect expiry only for scheduling; the API verifies every signed claim."""
+    try:
+        if len(credential) > 8192:
+            return False
+        body = credential.split(".", 1)[0]
+        claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        return type(claims.get("expires")) is int and claims["expires"] <= time.time() + 60
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        return False
+
+
+async def renew_scheduler_tool_credential(credential, base_url, agent, tool_name, request_json):
+    if not credential or not _scheduler_credential_needs_renewal(credential):
+        return credential, None
+    status, payload = await request_json(
+        "POST", f"{base_url}/api/agents/{quote(agent, safe='')}/scheduler/token/renew",
+        headers={"X-Hashi-Scheduler-Token": credential}, payload={"tool": tool_name},
+    )
+    if status >= 400 or payload.get("ok") is not True:
+        return "", (status, payload)
+    renewed = payload.get("token")
+    if not isinstance(renewed, str) or not renewed or len(renewed) > 8192:
+        return "", (503, {"ok": False, "error_code": "scheduler_delegation_unavailable"})
+    return renewed, None
+
 
 def _render_result(status: int, payload: dict[str, Any]) -> str:
     if status >= 400 or payload.get("ok") is False:
@@ -56,6 +106,11 @@ def _render_result(status: int, payload: dict[str, Any]) -> str:
                 details.append(value.strip())
         reason = f" [{code}]" if code else ""
         detail = ": " + " ".join(details) if details else ""
+        if code == "approval_required":
+            approval = payload.get("approval")
+            approval_id = approval.get("approval_id") if isinstance(approval, dict) else None
+            if isinstance(approval_id, str) and re.fullmatch(r"approval_[0-9a-f]{32}", approval_id):
+                detail += f" Pending approval ID: {approval_id}"
         return f"Error: HASHI Scheduler API request failed ({status}){reason}{detail}"
     authoritative = {
         "authority": "HASHI Scheduler",
@@ -72,6 +127,9 @@ async def execute_hashi_scheduler_tool(
     audit_context: Mapping[str, Any] | None,
     credential: str = "",
 ) -> str:
+    if not credential and governed_scheduler_context(audit_context):
+        return ("Error: scheduler_delegation_unavailable: The current Run has no usable Scheduler "
+                "delegation. Check the live user binding and instance credential availability.")
     try:
         base_url, agent = _scheduler_endpoint(audit_context)
     except ValueError as exc:
@@ -85,6 +143,11 @@ async def execute_hashi_scheduler_tool(
     encoded_agent = quote(agent, safe="")
     args = dict(arguments or {})
     try:
+        credential, renewal_error = await renew_scheduler_tool_credential(
+            credential, base_url, agent, tool_name, _request_json,
+        )
+        if renewal_error is not None:
+            return _render_result(*renewal_error)
         if tool_name == "hashi_scheduler_list":
             query: dict[str, str] = {}
             kind = str(args.get("kind") or "all").strip().lower()
@@ -122,11 +185,8 @@ async def execute_hashi_scheduler_tool(
                 f"{base_url}/api/agents/{encoded_agent}/scheduler/runs?{query}",
             )
         elif tool_name == "hashi_scheduler_rerun":
-            if args.get("authorization") != "explicit_user_authorization":
-                return (
-                    "Error: hashi_scheduler_rerun requires explicit authorization for "
-                    "this exact single job"
-                )
+            if not str(args.get("job_id") or "").strip():
+                return "Error: hashi_scheduler_rerun requires job_id"
             status, payload = await request_json(
                 "POST",
                 f"{base_url}/api/agents/{encoded_agent}/jobs/run",
@@ -134,7 +194,6 @@ async def execute_hashi_scheduler_tool(
                     "kind": str(args.get("kind") or "").strip().lower(),
                     "job_id": str(args.get("job_id") or "").strip(),
                     "requested_by": "hashi_tool_gateway",
-                    "authorization": "explicit_user_authorization",
                 },
             )
         elif tool_name == "hashi_scheduler_recovery_resolve":
@@ -174,11 +233,6 @@ async def execute_hashi_scheduler_tool(
                 payload=payload,
             )
         elif tool_name == "hashi_scheduler_delete":
-            if args.get("authorization") != "explicit_user_authorization":
-                return (
-                    "Error: hashi_scheduler_delete requires explicit authorization for "
-                    "this exact task"
-                )
             job_id = str(args.get("job_id") or "").strip()
             if not job_id:
                 return "Error: hashi_scheduler_delete requires job_id"
@@ -198,7 +252,6 @@ async def execute_hashi_scheduler_tool(
                 payload={
                     "kind": str(args.get("kind") or "").strip().lower(),
                     "requested_by": "hashi_tool_gateway",
-                    "authorization": "explicit_user_authorization",
                     "expected_revision": revision,
                 },
             )

@@ -31,8 +31,10 @@ from orchestrator.model_fallback_policy import (
     REASON_DISABLED,
     REASON_EFFECT_PAUSED,
     REASON_INCOMPATIBLE_CAPABILITY,
+    REASON_INELIGIBLE_FAILURE,
     REASON_MISSING_KEY_OR_RUNTIME,
     REASON_MODALITY_EXCLUDED,
+    REASON_MEDIA_RECOVERY_UNAVAILABLE,
     REASON_NO_ALLOWED_TARGET,
     REASON_PRIVACY_BLOCKED,
     REASON_UNKNOWN_COST,
@@ -217,7 +219,7 @@ def test_capacity_retry_is_explicit_bounded_and_honors_retry_after():
 
 
 @pytest.mark.parametrize("modality", ["call", "phone", "voice"])
-def test_capacity_retry_excludes_live_request_modalities_before_waiting(modality):
+def test_capacity_retry_reports_unavailable_live_media_recovery(modality):
     decision = resolve_capacity_retry(
         FallbackPolicy(mode=MODE_AUTO),
         CapacityRetryFacts(
@@ -232,7 +234,7 @@ def test_capacity_retry_excludes_live_request_modalities_before_waiting(modality
 
     assert decision.allowed is False
     assert decision.delay_s is None
-    assert decision.blocking_reason == REASON_MODALITY_EXCLUDED
+    assert decision.blocking_reason == REASON_MEDIA_RECOVERY_UNAVAILABLE
 
 
 def test_side_effect_recovery_is_independent_per_backend_and_defaults_to_pause():
@@ -856,3 +858,27 @@ def test_excluded_route_is_never_reused_and_next_route_wins():
     )
     assert decision.allowed is True
     assert decision.route == SECOND_HERV3_ROUTE
+
+
+def test_same_target_capacity_retry_does_not_require_destination_fallback():
+    policy = FallbackPolicy(
+        mode=MODE_OFF,
+        sources={SOURCE_HERV3: FallbackSourceRule(enabled=False)},
+    )
+    def decide(index, *, retry_after=None, effects=False, retryable=True):
+        return resolve_capacity_retry(policy, CapacityRetryFacts(
+            source=SOURCE_HERV3,
+            failure_code="PROVIDER_CAPACITY_UNAVAILABLE",
+            retryable=retryable,
+            retry_index=index,
+            retry_after_s=retry_after,
+            retry_delays_s=(0, 1, 2, 3),
+            side_effects_possible=effects,
+        ))
+    assert decide(0).allowed is True
+    assert decide(0).delay_s == 0
+    assert decide(2, retry_after=9).delay_s == 9
+    assert decide(3).allowed is True
+    assert decide(4).blocking_reason == REASON_RETRY_EXHAUSTED
+    assert decide(0, retryable=False).blocking_reason == REASON_INELIGIBLE_FAILURE
+    assert decide(0, effects=True).allowed is False

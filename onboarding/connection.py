@@ -19,10 +19,13 @@ from orchestrator.config import (
 )
 from orchestrator.flexible_backend_manager import FlexibleBackendManager
 from orchestrator.flexible_backend_registry import (
-    get_available_models, get_default_model, get_backend_entry, PROVIDER_ONLY_ENGINE_IDS,
+    get_available_models, get_default_model, get_backend_entry, allows_custom_models, PROVIDER_ONLY_ENGINE_IDS,
 )
 from orchestrator.pcm import atomic_write_pcm, render_pcm_document
-from onboarding.onboarding_main import _atomic_write_json
+from orchestrator.config_json import (
+    ConfigConflictError, ConfigDurabilityError, delete_config_json,
+    new_config_json, read_config_json, write_config_json,
+)
 
 
 class ConnectionError(RuntimeError):
@@ -66,6 +69,7 @@ def choices(home):
             continue
         rows.append({'engine':engine, 'models':models, 'default':get_default_model(engine) or models[0],
                      'kind':'cli' if program else 'api', 'program':program,
+                     'custom_models': allows_custom_models(engine) or engine == 'openrouter-api',
                      'authentication':'unverified'})
     return rows
 
@@ -92,7 +96,9 @@ async def validate(home, engine, model, key, *, confirmed=False):
         raise ConnectionError('CONFIRMATION_REQUIRED')
     available = {row['engine']:row for row in choices(home)}
     row = available.get(engine)
-    if row is None or model not in row['models']:
+    if (row is None or not isinstance(model, str) or not model.strip()
+            or any(ord(char) < 32 for char in model)
+            or (model not in row['models'] and not row.get('custom_models'))):
         raise ConnectionError('MODEL_UNAVAILABLE')
     if row['kind'] == 'api' and not key:
         raise ConnectionError('CREDENTIAL_REQUIRED')
@@ -100,13 +106,25 @@ async def validate(home, engine, model, key, *, confirmed=False):
     probe_backends = copy.deepcopy(backends)
     for backend in probe_backends:
         backend['tools'] = {'enabled': False}
+        if backend.get('engine') in PROVIDER_ONLY_ENGINE_IDS:
+            # This transient value applies only to the locally confirmed probe.
+            backend['_connection_probe_call_limit'] = 1
+        if backend.get('engine') == 'her-v2':
+            # Consent covers one check, not automatic paid retries.
+            backend['her_v2']['provider_recovery'] = {
+                'max_provider_retries': 0, 'capacity_delays_s': [],
+            }
     # Probe in a disposable workspace, through the same manager/adapter chain.
     # The selected credential stays in memory and is never copied into prompt/state.
     with tempfile.TemporaryDirectory(prefix='hashi-connect-') as directory:
         root = Path(directory)
         cfg = FlexibleAgentConfig(name='hashiko',workspace_dir=root,system_md=root/'agent.md',
             telegram_token_key='',allowed_backends=probe_backends,active_backend=active,
-            access_scope='workspace',extra={},project_root=root)
+            access_scope='workspace',extra={
+                'ephemeral_session': True,
+                'habit_learning_eligible': False,
+                'habit_meditation_enabled': False,
+            },project_root=root)
         atomic_write_pcm(cfg.agent_md, render_pcm_document(persona='Connection check.',system='Reply with HASHI_CONNECTED only. Do not use tools.'))
         global_cfg = GlobalConfig(authorized_id=0,project_root=root,bridge_home=root,base_logs_dir=root/'logs')
         if row['kind'] == 'cli':
@@ -128,14 +146,71 @@ async def validate(home, engine, model, key, *, confirmed=False):
             await manager.shutdown()
 
 
-def save(home, engine, model, key, *, verified, replace_confirmed=False, language='en'):
-    if not verified or verified.get('verified') is not True or verified.get('engine') != engine or verified.get('model') != model:
-        raise ConnectionError('VALIDATION_REQUIRED')
+def _snapshot(path):
+    try:
+        return read_config_json(path)
+    except FileNotFoundError:
+        return new_config_json(path)
+    except (ValueError, json.JSONDecodeError):
+        raise ConnectionError('CONFIG_INVALID') from None
+
+
+def connection_revisions(home):
+    """Opaque revisions only; never return credential contents."""
     home = Path(home)
+    return {
+        'config': _snapshot(home / 'agents.json').revision,
+        'secrets': _snapshot(home / 'secrets.json').revision,
+    }
+
+
+def _publish_connection_pair(config_path, cfg, secrets_path, secrets, original_secrets):
+    """Revision-checked publication; undo only our own unchanged secret write."""
+    secret_revision = None
+    try:
+        if dict(secrets) != dict(original_secrets):
+            secret_revision = write_config_json(secrets_path, secrets)
+        write_config_json(config_path, cfg)
+    except ConfigDurabilityError:
+        # The primitive reports a committed publication with uncertain
+        # durability. Never blindly roll it back or retry.
+        raise ConnectionError('SAVE_DURABILITY_UNKNOWN') from None
+    except (ConfigConflictError, OSError) as exc:
+        if secret_revision is not None:
+            try:
+                if original_secrets.revision is None:
+                    delete_config_json(secrets_path, expected_revision=secret_revision)
+                else:
+                    write_config_json(secrets_path, dict(original_secrets),
+                                      expected_revision=secret_revision)
+            except (ConfigConflictError, OSError):
+                raise ConnectionError('SAVE_PARTIAL') from None
+        raise ConnectionError('CONFIG_CHANGED' if isinstance(exc, ConfigConflictError)
+                              else 'SAVE_FAILED') from None
+
+
+def save(home, engine, model, key, *, verified=None, allow_unverified=False,
+         replace_confirmed=False, language='en', expected_revisions=None):
+    valid_proof = (isinstance(verified, dict) and verified.get('verified') is True
+                   and verified.get('engine') == engine and verified.get('model') == model)
+    if verified is not None and not valid_proof:
+        raise ConnectionError('VALIDATION_MISMATCH')
+    if not valid_proof and allow_unverified is not True:
+        raise ConnectionError('VALIDATION_REQUIRED')
+    if (not isinstance(model, str) or not model.strip()
+            or any(ord(char) < 32 for char in model)):
+        raise ConnectionError('MODEL_UNAVAILABLE')
+    home = Path(home)
+    home.mkdir(parents=True, exist_ok=True)
     config_path, secrets_path = home/'agents.json', home/'secrets.json'
-    before = {p:p.read_bytes() if p.exists() else None for p in (config_path,secrets_path)}
-    cfg, secrets = _read(config_path), _read(secrets_path)
-    if before[config_path] is None:
+    cfg, secrets = _snapshot(config_path), _snapshot(secrets_path)
+    if expected_revisions is not None:
+        if not isinstance(expected_revisions, dict) or expected_revisions != {
+            'config': cfg.revision, 'secrets': secrets.revision,
+        }:
+            raise ConnectionError('CONFIG_CHANGED')
+    original_secrets = secrets.copy()
+    if cfg.revision is None:
         cfg.setdefault('global', {})['default_tools'] = default_global_tools_config()
     reference = 'hashiko.connection.' + engine
     if key and secrets.get(reference) and secrets[reference] != key and not replace_confirmed:
@@ -159,31 +234,25 @@ def save(home, engine, model, key, *, verified, replace_confirmed=False, languag
     agent['allowed_backends'] = list(old.values())
     agent['active_backend'] = active
     agent['connection_revision'] = uuid4().hex
+    agent['connection_verification'] = {
+        'engine': engine, 'model': model, 'verified': valid_proof,
+    }
     if key:
         secrets[reference] = key
+    _publish_connection_pair(config_path, cfg, secrets_path, secrets, original_secrets)
     workspace = Path(agent['workspace_dir'])
     if not workspace.is_absolute():
         workspace = home/workspace
-    workspace.mkdir(parents=True,exist_ok=True)
-    if not (workspace/'agent.md').exists():
-        atomic_write_pcm(workspace/'agent.md',render_pcm_document(
-            persona='You are Hashiko (小乔), a concise, helpful personal assistant.',
-            system='The user can start work immediately. Telegram and all further setup are optional. Ask only what is needed for their task. Never request credentials in chat. Use the local connection page for secrets. Stay inside your authorized workspace and request access as needed.'))
-    # Refuse concurrent changes; never reconstruct the instance or its history.
-    for path, original in before.items():
-        if (path.read_bytes() if path.exists() else None) != original:
-            raise ConnectionError('CONFIG_CHANGED')
     try:
-        _atomic_write_json(secrets_path,secrets,private=True)
-        _atomic_write_json(config_path,cfg,private=True)
+        workspace.mkdir(parents=True,exist_ok=True)
+        if not (workspace/'agent.md').exists():
+            atomic_write_pcm(workspace/'agent.md',render_pcm_document(
+                persona='You are Hashiko (小乔), a concise, helpful personal assistant.',
+                system='The user can start work immediately. Telegram and all further setup are optional. Ask only what is needed for their task. Never request credentials in chat. Use the local connection page for secrets. Stay inside your authorized workspace and request access as needed.'))
     except OSError:
-        # Restore only the credential file written by this transaction.
-        if before[secrets_path] is None:
-            secrets_path.unlink(missing_ok=True)
-        else:
-            _atomic_write_json(secrets_path,json.loads(before[secrets_path].decode('utf-8-sig')),private=True)
-        raise ConnectionError('SAVE_FAILED') from None
-    return {'agent':'hashiko','engine':active,'saved':True,'runtime_ready':False}
+        raise ConnectionError('SAVED_WORKSPACE_PENDING') from None
+    return {'agent':'hashiko','engine':active,'saved':True,
+            'verified':valid_proof,'runtime_ready':False}
 
 
 async def adopt_if_running(home):
@@ -254,7 +323,8 @@ async def connect_telegram(home, token, user_id, *, confirmed=False, replace_con
     if not token or any(c.isspace() for c in token) or '/' in token:
         raise ConnectionError('BOT_TOKEN_INVALID')
     home=Path(home)
-    cfg,secrets=_read(home/'agents.json'),_read(home/'secrets.json')
+    cfg,secrets=_snapshot(home/'agents.json'),_snapshot(home/'secrets.json')
+    original_secrets=secrets.copy()
     agent=next((a for a in cfg.get('agents',[]) if a.get('name')=='hashiko'),None)
     if agent is None:
         raise ConnectionError('BACKEND_CONNECTION_REQUIRED')
@@ -264,7 +334,6 @@ async def connect_telegram(home, token, user_id, *, confirmed=False, replace_con
     reference='hashiko.telegram'
     if secrets.get(reference) and secrets[reference] != token and not replace_confirmed:
         raise ConnectionError('REPLACE_CONFIRMATION_REQUIRED')
-    before={p:p.read_bytes() if p.exists() else None for p in (home/'agents.json',home/'secrets.json')}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.get('https://api.telegram.org/bot'+token+'/getMe') as response:
@@ -273,21 +342,9 @@ async def connect_telegram(home, token, user_id, *, confirmed=False, replace_con
                     raise ConnectionError('BOT_AUTHENTICATION_FAILED')
     except (aiohttp.ClientError,TimeoutError,ValueError):
         raise ConnectionError('BOT_CONNECTION_FAILED') from None
-    for path,original in before.items():
-        if (path.read_bytes() if path.exists() else None) != original:
-            raise ConnectionError('CONFIG_CHANGED')
     secrets[reference]=token
     secrets['authorized_telegram_id']=int(user_id)
     agent['telegram_token_key']=reference
     # Mirror preferences are a different owner and are never written here.
-    try:
-        _atomic_write_json(home/'secrets.json',secrets,private=True)
-        _atomic_write_json(home/'agents.json',cfg,private=True)
-    except OSError:
-        original=before[home/'secrets.json']
-        if original is None:
-            (home/'secrets.json').unlink(missing_ok=True)
-        else:
-            _atomic_write_json(home/'secrets.json',json.loads(original.decode('utf-8-sig')),private=True)
-        raise ConnectionError('SAVE_FAILED') from None
+    _publish_connection_pair(home/'agents.json', cfg, home/'secrets.json', secrets, original_secrets)
     return {'agent':'hashiko','saved':True,'bot_verified':True,'runtime_ready':False}

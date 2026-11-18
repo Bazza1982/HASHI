@@ -21,7 +21,9 @@ def _runtime(*, level: PrivacyLevel = PrivacyLevel.PROVIDER_TRUST):
         set_privacy_level=AsyncMock(),
     )
 
-    def set_level(requested):
+    def set_level(requested, *, expected_current_level=None):
+        if expected_current_level is not None and int(manager.privacy_level) != expected_current_level:
+            raise ValueError("privacy setting changed; refresh before applying")
         manager.privacy_level = PrivacyLevel(int(requested))
         return manager.privacy_level
 
@@ -29,6 +31,7 @@ def _runtime(*, level: PrivacyLevel = PrivacyLevel.PROVIDER_TRUST):
     return SimpleNamespace(
         backend_manager=manager,
         config=SimpleNamespace(active_backend="codex-cli"),
+        global_config=SimpleNamespace(authorized_id=1),
         _backend_busy=lambda: False,
         _is_authorized_user=lambda _user_id: True,
         _reply_text=AsyncMock(),
@@ -62,17 +65,151 @@ def test_privacy_status_explains_level_zero_and_default() -> None:
 
 
 @pytest.mark.asyncio
-async def test_privacy_zero_requires_confirmation_when_lowering() -> None:
+@pytest.mark.parametrize(("initial", "requested", "expected"), [
+    (PrivacyLevel.PROVIDER_TRUST, "0", PrivacyLevel.OFF),
+    (PrivacyLevel.BASIC_REDACTION, "1", PrivacyLevel.PROVIDER_TRUST),
+])
+async def test_explicit_authorized_privacy_command_applies_downgrade_once(
+    initial, requested, expected,
+) -> None:
+    runtime = _runtime(level=initial)
+
+    await cmd_privacy(runtime, _update(), SimpleNamespace(args=[requested]))
+
+    assert runtime.backend_manager.privacy_level is expected
+    message = runtime._reply_text.await_args.args[1]
+    assert f"Privacy changed to Level {requested}" in message
+    assert "Confirm this privacy downgrade" not in message
+
+
+@pytest.mark.asyncio
+async def test_privacy_menu_downgrade_still_explains_effect_before_confirmation() -> None:
     runtime = _runtime()
+    update = _callback_update("privacy:set:0")
+
+    await callback_privacy(runtime, update, SimpleNamespace())
+
+    message = update.callback_query.edit_message_text.await_args.args[0]
+    keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+    assert "Confirm this privacy downgrade" in message
+    assert keyboard.inline_keyboard[0][0].callback_data == "privacy:confirm:0"
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_explicit_privacy_command_does_not_change_policy() -> None:
+    runtime = _runtime()
+    runtime._is_authorized_user = lambda _user_id: False
 
     await cmd_privacy(runtime, _update(), SimpleNamespace(args=["0"]))
 
-    message = runtime._reply_text.await_args.args[1]
-    keyboard = runtime._reply_text.await_args.kwargs["reply_markup"]
-    assert "Confirm this privacy downgrade" in message
-    assert keyboard.inline_keyboard[0][0].callback_data == "privacy:confirm:0"
-    assert keyboard.inline_keyboard[1][0].callback_data == "privacy:menu"
     assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+    runtime._reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authorized_delegate_still_receives_downgrade_review() -> None:
+    runtime = _runtime()
+    runtime.global_config.authorized_id = 2
+
+    await cmd_privacy(runtime, _update(), SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+    assert "Confirm this privacy downgrade" in runtime._reply_text.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_frontend_owner_can_issue_explicit_downgrade_without_telegram() -> None:
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    runtime = _runtime()
+    runtime.global_config.authorized_id = 0
+    update = SimpleNamespace(effective_user=SimpleNamespace(id="owner:authenticated"))
+    with bind_frontend_command_principal(runtime, "owner:authenticated"):
+        await cmd_privacy(runtime, update, SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.OFF
+
+
+@pytest.mark.asyncio
+async def test_scoped_delegate_cannot_inherit_primary_command_authority(monkeypatch) -> None:
+    runtime = _runtime()
+    runtime._telegram_scoped_access_enabled = True
+    monkeypatch.setattr(
+        "orchestrator.telegram_actor_scope.runtime_snapshot",
+        lambda _runtime: SimpleNamespace(primary_user_id=2, effective_user_ids={1, 2}),
+    )
+
+    await cmd_privacy(runtime, _update(), SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+    assert "Confirm this privacy downgrade" in runtime._reply_text.await_args.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("granted", "expected"), [
+    (True, PrivacyLevel.OFF),
+    (False, PrivacyLevel.PROVIDER_TRUST),
+])
+async def test_scoped_primary_needs_current_telegram_grant(
+    monkeypatch, granted, expected,
+) -> None:
+    runtime = _runtime()
+    runtime._telegram_scoped_access_enabled = True
+    monkeypatch.setattr(
+        "orchestrator.telegram_actor_scope.runtime_snapshot",
+        lambda _runtime: SimpleNamespace(
+            primary_user_id=1, effective_user_ids={1} if granted else set(),
+        ),
+    )
+
+    await cmd_privacy(runtime, _update(), SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is expected
+
+
+@pytest.mark.asyncio
+async def test_expired_frontend_binding_cannot_confirm_downgrade() -> None:
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    runtime = _runtime()
+    update = SimpleNamespace(effective_user=SimpleNamespace(id="owner:authenticated"))
+    with bind_frontend_command_principal(runtime, "owner:authenticated"):
+        pass
+    await cmd_privacy(runtime, update, SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+    assert "Confirm this privacy downgrade" in runtime._reply_text.await_args.args[1]
+
+
+
+@pytest.mark.asyncio
+async def test_unbound_frontend_identity_cannot_supply_owner_confirmation() -> None:
+    runtime = _runtime()
+    runtime.global_config.authorized_id = 0
+    update = SimpleNamespace(effective_user=SimpleNamespace(id="owner:claimed"))
+
+    await cmd_privacy(runtime, update, SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.PROVIDER_TRUST
+    assert "Confirm this privacy downgrade" in runtime._reply_text.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_explicit_downgrade_does_not_overwrite_changed_privacy_setting() -> None:
+    from orchestrator.privacy_levels import PrivacyPolicyError
+
+    runtime = _runtime()
+    def changed_before_save(_requested, *, expected_current_level=None):
+        assert expected_current_level == 1
+        runtime.backend_manager.privacy_level = PrivacyLevel.BASIC_REDACTION
+        raise PrivacyPolicyError("privacy setting changed; refresh before applying")
+    runtime.backend_manager.set_privacy_level = changed_before_save
+
+    await cmd_privacy(runtime, _update(), SimpleNamespace(args=["0"]))
+
+    assert runtime.backend_manager.privacy_level is PrivacyLevel.BASIC_REDACTION
+    assert "not changed" in runtime._reply_text.await_args.args[1].lower()
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,272 @@ def credential(server, base, binding, **changes):
 
 
 @pytest.mark.asyncio
+async def test_expired_scheduler_gateway_lease_renews_only_for_the_live_run_and_tool(tmp_path, monkeypatch):
+    import time
+    from orchestrator.workbench_auth import scheduler_tool_token_claims
+    from tools.gateway.context import load_gateway_context, write_gateway_context
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+        base = str(upstream.make_url("")).rstrip("/")
+        old = credential(server, base, binding, tools=["hashi_scheduler_list"], now=time.time() - 3700)
+        headers = {"X-Hashi-Scheduler-Token": old}
+        async with client.get(base + "/api/agents/momo/scheduler/jobs", headers=headers) as response:
+            assert response.status == 401
+        async with client.post(base + "/api/agents/momo/scheduler/token/renew", headers=headers,
+                               json={"tool": "hashi_scheduler_list"}) as response:
+            assert response.status == 200, await response.text()
+            renewed = (await response.json())["token"]
+        common = dict(instance_id=server.global_config.instance_id, agent_id="momo", audience=base)
+        assert scheduler_tool_token_claims(server.admin_token, renewed, tool="hashi_scheduler_list", **common)
+        assert scheduler_tool_token_claims(server.admin_token, renewed, tool="hashi_scheduler_create", **common) is None
+
+        # A gateway has only the old scoped token, not the signing key. Renewal
+        # happens before the read and its token never appears in the tool result.
+        registry = ToolRegistry(allowed_tools=["hashi_scheduler_list"], access_root=tmp_path,
+                                workspace_dir=runtime.workspace_dir, secrets={"scheduler_tool_token": old},
+                                audit_context={"agent_name": "momo", "workbench_api_base_url": base})
+        gateway_path = tmp_path / "expired-gateway.json"
+        write_gateway_context(registry, gateway_path, backend="codex", workbench_api_base_url=base)
+        assert old in gateway_path.read_text(encoding="utf-8")
+        assert server.admin_token not in gateway_path.read_text(encoding="utf-8")
+        gateway = load_gateway_context(gateway_path).build_registry()
+        result = await gateway.execute("hashi_scheduler_list", {})
+        assert not result.is_error and json.loads(result.output)["ok"], result.output
+        assert old not in result.output and renewed not in result.output and server.admin_token not in result.output
+        old_loop = credential(server, base, binding, tools=["hashi_superloop_list"], now=time.time() - 3700)
+        loop_registry = ToolRegistry(allowed_tools=["hashi_superloop_list"], access_root=tmp_path,
+                                     workspace_dir=runtime.workspace_dir, secrets={"scheduler_tool_token": old_loop},
+                                     audit_context={"agent_name": "momo", "workbench_api_base_url": base})
+        loop_result = await loop_registry.execute("hashi_superloop_list", {})
+        assert not loop_result.is_error and json.loads(loop_result.output)["ok"], loop_result.output
+        assert old_loop not in loop_result.output and server.admin_token not in loop_result.output
+
+        calls = []
+        original_upsert = runtime.skill_manager.upsert_cron_job
+        def upsert_once(**kwargs):
+            calls.append(kwargs["task_id"])
+            return original_upsert(**kwargs)
+        monkeypatch.setattr(runtime.skill_manager, "upsert_cron_job", upsert_once)
+        old_create = credential(server, base, binding, tools=["hashi_scheduler_create"], now=time.time() - 3700)
+        create_registry = ToolRegistry(allowed_tools=["hashi_scheduler_create"], access_root=tmp_path,
+                                       workspace_dir=runtime.workspace_dir, secrets={"scheduler_tool_token": old_create},
+                                       audit_context={"agent_name": "momo", "workbench_api_base_url": base})
+        args = {"kind": "cron", "task_id": "renewed-fixture", "schedule": "0 0 * * *",
+                "prompt": "fixture only", "enabled": False}
+        created = await create_registry.execute("hashi_scheduler_create", args)
+        assert not created.is_error and json.loads(created.output)["ok"], created.output
+        assert calls == ["renewed-fixture"]
+
+        for name, token, tool in [
+            ("momo", old, "hashi_scheduler_create"),
+            ("lily", old, "hashi_scheduler_list"),
+            ("momo", old + "x", "hashi_scheduler_list"),
+            ("momo", credential(server, "http://127.0.0.1:1", binding,
+                                tools=["hashi_scheduler_list"], now=time.time() - 3700), "hashi_scheduler_list"),
+            ("momo", credential(server, base, binding, tools=["hashi_scheduler_list"],
+                                fencing_token=binding["fencing_token"] + 1, now=time.time() - 3700), "hashi_scheduler_list"),
+        ]:
+            async with client.post(base + f"/api/agents/{name}/scheduler/token/renew",
+                                   headers={"X-Hashi-Scheduler-Token": token}, json={"tool": tool}) as response:
+                assert response.status in {401, 403}
+
+        server.session_store.cancel_run(binding["run_id"], owner_id=binding["owner_id"])
+        stopped = await create_registry.execute("hashi_scheduler_create", args)
+        assert stopped.is_error and calls == ["renewed-fixture"]
+        async with client.post(base + "/api/agents/momo/scheduler/token/renew", headers=headers,
+                               json={"tool": "hashi_scheduler_list"}) as response:
+            assert response.status in {401, 403}
+
+
+@pytest.mark.asyncio
+async def test_failed_lease_renewal_does_not_dispatch_a_scheduler_change(monkeypatch):
+    import time
+    from unittest.mock import AsyncMock
+    from tools import hashi_scheduler
+
+    expired = issue_scheduler_tool_token("fixture-secret", instance_id="TEST", agent_id="momo",
+                                         request_id="request", audience="http://127.0.0.1:9",
+                                         tools=["hashi_scheduler_create"], run_id="run", fencing_token=1,
+                                         now=time.time() - 3700)
+    request = AsyncMock(return_value=(503, {"ok": False, "error_code": "scheduler_delegation_unavailable"}))
+    monkeypatch.setattr(hashi_scheduler, "_request_json", request)
+    result = await hashi_scheduler.execute_hashi_scheduler_tool(
+        "hashi_scheduler_create", {"kind": "cron", "task_id": "fixture"}, credential=expired,
+        audit_context={"agent_name": "momo", "workbench_api_base_url": "http://127.0.0.1:9"},
+    )
+    assert "scheduler_delegation_unavailable" in result
+    assert request.await_count == 1
+    assert request.await_args.args[1].endswith("/scheduler/token/renew")
+    assert expired not in result
+
+
+def test_scheduler_lease_accepts_small_clock_skew_but_not_expired_effects():
+    from orchestrator.workbench_auth import scheduler_tool_token_claims
+
+    scope = dict(instance_id="TEST", agent_id="momo", audience="http://127.0.0.1:9",
+                 tool="hashi_scheduler_list")
+    token = issue_scheduler_tool_token("fixture-secret", instance_id=scope["instance_id"],
+                                       agent_id=scope["agent_id"], request_id="request",
+                                       audience=scope["audience"], tools=[scope["tool"]],
+                                       run_id="run", fencing_token=1, now=100)
+    assert scheduler_tool_token_claims("fixture-secret", token, now=99, **scope)
+    assert scheduler_tool_token_claims("fixture-secret", token, now=3700, **scope) is None
+
+
+@pytest.mark.asyncio
+async def test_governed_scheduler_delegation_binds_user_policy_and_live_run(tmp_path):
+    import time
+    from orchestrator.enterprise import EnterpriseRole, IdentityService, PolicyEvaluator
+    from orchestrator.workbench_auth import scheduler_delegation_key
+    from tools.hashi_scheduler import scheduler_tool_credential
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    server.global_config.deployment_profile = "enterprise"
+    server.global_config.organization_id = "ORG-001"
+    server.global_config.instance_id = server.session_store.instance_id
+    signing_key = scheduler_delegation_key(tmp_path, create=True)
+    identity = IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite")
+    identity.create_organization(org_id="ORG-001", name="Fixture")
+    project = identity.create_project(org_id="ORG-001", name="Fixture", project_id="project-1")
+    for user_id in ("allowed", "denied", "outsider", "retired"):
+        user = identity.create_user(org_id="ORG-001", email=f"{user_id}@example.invalid",
+                                    display_name=user_id, password="fixture-password", user_id=user_id)
+        if user_id != "outsider":
+            identity.assign_project_role(user_id=user.id, project_id=project.id,
+                                         role=EnterpriseRole.INDIVIDUAL_USER)
+    server.identity_service = identity
+    server.config_path.write_text(json.dumps({"global": {}, "agents": [
+        {"name": "momo", "project_id": project.id},
+    ]}), encoding="utf-8")
+    policy = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    policy.add_rule(action="tool.execute", resource="tool:hashi_scheduler_list", effect="deny",
+                    scope_type="user", scope_id="denied")
+
+    def run_for(user):
+        owner = f"enterprise:{user}"
+        session = server.session_store.create_session(owner_id=owner, agent_id="momo")
+        request = f"scheduler-{user}"
+        run = server.session_store.accept_run(session_id=session["session_id"], owner_id=owner,
+                                              agent_id="momo", request_id=request, text="test",
+                                              source="test", idempotency_key=request)
+        fence = server.session_store.mark_request_running(request, worker_id="fixture-worker")
+        return {"owner_id": owner, "request_id": request, "hashi_run_id": run.run_id,
+                "hashi_fencing_token": fence}
+
+    runs = {name: run_for(name) for name in ("allowed", "denied", "outsider", "retired")}
+    async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+        base = str(upstream.make_url("")).rstrip("/")
+
+        def token_for(run, **overrides):
+            context = {"agent_name": "momo", "global_config": server.global_config,
+                       "workbench_api_base_url": base, **run, **overrides}
+            return scheduler_tool_credential({},
+                                             context, {"hashi_scheduler_list"})
+
+        allowed_token = token_for(runs["allowed"])
+        assert allowed_token and server.admin_token not in allowed_token
+
+        def old_token_for(run):
+            return issue_scheduler_tool_token(
+                signing_key, instance_id=server.global_config.instance_id, agent_id="momo",
+                request_id=run["request_id"], audience=base, tools=["hashi_scheduler_list"],
+                run_id=run["hashi_run_id"], fencing_token=run["hashi_fencing_token"],
+                owner_id=run["owner_id"], now=time.time() - 3700,
+            )
+
+        async def renew(token):
+            async with client.post(base + "/api/agents/momo/scheduler/token/renew",
+                                   headers={"X-Hashi-Scheduler-Token": token},
+                                   json={"tool": "hashi_scheduler_list"}) as response:
+                return response.status, await response.json()
+
+        assert (await renew(old_token_for(runs["allowed"])))[0] == 200
+        assert (await renew(old_token_for(runs["denied"])))[0] in {401, 403}
+        assert (await renew(old_token_for(runs["outsider"])))[0] in {401, 403}
+
+        async def listed(token, path="/api/agents/momo/scheduler/jobs"):
+            async with client.get(base + path, headers={"X-Hashi-Scheduler-Token": token}) as response:
+                return response.status, await response.json()
+
+        status, payload = await listed(allowed_token)
+        assert status == 200 and payload["count"] == 1
+        registry = ToolRegistry(
+            allowed_tools=["hashi_scheduler_list", "hashi_scheduler_create"],
+            access_root=tmp_path, workspace_dir=runtime.workspace_dir,
+            secrets={},
+            audit_context={"agent_name": "momo", "global_config": server.global_config,
+                           "workbench_api_base_url": base, **runs["allowed"]},
+        )
+        result = await registry.execute("hashi_scheduler_create", {
+            "kind": "cron", "task_id": "governed-test", "schedule": "0 0 * * *",
+            "prompt": "fixture only", "enabled": False,
+        })
+        assert not result.is_error and json.loads(result.output)["ok"], result.output
+        assert runtime.skill_manager.get_job("cron", "governed-test")["prompt"] == "fixture only"
+        from tools.gateway.context import load_gateway_context, write_gateway_context
+
+        gateway_path = tmp_path / "governed-gateway.json"
+        write_gateway_context(registry, gateway_path, backend="codex", workbench_api_base_url=base)
+        gateway_data = gateway_path.read_text(encoding="utf-8")
+        assert signing_key not in gateway_data
+        assert server.admin_token not in gateway_data
+        gateway = load_gateway_context(gateway_path).build_registry()
+        gateway_result = await gateway.execute("hashi_scheduler_list", {})
+        assert not gateway_result.is_error and json.loads(gateway_result.output)["ok"], gateway_result.output
+        policy.add_rule(action="tool.execute", resource="tool:hashi_scheduler_create", effect="deny",
+                        scope_type="project", scope_id=project.id)
+        blocked = await registry.execute("hashi_scheduler_create", {
+            "kind": "cron", "task_id": "policy-blocked", "schedule": "0 0 * * *",
+            "prompt": "fixture only", "enabled": False,
+        })
+        assert blocked.is_error
+        assert runtime.skill_manager.get_job("cron", "policy-blocked") is None
+        assert (await listed(token_for(runs["denied"])))[0] in {401, 403}
+        assert (await listed(token_for(runs["outsider"])))[0] in {401, 403}
+        assert (await listed(token_for(runs["allowed"], owner_id="enterprise:denied")))[0] in {401, 403}
+        assert (await listed(allowed_token, "/api/agents/lily/scheduler/jobs"))[0] in {401, 403}
+        assert (await listed(allowed_token, "/api/agents/momo/scheduler/status?kind=cron&job_id=daily-report"))[0] in {401, 403}
+        assert (await listed("invalid"))[0] in {401, 403}
+        assert (await listed(token_for(runs["allowed"], workbench_api_base_url="http://127.0.0.1:1")))[0] in {401, 403}
+        retired_token = token_for(runs["retired"])
+        assert (await listed(retired_token))[0] == 200
+        identity.deactivate_user(user_id="retired")
+        assert (await listed(retired_token))[0] in {401, 403}
+        assert (await renew(old_token_for(runs["retired"])))[0] in {401, 403}
+
+        server.session_store.cancel_run(runs["allowed"]["hashi_run_id"], owner_id="enterprise:allowed")
+        assert (await listed(allowed_token))[0] in {401, 403}
+        assert (await renew(old_token_for(runs["allowed"])))[0] in {401, 403}
+
+
+@pytest.mark.asyncio
+async def test_missing_governed_delegation_reports_capability_before_dispatch(tmp_path, monkeypatch):
+    from tools import hashi_scheduler
+    from tools.gateway.context import load_gateway_context, write_gateway_context
+
+    config = SimpleNamespace(deployment_profile="enterprise", bridge_home=tmp_path, instance_id="TEST")
+    registry = ToolRegistry(
+        allowed_tools=["hashi_scheduler_list"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+        audit_context={"agent_name": "momo", "global_config": config,
+                       "workbench_api_base_url": "http://127.0.0.1:9", "owner_id": "enterprise:user",
+                       "request_id": "run", "hashi_run_id": "run", "hashi_fencing_token": 1},
+    )
+
+    async def no_dispatch(*args, **kwargs):
+        pytest.fail("missing delegation must not make an unauthenticated API call")
+
+    monkeypatch.setattr(hashi_scheduler, "_request_json", no_dispatch)
+    gateway_path = tmp_path / "gateway.json"
+    write_gateway_context(registry, gateway_path, backend="codex", workbench_api_base_url="http://127.0.0.1:9")
+    for candidate in (registry, load_gateway_context(gateway_path).build_registry()):
+        result = await candidate.execute("hashi_scheduler_list", {})
+        assert result.is_error and "scheduler_delegation_unavailable" in result.output
+
+
+@pytest.mark.asyncio
 async def test_forged_approval_string_cannot_delete_personal_l0_job(tmp_path):
     server, runtime = _server(tmp_path, persistent_session_v1=True)
     setup_personal(server, runtime)
@@ -353,3 +619,122 @@ def test_stop_and_effect_share_the_existing_pao_fence(tmp_path):
         assert dispatched.result(timeout=10)[0] is True
         assert cancelled.result(timeout=10)["state"] == "stopped"
     assert runtime.skill_manager.get_job("cron", "daily-report") is None
+
+
+
+@pytest.mark.asyncio
+async def test_cancelled_async_mutation_admission_never_dispatches_late(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from contextlib import contextmanager
+
+    from orchestrator.agent_mutation import invoke_async_mutation
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    entered, release = threading.Event(), threading.Event()
+    original = server.session_store.hold_active_run
+    dispatched = []
+
+    @contextmanager
+    def stalled_fence(**claims):
+        entered.set()
+        assert release.wait(5)
+        with original(**claims) as connection:
+            yield connection
+
+    async def callback():
+        dispatched.append(True)
+
+    monkeypatch.setattr(server.session_store, "hold_active_run", stalled_fence)
+    task = asyncio.create_task(invoke_async_mutation(server, binding, callback))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_owner_superloop_delete_needs_no_magic_body_but_run_does_not_self_grant(tmp_path):
+    server, _runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, _runtime)
+    binding = active_run(server)
+    service = server._superloop_service("momo")
+    loop_id = service.create_quickstart("synthetic fixture")["loop_id"]
+    other_id = server._superloop_service("lily").create_quickstart("other fixture")["loop_id"]
+    async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+        base = str(upstream.make_url("")).rstrip("/")
+        url = base + f"/api/agents/momo/superloops/{loop_id}"
+        async with client.delete(url, json={}) as response:
+            assert response.status == 401
+        token = credential(server, base, binding, tools=["hashi_superloop_delete"])
+        async with client.delete(url, json={},
+                                 headers={"X-Hashi-Scheduler-Token": token}) as response:
+            assert response.status == 403
+            pending = await response.json()
+            assert pending["error_code"] == "approval_required"
+        async with client.delete(url, json={"authorization": "explicit_user_authorization"},
+                                 headers={"X-Hashi-Scheduler-Token": token}) as response:
+            assert response.status == 403
+            assert (await response.json())["approval"]["approval_id"] == pending["approval"]["approval_id"]
+        registry = ToolRegistry(
+            allowed_tools=["hashi_superloop_delete"], access_root=tmp_path,
+            workspace_dir=_runtime.workspace_dir, secrets={"scheduler_tool_token": token},
+            audit_context={"agent_name": "momo", "workbench_api_base_url": base},
+        )
+        result = await registry.execute("hashi_superloop_delete", {"loop_id": loop_id})
+        assert result.is_error and "[approval_required]" in result.output
+        assert pending["approval"]["approval_id"] in result.output
+        assert service.get_loop(loop_id)["loop"]["status"] != "deleted"
+        async with client.delete(url, json={},
+                                 headers={"X-Workbench-Token": server.admin_token}) as response:
+            assert response.status == 200, await response.text()
+            assert (await response.json())["status"] == "deleted"
+        async with client.delete(base + f"/api/agents/momo/superloops/{other_id}", json={},
+                                 headers={"X-Workbench-Token": server.admin_token}) as response:
+            assert response.status == 404
+        assert server._superloop_service("lily").get_loop(other_id)["loop"]["status"] != "deleted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["hashi_scheduler_delete", "hashi_scheduler_rerun"])
+async def test_scoped_scheduler_operation_uses_pao_decision_not_a_magic_string(tmp_path, tool):
+    import re
+
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    original = runtime.skill_manager.get_job("cron", "daily-report")
+    async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+        base = str(upstream.make_url("")).rstrip("/")
+        token = credential(server, base, binding, tools=[tool])
+        registry = ToolRegistry(
+            allowed_tools=[tool], access_root=tmp_path, workspace_dir=runtime.workspace_dir,
+            secrets={"scheduler_tool_token": token},
+            audit_context={"agent_name": "momo", "workbench_api_base_url": base},
+        )
+        args = {"kind": "cron", "job_id": "daily-report"}
+        pending = await registry.execute(tool, args)
+        assert pending.is_error and "[approval_required]" in pending.output, pending.output
+        match = re.search(r"approval_[0-9a-f]{32}", pending.output)
+        assert match, pending.output
+        assert runtime.skill_manager.get_job("cron", "daily-report") == original
+        assert runtime.reruns == []
+        await owner_decision(client, base, server, match.group())
+        approved = await registry.execute(tool, args)
+        assert not approved.is_error, approved.output
+        if tool == "hashi_scheduler_delete":
+            assert runtime.skill_manager.get_job("cron", "daily-report") is None
+            assert runtime.skill_manager.get_job("cron", "other-agent")["agent"] == "lily"
+        else:
+            assert len(runtime.reruns) == 1
+            repeated = await registry.execute(tool, args)
+            assert repeated.is_error
+            assert len(runtime.reruns) == 1

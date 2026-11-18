@@ -35,6 +35,34 @@ def _runtime(tmp_path, *, instance_id: str = "HASHI2"):
     )
 
 
+def test_message_age_is_display_only_and_survives_session_projection(tmp_path):
+    from orchestrator.chat_transcript_projection import build_chat_projection
+
+    age = {
+        "reason": "stale",
+        "originated_at": "2026-11-17T00:00:00Z",
+        "received_at": "2026-11-17T00:02:00Z",
+        "age_seconds": 120.0,
+    }
+    snapshot = build_message_context_snapshot(
+        _runtime(tmp_path), source="session-api", chat_id=0,
+        prompt="hello", metadata={"_frontend_message_age": age},
+    )
+    assert snapshot["message_age"] == age
+    assert snapshot["private_authorization_state"] == "none"
+    store = SessionStore(tmp_path / "age.sqlite", instance_id="HASHI2")
+    session = store.ensure_default_session(owner_id="user:7", agent_id="a")
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id="user:7", agent_id="a",
+        request_id="age-request", text="hello", source="session-api",
+        idempotency_key="age-request", message_context=snapshot,
+    )
+    reopened = SessionStore(store.db_path, instance_id="HASHI2")
+    projected = build_chat_projection(reopened, session=session, owner_id="user:7")
+    message = next(row for row in projected["messages"] if row["message_id"] == accepted.message_id)
+    assert message["message_age"] == age
+
+
 def test_source_contract_accepts_open_external_ids_but_protects_reserved_names():
     assert normalize_external_source(
         {"id": "example_frontend", "display_name": "示例前端"}
@@ -313,6 +341,9 @@ def test_exchange_verified_hchat_context_projects_a_typed_relay_envelope(tmp_pat
         "message_type": "agent_message",
         "idempotency_key": "hchat:exchange-message-01",
         "payload_digest": "sha256:" + "a" * 64,
+        "conversation_id": "conversation-01",
+        "in_reply_to": "",
+        "to_instance": "HASHI1",
     }
 
 
@@ -735,3 +766,104 @@ def test_private_authorization_is_revalidated_after_queue_delay(tmp_path):
     assert json.loads(row["authorization_json"])["private_authorizations"][0][
         "state"
     ] == "revoked"
+def test_configured_private_proofs_preserve_all_results_in_message_context(tmp_path):
+    from orchestrator.private_authorization import authorization_content_sha256, build_configured_proofs
+
+    resources = [f"document:{index:03}" for index in range(70)]
+    credentials = {f"team-{index:02}": {"secret": f"synthetic-secret-{index:02}-long-enough",
+        "scopes": [f"read.scope.{index:02}"], "allowed_resources": resources}
+        for index in range(20)}
+    (tmp_path / "secrets.json").write_text(json.dumps({
+        "hashi_private_shared_credentials": {"credentials": credentials,
+            "policy": {"max_proofs_per_message": 24, "max_resources_per_message": 80}}
+    }), encoding="utf-8")
+    runtime = _runtime(tmp_path)
+    runtime.name = "sunny"
+    binding = {"message_id": "wire-many", "from_instance": "HASHI1", "from_agent": "sender",
+        "to_instance": "HASHI2", "to_agent": "sunny",
+        "content_sha256": authorization_content_sha256("fixture"), "resources": resources}
+    metadata = {
+        PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY:
+            build_configured_proofs(tmp_path, credential_ids=list(credentials), binding=binding),
+        PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY: binding,
+    }
+    results = resolve_private_authorizations(runtime, metadata=metadata, prompt="fixture")
+    assert len(results) == 20 and all(item["state"] == "success" for item in results)
+    metadata[PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY] = results
+    snapshot = build_message_context_snapshot(runtime, source="hchat", chat_id=0,
+        prompt="fixture", metadata=metadata)
+    assert len(snapshot["private_authorizations"]) == 20
+    assert all(item["resources"] == resources for item in snapshot["private_authorizations"])
+    assert "synthetic-secret" not in json.dumps(snapshot)
+
+
+def test_invalid_binding_reports_all_selected_proofs(tmp_path):
+    proofs = [{"credential_id": f"team-{index:02}"} for index in range(20)]
+    runtime = _runtime(tmp_path)
+    results = resolve_private_authorizations(runtime,
+        metadata={PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY: proofs}, prompt="fixture")
+    assert len(results) == 20
+    assert all(item["state"] == "invalid" for item in results)
+def test_missing_private_proof_store_reports_unavailable_without_grant():
+    runtime = SimpleNamespace(name="sunny", global_config=SimpleNamespace(instance_id="HASHI2"))
+    metadata = {
+        PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY: [{"credential_id": "synthetic"}],
+        PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY: {"to_instance": "HASHI2", "to_agent": "sunny"},
+    }
+    results = resolve_private_authorizations(runtime, metadata=metadata, prompt="fixture")
+    assert results[0]["state"] == "invalid"
+    assert results[0]["reason"] == "policy_unavailable"
+    assert "scopes" not in results[0]
+    metadata[PRIVATE_AUTHORIZATION_RESULTS_METADATA_KEY] = results
+    snapshot = build_message_context_snapshot(runtime, source="hchat", chat_id=0,
+                                               prompt="fixture", metadata=metadata)
+    assert snapshot["private_authorizations"][0]["reason"] == "policy_unavailable"
+
+
+
+def test_exchange_context_preserves_registered_id_and_allows_public_relay_projection(tmp_path):
+    from orchestrator.frontend_contracts import build_frontend_ingress_envelope
+
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": "synthetic-relay-secret"}), encoding="utf-8",
+    )
+    origin = "1Mixed_" + "abcDEFGH" * 8
+    prompt = "a synthetic request"
+    claims = {
+        MESSAGE_SOURCE_RESERVED_METADATA_KEY: "hchat",
+        HCHAT_CONTEXT_METADATA_KEY: {
+            "from_agent": "planner", "from_instance": origin,
+            "from_address": "planner@home.barrytianli",
+            "to_agent": "lily", "to_instance": "target",
+            "to_address": "lily@server.barrytianli",
+            "sender_assurance": "exchange_verified",
+            "network_authentication": "exchange_wss",
+            "authenticated_peer": origin,
+            "relay_chain": ["planner@home.barrytianli"],
+            "origin_instance": {"id": origin, "assurance": "exchange_verified"},
+            "remote_principal": {"registered_instance_id": origin},
+            "exchange_message": {
+                "message_id": "message-01", "conversation_id": "conversation-01",
+                "message_type": "agent_message", "in_reply_to": None,
+            },
+        },
+    }
+    runtime = _runtime(tmp_path, instance_id="HASHI1")
+    evidence = seal_connector_evidence(tmp_path, claims=claims, prompt=prompt)
+    metadata = apply_connector_evidence(
+        runtime, metadata={"_connector_evidence": evidence}, prompt=prompt,
+    )
+    snapshot = build_message_context_snapshot(
+        runtime, source="hchat-exchange", chat_id=None, prompt=prompt, metadata=metadata,
+    )
+    assert snapshot["origin_instance"]["id"] == origin
+    assert snapshot["frontend_relay"]["origin_instance"] == origin
+    assert snapshot["frontend_relay"]["relay_chain"] == [origin]
+    envelope = build_frontend_ingress_envelope(
+        source_id="hchat", ingress_transport="hchat-exchange", surface="workbench",
+        channel_key="default", instance_id="HASHI1", principal=snapshot["sender"],
+        network_authentication=snapshot["network_authentication"],
+        relay_chain=snapshot["relay_chain"], request_id="req-01",
+        idempotency_key="key-01", session_id="ses-01", agent_id="lily",
+    )
+    assert envelope["relay_chain"] == ["planner@home.barrytianli"]

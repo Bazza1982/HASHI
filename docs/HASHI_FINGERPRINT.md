@@ -14,7 +14,7 @@ change Runtime/Core fingerprints, permissions or protected Core.
 The setting is `global.fingerprint` in the existing instance configuration:
 
 ```json
-{"global":{"fingerprint":{"enabled":false,"marking":"auto","export_content":false}}}
+{"global":{"fingerprint":{"enabled":false,"marking":"auto","export_content":false,"required":false}}}
 ```
 
 Missing settings stay OFF. Reading defaults never writes them back. Explicit
@@ -42,6 +42,14 @@ Managed native execution also projects the persisted Run policy.
 
 OFF performs no Fingerprint target observation, marker generation, audit
 events or background watching; existing tool logs and behavior continue.
+When enabled, the default mode is best-effort: an unavailable optional
+observation or preparation is reported as an evidence gap, while the admitted
+business operation runs once under the normal permission checks. Explicitly
+selecting required mode keeps the pre-effect preparation barrier for covered
+mutations. This selection is frozen with the Run; existing legacy snapshots
+without the field remain readable and retain their original policy version.
+An older release does not understand newly created required-mode snapshots;
+coordinate any downgrade while those Runs exist.
 
 ## Controlled file operations
 
@@ -57,7 +65,8 @@ reused by existing effect receipts rather than reopening after the lease.
 The lease coordinates participating HASHI tools; it does not lock human editors.
 
 Business, evidence and marker/projection outcomes remain separate. A failure
-to establish required durable preparation blocks that controlled mutation.
+to establish explicitly required durable preparation blocks that controlled
+mutation; in best-effort mode it reports unavailable evidence and proceeds.
 Failures after a committed write never cause automatic business replay.
 Cancellation preserves partial-effect evidence and cleanup uncertainty. Started
 post-execution evidence I/O finishes before releasing the existing resource
@@ -108,7 +117,7 @@ does not preserve provenance.
 | Path | First-version evidence |
 |---|---|
 | HASHI file_write/apply_patch | Exact before/after versions in the participating controlled interval; expected-content check; safe marker or manifest |
-| HASHI shell/bash | A durable start event is required before execution while Fingerprint is ON; execution-window facts include failures and unfinished cleanup; only trusted, explicitly configured bounded file targets are observed |
+| HASHI shell/bash | Best-effort records a durable start when available; required mode retains the start barrier for opaque commands, whose read-only nature cannot safely be inferred from shell text. Execution-window facts include failures and unfinished cleanup; only trusted, explicitly configured bounded file targets are observed |
 | Native Engine edits | Actually received file-edit events, labelled engine_reported; absolute Windows/Linux paths are reduced only within the admitted trusted Workspaces; no claim that a start event means a completed write |
 | Supervised files | Existing verified permission result retained, with explicit artifact-adapter gap; no reopening a write-only handle or extra evidence-directory permission |
 | Human/external editors | No global lock or blanket authorship attribution |
@@ -135,7 +144,8 @@ python hashi.py fingerprint inspect <file>
 python hashi.py fingerprint verify <project>
 python hashi.py fingerprint export <project> --output <new-evidence.zip>
 python hashi.py fingerprint export <file> --output <new-evidence.zip> --include-content
-python hashi.py fingerprint set on --home <instance-home> --actor <authorized-actor> --expected-revision <revision>
+python hashi.py fingerprint set on --home <instance-home> --actor <authorized-actor> --expected-revision <revision> --mode best-effort
+python hashi.py fingerprint set on --home <instance-home> --actor <authorized-actor> --expected-revision <revision> --mode required
 python hashi.py fingerprint set off --home <instance-home> --actor <authorized-actor> --expected-revision <revision>
 python hashi.py fingerprint repair <project> --home <instance-home> --agent <agent> --actor <authorized-actor>
 ```

@@ -104,7 +104,7 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         request_id = await runtime.enqueue_request(
             chat_id=update.effective_chat.id,
             prompt=(
-                "Use the authorised memory_search Tool exactly once with "
+                "Use the authorised memory_search Tool as needed with "
                 f"scope=cross_agent, instance_id={instance_id!r}, agent_id={agent_id!r}, "
                 f"purpose={purpose!r}, and query={query!r}. Preserve provenance in the answer."
             ),

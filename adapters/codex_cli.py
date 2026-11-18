@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import sqlite3
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -82,7 +83,6 @@ class CodexCLIAdapter(BaseBackend):
     MAX_STDERR_CAPTURE_BYTES = 256 * 1024
     MCP_INVENTORY_TIMEOUT_SEC = 30
     MCP_INVENTORY_MAX_ATTEMPTS = 2
-    WORKSPACE_PREFLIGHT_MAX_ENTRIES = 4096
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -895,41 +895,11 @@ class CodexCLIAdapter(BaseBackend):
         cls,
         workspace: Path,
     ) -> tuple[str, str] | None:
-        """Inspect only top-level link health before launching Codex.
-
-        The preflight never walks ordinary directories or reads target file
-        content.  It follows a top-level link only far enough to stat its
-        target, which catches the broken project aliases that otherwise make a
-        coding turn fail after tool activity has already begun.
-        """
+        """Check the requested cwd itself, without scanning unrelated entries."""
 
         try:
-            with os.scandir(workspace) as entries:
-                for index, entry in enumerate(entries):
-                    if index >= cls.WORKSPACE_PREFLIGHT_MAX_ENTRIES:
-                        return (
-                            "CODEX_WORKSPACE_PREFLIGHT_FAILED",
-                            "Codex workspace preflight exceeded the bounded "
-                            f"top-level entry limit ({cls.WORKSPACE_PREFLIGHT_MAX_ENTRIES}); "
-                            "reduce the workspace root entry count before retrying.",
-                        )
-                    try:
-                        linked = entry.is_symlink()
-                        if not linked and os.name == "nt":
-                            junction_check = getattr(Path(entry.path), "is_junction", None)
-                            linked = bool(
-                                callable(junction_check) and junction_check()
-                            )
-                        if not linked:
-                            continue
-                        entry.stat(follow_symlinks=True)
-                    except OSError as exc:
-                        return (
-                            "CODEX_WORKSPACE_LINK_UNAVAILABLE",
-                            "Codex workspace link "
-                            f"{entry.name!r} is unavailable ({type(exc).__name__}); "
-                            "repair or remove the link before starting this coding session.",
-                        )
+            if not stat.S_ISDIR(workspace.stat().st_mode):
+                raise NotADirectoryError(str(workspace))
         except OSError as exc:
             return (
                 "CODEX_WORKSPACE_PREFLIGHT_FAILED",

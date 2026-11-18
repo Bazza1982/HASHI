@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,25 @@ import pytest
 # accepts both numeric seconds and timedelta, so this keeps the suite on the
 # forward-compatible branch instead of emitting one deprecation per retry.
 os.environ.setdefault("PTB_TIMEDELTA", "1")
+
+
+_PROTOCOL_MANAGER_TESTS = frozenset({
+    "test_hchat_freshness.py",
+    "test_remote_discovery_contract.py",
+    "test_remote_peer_status.py",
+    "test_remote_rescue_control.py",
+    "test_remote_shared_token.py",
+    "test_session_api_freshness.py",
+})
+
+
+@pytest.fixture(autouse=True)
+def isolate_protocol_manager_home(request, monkeypatch):
+    """ProtocolManager writes under Path.home; tests must never touch operator state."""
+    if request.node.path.name not in _PROTOCOL_MANAGER_TESTS:
+        return
+    root = request.getfixturevalue("tmp_path") / "isolated-protocol-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: root))
 
 
 @pytest.fixture(scope="session")

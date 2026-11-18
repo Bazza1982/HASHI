@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from orchestrator.config import GlobalConfig
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+from orchestrator.hchat_origin_binding import bind_outbound_origin
 from orchestrator.message_context import MESSAGE_CONTEXT_METADATA_KEY
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.session_store import SessionStore
 from orchestrator.workbench_api import WorkbenchApiServer
+from remote.exchange_protocol import utc_timestamp
 from remote.exchange_transport import ExchangeTransport, ExchangeTransportError
 
 
@@ -63,6 +67,11 @@ class _HashiAcceptanceRuntime(FlexibleAgentRuntime):
         self.error_logger = _Logger()
         self.logger = _Logger()
         self.request_activity = RequestActivityStore()
+        # Admission freezes execution settings even though this lab uses a
+        # deterministic executor instead of starting a model backend.
+        self.config = SimpleNamespace()
+        self.backend_manager = SimpleNamespace(_read_state_dict=lambda: {})
+        self._execution_admissions = {}
         self.skill_manager = None
         self.startup_success = True
         self._transfer_state = None
@@ -269,6 +278,30 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
             ]
             assert home_transport.status()["routes_stale"] is False
 
+            # Bind this outgoing request to the exact local conversation,
+            # then switch the primary conversation before its reply arrives.
+            owner = "synthetic-owner"
+            origin = home_runtime.session_store.create_session(owner_id=owner, agent_id="planner")
+            other = home_runtime.session_store.create_session(owner_id=owner, agent_id="planner")
+            origin_run = home_runtime.session_store.accept_run(
+                session_id=origin["session_id"], owner_id=owner, agent_id="planner",
+                request_id="req-lab-origin", text="Ask reviewer", source="test",
+                idempotency_key="lab-origin-run",
+            )
+            fence = home_runtime.session_store.mark_request_running(
+                origin_run.request_id, worker_id="lab-origin-worker",
+            )
+            bind_outbound_origin(
+                home_runtime.session_store, message_id="message_acceptance_1",
+                owner_id=owner, agent_id="planner", session_id=origin["session_id"],
+                run_id=origin_run.run_id, request_id=origin_run.request_id,
+                context_generation=origin["context_generation"], fencing_token=fence,
+                target="reviewer@server.barrytianli",
+            )
+            home_runtime.session_store.bind_primary_session(
+                owner_id=owner, agent_id="planner", session_id=other["session_id"],
+            )
+
             sent = await home_transport.send_message(
                 from_agent="planner",
                 to_address="reviewer@server.barrytianli",
@@ -288,6 +321,9 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
                 server_item.request_id
             )
             assert server_run["state"] == "queued"
+            assert server_runtime.session_store.get_session(
+                server_run["session_id"],
+            )["owner_id"] == "user:0"
             assert server_context["sender"]["claim"] == (
                 "planner@home.barrytianli"
             )
@@ -315,6 +351,9 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
             reply_calls = []
 
             def send_reply(to_agent, from_agent, text, **kwargs):
+                # Simulate a legitimate reply delayed beyond the legacy
+                # freshness window while still inside the transport deadline.
+                kwargs = {**kwargs, "originated_at": utc_timestamp(time.time() - 120)}
                 reply_calls.append((to_agent, from_agent, text, kwargs))
                 future = asyncio.run_coroutine_threadsafe(
                     server_transport.send_message(
@@ -330,35 +369,39 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
             monkeypatch.setattr("tools.hchat_send.send_hchat", send_reply)
             await server_runtime._hchat_route_reply(server_item, answer)
 
-            home_item = await asyncio.wait_for(
-                home_runtime.queue.get(),
-                timeout=5,
-            )
-            home_context = home_item.request_metadata[
-                MESSAGE_CONTEXT_METADATA_KEY
-            ]
-            assert home_context["sender"]["claim"] == (
-                "reviewer@server.barrytianli"
-            )
-            assert home_context["exchange_message"]["message_type"] == (
-                "agent_reply"
-            )
-            assert home_context["exchange_message"]["in_reply_to"] == (
-                "message_acceptance_1"
-            )
-            assert home_context["exchange_message"]["conversation_id"] == (
-                "conversation_acceptance_1"
-            )
-            completed_home_run = _finish_run(
-                home_runtime,
-                home_item,
-                answer,
-            )
-            await home_runtime._hchat_route_reply(
-                home_item,
-                "must not loop",
-            )
+            async with asyncio.timeout(5):
+                while True:
+                    visible = home_runtime.session_store.recent_visible_messages(
+                        origin["session_id"], owner_id=owner,
+                    )
+                    replies = [m for m in visible if m["source"] == "hchat-exchange-reply"]
+                    if replies:
+                        break
+                    await asyncio.sleep(0.01)
+            assert len(replies) == 1
+            assert replies[0]["text"] == answer
+            assert replies[0]["message_context"]["hchat_from_agent"] == "reviewer"
+            assert replies[0]["message_context"]["message_age"]["reason"] == "stale"
+            assert home_runtime.queue.empty()
+            assert home_runtime.session_store.recent_visible_messages(
+                other["session_id"], owner_id=owner,
+            ) == []
             assert len(reply_calls) == 1
+            assert reply_calls[0][3]["in_reply_to"] == "message_acceptance_1"
+            assert reply_calls[0][3]["conversation_id"] == "conversation_acceptance_1"
+            assert reply_calls[0][3]["message_type"] == "agent_reply"
+            await _wait_outbox_state(server_transport, reply_calls[0][3]["message_id"], "delivered")
+            replay_reply = await server_transport.send_message(
+                from_agent=reply_calls[0][1], to_address=reply_calls[0][0],
+                text=reply_calls[0][2], **reply_calls[0][3],
+            )
+            assert replay_reply["replayed"] is True
+            assert len([
+                m for m in home_runtime.session_store.recent_visible_messages(
+                    origin["session_id"], owner_id=owner,
+                ) if m["source"] == "hchat-exchange-reply"
+            ]) == 1
+            assert home_runtime.queue.empty()
 
             await _wait_outbox_state(
                 home_transport,
@@ -380,9 +423,7 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
             server_messages = server_runtime.session_store.messages(
                 completed_server_run["session_id"]
             )
-            home_messages = home_runtime.session_store.messages(
-                completed_home_run["session_id"]
-            )
+            home_messages = home_runtime.session_store.messages(origin["session_id"])
             assert [item["role"] for item in server_messages] == [
                 "user",
                 "assistant",
@@ -447,12 +488,10 @@ async def test_two_hashi_runtimes_accept_run_reply_and_deduplicate(
                     {
                         "request_receipt": sent["state"],
                         "server_run": completed_server_run["state"],
-                        "reply_run": completed_home_run["state"],
+                        "reply_state": "displayed_in_origin_without_new_run",
                         "server_sender": server_context["sender"]["claim"],
-                        "reply_sender": home_context["sender"]["claim"],
-                        "reply_conversation": home_context[
-                            "exchange_message"
-                        ]["conversation_id"],
+                        "reply_sender": reply_calls[0][1],
+                        "reply_conversation": reply_calls[0][3]["conversation_id"],
                         "deduplicated": server_runtime.queue.empty(),
                         "answer": answer,
                     },

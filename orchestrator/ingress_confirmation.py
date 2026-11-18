@@ -6,6 +6,7 @@ Decision: Pre-admission gate persists delayed requests and enforces exactly-once
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -188,8 +189,11 @@ class IngressConfirmationService:
         expires_at: str,
         payload: dict[str, Any],
         display_metadata: dict[str, Any],
+        initial_state: str = "awaiting_confirmation",
     ) -> dict[str, Any]:
         """Register a pending confirmation record or return existing idempotent match."""
+        if initial_state not in {"awaiting_confirmation", "expired"}:
+            raise ValueError("invalid initial confirmation state")
         now_str = self._now_iso()
         # Keep attachment references in the same compact JSON form used by
         # canonical message content so the existing bounded-reference checks
@@ -277,7 +281,7 @@ class IngressConfirmationService:
                     ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    'awaiting_confirmation', ?, ?
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -300,6 +304,7 @@ class IngressConfirmationService:
                     expires_at_str,
                     payload_json,
                     display_json,
+                    initial_state,
                     now_str,
                     now_str,
                 ),
@@ -310,6 +315,58 @@ class IngressConfirmationService:
             )
             created_row = cursor.fetchone()
             return self._row_to_dict(created_row)
+
+    def find_telegram_by_identity(
+        self, *, agent_id: str, owner_id: str, source_message_id: str,
+        idempotency_key: str, payload_digest: str,
+    ) -> dict[str, Any] | None:
+        """Preserve an earlier Telegram decision after the age policy changes."""
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT * FROM ingress_confirmations
+                   WHERE connector_id='telegram' AND agent_id=? AND owner_id=?
+                     AND (source_message_id=? OR idempotency_key=?)""",
+                (str(agent_id), str(owner_id), str(source_message_id), str(idempotency_key)),
+            ).fetchall()
+            if len(rows) > 1:
+                raise ConfirmationConflictError("Telegram confirmation identity is ambiguous")
+            if not rows:
+                return None
+            existing = self._row_to_dict(rows[0])
+            if (existing["payload_digest"] != payload_digest
+                    or existing["idempotency_key"] != idempotency_key
+                    or existing["source_message_id"] != source_message_id
+                    or existing["message_kind"] != "frontend_message"):
+                raise ConfirmationConflictError("Telegram confirmation is bound to a different message")
+            return self._check_lazy_state_transition_locked(connection, existing)
+
+    def find_hchat_by_identity(
+        self, *, agent_id: str, owner_id: str | None, source_message_id: str,
+        idempotency_key: str, payload_digest: str, message_kind: str,
+    ) -> dict[str, Any] | None:
+        """Respect an existing decision even when a later age policy is relaxed."""
+        clauses = ["connector_id = 'hchat'", "agent_id = ?", "(source_message_id = ? OR idempotency_key = ?)"]
+        params: list[Any] = [str(agent_id), str(source_message_id), str(idempotency_key)]
+        if owner_id:
+            clauses.append("owner_id = ?")
+            params.append(str(owner_id))
+        with self.store._lock, self.store._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT * FROM ingress_confirmations WHERE " + " AND ".join(clauses), params,
+            ).fetchall()
+            if len(rows) > 1:
+                raise ConfirmationConflictError("HChat confirmation identity is ambiguous")
+            if not rows:
+                return None
+            existing = self._row_to_dict(rows[0])
+            if (existing["payload_digest"] != payload_digest
+                    or existing["idempotency_key"] != idempotency_key
+                    or existing["source_message_id"] != source_message_id
+                    or existing["message_kind"] != message_kind):
+                raise ConfirmationConflictError("HChat confirmation is bound to a different message")
+            return self._check_lazy_state_transition_locked(connection, existing)
 
     def _check_lazy_state_transition_locked(
         self, connection: Any, record: dict[str, Any]
@@ -857,11 +914,37 @@ class IngressConfirmationService:
         execute_fn: Callable[[dict[str, Any]], Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically decide on a confirmation record with async execution support."""
-        record, token = self._claim_confirmation(
+
+        async def settled(operation, *args, **kwargs):
+            task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+
+        # Cancellation during claim must settle the transaction.  If the
+        # claim succeeded, release it without dispatching the operation.
+        claim = asyncio.create_task(asyncio.to_thread(
+            self._claim_confirmation,
             confirmation_id=confirmation_id,
             decision=decision,
             owner_id=owner_id,
-        )
+        ))
+        try:
+            record, token = await asyncio.shield(claim)
+        except asyncio.CancelledError as exc:
+            outcome = (await asyncio.gather(claim, return_exceptions=True))[0]
+            if not isinstance(outcome, BaseException):
+                _record, claimed_token = outcome
+                if claimed_token is not None:
+                    await settled(
+                        self._release_failed_claim,
+                        confirmation_id=confirmation_id,
+                        execution_token=claimed_token,
+                        error=exc,
+                    )
+            raise
         if token is None:
             return record
         heartbeat = self._start_execution_heartbeat(
@@ -873,16 +956,22 @@ class IngressConfirmationService:
             if inspect.isawaitable(result):
                 result = await result
         except BaseException as exc:
-            self._stop_execution_heartbeat(heartbeat)
-            self._release_failed_claim(
-                confirmation_id=confirmation_id,
-                execution_token=token,
-                error=exc,
-            )
+            try:
+                await settled(
+                    self._release_failed_claim,
+                    confirmation_id=confirmation_id,
+                    execution_token=token,
+                    error=exc,
+                )
+            finally:
+                await settled(self._stop_execution_heartbeat, heartbeat)
             raise
-        self._stop_execution_heartbeat(heartbeat)
-        return self._finish_execution(
-            record=record,
-            execution_token=token,
-            callback_result=result,
-        )
+        try:
+            return await settled(
+                self._finish_execution,
+                record=record,
+                execution_token=token,
+                callback_result=result,
+            )
+        finally:
+            await settled(self._stop_execution_heartbeat, heartbeat)

@@ -308,7 +308,7 @@ class HERv2Adapter(BaseBackend):
         if journal is not None:
             journal.append_audit(record)
 
-    def _observe_canonical_audit(self, record: Mapping[str, Any]) -> None:
+    def _observe_canonical_audit(self, record: Mapping[str, Any]) -> int | None:
         """Required pre-audit write into the canonical Session event store."""
 
         request_ref = str(record.get("request_ref") or "")
@@ -317,7 +317,7 @@ class HERv2Adapter(BaseBackend):
             # Maintenance jobs and legacy non-fixed requests have no fixed
             # Session authority to project into.
             return
-        self._session_coordinator.record_runtime_event(accepted, record)
+        return self._session_coordinator.record_runtime_event(accepted, record)
 
     def _wip_journal_for_request(
         self,
@@ -1132,7 +1132,10 @@ class HERv2Adapter(BaseBackend):
                 observer=self._observe_wip_audit,
                 canonical_observer=self._observe_canonical_audit,
             )
-            self._audit_log.replay_fallback()
+            try:
+                self._audit_log.replay_fallback()
+            except (OSError, ValueError) as exc:
+                self.logger.warning("HERV3 audit projection replay unavailable: %s", type(exc).__name__)
             # The ledger is a shadow of the canonical Turn owner.  Reconcile
             # only request refs whose canonical owner was confirmed dead;
             # another live Worker's ledgers remain immutable to this candidate.
@@ -1451,6 +1454,7 @@ class HERv2Adapter(BaseBackend):
         silent: bool,
         usage_observer: Callable[[Any], None] | None = None,
         default_recovery_kind: str = "none",
+        retry_policy: ProviderRetryPolicy | None = None,
     ) -> StageProvider:
         injected = getattr(self.config, "_her_v2_stage_provider", None)
         if injected is not None:
@@ -1460,7 +1464,7 @@ class HERv2Adapter(BaseBackend):
             tool_registry=self.tool_registry,
             on_stream_event=on_stream_event,
             silent=silent,
-            retry_policy=self._provider_retry_policy(),
+            retry_policy=retry_policy or self._provider_retry_policy(),
             audit_log=self._audit_log,
             workzone_ref=str(self.effective_workdir.resolve()),
             runtime_context=self._runtime_context(),
@@ -1470,13 +1474,23 @@ class HERv2Adapter(BaseBackend):
             compute_services_config_path=self._compute_services_config_path(),
         )
 
-    def _provider_retry_policy(self) -> ProviderRetryPolicy:
+    def _provider_retry_policy(
+        self, task_options: Mapping[str, Any] | None = None,
+    ) -> ProviderRetryPolicy:
         injected = getattr(self.config, "_her_v2_retry_policy", None)
-        return (
-            injected
-            if isinstance(injected, ProviderRetryPolicy)
-            else DEFAULT_PROVIDER_RETRY_POLICY
-        )
+        if isinstance(injected, ProviderRetryPolicy) and task_options is None:
+            return injected
+        raw_v2 = self._extra.get("her_v2")
+        configured = raw_v2.get("provider_recovery") if isinstance(raw_v2, Mapping) else None
+        if configured is None and task_options is None:
+            return injected if isinstance(injected, ProviderRetryPolicy) else DEFAULT_PROVIDER_RETRY_POLICY
+        if configured is not None and not isinstance(configured, Mapping):
+            raise ValueError("provider_recovery must be an object")
+        if task_options is not None and not isinstance(task_options, Mapping):
+            raise ValueError("task provider_recovery must be an object")
+        merged = dict(configured or {})
+        merged.update(task_options or {})
+        return ProviderRetryPolicy.from_mapping(merged)
 
     async def _invoke_maintenance_model(
         self,
@@ -1626,11 +1640,7 @@ class HERv2Adapter(BaseBackend):
                     else "provider_recovery_already_used"
                 )
             )
-            retry_delay = (
-                last_error.retry_after_s
-                if last_error.retry_after_s is not None
-                else 0.25
-            )
+            retry_delay = policy.delay(attempt - 1, last_error.retry_after_s)
             self._audit_log.append(
                 event_id=f"{invocation_id}:attempt:{attempt}:failed",
                 turn_id=turn_id,
@@ -1877,6 +1887,9 @@ class HERv2Adapter(BaseBackend):
         turn_config = self._v2_config
         request_meta = self._runtime_request_meta(request_id)
         try:
+            turn_retry_policy = self._provider_retry_policy(
+                request_meta.get("provider_recovery")
+            )
             effort_resolution = resolve_request_effort(
                 self.effort,
                 request_meta,
@@ -1885,13 +1898,13 @@ class HERv2Adapter(BaseBackend):
             return BackendResponse(
                 text="",
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                error=f"Invalid HERV3 request effort policy: {exc}",
+                error=f"Invalid HERV3 request policy: {exc}",
                 is_success=False,
                 error_code=ProviderFailureCode.PROVIDER_BAD_REQUEST.value,
                 error_retryable=False,
                 stream_metadata={
                     "provider_failure_description": (
-                        "The request selected an invalid HERV3 effort policy."
+                        "The request selected an invalid HERV3 request policy."
                     )
                 },
             )
@@ -2212,6 +2225,7 @@ class HERv2Adapter(BaseBackend):
             provider = self._new_stage_provider(
                 on_stream_event=on_stream_event,
                 silent=silent,
+                retry_policy=turn_retry_policy,
                 usage_observer=(
                     self._fixed_provider_usage_observer(
                         accepted=fixed_turn,
@@ -2396,6 +2410,7 @@ class HERv2Adapter(BaseBackend):
                 downstream=commentary,
                 commentary_interval_s=runtime_config.commentary_interval_s,
                 companion_enabled=runtime_config.agent_companion.enabled,
+                companion_mode=getattr(runtime_config.agent_companion, "mode", "advisory"),
                 companion_interval_s=(
                     runtime_config.agent_companion.interval_minutes * 60.0
                 ),
@@ -2453,7 +2468,7 @@ class HERv2Adapter(BaseBackend):
             ),
             dream=getattr(self.config, "_her_v2_dream_maintainer", None),
             logger=self.logger,
-            retry_policy=self._provider_retry_policy(),
+            retry_policy=turn_retry_policy,
             workzone_ref=str(self.effective_workdir.resolve()),
             skills_catalogue=self._direct_skill_catalogue(),
             capability_cache_path=self._model_capability_cache_path(),

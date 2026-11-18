@@ -47,6 +47,7 @@ def accept_runtime_ingress(
     request_metadata: Mapping[str, Any] | None,
     request_content: Mapping[str, Any] | None,
     idempotency_key: str | None,
+    replay_only: bool = False,
 ) -> tuple[dict[str, Any], Any | None, str, str, str]:
     """Validate the standard envelope, then use PAO's sole Run writer."""
 
@@ -228,6 +229,7 @@ def accept_runtime_ingress(
     with runtime_transfer.transfer_admission_lock(runtime):
         if (
             fenced_connector
+            and not replay_only
             and not trusted_bridge_ingress
             and runtime_transfer.session_request_requires_transfer_fence(
                 request_content
@@ -247,9 +249,10 @@ def accept_runtime_ingress(
             request_metadata=metadata,
             request_content=request_content,
             idempotency_key=idempotency_key,
+            replay_only=replay_only,
         )
     session, accepted, _owner, _surface, _channel = result
-    if accepted is not None:
+    if accepted is not None and not replay_only:
         store = ensure_store(runtime)
         if isinstance(request_content, MutableMapping):
             rebound_content = store.rebind_request_content_attachments(

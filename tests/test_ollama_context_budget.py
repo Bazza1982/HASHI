@@ -8,7 +8,6 @@ from copy import deepcopy
 import httpx
 import pytest
 
-from adapters.ollama_api import OllamaAdapter
 from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from tests.test_ollama_context_pilot import _adapter
 
@@ -273,6 +272,7 @@ async def test_capacity_recovery_closes_tools_and_preserves_completed_write(tmp_
 
     sentinel = tmp_path / "completed.txt"
     adapter = _adapter(tmp_path)
+    adapter.config.extra["model_capabilities"]["local-qwen"]["ollama_tool_closure_margin_tokens"] = 2048
     adapter.tool_registry = ToolRegistry(
         allowed_tools=["file_write"], access_root=tmp_path,
         workspace_dir=tmp_path, secrets={},
@@ -364,7 +364,7 @@ async def test_low_space_read_batch_returns_source_and_finishes_without_page_rec
     assert response.is_success, response.error
     assert response.tool_call_count == 3
     final = requests[-1]
-    assert "tools" not in final
+    assert "tools" in final
     result_rows = [m for m in final["messages"] if m["role"] == "tool"]
     assert len(result_rows) == 3
     for i, row in enumerate(result_rows):
@@ -380,6 +380,7 @@ async def test_tool_request_after_capacity_closure_cannot_execute(tmp_path):
 
     sentinel = tmp_path / "must-not-be-written.txt"
     adapter = _adapter(tmp_path)
+    adapter.config.extra["model_capabilities"]["local-qwen"]["ollama_tool_closure_margin_tokens"] = 2048
     adapter.tool_registry = ToolRegistry(
         allowed_tools=["file_write"], access_root=tmp_path,
         workspace_dir=tmp_path, secrets={},
@@ -412,3 +413,115 @@ async def test_tool_request_after_capacity_closure_cannot_execute(tmp_path):
     assert not sentinel.exists()
     assert not response.is_success
     assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_near_capacity_keeps_granted_tools_open_by_default(tmp_path, monkeypatch):
+    from tools.registry import ToolRegistry
+    adapter = _adapter(tmp_path)
+    registry = ToolRegistry(["file_read"], tmp_path, tmp_path, {})
+    observed = []
+    original = registry._dispatch
+    async def read_fixture(name, arguments, *, tool_call_id=""):
+        if name == "file_read":
+            observed.append(arguments["path"])
+            return ""
+        return await original(name, arguments, tool_call_id=tool_call_id)
+    monkeypatch.setattr(registry, "_dispatch", read_fixture)
+    adapter.tool_registry = registry
+    requests, main_calls = [], 0
+    def respond(request):
+        nonlocal main_calls
+        payload = json.loads(request.content)
+        requests.append(payload)
+        probe = payload["options"]["num_predict"] == 1
+        message = {"content": ""}
+        if not probe:
+            main_calls += 1
+            if main_calls == 1:
+                message["tool_calls"] = [{"function": {"name": "file_read", "arguments": {"path": "fixture.txt"}}}]
+            else:
+                message["content"] = "read complete"
+        return httpx.Response(200, json={"message": message, "done": True,
+                                         "done_reason": "length" if probe else "stop",
+                                         "prompt_eval_count": 40800, "eval_count": 1 if probe else 3})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("read the fixture", "near-capacity")
+    assert response.is_success, response.error
+    assert response.text == "read complete" and observed == ["fixture.txt"]
+    assert len(requests) == 4 and all("tools" in payload for payload in requests)
+    assert all(not any("tool use is closed" in str(row.get("content")) for row in payload["messages"])
+               for payload in requests)
+
+
+@pytest.mark.asyncio
+async def test_genuine_overcapacity_does_not_dispatch_full_generation(tmp_path):
+    from tools.registry import ToolRegistry
+    adapter = _adapter(tmp_path)
+    adapter.tool_registry = ToolRegistry(["file_write"], tmp_path, tmp_path, {})
+    requests = []
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        return httpx.Response(200, json={"message": {"content": "probe"}, "done": True,
+                                         "done_reason": "length", "prompt_eval_count": 40961, "eval_count": 1})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("do not guess capacity", "over-capacity")
+    assert not response.is_success and response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert len(requests) == 1 and requests[0]["options"]["num_predict"] == 1
+
+
+@pytest.mark.asyncio
+async def test_low_space_can_read_saved_result_tail_without_repeating_side_effect(tmp_path, monkeypatch):
+    from tools.registry import ToolRegistry
+    adapter = _adapter(tmp_path)
+    registry = ToolRegistry(["file_write"], tmp_path, tmp_path, {},
+                            audit_context={"hashi_run_id": "run-one", "request_id": "request-one",
+                                           "request_tool_allowlist": ["file_write"]})
+    monkeypatch.setattr(registry, "tool_availability", lambda _name: {"available": True})
+    original_dispatch = registry._dispatch
+    target = tmp_path / "once.txt"
+    executions = []
+    original = ("result line\n" * 500) + "TAIL-OBSERVED"
+    async def fixture_dispatch(name, arguments, *, tool_call_id=""):
+        if name == "file_write":
+            executions.append(name)
+            target.write_text("written once", encoding="utf-8")
+            return original
+        return await original_dispatch(name, arguments, tool_call_id=tool_call_id)
+    monkeypatch.setattr(registry, "_dispatch", fixture_dispatch)
+    adapter.tool_registry = registry
+    requests, main_calls = [], 0
+    def respond(request):
+        nonlocal main_calls
+        payload = json.loads(request.content)
+        requests.append(payload)
+        probe = payload["options"]["num_predict"] == 1
+        message = {"content": ""}
+        if not probe:
+            main_calls += 1
+            if main_calls == 1:
+                message["tool_calls"] = [{"function": {"name": "file_write", "arguments": {"path": str(target)}}}]
+            elif main_calls == 2:
+                assert "tool_output_read" in {tool["function"]["name"] for tool in payload["tools"]}
+                first = next(row["content"] for row in payload["messages"]
+                             if row.get("role") == "tool" and "HASHI_OLLAMA_RESULT_PAGE " in row.get("content", ""))
+                meta = json.JSONDecoder().raw_decode(first.split("HASHI_OLLAMA_RESULT_PAGE ", 1)[1])[0]
+                assert meta["result_reference"] and meta["total_chars"] == len(original)
+                message["tool_calls"] = [{"function": {"name": "tool_output_read", "arguments": {
+                    "reference": meta["result_reference"], "offset": len(original) - len("TAIL-OBSERVED"), "limit": 13}}}]
+            else:
+                assert any("TAIL-OBSERVED" in str(row.get("content")) for row in payload["messages"] if row.get("role") == "tool")
+                message["content"] = "tail seen"
+        return httpx.Response(200, json={"message": message, "done": True,
+                                         "done_reason": "length" if probe else "stop",
+                                         "prompt_eval_count": 40800, "eval_count": 1 if probe else 3})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter.client = client
+        response = await adapter.generate_response("write once and inspect returned tail", "paged-tail")
+    assert response.is_success, response.error
+    assert response.text == "tail seen" and executions == ["file_write"]
+    assert target.read_text(encoding="utf-8") == "written once"
+    assert main_calls == 3 and len(requests) == 6

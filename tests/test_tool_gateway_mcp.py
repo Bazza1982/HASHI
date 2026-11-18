@@ -239,6 +239,19 @@ async def test_mcp_preserves_safe_authoritative_error_details(tmp_path, monkeypa
     assert any("runtime_integrity_failed" in block.get("text", "") for block in result["content"])
 
 
+def test_mcp_size_details_expose_only_nonnegative_integer_counts():
+    from tools.gateway.mcp_stdio import _safe_mcp_result_details
+
+    assert _safe_mcp_result_details({
+        "actual_bytes": 123, "limit_bytes": 100, "secret": "private",
+    }) == {"actual_bytes": 123, "limit_bytes": 100}
+    assert _safe_mcp_result_details({
+        "actual_bytes": True, "limit_bytes": "not-a-count", "secret": "private",
+    }) == {}
+    assert _safe_mcp_result_details({"actual_bytes": -1, "limit_bytes": -1}) == {}
+
+
+
 @pytest.mark.asyncio
 async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, monkeypatch):
     registry = _registry(tmp_path)
@@ -286,7 +299,6 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
         {
             "kind": "cron",
             "job_id": "daily",
-            "authorization": "explicit_user_authorization",
         },
         "run-1",
     )
@@ -298,7 +310,6 @@ async def test_gateway_exposes_authoritative_hashi_scheduler_tools(tmp_path, mon
             "kind": "cron",
             "job_id": "daily",
             "requested_by": "hashi_tool_gateway",
-            "authorization": "explicit_user_authorization",
         },
     )
 
@@ -413,7 +424,7 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
 
     denied = await gateway.call(
         "hashi_scheduler_delete",
-        {"kind": "heartbeat", "job_id": "momo-loop-1"},
+        {"kind": "heartbeat"},
         "delete-denied",
     )
     assert denied["isError"] is True
@@ -424,7 +435,6 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
         {
             "kind": "heartbeat",
             "job_id": "momo-loop-1",
-            "authorization": "explicit_user_authorization",
         },
         "delete-1",
     )
@@ -440,7 +450,6 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
         {
             "kind": "heartbeat",
             "requested_by": "hashi_tool_gateway",
-            "authorization": "explicit_user_authorization",
             "expected_revision": "a" * 64,
         },
     )
@@ -478,7 +487,7 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
 
     denied_loop = await gateway.call(
         "hashi_superloop_delete",
-        {"loop_id": "sl-1"},
+        {},
         "superloop-delete-denied",
     )
     assert denied_loop["isError"] is True
@@ -486,10 +495,7 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
 
     deleted_loop = await gateway.call(
         "hashi_superloop_delete",
-        {
-            "loop_id": "sl-1",
-            "authorization": "explicit_user_authorization",
-        },
+        {"loop_id": "sl-1"},
         "superloop-delete-1",
     )
     assert deleted_loop["isError"] is False
@@ -498,7 +504,6 @@ async def test_gateway_exposes_agent_owned_scheduler_and_superloop_mutations(
         "http://10.255.255.254:18800/api/agents/momo/superloops/sl-1",
         {
             "requested_by": "hashi_tool_gateway",
-            "authorization": "explicit_user_authorization",
         },
     )
 
@@ -714,7 +719,7 @@ def test_gateway_bounds_legacy_browser_session_screenshot_count():
 
     assert is_error is False
     assert content and sum(block.get("type") == "image" for block in content) == 6
-    assert any("6-image safety limit" in block.get("text", "") for block in content)
+    assert any("remaining frames are unavailable" in block.get("text", "") for block in content)
 
 
 @pytest.mark.asyncio
@@ -758,3 +763,238 @@ async def test_gateway_allows_repeated_browser_side_effect_when_state_changes(tm
         result = await gateway.call("browser_click", arguments, str(number))
         assert result["isError"] is False
 # HASHI-Fingerprint: hfp_cf66b29779af41f99a82f150ae5ef628
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["codex-cli", "claude-cli", "her-v3"])
+async def test_current_gateway_does_not_apply_legacy_repeat_call_or_error_limits(tmp_path, backend):
+    from dataclasses import replace
+    from tools.gateway.context import GatewayContext
+
+    path = tmp_path / "readable.txt"
+    path.write_text("fixture", encoding="utf-8")
+    registry = ToolRegistry(["file_read"], tmp_path, tmp_path, {})
+    original = GatewayContext.from_registry(registry, backend=backend)
+    assert original.enforce_legacy_limits is False
+    context = replace(original, max_calls=2, max_identical_calls=2, max_consecutive_errors=2)
+    gateway = ToolGateway(context)
+    for i in range(6):
+        result = await gateway.call("hashi_file_read", {"path": str(tmp_path / "missing")}, f"missing-{i}")
+        assert result["isError"] is True
+        assert "legacy HER v1" not in str(result)
+    for i in range(6):
+        result = await gateway.call("hashi_file_read", {"path": str(path)}, f"valid-{i}")
+        assert result["isError"] is False
+        assert "fixture" in str(result)
+    assert gateway.call_count == 12
+
+
+@pytest.mark.asyncio
+async def test_retired_legacy_gateway_repeat_limit_is_explicitly_scoped(tmp_path):
+    from dataclasses import replace
+    from tools.gateway.context import GatewayContext
+
+    path = tmp_path / "readable.txt"
+    path.write_text("fixture", encoding="utf-8")
+    registry = ToolRegistry(["file_read"], tmp_path, tmp_path, {})
+    original = GatewayContext.from_registry(registry, backend="her-v1")
+    assert original.enforce_legacy_limits is True
+    gateway = ToolGateway(replace(original, max_calls=100, max_identical_calls=2))
+    for i in range(2):
+        result = await gateway.call("hashi_file_read", {"path": str(path)}, f"legacy-{i}")
+        assert result["isError"] is False
+    result = await gateway.call("hashi_file_read", {"path": str(path)}, "legacy-2")
+    assert result["isError"] is True and "legacy HER v1" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_legacy_screenshot_paging_preserves_every_image_and_run_scope(tmp_path, monkeypatch):
+    from tools.legacy_screenshot import normalize_legacy_screenshot as _normalize_legacy_screenshot
+
+    registry = ToolRegistry(
+        allowed_tools=["browser_session"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+        audit_context={"instance_id": "TEST", "agent_name": "momo", "owner_id": "user",
+                       "hashi_session_id": "session", "hashi_run_id": "run-a", "request_id": "request-a"},
+    )
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    payloads = []
+    for index in range(7):
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 20), (index * 31, 45, 210 - index * 25)).save(buf, format="PNG")
+        payloads.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+    legacy = "\n".join(f"[screenshot] base64:{payload}" for payload in payloads)
+    original_dispatch = gateway.registry._dispatch
+
+    async def fake_dispatch(name, arguments, *, tool_call_id=""):
+        if name == "browser_session":
+            return legacy
+        return await original_dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(gateway.registry, "_dispatch", fake_dispatch)
+    first = await gateway.call("browser_session", {"steps": [{"action": "screenshot"}]}, "first")
+    assert first["isError"] is False
+    first_images = [part for part in first["content"] if part["type"] == "image"]
+    assert len(first_images) == 6
+    details = first["structuredContent"]["hashi"]["details"]
+    reference, offset = details["image_continuation"], details["image_next_offset"]
+    assert offset == 6 and details["complete_content"] is False
+
+    second = await gateway.call("tool_output_read", {"reference": reference, "offset": offset}, "second")
+    assert second["isError"] is False
+    second_images = [part for part in second["content"] if part["type"] == "image"]
+    assert len(second_images) == 1
+    assert first_images + second_images == [_normalize_legacy_screenshot(payload)[0] for payload in payloads]
+    assert second["structuredContent"]["hashi"]["details"]["complete_content"] is True
+
+    foreign = await gateway.registry.execute_with_audit_context(
+        "tool_output_read", {"reference": reference, "offset": offset}, tool_call_id="foreign",
+        audit_context={"instance_id": "TEST", "agent_name": "momo", "owner_id": "user",
+                       "hashi_session_id": "session", "hashi_run_id": "run-b", "request_id": "request-b"},
+    )
+    assert foreign.is_error
+    assert not foreign.content
+
+
+@pytest.mark.asyncio
+async def test_legacy_screenshot_rejects_declared_mime_mismatch(tmp_path, monkeypatch):
+    registry = ToolRegistry(allowed_tools=["browser_screenshot"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={})
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+
+    async def fake_execute(name, arguments, tool_call_id=""):
+        return ToolResult(tool_call_id=tool_call_id,
+                          output=f"data:image/gif;base64,{_png_base64()}")
+
+    monkeypatch.setattr(gateway.registry, "execute", fake_execute)
+    result = await gateway.call("browser_screenshot", {"url": "https://example.com"}, "bad-mime")
+    assert result["isError"] is True
+    assert not any(part["type"] == "image" for part in result["content"])
+    assert "mime" in json.dumps(result).lower()
+
+
+@pytest.mark.asyncio
+async def test_gateway_leaves_existing_structured_images_uncapped(tmp_path, monkeypatch):
+    registry = ToolRegistry(allowed_tools=["browser_screenshot"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={})
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    images = [{"type": "image", "mimeType": "image/png", "data": _png_base64()} for _ in range(7)]
+
+    async def fake_execute(name, arguments, tool_call_id=""):
+        return ToolResult(tool_call_id=tool_call_id, output="images", content=images)
+
+    monkeypatch.setattr(gateway.registry, "execute", fake_execute)
+    result = await gateway.call("browser_screenshot", {"url": "https://example.com"}, "structured")
+    assert result["isError"] is False
+    assert result["content"] == images
+
+
+@pytest.mark.asyncio
+async def test_legacy_screenshot_pages_preserve_bytes_beyond_default_budget(tmp_path, monkeypatch):
+    import random
+    from tools.legacy_screenshot import normalize_legacy_screenshot as _normalize_legacy_screenshot
+
+    registry = ToolRegistry(
+        allowed_tools=["browser_session"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+        audit_context={"agent_name": "momo", "request_id": "budget-request", "hashi_run_id": "budget-run"},
+    )
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    pixels = random.Random(12).randbytes(1600 * 1600 * 3)
+    buf = io.BytesIO()
+    Image.frombytes("RGB", (1600, 1600), pixels).save(buf, format="JPEG", quality=90)
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    expected, size = _normalize_legacy_screenshot(payload)
+    assert size * 3 > 4_000_000
+    output = "\n".join(f"data:image/jpeg;base64,{payload}" for _ in range(3))
+    original_dispatch = gateway.registry._dispatch
+
+    async def fake_dispatch(name, arguments, *, tool_call_id=""):
+        if name == "browser_session":
+            return output
+        return await original_dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(gateway.registry, "_dispatch", fake_dispatch)
+    page = await gateway.call("browser_session", {"steps": [{"action": "screenshot"}]}, "first")
+    images = [part for part in page["content"] if part["type"] == "image"]
+    detail = page["structuredContent"]["hashi"]["details"]
+    reference, offset = detail["image_continuation"], detail["image_next_offset"]
+    assert reference and offset < 3
+    while offset is not None:
+        page = await gateway.call("tool_output_read", {"reference": reference, "offset": offset, "limit": 1}, f"page-{offset}")
+        assert page["isError"] is False
+        images.extend(part for part in page["content"] if part["type"] == "image")
+        detail = page["structuredContent"]["hashi"]["details"]
+        offset = detail["image_next_offset"]
+    assert images == [expected] * 3
+    assert detail["complete_content"] is True
+
+
+@pytest.mark.asyncio
+async def test_screenshot_paging_keeps_prior_decode_failure_visible(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHI_MCP_IMAGE_PAGE_COUNT", "1")
+    registry = ToolRegistry(
+        allowed_tools=["browser_session"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+        audit_context={"agent_name": "momo", "request_id": "failure-request", "hashi_run_id": "failure-run"},
+    )
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    output = f"data:image/gif;base64,{_png_base64()}\n[screenshot] base64:{_png_base64()}"
+    original_dispatch = gateway.registry._dispatch
+
+    async def fake_dispatch(name, arguments, *, tool_call_id=""):
+        if name == "browser_session":
+            return output
+        return await original_dispatch(name, arguments, tool_call_id=tool_call_id)
+
+    monkeypatch.setattr(gateway.registry, "_dispatch", fake_dispatch)
+    first = await gateway.call("browser_session", {"steps": [{"action": "screenshot"}]}, "first")
+    assert first["isError"] is True
+    detail = first["structuredContent"]["hashi"]["details"]
+    assert detail["image_next_offset"] == 1
+    last = await gateway.call("tool_output_read", {
+        "reference": detail["image_continuation"], "offset": 1,
+    }, "last")
+    assert any(part["type"] == "image" for part in last["content"])
+    assert last["structuredContent"]["hashi"]["details"]["complete_content"] is False
+
+
+@pytest.mark.asyncio
+async def test_nonvision_gateway_does_not_fall_back_to_raw_screenshot_payload(tmp_path, monkeypatch):
+    from dataclasses import replace
+    registry = ToolRegistry(allowed_tools=["browser_screenshot"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={})
+    context = load_gateway_context(_write_context(registry, tmp_path))
+    gateway = ToolGateway(replace(context, vision_enabled=False))
+    payload = _png_base64()
+
+    async def fake_execute(name, arguments, tool_call_id=""):
+        return ToolResult(tool_call_id=tool_call_id, output=f"screenshot:{payload}")
+
+    monkeypatch.setattr(gateway.registry, "execute", fake_execute)
+    result = await gateway.call("browser_screenshot", {"url": "https://example.com"}, "nonvision")
+    assert payload not in json.dumps(result)
+    assert "non-vision" in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_screenshot_projection_uses_owner_budget_for_matching_offset(tmp_path, monkeypatch):
+    monkeypatch.setenv("HASHI_MCP_IMAGE_PAGE_COUNT", "1")
+    registry = ToolRegistry(allowed_tools=["browser_session"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={})
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    output = "\n".join(f"[screenshot] base64:{_png_base64()}" for _ in range(7))
+
+    async def fake_execute(name, arguments, tool_call_id=""):
+        return ToolResult(
+            tool_call_id=tool_call_id, output=output,
+            details={"complete_content": False, "image_continuation": "owner-reference",
+                     "image_next_offset": 6, "image_total": 7,
+                     "image_page_count_budget": 6, "image_page_byte_budget": 4_000_000},
+        )
+
+    monkeypatch.setattr(gateway.registry, "execute", fake_execute)
+    first = await gateway.call("browser_session", {"steps": [{"action": "screenshot"}]}, "first")
+    assert sum(part["type"] == "image" for part in first["content"]) == 6
+    assert first["structuredContent"]["hashi"]["details"]["image_next_offset"] == 6

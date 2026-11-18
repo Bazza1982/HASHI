@@ -20,35 +20,48 @@ class FingerprintPolicy:
     enabled: bool = False
     marking: str = "auto"
     export_content: bool = False
+    required: bool = False
 
     def __post_init__(self):
-        if type(self.enabled) is not bool or type(self.export_content) is not bool:
+        if (type(self.enabled) is not bool or type(self.export_content) is not bool
+                or type(self.required) is not bool):
             raise ValueError("fingerprint switches must be booleans")
         if self.marking != "auto":
             raise ValueError("only automatic fingerprint marking is supported")
 
     @classmethod
     def from_mapping(cls, value):
-        if not isinstance(value, Mapping) or set(value) - {"enabled", "marking", "export_content"}:
+        if not isinstance(value, Mapping) or set(value) - {"enabled", "marking", "export_content", "required"}:
             raise ValueError("fingerprint policy must contain supported settings only")
         return cls(**value)
 
+    def version_payload(self) -> dict:
+        value = asdict(self)
+        if not self.required:
+            value.pop("required")
+        return value
+
     @property
     def version(self) -> str:
-        return hashlib.sha256(canonical_json(asdict(self))).hexdigest()
+        return hashlib.sha256(canonical_json(self.version_payload())).hexdigest()
 
     def snapshot(self) -> dict:
-        return {"schema": SCHEMA, **asdict(self), "version": self.version}
+        return {"schema": SCHEMA, **self.version_payload(), "version": self.version}
 
     @classmethod
     def from_snapshot(cls, value):
         # Old persisted Runs have no feature snapshot and must remain OFF.
         if value == {} or value is None:
             return cls()
-        if not isinstance(value, dict) or set(value) != {"schema", "enabled", "marking", "export_content", "version"}:
+        base = {"schema", "enabled", "marking", "export_content", "version"}
+        if not isinstance(value, dict) or set(value) not in (base, base | {"required"}):
             raise ValueError("invalid frozen fingerprint policy")
-        policy = cls.from_mapping({key: value[key] for key in ("enabled", "marking", "export_content")})
-        if type(value["schema"]) is not int or value["schema"] != SCHEMA or value["version"] != policy.version:
+        fields = {key: value[key] for key in ("enabled", "marking", "export_content")}
+        if "required" in value:
+            fields["required"] = value["required"]
+        policy = cls.from_mapping(fields)
+        expected = hashlib.sha256(canonical_json(fields)).hexdigest()
+        if type(value["schema"]) is not int or value["schema"] != SCHEMA or value["version"] != expected:
             raise ValueError("fingerprint policy version mismatch")
         return policy
 

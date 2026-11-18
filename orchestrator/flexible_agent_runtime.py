@@ -516,16 +516,24 @@ class FlexibleAgentRuntime:
             persisted = None
         return persisted or 0
 
-    def _is_authorized_user(self, user_id: int | None) -> bool:
+    def _is_authorized_user(self, user_id: int | str | None) -> bool:
+        from orchestrator.frontend_command_context import is_frontend_command_principal
+
+        if is_frontend_command_principal(self, user_id):
+            return True
         if user_id is None or isinstance(user_id, bool):
             return False
         from orchestrator.telegram_actor_scope import scoped_access_enabled
 
-        if scoped_access_enabled(self):
-            from orchestrator.telegram_actor_scope import runtime_snapshot
+        scoped = scoped_access_enabled(self)
+        if scoped or getattr(self.global_config, "telegram_identity_invalid", False):
+            from orchestrator.telegram_actor_scope import (
+                runtime_ingress_user_ids, runtime_legacy_ingress_user_ids,
+            )
 
             try:
-                return user_id in runtime_snapshot(self).effective_user_ids
+                grants = runtime_ingress_user_ids if scoped else runtime_legacy_ingress_user_ids
+                return user_id in grants(self)
             except (OSError, ValueError, TypeError, LookupError):
                 return False
         return user_id in self._authorized_telegram_ids
@@ -548,8 +556,6 @@ class FlexibleAgentRuntime:
                     "fyi",
                     "debug",
                     "start",
-                    "stop",
-                    "terminate",
                     "reboot",
                     "wa_on",
                     "wa_off",
@@ -567,15 +573,22 @@ class FlexibleAgentRuntime:
             mode = (policy.get("mode") or "denylist").lower()
             if mode in {"denylist", "allowlist"}:
                 self._command_policy_mode = mode
+            explicit_disabled = set()
             for name in policy.get("disabled_commands", []) or []:
                 if isinstance(name, str) and name.strip():
-                    self._disabled_commands.add(name.strip().lstrip("/").lower())
+                    explicit_disabled.add(name.strip().lstrip("/").lower())
+            self._disabled_commands.update(explicit_disabled)
             for name in policy.get("enabled_commands", []) or []:
                 if isinstance(name, str) and name.strip():
-                    self._enabled_commands.add(name.strip().lstrip("/").lower())
+                    command = name.strip().lstrip("/").lower()
+                    self._enabled_commands.add(command)
+                    # An explicit enable replaces a preset denial. If the same
+                    # policy explicitly lists both, its explicit denial wins.
+                    if command not in explicit_disabled:
+                        self._disabled_commands.discard(command)
 
         # help/status/new/fresh/wipe/clear/model/effort/mode should always be available
-        self._enabled_commands.update({"help", "status", "new", "fresh", "sessions", "use", "current", "archive", "promote", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "terminal", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp"})
+        self._enabled_commands.update({"help", "status", "new", "fresh", "sessions", "use", "current", "archive", "promote", "wipe", "reset", "clear", "memory", "notepad", "model", "effort", "mode", "wrapper", "audit", "brain", "core", "wrap", "bg", "jobs", "terminal", "verbose", "think", "stream", "preview", "voice", "say", "whisper", "transfer", "fork", "cos", "long", "end", "browser", "exp", "stop", "terminate"})
 
     def _is_command_allowed(self, cmd: str) -> bool:
         cmd = (cmd or "").lstrip("/").lower()
@@ -598,6 +611,8 @@ class FlexibleAgentRuntime:
         return True
 
     def _evaluate_enterprise_policy(self, action: str, *, resource: str = "*", **context):
+        from orchestrator.frontend_command_context import frontend_command_policy_context
+
         global_config = getattr(self, "global_config", None)
         if global_config is None:
             return evaluate_governance_policy("noop", {"deployment_profile": "personal"})
@@ -607,6 +622,7 @@ class FlexibleAgentRuntime:
                 "global_config": global_config,
                 "agent_id": getattr(self, "name", None),
                 "resource": resource,
+                **frontend_command_policy_context(self),
                 **context,
             },
         )
@@ -865,7 +881,9 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
-                    from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+                    from orchestrator.telegram_freshness_gate import (
+                        check_telegram_message_freshness, telegram_message_age_metadata,
+                    )
                     if await check_telegram_message_freshness(
                         self,
                         update,
@@ -883,6 +901,7 @@ class FlexibleAgentRuntime:
                         text=str(getattr(message, "text", "") or ""),
                         source="telegram.command",
                         content_format="plain-text",
+                        message_context={"message_age": telegram_message_age_metadata(update)},
                     )
                     from orchestrator.frontend_command_admission import (
                         execute_telegram_command_invocation,
@@ -1138,6 +1157,7 @@ class FlexibleAgentRuntime:
         request_content: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         reply_to_message_id: Any | None = None,
+        replay_only: bool = False,
     ):
         # Mirror targets are server-owned. Legacy client delivery flags cannot
         # override the owner's persistent connector preference.
@@ -1145,6 +1165,8 @@ class FlexibleAgentRuntime:
         from orchestrator.frontend_delivery import telegram_delivery_for_admission
 
         from orchestrator.frontend_call.transient_live_media import (
+            TRANSIENT_LIVE_FRAMES_METADATA_KEY,
+            LIVE_FRAME_LIMIT,
             bind_live_frames,
             discard_live_frames,
             pop_live_frames_metadata,
@@ -1154,7 +1176,8 @@ class FlexibleAgentRuntime:
         from orchestrator.fingerprint.runtime import admission_policy
         # Policy is PAO-owned, never accepted from frontend/model metadata.
         request_metadata["fingerprint_policy"] = admission_policy(self)
-        transient_live_frames = pop_live_frames_metadata(request_metadata)
+        raw_live_frames = request_metadata.pop(TRANSIENT_LIVE_FRAMES_METADATA_KEY, None)
+        transient_live_frames = ()
         admission_metadata = dict(request_metadata)
         # A delayed Telegram Update may only pass the freshness gate while the
         # connector is replaying the immutable server-side record.  Bind that
@@ -1204,23 +1227,11 @@ class FlexibleAgentRuntime:
             )
             return None
         operational_prompt = clean_prompt or "Respond to the attached voice message."
-        from orchestrator.agent_move.source_guard import source_move_guard_state
+        from orchestrator.agent_move.source_guard import runtime_move_guard
 
         project_root = getattr(self.global_config, "project_root", None)
-        if getattr(self, "_agent_move_quiesced", False):
-            move_guard = {
-                "status": "cutover_quiesce",
-                "target_instance": str(
-                    getattr(self, "_agent_move_target_instance", "") or ""
-                ),
-            }
-        else:
-            move_guard = (
-                source_move_guard_state(project_root, self.name)
-                if project_root is not None
-                else None
-            )
-        if move_guard is not None:
+        move_guard = runtime_move_guard(self, project_root, self.name)
+        if move_guard is not None and not replay_only:
             if telegram_requested and not silent:
                 await self._send_text(
                     chat_id,
@@ -1265,6 +1276,15 @@ class FlexibleAgentRuntime:
             metadata=request_metadata,
             prompt=clean_prompt,
         )
+        # The frame count is a frozen Call policy sealed by the connector.
+        # Unverified caller metadata cannot select the allowance.
+        call_media = metadata.get("call_media")
+        if (raw_live_frames is not None and str(source).casefold() == "session-api"
+            and isinstance(call_media, Mapping)):
+            transient_live_frames = pop_live_frames_metadata(
+                {TRANSIENT_LIVE_FRAMES_METADATA_KEY: raw_live_frames},
+                max_frames=call_media.get("max_frames_per_turn", LIVE_FRAME_LIMIT),
+            )
         from orchestrator.agent_stop_fence import current_runtime_epoch
 
         current_stop_epoch = current_runtime_epoch(self)
@@ -1625,6 +1645,7 @@ class FlexibleAgentRuntime:
                 request_metadata=metadata,
                 request_content=normalized_request_content,
                 idempotency_key=idempotency_key,
+                replay_only=replay_only,
             ),
             name=f"admit-{self.name}-{request_id}",
         )
@@ -1676,6 +1697,10 @@ class FlexibleAgentRuntime:
         session, accepted, session_owner, session_surface, session_channel_key = (
             admission_result
         )
+        if replay_only:
+            if accepted is None or not accepted.replayed:
+                raise SessionConflict("receipt lookup did not find a prior Run")
+            return accepted.request_id
         request_session_id = (
             accepted.session_id
             if accepted is not None
@@ -1890,6 +1915,25 @@ class FlexibleAgentRuntime:
                     failure_state="superseded",
                 )
                 return None
+            if source == "hchat-exchange" and accepted is not None:
+                # Recovery may race the original admission or the executor
+                # taking a queued item. Recheck durable state under the same
+                # publication fence, then honor any live owner of this Run.
+                current_run = await asyncio.to_thread(
+                    self.session_store.get_run, accepted.run_id, owner_id=session_owner
+                )
+                admissions = getattr(self, "_execution_admissions", {})
+                executions = getattr(self, "_session_execution_tasks", {})
+                if (
+                    str(current_run.get("state") or "") != "queued"
+                    or item.request_id in admissions
+                    or item.request_id in executions
+                    or queue_publication_observed() is True
+                ):
+                    self.message_logger.info(
+                        "Exchange Run %s already has an executor owner", accepted.run_id
+                    )
+                    return accepted.request_id
             submission_started = False
             try:
                 usage_recorder = getattr(
@@ -1914,9 +1958,15 @@ class FlexibleAgentRuntime:
                 from orchestrator import runtime_execution
                 self._execution_admissions[item.request_id] = runtime_execution.snapshot(self)
                 admission_snapshotted = True
-                if transient_live_frames:
+                call_context = message_context_snapshot.get("call") or {}
+                call_camera = call_context.get("camera") or {}
+                freshness = call_camera.get("freshness_seconds")
+                if transient_live_frames and type(freshness) is int:
+                    bind_live_frames(
+                        self, item.request_id, transient_live_frames,
+                        freshness_seconds=freshness,
+                    )
                     live_frames_bound = True
-                    bind_live_frames(self, item.request_id, transient_live_frames)
                 submission_started = True
                 await self.queue.put(item)
             except BaseException as failure:
@@ -5931,10 +5981,6 @@ class FlexibleAgentRuntime:
             await self._do_move(update, agent_id, target, instances, keep_source=keep, sync=sync, dry_run=dry, transfer_mode=("identity_memory" if "--identity-memory" in args else "workspace" if "--workspace" in args else None))
             return
 
-        if not any(inst.get("active") for inst in instances.values()):
-            await self._reply_text(update, ui_language.tr("remote.move.no_targets"))
-            return
-
         # /move <agent> — show target picker
         if len(args) == 1:
             agent_id = args[0]
@@ -5954,7 +6000,8 @@ class FlexibleAgentRuntime:
         await runtime_remote.move_show_options(self, update, agent_id, target)
 
     async def _do_move(self, update, agent_id: str, target: str, instances: dict,
-                       keep_source: bool = False, sync: bool = False, dry_run: bool = False, transfer_mode: str | None = None):
+                       keep_source: bool = False, sync: bool = False, dry_run: bool = False, transfer_mode: str | None = None,
+                       history_mode: str | None = None, desired_target_active: bool | None = None):
         await runtime_remote.do_move(
             self,
             update,
@@ -5965,6 +6012,8 @@ class FlexibleAgentRuntime:
             sync=sync,
             dry_run=dry_run,
             transfer_mode=transfer_mode,
+            history_mode=history_mode,
+            desired_target_active=desired_target_active,
         )
 
     async def callback_move(self, update: Update, context: Any):
@@ -6722,7 +6771,13 @@ class FlexibleAgentRuntime:
                     pending["prompt"],
                     "voice_transcript",
                     pending["summary"],
-                    request_metadata={"ingress_transport": "telegram"},
+                    request_metadata={
+                        "ingress_transport": "telegram",
+                        **({"_frontend_message_age": pending["message_age"]}
+                           if isinstance(pending.get("message_age"), Mapping) else {}),
+                    },
+                    **({"idempotency_key": pending["telegram_ingress_key"]}
+                       if pending.get("telegram_ingress_key") else {}),
                 )
         elif action == "no":
             if pending and pending.get("native_audio"):
@@ -8758,6 +8813,49 @@ class FlexibleAgentRuntime:
             and not attachment_paths
         ):
             attachment_error = "attachment selection produced no deliverable files"
+        origin_binding = None
+        group_origin = None
+        group_message_id = None
+        if attachment_error is None and all((
+            store is not None,
+            getattr(item, "session_id", None), getattr(item, "run_id", None),
+            getattr(item, "owner_id", None), getattr(item, "fencing_token", None) is not None,
+        )):
+            from remote.internet_address import (
+                GroupAddress, LocalAddress, PublicAddress, parse_hchat_address,
+            )
+
+            target_address = parse_hchat_address(draft.target)
+            if isinstance(target_address, (GroupAddress, PublicAddress)) or (
+                isinstance(target_address, LocalAddress) and target_address.agent != "all"
+            ):
+                message_id = "hchat-" + hashlib.sha256(
+                    ("hchat-draft:" + str(store.instance_id) + "\0" + self.name
+                     + "\0" + item.run_id + "\0" + item.request_id).encode("utf-8")
+                ).hexdigest()[:24]
+                try:
+                    if isinstance(target_address, GroupAddress):
+                        from orchestrator.hchat_group_origin import HChatGroupOrigin
+                        group_message_id = message_id
+                        group_origin = HChatGroupOrigin(
+                            store, parent_message_id=message_id,
+                            owner_id=item.owner_id, agent_id=self.name,
+                            session_id=item.session_id, run_id=item.run_id,
+                            request_id=item.request_id, context_generation=item.context_generation,
+                            fencing_token=item.fencing_token, target=target_address.canonical,
+                            text=draft.message,
+                        )
+                    else:
+                        from orchestrator.hchat_origin_binding import bind_outbound_origin
+                        origin_binding = await asyncio.to_thread(
+                            bind_outbound_origin, store, message_id=message_id,
+                            owner_id=item.owner_id, agent_id=self.name,
+                            session_id=item.session_id, run_id=item.run_id,
+                            request_id=item.request_id, context_generation=item.context_generation,
+                            fencing_token=item.fencing_token, target=target_address.canonical,
+                        )
+                except Exception as exc:
+                    attachment_error = f"HChat source conversation is unavailable: {type(exc).__name__}"
         if attachment_error:
             result = HChatDeliveryResult(
                 success=False,
@@ -8779,6 +8877,10 @@ class FlexibleAgentRuntime:
                 sender=sender,
                 attachments=attachment_paths,
                 attempt_id=item.request_id,
+                **({"message_id": origin_binding["message_id"],
+                    "originated_at": origin_binding["originated_at"]} if origin_binding else {}),
+                **({"message_id": group_message_id, "_group_origin": group_origin}
+                   if group_origin is not None else {}),
             )
         locale = ui_language.preferred_locale(
             self,
@@ -12190,7 +12292,11 @@ class FlexibleAgentRuntime:
             return
         if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
             return
-        from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
+        from orchestrator.telegram_freshness_gate import (
+            check_telegram_message_freshness, telegram_message_age_metadata,
+            telegram_message_idempotency_key,
+        )
+        telegram_key = telegram_message_idempotency_key(self, update)
         if await check_telegram_message_freshness(self, update, handler_kind="text"):
             return
         self._record_active_chat(update)
@@ -12204,7 +12310,10 @@ class FlexibleAgentRuntime:
         if await runtime_workzone.handle_pending_path_reply(self, update):
             return
         # /long is scoped to the chat that started it.
+        if runtime_long.has_seen_telegram_update(self, update.effective_chat.id, telegram_key):
+            return
         if runtime_long.collect_text(self, update.effective_chat.id, text):
+            runtime_long.remember_telegram_update(self, update.effective_chat.id, telegram_key)
             return
         _print_user_message(self.name, text)
         reply_to_message = getattr(update.message, "reply_to_message", None)
@@ -12213,6 +12322,8 @@ class FlexibleAgentRuntime:
             text,
             "telegram",
             _safe_excerpt(text),
+            idempotency_key=telegram_key,
+            request_metadata={"_frontend_message_age": telegram_message_age_metadata(update)},
             reply_to_message_id=getattr(reply_to_message, "message_id", None),
         )
 
@@ -12492,11 +12603,15 @@ class FlexibleAgentRuntime:
 
         def _build_display() -> str:
             elapsed = max(0, int(time.monotonic() - started))
+            lines = digest.render_lines(locale=locale)
+            omitted = getattr(event_queue, "_hashi_omitted", 0)
+            if omitted:
+                lines.insert(0, ui_language.tr("activity.omitted", locale=locale, count=omitted))
             return _streaming_status_to_html(
                 display_name,
                 engine,
                 elapsed,
-                digest.render_lines(locale=locale),
+                lines,
                 max_message_len=MAX_MSG_LEN,
                 phase_icon=digest.phase_icon,
                 phase_label=digest.phase_label_for(locale=locale),
@@ -12618,6 +12733,7 @@ class FlexibleAgentRuntime:
                         f"Streaming display edit failed for {request_id}: {exc}"
                     )
 
+        last_omitted = 0
         while not stop_event.is_set():
             event_task = asyncio.create_task(event_queue.get())
             stop_task = asyncio.create_task(stop_event.wait())
@@ -12667,6 +12783,10 @@ class FlexibleAgentRuntime:
                     dirty = digest.mark_waiting(now=now) or dirty
                     last_heartbeat_at = now
 
+            omitted = getattr(event_queue, "_hashi_omitted", 0)
+            if omitted != last_omitted:
+                last_omitted = omitted
+                dirty = True
             now = time.monotonic()
             if dirty and (now - last_edit_at) >= MIN_EDIT_INTERVAL:
                 await _edit_placeholder()
@@ -12743,6 +12863,7 @@ class FlexibleAgentRuntime:
                 try:
                     event_queue.put_nowait(event)
                 except asyncio.QueueFull:
+                    event_queue._hashi_omitted = getattr(event_queue, "_hashi_omitted", 0) + 1
                     self.logger.debug(f"Stream event queue full, dropping: {event.summary[:40]!r}")
             # Always track thinking volume for token estimation (CLI backends only;
             # OpenRouter gets real counts from response.usage)

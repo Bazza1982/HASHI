@@ -4200,14 +4200,14 @@ def test_agent_reply_rejects_route_trace_loop(tmp_path):
     assert result["body"]["code"] == "loop_detected"
 
 
-def test_agent_reply_dedupes_terminal_reply_without_second_enqueue(tmp_path):
+def test_legacy_reply_without_original_identity_is_not_claimed_as_delivered(tmp_path):
     manager = _reply_manager(tmp_path)
     manager._inflight["msg-1:reply"] = {"state": "reply_delivered_locally", "request_id": "req-old"}
 
     status, result = asyncio.run(manager._handle_agent_reply(_reply_payload()))
 
-    assert status == 200
-    assert result["state"] == "reply_delivered_locally"
+    assert status == 409
+    assert result["body"]["code"] == "delivery_outcome_unknown"
     assert not hasattr(manager, "_last_enqueue")
 
 

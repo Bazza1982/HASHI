@@ -77,7 +77,7 @@ async def test_command_transport_targets_selected_session_and_rejects_stale_gene
 
 
 @pytest.mark.asyncio
-async def test_new_owner_is_used_without_restarting_the_worker(tmp_path, monkeypatch):
+async def test_workbench_owner_does_not_require_a_primary_telegram_user(tmp_path, monkeypatch):
     from types import MethodType
     from orchestrator.config_json import write_config_json
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
@@ -100,22 +100,153 @@ async def test_new_owner_is_used_without_restarting_the_worker(tmp_path, monkeyp
     state = users.status("agent")
     users.change("agent", expected_revision=state["revision"],
                  scope="global", action="add", user_id="7")
+    assert users.status("agent")["primary_user_id"] is None
     monkeypatch.setattr("orchestrator.command_interaction_bridge._catalogue",
                         lambda _runtime, _locale: {"ok": True, "commands": [{"name": "reboot"}]})
 
     result = await try_execute_slash_command_text(
         runtime, _wire(), source_channel="workbench_api",
+        session_metadata={"_hashi_owner_id": "user:0"},
     )
     assert result["ok"] is True
-    assert runtime.global_config.authorized_id == 7
+    assert runtime.global_config.authorized_id == 0
     assert runtime.global_config.owner_scope_id == "user:0"
 
     config_path.write_text("{broken", encoding="utf-8")
-    denied = await try_execute_slash_command_text(
+    independent = await try_execute_slash_command_text(
         runtime, _wire(), source_channel="workbench_api",
+        session_metadata={"_hashi_owner_id": "user:0"},
     )
+    assert independent["ok"] is True
+    # A real Telegram actor still needs a readable current policy.
+    assert runtime._is_authorized_user(7) is False
+    denied = await try_execute_slash_command_text(runtime, _wire(), source_channel="workbench_api")
     assert denied["ok"] is False
     assert denied["error_code"] == "command_menu_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_workbench_owner_can_list_sessions_without_telegram(tmp_path):
+    from types import MethodType
+    from orchestrator import runtime_session
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.session_store import SessionStore
+
+    runtime = _runtime()
+    runtime.global_config.authorized_id = 0
+    runtime.global_config.owner_scope_id = "user:0"
+    runtime._authorized_telegram_ids = ()
+    runtime._is_authorized_user = MethodType(FlexibleAgentRuntime._is_authorized_user, runtime)
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.session_store = SessionStore(tmp_path / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = runtime.session_store.resolve_primary_session(
+        owner_id="user:0", agent_id="agent", establish=True
+    )
+    runtime.cmd_sessions = MethodType(runtime_session.cmd_sessions, runtime)
+
+    async def reply(update, text, **kwargs):
+        return await update.message.reply_text(text, **kwargs)
+
+    runtime._reply_text = reply
+    result = await execute_local_command(
+        runtime, "/sessions", source_channel="workbench_api",
+        session_metadata={
+            "_hashi_owner_id": "user:0", "session_surface": "workbench",
+            "session_channel_key": "default", "session_id": session["session_id"],
+            "context_generation": session["context_generation"],
+        },
+    )
+    assert result["ok"] is True
+    assert session["session_id"] in str(result["messages"])
+
+
+@pytest.mark.asyncio
+async def test_frontend_principal_is_bound_to_runtime_and_command_lifetime():
+    import asyncio
+    from types import MethodType
+
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    runtime = _runtime()
+    other_runtime = _runtime()
+    for item in (runtime, other_runtime):
+        item._authorized_telegram_ids = (7,)
+        item._is_authorized_user = MethodType(FlexibleAgentRuntime._is_authorized_user, item)
+
+    release_child = asyncio.Event()
+
+    async def inherited_task():
+        await release_child.wait()
+        return runtime._is_authorized_user("local:alice")
+
+    assert not runtime._is_authorized_user("local:alice")
+    with bind_frontend_command_principal(runtime, "local:alice"):
+        assert runtime._is_authorized_user("local:alice")
+        assert not runtime._is_authorized_user("local:bob")
+        assert not other_runtime._is_authorized_user("local:alice")
+        assert runtime._is_authorized_user(7)
+        assert not runtime._is_authorized_user(8)
+        child = asyncio.create_task(inherited_task())
+    release_child.set()
+    assert not await child
+    assert not runtime._is_authorized_user("local:alice")
+
+
+@pytest.mark.asyncio
+async def test_authenticated_workbench_menu_does_not_refresh_telegram_policy(monkeypatch):
+    observed = []
+
+    async def dispatch(runtime, payload, metadata):
+        observed.append(metadata)
+        return {"ok": True, "commands": []}
+
+    monkeypatch.setattr(
+        "orchestrator.command_interaction_bridge.dispatch_command_interaction", dispatch
+    )
+    monkeypatch.setattr(
+        "orchestrator.telegram_actor_scope.refresh_primary_user",
+        lambda _runtime: pytest.fail("a frontend command must not require Telegram"),
+    )
+    result = await try_execute_slash_command_text(
+        _runtime(), _wire(), source_channel="workbench_api",
+        session_metadata={"_hashi_owner_id": "local:alice"},
+    )
+    assert result["ok"] is True
+    assert observed[0]["actor_id"] == "local:alice"
+    assert observed[0]["owner_id"] == "local:alice"
+
+
+@pytest.mark.asyncio
+async def test_version_command_returns_to_frontend_with_nonnumeric_owner(tmp_path, monkeypatch):
+    from types import MethodType
+    from unittest.mock import AsyncMock
+
+    from orchestrator import runtime_version
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.session_store import SessionStore
+
+    runtime = _runtime()
+    runtime._authorized_telegram_ids = ()
+    runtime._is_authorized_user = MethodType(FlexibleAgentRuntime._is_authorized_user, runtime)
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.session_store = SessionStore(tmp_path / "state/sessions.sqlite3", instance_id="HASHI1")
+    session = runtime.session_store.resolve_primary_session(
+        owner_id="local:alice", agent_id="agent", establish=True
+    )
+    runtime.cmd_version = MethodType(runtime_version.command, runtime)
+    runtime.send_long_message = AsyncMock(side_effect=AssertionError("must use frontend capture"))
+    monkeypatch.setattr(runtime_version, "collect_version_payload", lambda _runtime: {})
+    monkeypatch.setattr(runtime_version, "render_version_card", lambda *_args, **_kwargs: "version")
+
+    result = await execute_local_command(
+        runtime, "/version", source_channel="workbench_api",
+        session_metadata={"_hashi_owner_id": "local:alice", "session_surface": "workbench",
+                          "session_channel_key": "default", "session_id": session["session_id"]},
+    )
+    assert result["ok"] is True, result
+    assert "version" in str(result["messages"])
+    runtime.send_long_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

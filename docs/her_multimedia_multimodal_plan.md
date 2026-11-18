@@ -1,5 +1,7 @@
 # HER 后端多媒体多模态通路
 
+**2026-11-17 remediation candidate:** PDF reads now accept page_start/page_end and expose pdf_next_cursor for version-bound text and rendered-page continuation. Audio/video reads accept start_seconds/end_seconds; long audio is processed in bounded windows and reports audio_next_start and a source-version-bound audio_next_cursor, with exact selected range metadata. The original 30-page and 600-second whole-source refusals described below are historical. Image OCR accepts a per-call ocr_timeout_seconds or the tool_options.media_read.ocr_timeout_seconds default, applied separately to detection and each engine; complete OCR text uses same-Run output continuation. Cancellation signals and reaps the owned OCR worker before returning. Source image/PDF/AV byte budgets use available memory by default with operator-configurable overrides; decoder pixel checks remain active. image_region selects source-oriented pixel coordinates and reports actual output dimensions, so adjacent regions can recover spatial detail. Provider-dependent output limits and complete tile coverage still require further remediation and platform validation.
+
 - 原始方案：Feiyan，2026-08-13
 - 审阅与修订：HASHI1 整合，2026-08-13
 - 状态：已实施；2026-10-16 补齐 HERV3/DeepSeek 直接工具结果通路

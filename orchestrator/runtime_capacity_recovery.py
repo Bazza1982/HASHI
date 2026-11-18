@@ -16,8 +16,10 @@ import math
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Awaitable, Callable, Mapping
+from uuid import uuid4
 
 from adapters.stream_events import (
+    DELIVERY_INTERNAL,
     DELIVERY_TECHNICAL,
     KIND_PROGRESS,
     StreamEvent,
@@ -25,6 +27,7 @@ from adapters.stream_events import (
 from orchestrator import model_fallback_policy as policy_owner
 from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import canonical_backend_engine
+from orchestrator.her_v2.retry import ProviderRetryPolicy
 
 Sleep = Callable[[float], Awaitable[Any] | Any]
 
@@ -107,6 +110,7 @@ def _annotate(
         policy_owner.REASON_EFFECT_PAUSED: "fallback.runtime.effect_paused",
         policy_owner.REASON_UNSAFE_CHECKPOINT: "fallback.runtime.effect_paused",
         policy_owner.REASON_RESUME_UNAVAILABLE: "fallback.runtime.resume_unavailable",
+        policy_owner.REASON_MEDIA_RECOVERY_UNAVAILABLE: "fallback.runtime.media_recovery_unavailable",
         policy_owner.REASON_RETRY_EXHAUSTED: "fallback.runtime.retry_exhausted",
         policy_owner.REASON_CONFIRMATION_REQUIRED: (
             "fallback.runtime.confirmation_unavailable"
@@ -145,17 +149,26 @@ def _annotate(
 async def _emit(on_stream_event: Any, key: str, **values: Any) -> None:
     if not callable(on_stream_event):
         return
-    result = on_stream_event(
-        StreamEvent(
-            kind=KIND_PROGRESS,
-            summary=ui_language.tr(key, **values),
-            delivery_class=DELIVERY_TECHNICAL,
-            origin="hashi_capacity_recovery",
-            phase="recovery",
-            required=True,
-            provenance="hashi_policy",
-        )
+    event = StreamEvent(
+        kind=KIND_PROGRESS,
+        summary=ui_language.tr(key, **values),
+        event_id=f"capacity-{uuid4().hex}",
+        delivery_class=DELIVERY_TECHNICAL,
+        origin="hashi_capacity_recovery",
+        phase="recovery",
+        required=True,
+        provenance="hashi_policy",
     )
+    publish = getattr(on_stream_event, "publish_capacity_notice", None)
+    if callable(publish):
+        published = publish(event)
+        if inspect.isawaitable(published):
+            published = await published
+        if published:
+            # The durable notification already owns presentation; retain the
+            # event for audit without displaying a second optional copy.
+            event.delivery_class = DELIVERY_INTERNAL
+    result = on_stream_event(event)
     if inspect.isawaitable(result):
         await result
 
@@ -503,6 +516,12 @@ async def generate_with_capacity_recovery(
     """Generate one response and apply the user's bounded capacity policy."""
 
     kwargs = deepcopy(dict(generation_kwargs))
+    metadata = getattr(item, "request_metadata", None)
+    requested_policy = metadata.get("provider_recovery") if isinstance(metadata, Mapping) else None
+    capacity_delays = (
+        ProviderRetryPolicy.from_mapping(requested_policy).capacity_delays_s
+        if requested_policy is not None else policy_owner.CAPACITY_RETRY_DELAYS_S
+    )
     response = await runtime.backend_manager.generate_response(
         prompt,
         item.request_id,
@@ -552,6 +571,7 @@ async def generate_with_capacity_recovery(
                 retryable=getattr(response, "error_retryable", None) is True,
                 retry_index=retry_attempts,
                 retry_after_s=getattr(response, "retry_after_s", None),
+                retry_delays_s=capacity_delays,
                 side_effects_possible=side_effects_seen,
                 resumable_session=_resumable_session(
                     runtime,
@@ -569,7 +589,7 @@ async def generate_with_capacity_recovery(
             on_stream_event,
             "fallback.retry.wait",
             attempt=decision.retry_number,
-            count=len(policy_owner.CAPACITY_RETRY_DELAYS_S),
+            count=len(capacity_delays),
             seconds=math.ceil(delay_s),
         )
         runtime._log_maintenance(
@@ -608,7 +628,7 @@ async def generate_with_capacity_recovery(
     if (
         str(getattr(response, "error_code", "") or "").upper()
         == policy_owner.CAPACITY_FAILURE_CODE
-        and retry_attempts >= len(policy_owner.CAPACITY_RETRY_DELAYS_S)
+        and retry_attempts >= len(capacity_delays)
         and policy.mode in {policy_owner.MODE_ASK, policy_owner.MODE_AUTO}
     ):
         return await _attempt_fallback(

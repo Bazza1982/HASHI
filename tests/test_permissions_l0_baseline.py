@@ -1,5 +1,6 @@
 """Observable L0 baseline captured from main before permission integration."""
 from hashlib import sha256
+import copy
 import json
 from pathlib import Path
 
@@ -49,6 +50,22 @@ async def test_l0_matches_frozen_main_without_constructing_permission_authority(
         audit_context={"agent_name": "baseline-agent", "workspace_dir": str(toolroot), "safety_mode": "read_write"},
     )
     definitions = registry.get_tool_definitions()
+    read_schema = next(item["function"] for item in definitions if item["function"]["name"] == "file_read")
+    assert "cursor" in read_schema["parameters"]["properties"]
+    assert "tool_output_read" not in {item["function"]["name"] for item in definitions}
+    assert "tool_catalog" in {item["function"]["name"] for item in definitions}
+
+    # Compare unchanged L0 behavior to the frozen main fixture, while testing
+    # the deliberately added read cursor and scoped discovery separately.
+    baseline_definitions = copy.deepcopy([
+        item for item in definitions if item["function"]["name"] != "tool_catalog"
+    ])
+    baseline_read = next(item["function"] for item in baseline_definitions if item["function"]["name"] == "file_read")
+    baseline_read["parameters"]["properties"].pop("cursor")
+    baseline_read["description"] = (
+        "Read a file from disk and return its contents. "
+        "Supports optional offset (start line) and limit (max lines)."
+    )
     write = await registry.execute("file_write", {"path": "note.txt", "content": "baseline data"}, tool_call_id="write")
     read = await registry.execute("file_read", {"path": "note.txt"}, tool_call_id="read")
     denied = await registry.execute("shell", {"command": "should-not-run"}, tool_call_id="deny")
@@ -73,8 +90,8 @@ async def test_l0_matches_frozen_main_without_constructing_permission_authority(
     )
     result = await runtime.run_turn("Answer directly", "request-l0")
     observed = {
-        "tool_names": [item["function"]["name"] for item in definitions],
-        "schemas": _digest(definitions),
+        "tool_names": [item["function"]["name"] for item in baseline_definitions],
+        "schemas": _digest(baseline_definitions),
         "file_contents": (toolroot / "note.txt").read_text(encoding="utf-8"),
         "file_write_error": write.is_error,
         "file_read_error": read.is_error,
@@ -98,7 +115,7 @@ async def test_l0_matches_frozen_main_without_constructing_permission_authority(
     # Reverse ONLY the two reviewed presentation/schema changes and compare
     # with the original frozen hashes. A tool, permission, required argument,
     # other schema field or unrelated prompt edit still fails this baseline.
-    legacy_definitions = json.loads(json.dumps(definitions))
+    legacy_definitions = copy.deepcopy(baseline_definitions)
     listing = next(item["function"] for item in legacy_definitions
                    if item["function"]["name"] == "file_list")
     assert listing["description"] == authorised["file_list"]["description"]
@@ -113,3 +130,4 @@ async def test_l0_matches_frozen_main_without_constructing_permission_authority(
                 "schemas": authorised["schemas"],
                 "prompt_system": authorised["prompt_system"]}
     assert observed == expected
+# HASHI-Fingerprint: hfp_fd19cc27402e4c648c62b12791dd1d45

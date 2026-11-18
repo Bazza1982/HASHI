@@ -452,3 +452,35 @@ async def test_agent_switch_discards_late_speech_before_local_player(
 
         assert len(client.speech_calls) == 1
         assert played == []
+
+
+
+@pytest.mark.parametrize("text,reference,caption", [
+    ('@reports/weekly.pdf "summarize this"', "reports/weekly.pdf", "summarize this"),
+    (r'@C:\Workzone\weekly.pdf explain', r'C:\Workzone\weekly.pdf', "explain"),
+    (r'@"C:\Work Zone\weekly.pdf" "summarize this"', r'C:\Work Zone\weekly.pdf', "summarize this"),
+    (r'"@C:\Work Zone\weekly.pdf" explain', r'C:\Work Zone\weekly.pdf', "explain"),
+    ('@/allowed/file.txt explain', "/allowed/file.txt", "explain"),
+    ('@@literal text', None, '@@literal text'),
+    ('@"unterminated', None, '@"unterminated'),
+    ('@"path"suffix', None, '@"path"suffix'),
+])
+def test_workzone_reference_parser_preserves_target_paths(text, reference, caption):
+    assert HASHITuiApp._parse_workzone_reference(text) == (reference, caption)
+
+
+@pytest.mark.asyncio
+async def test_tui_sends_windows_workzone_reference_without_changing_separators(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = r'@"C:\Work Zone\weekly.pdf" summarize'
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert client.sent[0][1] == "summarize"
+        assert client.sent[0][2]["workzone_ref"] == r'C:\Work Zone\weekly.pdf'

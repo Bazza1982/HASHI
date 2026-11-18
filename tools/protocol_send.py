@@ -37,6 +37,7 @@ from remote.attachments import (
     STREAM_MAX_TOTAL_ATTACHMENT_BYTES,
 )
 from remote.security.client_auth import build_client_auth_headers
+from remote.security.shared_token import HEADER_NONCE, verify_response_auth
 from tools.remote_capabilities import fetch_remote_protocol_capabilities
 from tools.hchat_send import (
     _configure_cli_console_encoding,
@@ -79,6 +80,10 @@ def _build_request_headers(
     )
 
 
+class UnverifiedProtocolReceipt(ValueError):
+    """A dispatched request has no verifiable, target-bound acknowledgement."""
+
+
 def _request_json(
     url: str,
     *,
@@ -88,29 +93,49 @@ def _request_json(
     shared_token: str | None = None,
     from_instance: str | None = None,
     timeout: int = 10,
+    expected_response_instance: str | None = None,
 ) -> dict:
+    if expected_response_instance and (not shared_token or token):
+        raise ValueError("A shared-token request is required for authenticated receipt verification.")
     data = json.dumps(payload).encode("utf-8")
-    req = urllib_request.Request(
-        url,
-        data=data,
-        headers=_build_request_headers(
-            url=url,
-            method=method,
-            data=data,
-            token=token,
-            shared_token=shared_token,
-            from_instance=from_instance,
-        ),
-        method=method,
+    headers = _build_request_headers(
+        url=url, method=method, data=data, token=token,
+        shared_token=shared_token, from_instance=from_instance,
     )
+    req = urllib_request.Request(url, data=data, headers=headers, method=method)
+    request_nonce = next(
+        (value for key, value in headers.items() if key.lower() == HEADER_NONCE.lower()), ""
+    )
+
+    def validate(body, status):
+        if not isinstance(body, dict):
+            raise UnverifiedProtocolReceipt("The receiver response is not a JSON object.")
+        if expected_response_instance:
+            unsigned = {key: value for key, value in body.items() if key != "response_auth"}
+            if (
+                _normalize_instance_id(unsigned.get("responder_instance"))
+                != _normalize_instance_id(expected_response_instance)
+                or unsigned.get("response_status") != status
+                or not request_nonce
+                or not verify_response_auth(
+                    shared_token=shared_token,
+                    request_nonce=request_nonce,
+                    payload=unsigned,
+                    response_auth=body.get("response_auth"),
+                )
+            ):
+                raise UnverifiedProtocolReceipt("The receiver acknowledgement could not be verified.")
+        return body
+
     try:
         with urllib_request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            return validate(json.loads(resp.read().decode("utf-8")), int(getattr(resp, "status", 200)))
     except HTTPError as exc:
         try:
             body = json.loads(exc.read().decode("utf-8"))
         except Exception:
             body = {"ok": False, "error": str(exc)}
+        body = validate(body, exc.code)
         body.setdefault("status", exc.code)
         return body
 
@@ -527,6 +552,7 @@ def _send_with_attachments_v2(
         shared_token=shared_token,
         from_instance=payload["from_instance"],
         timeout=timeout,
+        expected_response_instance=payload["to_instance"] if shared_token and not token else None,
     )
     if not commit_result.get("ok"):
         _cancel_staged_attachments(
@@ -595,6 +621,7 @@ def _send_with_attachments_v1(
         shared_token=shared_token,
         from_instance=payload["from_instance"],
         timeout=timeout,
+        expected_response_instance=payload["to_instance"] if shared_token and not token else None,
     )
     if not commit_result.get("ok"):
         _cancel_staged_attachments(
@@ -610,6 +637,44 @@ def _send_with_attachments_v1(
     return commit_result
 
 
+def _authenticated_peer_capabilities(
+    base_url: str, *, shared_token: str, from_instance: str,
+    target_instance: str, timeout: int,
+) -> tuple[set[str], str | None]:
+    """Authenticate the actual peer before disclosing selected attachment bytes."""
+    url = f"{base_url}/protocol/handshake"
+    payload = {"from_instance": from_instance, "protocol_version": "2.0"}
+    data = json.dumps(payload).encode("utf-8")
+    headers = _build_request_headers(
+        url=url, method="POST", data=data, token=None,
+        shared_token=shared_token, from_instance=from_instance,
+    )
+    nonce = next((value for key, value in headers.items() if key.lower() == HEADER_NONCE.lower()), "")
+    req = urllib_request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            status = int(getattr(response, "status", 200))
+            body = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, ValueError, UnicodeError):
+        return set(), "peer_identity_unverified"
+    if not isinstance(body, dict) or status != 200:
+        return set(), "peer_identity_unverified"
+    unsigned = {key: value for key, value in body.items() if key != "response_auth"}
+    actual = str(body.get("instance_id") or "").strip().upper()
+    expected = str(target_instance or "").strip().upper()
+    if (
+        body.get("status") != "handshake_accept"
+        or not expected or actual != expected or not nonce
+        or not verify_response_auth(
+            shared_token=shared_token, request_nonce=nonce, payload=unsigned,
+            response_auth=body.get("response_auth"),
+        )
+    ):
+        return set(), "peer_identity_unverified"
+    values = body.get("capabilities")
+    return ({str(item) for item in values} if isinstance(values, list) else set()), None
+
+
 def _send_with_attachments(
     *,
     base_url: str,
@@ -619,9 +684,20 @@ def _send_with_attachments(
     shared_token: str | None,
     timeout: int,
 ) -> dict:
-    capabilities, probe_error = fetch_remote_protocol_capabilities(
-        base_url, timeout=min(timeout, 5)
-    )
+    if shared_token and not token:
+        capabilities, probe_error = _authenticated_peer_capabilities(
+            base_url, shared_token=shared_token, from_instance=payload["from_instance"],
+            target_instance=payload["to_instance"], timeout=min(timeout, 5),
+        )
+        if probe_error:
+            return {
+                "ok": False, "code": "auth_failed",
+                "error": "Target identity could not be verified; no attachment was uploaded.",
+            }
+    else:
+        capabilities, probe_error = fetch_remote_protocol_capabilities(
+            base_url, timeout=min(timeout, 5)
+        )
     if "message_attachments_v2_streaming" in capabilities:
         return _send_with_attachments_v2(
             base_url=base_url,
@@ -631,16 +707,6 @@ def _send_with_attachments(
             shared_token=shared_token,
             timeout=timeout,
         )
-    if capabilities and "message_attachments_v1" not in capabilities:
-        return {
-            "ok": False,
-            "error": (
-                "remote peer advertises neither message_attachments_v2_streaming "
-                "nor message_attachments_v1 on live /protocol/status; update that peer "
-                "before sending attachments"
-            ),
-            "code": "attachment_capability_missing",
-        }
     if probe_error:
         print(
             "⚠️  Could not confirm remote attachment capability via "
@@ -835,46 +901,47 @@ def send_protocol_message(
             remote_host = candidate
             break
     base_url = f"http://{remote_host}:{remote_port}"
-    capabilities, capability_error = fetch_remote_protocol_capabilities(
-        base_url, timeout=min(timeout, 5)
-    )
-    required_hchat_capabilities = {
-        "message_freshness_v1",
-        "hchat_delivery_status_v1",
-    }
-    missing_hchat_capabilities = required_hchat_capabilities - capabilities
-    if capability_error or missing_hchat_capabilities:
-        reason = capability_error or (
-            "peer does not advertise "
-            + ", ".join(sorted(missing_hchat_capabilities))
-        )
-        print(
-            "❌ Remote peer does not support complete HChat freshness/status protection; "
-            f"update the peer before sending ({reason}).",
-            file=sys.stderr,
-        )
-        return record_hchat_failure(reason="capability_missing", phase="validate")
+    # Freshness and delivery-status are optional projections, not prerequisites
+    # for an authenticated, idempotent ordinary message. Selected attachments
+    # are still negotiated by _send_with_attachments before uploading bytes.
     attachments = attachments or []
+    if not attachments and shared_token and not token:
+        _capabilities, peer_error = _authenticated_peer_capabilities(
+            base_url, shared_token=shared_token, from_instance=source_instance,
+            target_instance=target_instance, timeout=min(timeout, 5),
+        )
+        if peer_error:
+            print("HChat target identity could not be verified; message was not sent.", file=sys.stderr)
+            return record_hchat_rejection({"code": "auth_failed"}, status=401)
     _record_outbound_correlation(payload, state="sending", sidecar_base_url=local_sidecar_base_url)
     begin_hchat_dispatch()
-    if attachments:
-        result = _send_with_attachments(
-            base_url=base_url,
-            payload=payload,
-            attachments=attachments,
-            token=token,
-            shared_token=shared_token,
-            timeout=timeout,
+    try:
+        if attachments:
+            result = _send_with_attachments(
+                base_url=base_url,
+                payload=payload,
+                attachments=attachments,
+                token=token,
+                shared_token=shared_token,
+                timeout=timeout,
+            )
+        else:
+            result = _request_json(
+                f"{base_url}/protocol/message",
+                payload=payload,
+                token=token,
+                shared_token=shared_token,
+                from_instance=source_instance,
+                timeout=timeout,
+                expected_response_instance=target_instance if shared_token and not token else None,
+            )
+    except (UnverifiedProtocolReceipt, UnicodeError, json.JSONDecodeError):
+        print(
+            "HChat was submitted, but the receiver acknowledgement could not be verified; "
+            "check the original message before retrying.",
+            file=sys.stderr,
         )
-    else:
-        result = _request_json(
-            f"{base_url}/protocol/message",
-            payload=payload,
-            token=token,
-            shared_token=shared_token,
-            from_instance=source_instance,
-            timeout=timeout,
-        )
+        return record_hchat_failure(reason="response_invalid", phase="read", accepted=None)
     disposition = _delivery_disposition(result)
     if disposition != "failed":
         record_hchat_response(result)

@@ -32,7 +32,8 @@ def main():
         command.add_argument("--work-root", type=Path, required=True)
         if name == "activate":
             command.add_argument("--config", type=Path, required=True)
-            command.add_argument("--minimum-free-bytes", type=int, default=2*1024**3)
+            command.add_argument("--minimum-free-bytes", type=int, default=0,
+                                 help="Optional free-space reserve for Office write operations (default: none).")
     args = parser.parse_args()
     if args.operation == "prepare":
         manifest = qualify_runtime(args.python, args.destination, converter=args.converter)
@@ -60,3 +61,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_708b59b2986f401da2aad5ff74a8c333

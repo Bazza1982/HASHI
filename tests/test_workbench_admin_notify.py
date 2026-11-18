@@ -79,7 +79,7 @@ async def test_session_notice_retries_after_ack_loss_without_telegram_or_default
     if not worker_online:
         server.runtimes = []
     origin = {"surface": "workbench", "owner_id": "user:123", "session_id": selected["session_id"],
-              "context_generation": 1, "session_channel_key": "default"}
+              "context_generation": 1, "session_channel_key": "default", "instance_id": "NOTIFY_TEST"}
     request = _FakeRequest({"agent": "hashiko", "message_key": "api.restart.completed",
         "message_args": {"instance": "PEER"}, "origin": origin, "ui_locale": "zh-CN",
         "publication_id": "restart:fixture-1"})
@@ -97,7 +97,7 @@ async def test_session_notice_retries_after_ack_loss_without_telegram_or_default
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("invalid_scope", "expected_status"),
-    [("owner", 403), ("missing_owner", 403), ("agent", 404),
+    [("owner", 403), ("missing_owner", 403), ("instance", 409), ("agent", 404),
      ("session", 404), ("generation", 409)],
 )
 async def test_offline_session_notice_validates_scope_without_writes(
@@ -116,6 +116,8 @@ async def test_offline_session_notice_validates_scope_without_writes(
         origin.update(owner_id="user:999", session_id=foreign["session_id"])
     elif invalid_scope == "missing_owner":
         del origin["owner_id"]
+    elif invalid_scope == "instance":
+        origin["instance_id"] = "ANOTHER_INSTANCE"
     elif invalid_scope == "agent":
         payload["agent"] = "another-agent"
     elif invalid_scope == "session":

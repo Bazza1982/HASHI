@@ -29,6 +29,7 @@ from orchestrator.agent_incarnation import (
     valid_agent_lifecycle_id,
 )
 from orchestrator.telegram_delivery_state import retire_agent_state
+from orchestrator.telegram_configuration_lock import TELEGRAM_PENDING_SECRET_KEY
 from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     ConfigDocument,
@@ -740,7 +741,10 @@ class AgentDeletionService:
             secrets_doc = read_config_json(self.paths.secrets_path)
             # Candidate secret keys belonging to deleted agent
             token_key = deleted_row.get("telegram_token_key") or agent_id
-            candidates = {str(token_key), agent_id}
+            # An explicit reference does not prove that an unrelated
+            # same-name secret belongs to the deleted Agent.
+            candidates = {str(token_key)}
+            candidates.discard(TELEGRAM_PENDING_SECRET_KEY)
             engines = {
                 str(deleted_row.get("active_backend") or deleted_row.get("engine") or "")
             }
@@ -752,6 +756,17 @@ class AgentDeletionService:
                     candidates.update(get_secret_lookup_order(engine, agent_id))
 
             removed_any = False
+            pending = secrets_doc.get(TELEGRAM_PENDING_SECRET_KEY)
+            if pending is not None and not isinstance(pending, dict):
+                raise ValueError("Telegram draft storage is invalid")
+            if isinstance(pending, dict) and agent_id in pending:
+                pending = dict(pending)
+                pending.pop(agent_id)
+                if pending:
+                    secrets_doc[TELEGRAM_PENDING_SECRET_KEY] = pending
+                else:
+                    secrets_doc.pop(TELEGRAM_PENDING_SECRET_KEY, None)
+                removed_any = True
             for key in candidates:
                 if key in secrets_doc:
                     # Check if any remaining agent references this secret

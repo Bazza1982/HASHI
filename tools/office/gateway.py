@@ -7,12 +7,14 @@ remain the owners of execution evidence and conversation delivery.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import stat
+import sys
 import time
 from pathlib import Path
 from contextlib import nullcontext, contextmanager
@@ -20,8 +22,8 @@ from uuid import uuid4
 
 from .contract import OfficeInputError, validate_office_arguments
 from .runtime import OfficeRuntime, RuntimeUnavailable, canonical, digest
+from .limits import DEFAULT_BUDGETS
 
-MAX_BYTES = 32 * 1024 * 1024
 SUFFIXES = {".xlsx", ".xlsm", ".docx", ".docm", ".pptx", ".pptm", ".pdf", ".csv"}
 
 
@@ -58,14 +60,19 @@ def _no_links(path):
 
 class OfficeGateway:
     def __init__(self, runtime: OfficeRuntime, *, read_roots, write_roots, cwd, context,
-                 path_guard=None, attachment_loader=None, delivery=None, effect_guard=None):
+                 path_guard=None, attachment_loader=None, delivery=None, effect_guard=None,
+                 working_copy_loader=None, working_copy_lister=None, working_copy_commit_guard=None):
         self.runtime = runtime
+        self.file_budget = getattr(runtime, "budgets", DEFAULT_BUDGETS)["file_bytes"]
         self.read_roots = tuple(Path(p).resolve() for p in read_roots)
         self.write_roots = tuple(Path(p).resolve() for p in write_roots)
         self.cwd = Path(cwd).resolve()
         self.context = dict(context)
         self.path_guard = path_guard
         self.attachment_loader = attachment_loader
+        self.working_copy_loader = working_copy_loader
+        self.working_copy_lister = working_copy_lister
+        self.working_copy_commit_guard = working_copy_commit_guard
         self.delivery = delivery
         self.effect_guard = effect_guard or nullcontext
         config = self.context.get("global_config")
@@ -91,6 +98,13 @@ class OfficeGateway:
                 CREATE TABLE IF NOT EXISTS operations(
                     id TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL,
                     file_id TEXT, result TEXT, plan TEXT, created REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS read_cursors(
+                    id TEXT PRIMARY KEY, file_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+                    revision INTEGER NOT NULL, target TEXT NOT NULL, view TEXT NOT NULL,
+                    state TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS working_copy_cursors(
+                    id TEXT PRIMARY KEY, source_session TEXT NOT NULL, access_scope TEXT NOT NULL,
+                    after_id TEXT NOT NULL, UNIQUE(source_session, access_scope, after_id));
             """)
             if "facts" not in {r[1] for r in db.execute("PRAGMA table_info(files)")}:
                 db.execute("ALTER TABLE files ADD COLUMN facts TEXT NOT NULL DEFAULT '{}'")
@@ -111,7 +125,12 @@ class OfficeGateway:
         candidate = Path(raw)
         if not candidate.is_absolute():
             candidate = self.cwd / candidate
-        _no_links(candidate)
+        # Read aliases are resolved to an authorized real path and opened
+        # through a pinned, no-follow handle in read_bytes. Publication still
+        # retains the existing stricter path rule until its own atomic binding
+        # supports aliases as well.
+        if write:
+            _no_links(candidate)
         try:
             resolved = _resolve_path(str(candidate), self.write_roots if write else self.read_roots, self.cwd)
         except ValueError:
@@ -124,18 +143,38 @@ class OfficeGateway:
         return resolved
 
     def read_bytes(self, path):
+        from orchestrator.session_attachment_authorization import _open_no_symlinks
+
         path = self.resolve(str(path))
-        before = path.stat()
-        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_BYTES:
-            raise GatewayError("FILE_LIMIT", "Input must be a regular file of at most 32 MiB.")
-        data = path.read_bytes()
-        after = path.stat()
-        if len(data) > MAX_BYTES or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
-            raise GatewayError("SOURCE_CHANGED", "Input changed while being read; inspect it again.")
+        try:
+            descriptor, _ancestors = _open_no_symlinks(path, os.O_RDONLY)
+        except OSError as error:
+            raise GatewayError("SOURCE_CHANGED", "Input could not be opened safely; inspect it again.") from error
+
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+        # Read through the already-bound file, not a second path lookup.  The
+        # helper pins each directory while opening and refuses replacement
+        # links; Windows additionally prevents writes to the open handle.
+        with os.fdopen(descriptor, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise GatewayError("FILE_LIMIT", "Input must be a regular file.")
+            if before.st_size > self.file_budget:
+                raise GatewayError("FILE_LIMIT", f"Input {before.st_size} bytes exceeds file_bytes budget {self.file_budget}; increase the configured resource budget.")
+            data = source.read(self.file_budget + 1)
+            after = os.fstat(source.fileno())
+            try:
+                current = path.stat()
+            except OSError as error:
+                raise GatewayError("SOURCE_CHANGED", "Input changed while being read; inspect it again.") from error
+            if (len(data) > self.file_budget or identity(before) != identity(after)
+                    or identity(after) != identity(current) or before.st_ctime_ns != after.st_ctime_ns):
+                raise GatewayError("SOURCE_CHANGED", "Input changed while being read; inspect it again.")
         return data
 
-    def handle(self, file_id, *, check_origin=True):
+    def handle(self, file_id, *, check_origin=False):
         with self.db() as db:
             row = db.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
         if row is None:
@@ -153,6 +192,45 @@ class OfficeGateway:
                 if hashlib.sha256(self.read_bytes(Path(source["path"]))).hexdigest() != source["sha256"]:
                     raise GatewayError("SOURCE_CHANGED", "An original/template/asset changed outside Office. Inspect current sources before editing.")
         return item
+
+    def source_provenance(self, item):
+        """Describe source freshness without vetoing use of the bound working copy."""
+        origins = json.loads(item["facts"] or "{}").get("origins", [])
+        if item["origin"] and not origins:
+            origins = [{"path": item["origin"], "sha256": item["origin_sha256"]}]
+        if not origins:
+            return "independent"
+        unavailable = False
+        for source in origins:
+            try:
+                actual = hashlib.sha256(self.read_bytes(Path(source["path"]))).hexdigest()
+            except (GatewayError, OSError, KeyError, TypeError, ValueError):
+                unavailable = True
+                continue
+            if actual != source.get("sha256"):
+                return "changed"
+        return "unavailable" if unavailable else "current"
+
+    def read_cursor(self, token, handle):
+        with self.db() as db:
+            row = db.execute("SELECT * FROM read_cursors WHERE id=?", (token,)).fetchone()
+        if not row or row["file_id"] != handle["id"]:
+            raise GatewayError("INVALID_CURSOR", "Continuation does not belong to this file or session.")
+        if row["revision"] != handle["revision"] or row["sha256"] != handle["sha256"]:
+            raise GatewayError("STALE_CURSOR", "The working file changed; start a new read.")
+        return dict(row)
+
+    def save_read_cursor(self, handle, target, view, state):
+        token = "read_" + uuid4().hex
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT revision,sha256 FROM files WHERE id=?", (handle["id"],)).fetchone()
+            if not current or current["revision"] != handle["revision"] or current["sha256"] != handle["sha256"]:
+                raise GatewayError("STALE_CURSOR", "The working file changed; start a new read.")
+            db.execute("INSERT INTO read_cursors VALUES(?,?,?,?,?,?,?)",
+                       (token, handle["id"], handle["sha256"], handle["revision"],
+                        target, view, json.dumps(state)))
+        return token
 
     def op_key(self, name, call_id):
         return hashlib.sha256(canonical([self.context.get("request_id"), call_id or uuid4().hex, name])).hexdigest()
@@ -187,16 +265,19 @@ class OfficeGateway:
                        (op, fingerprint, "running", args.get("file_id"), None, None, time.time()))
         return None
 
-    def _record(self, op, response, *, handle=None, expected_revision=None):
-        with self.effect_guard(), self.db() as db:
+    def _record(self, op, response, *, handle=None, expected_revision=None,
+                commit_guard=None, revalidate=None):
+        with self.effect_guard(), (commit_guard or nullcontext()), self.db() as db:
+            if revalidate is not None:
+                revalidate()
             db.execute("BEGIN IMMEDIATE")
             intent = db.execute("SELECT state FROM operations WHERE id=?", (op,)).fetchone()
             if not intent or intent["state"] not in {"running","prepared"}:
                 raise GatewayError("EDIT_CONFLICT", "This Office intent has been retired; its candidate cannot commit.")
             if handle is not None:
                 if expected_revision is None:
-                    if db.execute("SELECT COUNT(*) FROM files").fetchone()[0] >= 512:
-                        raise GatewayError("HANDLE_LIMIT", "This Session reached 512 working files.")
+                    # Retained working copies do not impose a count limit;
+                    # actual storage capacity governs new files.
                     db.execute("INSERT INTO files(id,path,suffix,sha256,revision,origin,origin_sha256,output,saved,facts) VALUES(:id,:path,:suffix,:sha256,:revision,:origin,:origin_sha256,:output,:saved,:facts)", handle)
                 else:
                     changed = db.execute("""UPDATE files SET path=:path,suffix=:suffix,sha256=:sha256,
@@ -206,6 +287,131 @@ class OfficeGateway:
                         raise GatewayError("EDIT_CONFLICT", "Another Office call changed this file. Inspect its latest version.")
             db.execute("UPDATE operations SET state='done',result=?,file_id=? WHERE id=?",
                        (json.dumps(response, ensure_ascii=False), response.get("file_id"), op))
+
+    def _authorize_working_copy_origins(self, item):
+        try:
+            facts = json.loads(item["facts"] or "{}")
+            if not isinstance(facts, dict) or not isinstance(facts.get("origins", []), list):
+                raise ValueError("invalid origins")
+            origins = [entry["path"] for entry in facts.get("origins", [])]
+            if item["origin"]:
+                origins.append(item["origin"])
+            if any(not isinstance(path, str) or not path for path in origins):
+                raise ValueError("invalid source path")
+        except (KeyError, TypeError, ValueError):
+            raise GatewayError("WORKING_COPY_CHANGED", "The source working-file metadata is invalid.") from None
+        # Original inputs and assets remain subject to the current request's
+        # selected Workzones, including when a completed result is replayed.
+        for origin in dict.fromkeys(origins):
+            self.resolve(origin)
+
+    def list_working_copies(self, after):
+        """List one bounded page; authorization is checked on each record."""
+        with self.db() as db:
+            rows = [dict(row) for row in db.execute(
+                "SELECT * FROM files WHERE id>? ORDER BY id LIMIT 51", (after,),
+            ).fetchall()]
+        files = []
+        for item in rows[:50]:
+            try:
+                self._authorize_working_copy_origins(item)
+                suffix = str(item["suffix"]).lower()
+                if suffix not in SUFFIXES or type(item["revision"]) is not int or item["revision"] < 1:
+                    continue
+                name = "Office" + suffix
+                if item["origin"]:
+                    name = Path(item["origin"]).name
+                elif item["output"]:
+                    try:
+                        name = self.resolve(item["output"]).name
+                    except (GatewayError, OSError, TypeError, ValueError):
+                        # The working copy may still be authorized even when
+                        # its proposed output path is outside this Workzone.
+                        pass
+                files.append({"file_id": item["id"], "revision": item["revision"],
+                              "name": name, "format": suffix.lstrip("."),
+                              "availability": "not_verified"})
+            except (GatewayError, OSError, TypeError, ValueError):
+                # Do not expose a name or ID from outside the selected scope.
+                continue
+        return {"files": files, "last_id": rows[49]["id"] if len(rows) > 50 else None}
+
+    def working_copy_cursor(self, source_session, after=None, token=None):
+        roots = sorted({os.path.normcase(str(root)) for root in self.read_roots})
+        scope = hashlib.sha256(canonical(roots)).hexdigest()
+        if token is not None:
+            with self.db() as db:
+                row = db.execute(
+                    "SELECT after_id FROM working_copy_cursors WHERE id=? AND source_session=? AND access_scope=?",
+                    (token, source_session, scope),
+                ).fetchone()
+            if row is None:
+                raise GatewayError("INVALID_CURSOR", "Working-copy continuation belongs to another Session or Workzone.")
+            return row["after_id"]
+        if after is None:
+            return None
+        with self.effect_guard(), self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT OR IGNORE INTO working_copy_cursors(id,source_session,access_scope,after_id) VALUES(?,?,?,?)",
+                ("wc_" + uuid4().hex, source_session, scope, after),
+            )
+            row = db.execute(
+                "SELECT id FROM working_copy_cursors WHERE source_session=? AND access_scope=? AND after_id=?",
+                (source_session, scope, after),
+            ).fetchone()
+            if row is None:
+                raise GatewayError("WORKING_COPY_UNAVAILABLE", "Working-copy continuation is unavailable.")
+            return row["id"]
+
+    def snapshot_working_copy(self, file_id, expected_revision, job):
+        """Copy the exact committed working version from this authorized Session."""
+        from orchestrator.session_attachment_authorization import _open_no_symlinks
+
+        with self.db() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+            if row is None:
+                raise GatewayError("FILE_NOT_FOUND", "The selected working file is unavailable.")
+            item = dict(row)
+            if expected_revision is not None and item["revision"] != expected_revision:
+                raise GatewayError("SOURCE_CHANGED", "The source working copy changed; inspect its current revision.")
+            self._authorize_working_copy_origins(item)
+            source = Path(item["path"])
+            suffix = str(item["suffix"]).lower()
+            if not source.is_absolute() or suffix not in SUFFIXES or source.suffix.lower() != suffix:
+                raise GatewayError("WORKING_COPY_CHANGED", "The source working file is invalid.")
+            _no_links(source)
+            try:
+                source = source.resolve(strict=True)
+                if not source.is_relative_to(self.root.resolve(strict=True)):
+                    raise GatewayError("WORKING_COPY_CHANGED", "The source working file is outside its Session.")
+                descriptor, _ancestors = _open_no_symlinks(source, os.O_RDONLY)
+                with os.fdopen(descriptor, "rb") as stream:
+                    before = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(before.st_mode) or before.st_size > self.file_budget:
+                        raise GatewayError("FILE_LIMIT", "The source working file exceeds the selected file budget.")
+                    data = stream.read(self.file_budget + 1)
+                    after = os.fstat(stream.fileno())
+                    current = source.stat()
+            except OSError as exc:
+                raise GatewayError("WORKING_COPY_CHANGED", "The source working file is unavailable or changed.") from exc
+
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+            # Windows can report a different creation timestamp through a
+            # pathname than through an open handle; compare handle timestamps
+            # with each other, and file identity plus content across both.
+            if (len(data) > self.file_budget or identity(before) != identity(after)
+                    or before.st_ctime_ns != after.st_ctime_ns
+                    or identity(after) != identity(current)
+                    or hashlib.sha256(data).hexdigest() != item["sha256"]):
+                raise GatewayError("WORKING_COPY_CHANGED", "The source working file failed version verification.")
+            staged = Path(job) / ("input" + suffix)
+            with staged.open("xb") as target:
+                target.write(data)
+            return {**item, "path": str(staged)}
 
     def stage_handle(self, handle, job, name="input"):
         source = Path(handle["path"])
@@ -259,16 +465,38 @@ class OfficeGateway:
         try:
             args = validate_office_arguments(name, arguments)
             self.runtime.manifest(verify=False)
+            if name == "office_inspect" and args.get("source") == "list_working_copies":
+                if self.working_copy_lister is None:
+                    raise GatewayError("WORKING_COPY_UNAVAILABLE", "Authorized Session working copies are unavailable.")
+                source_session = args["source_session_id"]
+                after = (self.working_copy_cursor(source_session, token=args["cursor"])
+                         if args.get("cursor") else "")
+                page = self.working_copy_lister(source_session, after)
+                cursor = self.working_copy_cursor(source_session, after=page["last_id"])
+                return result(
+                    summary="Listed authorized working copies; reopen a selected version to verify it.",
+                    data={"files": page["files"], "next_cursor": cursor},
+                    next_call=next_tool("office_inspect", source="list_working_copies",
+                                        source_session_id=source_session, cursor=cursor) if cursor else None,
+                )
             origins = []
             attachment_facts = {}
-            minimum_free = int(self.runtime.options.get("minimum_free_bytes", 2 * 1024**3))
-            if shutil.disk_usage(self.root).free < minimum_free + 3 * MAX_BYTES:
-                raise GatewayError("STORAGE_LIMIT", "Office work disk reserve is insufficient; no fallback is allowed.")
+            reopened_revision = None
+            # A reserve is an explicit policy for writes; reads can use their
+            # staged snapshot while the filesystem has sufficient real space.
+            minimum_free = max(0, int(self.runtime.options.get("minimum_free_bytes", 0)))
+            if (name not in {"office_inspect", "office_read"} and minimum_free
+                    and shutil.disk_usage(self.root).free < minimum_free):
+                raise GatewayError("STORAGE_LIMIT", "The configured Office write reserve is unavailable.")
             op = self.op_key(name, call_id)
             prior = self._begin(op, name, args)
             if prior:
                 if prior["state"] == "done":
-                    return json.loads(prior["result"])
+                    previous = json.loads(prior["result"])
+                    if (name == "office_inspect" and args.get("source") == "working_copy"
+                            and previous.get("status") == "ok" and previous.get("file_id")):
+                        self._authorize_working_copy_origins(self.handle(previous["file_id"]))
+                    return previous
                 if prior["state"] == "prepared" and name == "office_finish":
                     return await self._recover_finish(op, prior, args)
                 raise GatewayError("OPERATION_UNCERTAIN", "Previous call has no completed receipt. Inspect the file; do not blindly repeat a mutation.")
@@ -276,19 +504,50 @@ class OfficeGateway:
             job = self.root / "jobs" / op
             job.mkdir(parents=True, exist_ok=False)
             if name == "office_inspect":
-                if args.get("file_id"):
+                if args.get("source") == "list_attachments":
+                    if self.attachment_loader is None:
+                        raise GatewayError("ATTACHMENT_UNAVAILABLE", "No canonical attachment source is bound to this request.")
+                    page = self.attachment_loader(list_only=True, cursor=args.get("cursor"))
+                    next_cursor = page.get("next_cursor")
+                    response = result(
+                        summary="Listed visible Office attachments in this Session.", data=page,
+                        next_call=next_tool("office_inspect", source="list_attachments", cursor=next_cursor)
+                        if next_cursor else None,
+                    )
+                    self._record(op, response)
+                    return response
+                if args.get("source") == "working_copy":
+                    if self.working_copy_loader is None:
+                        raise GatewayError("WORKING_COPY_UNAVAILABLE", "Authorized Session working copies are unavailable.")
+                    handle = self.working_copy_loader(
+                        args["source_session_id"], args["source_file_id"], args.get("source_revision"), job,
+                    )
+                    reopened_revision = handle["revision"]
+                    facts = json.loads(handle["facts"] or "{}")
+                    if not isinstance(facts, dict):
+                        raise GatewayError("WORKING_COPY_CHANGED", "The source working-file metadata is invalid.")
+                    # An attachment ID is scoped to its original Session; do
+                    # not present it as an attachment of the current Session.
+                    facts.pop("attachment_id", None)
+                    facts.pop("attachment_sha256", None)
+                    file_id = "office_" + uuid4().hex
+                    handle = {**handle, "id": file_id, "revision": 1, "saved": None,
+                              "facts": json.dumps(facts, ensure_ascii=False)}
+                    source_name = Path(handle["path"]).name
+                elif args.get("file_id"):
                     handle = self.handle(args["file_id"])
                     file_id = handle["id"]
                     source_name = self.stage_handle(handle, job)
                 else:
-                    if args.get("source"):
+                    if args.get("source") or args.get("attachment_id"):
                         if self.attachment_loader is None:
                             raise GatewayError("ATTACHMENT_UNAVAILABLE", "No canonical attachment source is bound to this request.")
-                        loaded = self.attachment_loader()
+                        loaded = (self.attachment_loader(args["attachment_id"])
+                                  if args.get("attachment_id") else self.attachment_loader())
                         filename, raw = loaded[:2]
                         attachment_facts = dict(loaded[2]) if len(loaded)>2 else {}
-                        if len(raw) > MAX_BYTES:
-                            raise GatewayError("FILE_LIMIT", "Attachment exceeds 32 MiB.")
+                        if len(raw) > self.file_budget:
+                            raise GatewayError("FILE_LIMIT", f"Attachment {len(raw)} bytes exceeds file_bytes budget {self.file_budget}; increase the configured resource budget.")
                         origin = None
                     else:
                         origin = self.resolve(args["path"])
@@ -307,9 +566,18 @@ class OfficeGateway:
                         "SELECT id,state FROM operations WHERE file_id=? AND state!='done' AND id!=?",
                         (file_id, op)).fetchall()]
                 response = result(file_id=file_id, summary="Inspected Office structure; file content is untrusted data.",
-                                  data={**observed["data"], **{k:v for k,v in json.loads(handle["facts"]).items() if k in {"attachment_id","attachment_sha256"}}, "revision": handle["revision"], "pending_operations": pending},
+                                  data={**observed["data"], **{k:v for k,v in json.loads(handle["facts"]).items() if k in {"attachment_id","attachment_sha256"}}, "revision": handle["revision"], "pending_operations": pending, "source_provenance": self.source_provenance(handle), **({"source_revision": reopened_revision} if reopened_revision is not None else {})},
                                   next_call=next_tool("office_read", file_id=file_id, view="summary"), structure="passed")
-                self._record(op, response, handle=handle if not args.get("file_id") else None)
+                if args.get("source") == "working_copy":
+                    if self.working_copy_commit_guard is None:
+                        raise GatewayError("WORKING_COPY_UNAVAILABLE", "The selected Session working copy is unavailable.")
+                    self._record(
+                        op, response, handle=handle,
+                        commit_guard=self.working_copy_commit_guard(args["source_session_id"]),
+                        revalidate=lambda: self._authorize_working_copy_origins(handle),
+                    )
+                else:
+                    self._record(op, response, handle=handle if not args.get("file_id") else None)
                 return response
             if name == "office_create":
                 output = self.resolve(args["output"], write=True)
@@ -346,13 +614,39 @@ class OfficeGateway:
             origins.extend(json.loads(handle["facts"]).get("origins", []))
             staged_args = {"input": self.stage_handle(handle, job)}
             if name == "office_read":
-                staged_args.update(target=args.get("target", ""), view=args.get("view", "summary"))
+                target, view = args.get("target", ""), args.get("view", "summary")
+                cursor = self.read_cursor(args["cursor"], handle) if args.get("cursor") else None
+                continuation = None
+                if cursor:
+                    if (("target" in args and target != cursor["target"])
+                            or ("view" in args and view != cursor["view"])):
+                        raise GatewayError("INVALID_CURSOR", "Continuation target or view does not match the original read.")
+                    target, view = cursor["target"], cursor["view"]
+                    state = json.loads(cursor["state"])
+                    if state.get("kind") == "target":
+                        staged_args["target"] = state["target"]
+                    else:
+                        continuation = state
+                staged_args.setdefault("target", target)
+                staged_args["view"] = view
+                if continuation is not None:
+                    staged_args["continuation"] = continuation
                 value = await self._invoke("read", staged_args, job)
-                next_target = value["data"].get("next_target")
+                data = value["data"]
+                tables_target = data.get("tables_next_target")
+                if tables_target:
+                    tables_cursor = self.save_read_cursor(handle, tables_target, view,
+                                                          {"kind": "target", "target": tables_target})
+                    data["tables_next"] = next_tool("office_read", file_id=file_id, cursor=tables_cursor)
+                next_state = data.pop("_continuation", None)
+                if not next_state and data.get("next_target"):
+                    next_state = {"kind": "target", "target": data["next_target"]}
+                next_cursor = self.save_read_cursor(handle, target, view, next_state) if next_state else None
+                if next_cursor:
+                    data["next_cursor"] = next_cursor
                 response = result(file_id=file_id, summary="Read requested Office part.",
-                                  data={**value["data"],**{k:v for k,v in json.loads(handle["facts"]).items() if k in {"attachment_id","attachment_sha256"}}},
-                                  next_call=next_tool("office_read", file_id=file_id, target=next_target,
-                                                      view=args.get("view", "summary")) if next_target else None,
+                                  data={**data,**{k:v for k,v in json.loads(handle["facts"]).items() if k in {"attachment_id","attachment_sha256"}}, "source_provenance": self.source_provenance(handle)},
+                                  next_call=next_tool("office_read", file_id=file_id, cursor=next_cursor) if next_cursor else None,
                                   structure="passed")
                 self._record(op, response)
                 return response
@@ -384,7 +678,7 @@ class OfficeGateway:
                 if suffix != handle["suffix"]:
                     updated["output"] = str(Path(handle["output"]).with_suffix(suffix)) if handle["output"] else None
                 response = result(file_id=file_id, summary="Edited working copy atomically; original retained.",
-                                  data={**value["data"], "revision": updated["revision"]},
+                                  data={**value["data"], "revision": updated["revision"], "source_provenance": self.source_provenance(updated)},
                                   next_call=next_tool("office_finish", file_id=file_id), structure="passed",
                                   recalculation=value["data"].get("recalculation", "not_performed"))
                 self._record(op, response, handle=updated, expected_revision=handle["revision"])
@@ -403,7 +697,12 @@ class OfficeGateway:
                                (json.dumps(cancelled),op))
             raise
         except (GatewayError, RuntimeUnavailable, OfficeInputError, asyncio.TimeoutError, OSError, ValueError) as exc:
-            code = getattr(exc, "code", None) or ("OPERATION_TIMEOUT" if isinstance(exc, asyncio.TimeoutError) else
+            disk_full = isinstance(exc, OSError) and (
+                exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}
+                or getattr(exc, "winerror", None) in {39, 112}
+            )
+            code = getattr(exc, "code", None) or ("STORAGE_LIMIT" if disk_full else
+                                                "OPERATION_TIMEOUT" if isinstance(exc, asyncio.TimeoutError) else
                                                 "RUNTIME_UNAVAILABLE" if isinstance(exc, RuntimeUnavailable) else "OFFICE_FAILED")
             if file_id:
                 with self.db() as db:
@@ -419,8 +718,31 @@ class OfficeGateway:
             return response
 
     def _verify_candidate(self, path, value):
-        if not path.is_file() or path.stat().st_size > MAX_BYTES or digest(path) != value.get("sha256"):
+        if not path.is_file() or path.stat().st_size > self.file_budget or digest(path) != value.get("sha256"):
             raise GatewayError("INVALID_RECEIPT", "Candidate file does not match the isolated runtime receipt.")
+
+    @staticmethod
+    def _atomic_rename_no_replace(source, target):
+        """Publish a same-directory temporary file without replacing a target."""
+        if os.name == "nt":
+            # Python's Windows rename fails when the destination already exists.
+            os.rename(source, target)
+            return
+        if sys.platform.startswith("linux"):
+            import ctypes
+            library = ctypes.CDLL(None, use_errno=True)
+            rename = getattr(library, "renameat2", None)
+            if rename is not None:
+                rename.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                                   ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                rename.restype = ctypes.c_int
+                if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1) == 0:
+                    return
+                number = ctypes.get_errno()
+                if number not in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+                    raise OSError(number, os.strerror(number), str(target))
+        raise GatewayError("ATOMIC_PUBLISH_UNSUPPORTED",
+                           "This filesystem cannot safely publish without replacing an existing file.")
 
     @staticmethod
     def _atomic_new_file(source, target):
@@ -434,9 +756,18 @@ class OfficeGateway:
                 os.fsync(stream.fileno())
             if digest(temporary) != digest(source):
                 raise GatewayError("COMMIT_VALIDATION_FAILED", "Saved bytes differ; original retained.")
-            # Hard-link publication is atomic and cannot replace an existing
-            # file (unlike POSIX rename). Temp and target are on the same volume.
-            os.link(temporary, target)
+            # Prefer link publication; use a platform no-replace rename when
+            # links are unsupported. Both paths keep an existing target intact.
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                raise
+            except OSError as exc:
+                retryable = {errno.EPERM, errno.EACCES, errno.EXDEV, errno.EINVAL,
+                             errno.ENOSYS, errno.EOPNOTSUPP, errno.EMLINK}
+                if exc.errno not in retryable and getattr(exc, "winerror", None) not in {1, 5, 17, 50, 1314}:
+                    raise
+                OfficeGateway._atomic_rename_no_replace(temporary, target)
         except FileExistsError:
             raise GatewayError("OUTPUT_EXISTS", "Output already exists. Choose a new filename.") from None
         finally:
@@ -456,7 +787,7 @@ class OfficeGateway:
         facts = json.loads(handle["facts"] or "{}")
         info = {**value["data"], "recalculation":facts.get("recalculation","not_performed"),
                 "output": str(output), "sha256": handle["sha256"],
-                "revision": handle["revision"]}
+                "revision": handle["revision"], "source_provenance": self.source_provenance(handle)}
         if value.get("preview"):
             preview = value["preview"]
             info["preview"] = {**preview}
@@ -531,3 +862,4 @@ class OfficeGateway:
                        (str(output), str(output), handle["id"], handle["revision"]))
         self._record(op, response)
         return response
+# HASHI-Fingerprint: hfp_13c5a1235893417ea50c33dbf41e3b46

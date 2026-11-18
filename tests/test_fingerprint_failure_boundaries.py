@@ -174,7 +174,7 @@ async def test_same_file_agents_serialize_and_repair_never_rewinds_latest(tmp_pa
     entry = before["artifacts"]["shared.json"]
     assert len(entry["receipts"]) == 2
     latest = entry["latest_receipt"]
-    last = before["receipts"][latest]
+    assert latest in before["receipts"]
     all_records = [before["receipts"][event] for event in entry["receipts"]]
     assert {r["identity"]["agent_id"] for r in all_records} == {"agent", "other"}
     repair(FingerprintAudit(store), work, authorization=AUTH)
@@ -284,7 +284,7 @@ async def test_case_and_long_windows_path_use_actual_file_identity(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows sharing denial is a native Windows contract")
 @pytest.mark.asyncio
-async def test_windows_exclusive_file_occupancy_blocks_before_business_write(tmp_path):
+async def test_windows_exclusive_file_occupancy_reports_business_failure(tmp_path):
     import ctypes
     from ctypes import wintypes
     registry, store, work = registry_at(tmp_path)
@@ -300,6 +300,8 @@ async def test_windows_exclusive_file_occupancy_blocks_before_business_write(tmp
     try:
         denied = await registry.execute("file_write", {"path": "occupied.txt", "content": "overwrite"}, tool_call_id="locked")
         assert denied.is_error
+        assert denied.details["fingerprint"]["evidence_status"] == "unavailable"
+        assert denied.details["fingerprint"]["business_status"] == "failed"
     finally:
         kernel.CloseHandle(handle)
     assert path.read_text() == "keep"

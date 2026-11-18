@@ -2,9 +2,73 @@
 
 from __future__ import annotations
 
+import json
+
 from orchestrator import runtime_session
 from orchestrator.frontend_connector_registry import endpoint_id_for
 from orchestrator.frontend_projection import transport_text_component
+
+
+async def publish_run_capacity_notice(runtime, item, event):
+    """Publish one internal recovery notice under the current Run fence.
+
+    The outbox and presentation row commit together, using the Run's own
+    immutable route.  A stopped or replaced Run cannot enqueue a later notice.
+    """
+    if bool(getattr(item, "silent", False)):
+        return False
+    run_id = str(getattr(item, "run_id", "") or "").strip()
+    owner_id = str(getattr(item, "owner_id", "") or "").strip()
+    session_id = str(getattr(item, "session_id", "") or "").strip()
+    request_id = str(getattr(item, "request_id", "") or "").strip()
+    event_id = str(getattr(event, "event_id", "") or "").strip()
+    text = str(getattr(event, "summary", "") or "").strip()
+    fence = getattr(item, "fencing_token", None)
+    generation = getattr(item, "context_generation", None)
+    if not all((run_id, owner_id, session_id, request_id, event_id, text)):
+        return False  # Legacy non-Session callers retain their existing presentation.
+    if type(fence) is not int or type(generation) is not int:
+        return False
+    store = runtime_session.ensure_store(runtime)
+    worker_id = f"{getattr(runtime.global_config, 'instance_id', 'HASHI')}:{runtime.name}"
+    binding = {
+        "run_id": run_id, "owner_id": owner_id, "agent_id": runtime.name,
+        "session_id": session_id, "request_id": request_id,
+        "context_generation": generation, "fencing_token": fence, "worker_id": worker_id,
+    }
+
+    def commit():
+        from orchestrator.frontend_delivery import normalize_run_delivery_route
+        from orchestrator.frontend_projection import build_frontend_presentation_context
+
+        with store.hold_active_run(**binding) as connection:
+            row = connection.execute(
+                "SELECT delivery_route_json FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            raw_route = json.loads(row["delivery_route_json"] or "{}")
+            if not raw_route:
+                return False  # Do not invent a destination for older Runs.
+            route = normalize_run_delivery_route(raw_route)
+            context = build_frontend_presentation_context(
+                text=text, content_format="plain-text", presentation_channel="notification",
+                message_context={"delivery_recovery": {
+                    "category": "active_run_notice", "run_id": run_id,
+                }},
+            )
+            return store.append_presentation_message(
+                session_id=session_id, owner_id=owner_id, agent_id=runtime.name,
+                role="assistant", text=text, source="frontend.capacity_recovery_notice",
+                idempotency_key=f"capacity-recovery:{request_id}:{event_id}",
+                presentation_channel="notification", history_eligible=False,
+                message_context=context, outbox=True, delivery_route=route,
+                expected_context_generation=generation, _connection=connection, _run_id=run_id,
+            )
+
+    from orchestrator.frontend_database import run_database_work
+    return await run_database_work(
+        commit, _db_role="worker", _db_instance=store.instance_id,
+        _db_operation="capacity.notice.publish",
+    )
 
 
 async def deliver_notice(
@@ -22,7 +86,7 @@ async def deliver_notice(
         original_at=original_at,
     )
     if not message:
-        return {"sent": False}
+        return {"sent": False, "retry_safe": True}
     presentation = {
         "message_id": message["message_id"],
         "session_id": message["session_id"],
@@ -54,7 +118,7 @@ async def deliver_notice(
     if runtime_map and not any(getattr(handle, "telegram_connected", False)
                                for handle in runtime_map.values()):
         # Durable publication remains pending; offline time is not an attempt.
-        return {**result, "sent": False, "deferred": True}
+        return {**result, "sent": False, "deferred": True, "retry_safe": True}
     claims = store.claim_delivery_outbox(
         session_id=message["session_id"],
         owner_id=owner,
@@ -70,13 +134,18 @@ async def deliver_notice(
             owner_id=owner,
             event_id=message["delivery_event_id"],
         )
-        return {
-            **result,
-            "sent": any(
-                r["endpoint_id"] == endpoint and r["status"] == "delivered"
-                for r in receipts
-            ),
-        }
+        if any(r["endpoint_id"] == endpoint and r["status"] == "delivered" for r in receipts):
+            return result
+        task = store.frontend_delivery_task_result(
+            session_id=message["session_id"], owner_id=owner,
+            event_id=message["delivery_event_id"], connector_id="telegram", endpoint_id=endpoint,
+        ) or {}
+        state = str(task.get("state") or "unknown")
+        if state in {"pending", "retry", "claimed"}:
+            return {**result, "sent": False, "deferred": True, "retry_safe": True}
+        return {**result, "sent": False, "delivery_state": state if state in {
+            "unknown", "failed", "expired", "suppressed"
+        } else "unknown"}
     claim = claims[0]
     from orchestrator.frontend_dispatch import project_claimed_frontend_event
     from orchestrator.frontend_telegram_replay import (
@@ -115,7 +184,20 @@ async def deliver_notice(
             status="unknown",
             error_code="notice_transport_unknown",
         )
-        raise
+        return {**result, "sent": False, "delivery_state": "unknown"}
+    if not delivered.get("sent"):
+        if delivered.get("retry_safe") is True:
+            store.complete_delivery_outbox(
+                outbox_id=claim["outbox_id"], lease_token=claim["lease_token"],
+                status="retry", retry_safe=True, error_code="notice_transport_retryable",
+            )
+            return {**result, **delivered}
+        if delivered.get("delivery_state") != "failed":
+            store.complete_delivery_outbox(
+                outbox_id=claim["outbox_id"], lease_token=claim["lease_token"],
+                status="unknown", error_code="notice_transport_unknown",
+            )
+            return {**result, **delivered, "sent": False, "delivery_state": "unknown"}
     sent_id = delivered.get("message_id")
     status = (
         "delivered"

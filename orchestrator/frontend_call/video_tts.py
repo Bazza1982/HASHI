@@ -28,12 +28,14 @@ from orchestrator.compute_services import (
     ComputeServiceError,
     ComputeServicesConfig,
 )
-from .contract import CallError
+from orchestrator.lan_transport import LanDestinationError, configured_media_session
+from .contract import CallError, video_transport_limit
 from .diagnostics import emit
 
 ASYNC_PROTOCOL = "video.speech.async.v1"
 SYNC_PROTOCOL = "video.speech.mp4.v1"
 CAPABILITIES_PROTOCOL = "video.speech.capabilities.v1"
+LOOKUP_PROTOCOL = "video.speech.lookup.v1"
 MAX_VIDEO_BYTES = 64 * 1024 * 1024
 MAX_REFERENCE_BYTES = 4 * 1024 * 1024
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
@@ -128,23 +130,28 @@ class VideoTTSSelection:
         first_segment_sentences = raw.get("first_segment_sentences", 2)
         group_sentences = raw.get("group_sentences", 4)
         max_inflight_groups = raw.get("max_inflight_groups", 2)
-        for value, low, high in (
-            (speed, 0.5, 2),
-            (request_timeout, 1, 900),
-            (job_timeout, 1, 1800),
-            (queue_timeout, 1, 1800),
-            (wait_base, 0, 300),
-            (wait_per_char, 0, 5),
-            (wait_min, 1, 300),
-            (wait_max, 1, 600),
+        for value, allow_zero in (
+            (request_timeout, False),
+            (job_timeout, False),
+            (queue_timeout, False),
+            (wait_base, True),
+            (wait_per_char, True),
+            (wait_min, False),
+            (wait_max, False),
         ):
-            if (
-                type(value) not in (int, float)
-                or not math.isfinite(value)
-                or not low <= value <= high
-            ):
+            try:
+                number = float(value) if type(value) in (int, float) else float("nan")
+            except OverflowError:
+                number = float("nan")
+            if not math.isfinite(number) or number < 0 or (not allow_zero and number == 0):
                 raise CallError("call_video_configuration_invalid", 503)
-        if type(maximum) is not int or not 1 <= maximum <= 4000:
+        try:
+            speed_value = float(speed) if type(speed) in (int, float) else float("nan")
+        except OverflowError:
+            speed_value = float("nan")
+        if not math.isfinite(speed_value) or not 0.5 <= speed_value <= 2:
+            raise CallError("call_video_configuration_invalid", 503)
+        if type(maximum) is not int or maximum < 1:
             raise CallError("call_video_configuration_invalid", 503)
         if (
             type(first_segment_sentences) is not int
@@ -247,6 +254,19 @@ def same_origin_url(node, value):
     return result.geturl()
 
 
+def _validated_job_id(result):
+    if not isinstance(result, dict):
+        raise CallError("call_video_job_invalid", 502)
+    values = [result[key] for key in ("id", "job_id") if key in result]
+    if (
+        not values
+        or any(not isinstance(value, str) or not _JOB_ID.fullmatch(value) for value in values)
+        or any(value != values[0] for value in values)
+    ):
+        raise CallError("call_video_job_invalid", 502)
+    return values[0]
+
+
 class VideoSpeechClient(ComputeServiceClient):
     """Bounded media/job transport retaining the directory's credential owner."""
 
@@ -268,9 +288,9 @@ class VideoSpeechClient(ComputeServiceClient):
         if request_id:
             headers["Idempotency-Key"] = hashlib.sha256(request_id.encode()).hexdigest()
         try:
-            async with self.session_factory(
+            async with configured_media_session(
+                self.session_factory, {"location": node.location, "base_url": node.base_url},
                 timeout=aiohttp.ClientTimeout(total=timeout or node.timeout_seconds),
-                trust_env=False,
             ) as session:
                 async with session.request(
                     method, url, headers=headers, json=payload, allow_redirects=False
@@ -312,7 +332,7 @@ class VideoSpeechClient(ComputeServiceClient):
             raise
         except CallError:
             raise
-        except (aiohttp.ClientError, OSError, TimeoutError) as exc:
+        except (aiohttp.ClientError, LanDestinationError, OSError, TimeoutError) as exc:
             # A POST timeout is an uncertain effect, never a reason to resubmit.
             code = (
                 "call_video_outcome_unknown"
@@ -383,15 +403,18 @@ class CallVideoTTS:
             raise CallError("call_video_reference_invalid", 502)
         width, height = struct.unpack(">II", reference[16:24])
         image = offering.image
+        reference_limit = video_transport_limit("MAX_REFERENCE_BYTES", MAX_REFERENCE_BYTES)
+        media_limit = video_transport_limit("MAX_MEDIA_BYTES", MAX_VIDEO_BYTES)
+        pixel_limit = video_transport_limit("MAX_REFERENCE_PIXELS", 8_000_000)
         if (
             not width
             or not height
-            or width * height > 8_000_000
+            or width * height > pixel_limit
             or len(reference)
             > min(
-                MAX_REFERENCE_BYTES,
-                image.max_bytes or MAX_REFERENCE_BYTES,
-                image.max_total_bytes or MAX_REFERENCE_BYTES,
+                reference_limit,
+                image.max_bytes or reference_limit,
+                image.max_total_bytes or reference_limit,
             )
             or "png" not in image.formats
             or (image.max_count or 0) < 1
@@ -417,23 +440,46 @@ class CallVideoTTS:
             on_submit()
         emit("video_tts_submitting", **selection.public(), text_chars=len(text))
         try:
-            result = await self.client.request(
-                node,
-                "POST",
-                resolved.interface_url(selection.protocol),
-                payload=payload,
-                timeout=selection.request_timeout_seconds,
-                request_id=request_id,
-                media=selection.protocol == SYNC_PROTOCOL,
-                maximum=MAX_VIDEO_BYTES
-                if selection.protocol == SYNC_PROTOCOL
-                else 1024 * 1024,
-            )
+            try:
+                result = await self.client.request(
+                    node,
+                    "POST",
+                    resolved.interface_url(selection.protocol),
+                    payload=payload,
+                    timeout=selection.request_timeout_seconds,
+                    request_id=request_id,
+                    media=selection.protocol == SYNC_PROTOCOL,
+                    maximum=media_limit
+                    if selection.protocol == SYNC_PROTOCOL
+                    else 1024 * 1024,
+                )
+            except CallError as exc:
+                if (
+                    exc.code != "call_video_outcome_unknown"
+                    or selection.protocol != ASYNC_PROTOCOL
+                    or not request_id
+                ):
+                    raise
+                # Only an explicitly advertised lookup may settle an unknown POST.
+                # A missing, failed or mismatched lookup remains unknown: no replay.
+                lookup = next(
+                    (item for item in offering.interfaces if item.protocol == LOOKUP_PROTOCOL),
+                    None,
+                )
+                if lookup is None or lookup.method != "GET":
+                    raise
+                key = hashlib.sha256(request_id.encode()).hexdigest()
+                try:
+                    lookup_url = lookup.render_url(node, idempotency_key=key)
+                    recovered = await self.client.request(node, "GET", lookup_url)
+                except (CallError, ComputeServiceError):
+                    raise exc
+                if recovered.get("idempotency_key") != key:
+                    raise exc
+                result = recovered
             if selection.protocol == SYNC_PROTOCOL:
                 return {"media": result, "provider_receipt": selection.public()}
-            job_id = result.get("id") or result.get("job_id")
-            if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id):
-                raise CallError("call_video_job_invalid", 502)
+            job_id = _validated_job_id(result)
             # This content-free receipt precedes polling and survives provider errors.
             receipt = {**selection.public(), "job_id": job_id}
             emit(
@@ -448,6 +494,8 @@ class CallVideoTTS:
             deadline = accepted_at + selection.job_timeout_seconds
             previous_status = None
             while True:
+                if _validated_job_id(result) != job_id:
+                    raise CallError("call_video_job_invalid", 502)
                 status = result.get("status")
                 if status != previous_status:
                     emit(
@@ -464,7 +512,7 @@ class CallVideoTTS:
                         "GET",
                         same_origin_url(node, result.get("video_url")),
                         media=True,
-                        maximum=MAX_VIDEO_BYTES,
+                        maximum=media_limit,
                         timeout=30,
                     )
                     if on_job is not None:

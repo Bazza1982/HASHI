@@ -32,7 +32,7 @@ def _saved(path):
 def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert gateway.load_api_gateway_config(cfg) == {
         "enabled": True, "default_model": gateway.default_api_model(),
-        "max_parallel_per_model": 2,
+        "max_parallel_per_model": None,
         "updated_at": "", "updated_by": "",
     }
     assert not cfg.bridge_home.exists()
@@ -42,6 +42,30 @@ def test_missing_config_has_read_only_defaults_and_explicit_save_contract(cfg):
     assert _saved(gateway.config_path_for(cfg)) == saved
     assert gateway.load_api_gateway_config(cfg) == saved
     assert not cfg.project_root.exists()
+
+
+def test_selected_model_capacity_can_exceed_eight_and_can_be_reset_to_instance_policy(cfg):
+    selected = gateway.save_api_gateway_config(cfg, max_parallel_per_model=12)
+    assert selected["max_parallel_per_model"] == 12
+    assert gateway.load_api_gateway_config(cfg)["max_parallel_per_model"] == 12
+    restored = gateway.save_api_gateway_config(cfg, max_parallel_per_model=None)
+    assert restored["max_parallel_per_model"] is None
+    assert _saved(gateway.config_path_for(cfg))["max_parallel_per_model"] is None
+
+
+def test_catalogue_policy_roundtrips_and_can_be_cleared(cfg):
+    saved = gateway.save_api_gateway_config(cfg, max_external_tools=500, max_external_tool_bytes=2_000_000)
+    assert saved["max_external_tools"] == 500 and saved["max_external_tool_bytes"] == 2_000_000
+    assert gateway.load_api_gateway_config(cfg) == saved
+    cleared = gateway.save_api_gateway_config(cfg, max_external_tools=None, max_external_tool_bytes=None)
+    assert cleared["max_external_tools"] is None and cleared["max_external_tool_bytes"] is None
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, "12", 1.5])
+def test_invalid_model_capacity_does_not_publish_configuration(cfg, invalid):
+    with pytest.raises(ValueError):
+        gateway.save_api_gateway_config(cfg, max_parallel_per_model=invalid)
+    assert not gateway.config_path_for(cfg).exists()
 
 
 def test_first_model_selection_keeps_fresh_gateway_available(cfg):

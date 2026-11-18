@@ -553,11 +553,8 @@ class AgentCreationService:
         name = validate_agent_name(spec.name)
         backend = canonical_backend_engine(str(spec.backend or "").strip())
         display_name = str(spec.display_name or "").strip() or name
-        if len(display_name) > 160:
-            raise InvalidDisplayNameError(
-                "display name must be at most 160 characters"
-            )
-
+        # The display label is stored as data and never used as a path.
+        # Internal IDs retain their independent path-safe validation.
         logger.info(
             "agent_create.requested agent_name=%s backend=%s effort=%s is_active=%s",
             name,

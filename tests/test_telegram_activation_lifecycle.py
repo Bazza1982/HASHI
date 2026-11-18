@@ -288,4 +288,52 @@ async def test_unknown_response_and_status_reads_never_replay_an_activation(acti
     await asyncio.sleep(0.05)
     assert len(calls) == 1
     assert NEW_TOKEN not in repr(saved)
+
+
+@pytest.mark.asyncio
+async def test_offline_draft_does_not_cancel_waiting_existing_credential_activation(activation):
+    from tests.test_workbench_telegram_credential import OLD_TOKEN
+
+    server, runtime, state, calls, _responses, accepted = activation
+    assert (await save(server))["activation_waiting"] is True
+    before = await status(server)
+    drafted = await server.handle_admin_agent_telegram_credential_replace(_Request(
+        headers={"X-Workbench-Token": ADMIN_TOKEN},
+        payload={"token": OLD_TOKEN, "replace_existing": True, "save_unverified": True,
+                 "expected_revision": before["credential_revision"]},
+    ))
+    assert drafted.status == 200
+    assert json.loads(drafted.text)["pending_verification"] is True
+    await asyncio.sleep(0.06)
+    projected = await status(server)
+    assert projected["activation_waiting"] is True
+    assert "_activation_binding" not in json.dumps(projected)
+    assert calls == []
+    state["is_generating"] = False
+    await asyncio.wait_for(accepted.wait(), 1)
+    assert len(calls) == 1 and calls[0][0] is runtime
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["route", "secret_reference"])
+async def test_wait_rejects_changed_active_credential_binding(activation, tmp_path, changed):
+    server, _runtime, state, calls, _responses, _accepted = activation
+    assert (await save(server))["activation_waiting"] is True
+    config_path = tmp_path / "agents.json"
+    config = read_config_json(config_path)
+    if changed == "route":
+        config["agents"][0]["extra"] = {"telegram_api_url": "http://127.0.0.1:8989"}
+    else:
+        secrets_path = tmp_path / "secrets.json"
+        secrets = read_config_json(secrets_path)
+        secrets["replacement.telegram"] = secrets["lily.telegram"]
+        write_config_json(secrets_path, secrets)
+        config["agents"][0]["telegram_token_key"] = "replacement.telegram"
+    write_config_json(config_path, config)
+    state["is_generating"] = False
+    await asyncio.sleep(0.08)
+    assert calls == []
+    assert (await status(server)).get("activation_waiting", False) is False
+
 # HASHI-Fingerprint: hfp_796e570be426497cb631bb1c98bd1689

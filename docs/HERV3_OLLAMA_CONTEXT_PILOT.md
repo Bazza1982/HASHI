@@ -42,16 +42,24 @@ authority stay unchanged. Other adapters and models without a per-model
 native-context opt-in keep their previous prompts. A previous turn's tool
 closure must not hide native schemas when measuring the next initial request.
 
-Near-capacity tool closure uses a margin of min(2048, usable_input_tokens / 6)
-for exact-model opt-ins, rather than spending the same fixed 2K margin on every
-small context. Backend-level legacy opt-ins retain the existing margin. This
+The 2026-11-17 remediation candidate uses explicit per-model native context
+and output settings without requiring the native-capacity pilot. When those
+settings are absent or bound to another endpoint, the native server chooses its
+defaults. The legacy OpenAI-compatible path retains its existing protocol
+settings. Service-side capacity discovery remains unfinished.
+
+The candidate does not close tools early by default:
+the final native probe enforces actual usable input and selected output reserve.
+An operator may explicitly configure a nonnegative per-model
+ollama_tool_closure_margin_tokens to opt into early closure. This
 does not reduce response headroom or authorize a tool replay. Complete new
 results that fit their estimated token share and the exact encoded request
 remain visible; UTF-8 byte size alone must not turn a usable one-line JSON
 search result into an empty page. An allowance below 1,024 alone does not close
 tools: fitting results retain successive reads while native admission allows.
-Only genuinely small pages close future reads to avoid footer-only recursion;
-larger results retain the existing private paging source.
+Small result pages retain a same-Run tool_output_read reference when that
+reader is available. The reader accepts a smaller page limit; if it is not
+available the page explicitly reports that continuation is unavailable.
 The changed final payload is independently admitted. Character
 and native token checks still govern every physical call after privacy
 filtering. Protected input that cannot fit fails explicitly rather than being
@@ -94,7 +102,7 @@ reasoning controls from the same effective Provider/model choices.
 | Admission | Tokenizer probe of the final privacy-filtered payload before generation | One generated probe token is physical inference, separately metered; it is not a free count endpoint |
 | Tool results | Bounded pages of new results, with complete private source and hashes retained | Completed operations are never replayed to recover space |
 | Reference projection | Smaller history fields and discovery/recovery indexes | Current request, trusted PCM, active recovery and unresolved effects retain their authority |
-| Near capacity | Close tool use, preserve results and independently reprobe the changed payload | Unexpected later tool calls are rejected; the output reserve is not reduced |
+| Near capacity | Native probe retains tools while the request fits; optional configured margin can select early closure | The output reserve is preserved; restart-safe continuation and real Ollama acceptance remain unfinished |
 | Reasoning | Exact-model `enabled/off` maps to native boolean `think` | A separate opt-in from capacity; it does not invent graded strength or grant capability to every model |
 | Presentation | Ollama main PCM/final answer stay; auxiliary style inference is bypassed | Required questions and neutral progress still use their normal delivery boundaries |
 | Public selection | Provider names match catalogue keys, live/offline state and creation | Legacy adapter IDs remain valid input; internal adapter grants are preserved |
@@ -193,10 +201,11 @@ The existing native-context opt-in owns this narrower provider adaptation:
 - Every original reference is retained in a private SHA256-addressed file;
   model-facing omission never means deletion or a claim that omitted content
   was read. Shared PCM, Scheduler state and other Model Providers do not change.
-- New result pages still preserve complete outputs. When a batch cannot afford
-  useful pages, the following call closes tools rather than recursively reading
-  footer-only results. Within 2,048 tokens of the usable input limit, native
-  admission also closes tool use and checks the changed payload independently.
+- New result pages preserve complete outputs. The 2026-11-17 candidate keeps
+  tools available for small same-Run continuation reads rather than closing
+  them solely because the result page is small. The former automatic 2,048-token
+  admission closure is superseded; only an explicitly configured margin selects
+  early closure. A new payload must still pass the actual native capacity check.
 - Closing reclaims future tool schemas and adds a runtime status notice. It
   preserves the original task, trusted system text and earlier results, keeps
   the configured output reserve and forbids execution of unexpected subsequent
@@ -261,27 +270,35 @@ Agent's existing `allowed_backends` Ollama profile. No shared model catalogue,
 PCM thresholds, Persona, Memory, CLI provider, or DeepSeek behavior changes.
 Without the opt-in the existing OpenAI-compatible transport stays unchanged.
 
-The native `/api/chat` request uses the existing capacity resolver and exact
-`model_capabilities[model]` declaration:
+The native chat request uses endpoint-qualified, exact-model settings when
+supplied. Otherwise, for the native-context pilot it asks the selected service
+for the model list and model metadata. The model revision digest must be
+unique and unchanged before and after the metadata read; switching endpoint,
+model or revision causes fresh discovery. Model-advertised context length is
+not proof of available hardware memory or of the context the server loaded.
 
-- `context_window_tokens` becomes the effective `options.num_ctx`;
-- `response_headroom_tokens` becomes `options.num_predict`;
-- `truncate: false` prevents the service from silently pruning the task;
-- an unknown capacity fails closed; the native tokenizer admission check
-  enforces the response reserve before full generation (see the repair below);
-- exact-model `ollama_num_batch` and `ollama_num_gpu` optionally bound batch
-  scratch memory and GPU layer placement without changing model weights.
-- native-only `ollama_keep_alive_seconds` optionally sets a nonnegative integer
-  idle residency in seconds. The 48K candidate uses 90 seconds to retain a
-  prefix between tool rounds, then release the model allocation when idle.
-  This is not a GPU quota, concurrency broker, or immediate voice preemption.
+- A discovered model context or selected configured capacity supplies the
+  context option; the selected response budget supplies the output option.
+  When no output budget was selected, discovery uses a model-proportional
+  reserve. Explicit exact-model settings continue to take precedence.
+- Native requests ask the service not to silently prune the task.
+- If discovery is unavailable or ambiguous and no qualified capacity was
+  configured, HASHI leaves capacity unspecified, records it as unverified,
+  and lets the service accept or reject the untruncated request. It does not
+  claim a physically safe request or run an exact-capacity admission probe.
+- Response metadata marks discovery as verified only for an actually observed
+  endpoint/model revision. A declared capacity remains a user configuration
+  rather than a live verification.
+- Exact-model batch and GPU-layer settings can bound scratch memory and layer
+  placement without changing model weights. The native idle residency setting
+  remains a nonnegative number of seconds, not a GPU quota or broker.
 
-The shared estimator is not the model tokenizer and does not admit native
-Ollama requests. A bounded native probe now checks the exact privacy-filtered
-messages and tools against usable input capacity before full generation.
-The native service remains responsible for hard input rejection. A recognized
-native context-overflow rejection uses the existing typed capacity error.
-No completed tool is automatically replayed to recover capacity.
+The shared estimator is not the model tokenizer. When a qualified capacity is
+available, a bounded native probe checks the exact privacy-filtered messages
+and tools against usable input capacity before full generation. The service
+remains responsible for hard input rejection. A recognized native overflow
+uses the existing typed capacity error. No completed tool is automatically
+replayed to recover capacity.
 
 ## Protocol and evidence
 
@@ -584,10 +601,12 @@ configuration changes are required.
   canonical wire evidence before a page is substituted. PCM, the task and
   earlier results are preserved. Paging is a model-facing projection, not a
   claim that unshown content was read or a change to tool authority.
-- Each next complete payload still passes the native check. Saved results can
-  be read in smaller pages or searched; the original operation is not replayed.
-  If the task/history plus minimum receipts cannot fit, retain the typed
-  capacity failure rather than silently pruning authoritative material.
+- Each next complete payload still passes the native check. A same-Run
+  continuation reads small pages without replaying the original operation when
+  a qualified tool_output_read is available. Its in-memory reference lasts for
+  the Registry lifetime; it is not restart-safe. If the task/history plus
+  minimum receipts cannot fit, retain the typed capacity failure rather than
+  silently pruning authoritative material.
 - PAO persists the primary backend terminal first. If sending its error message
   raises (including Telegram `Chat not found`), log a separate
   `send_error_failed` event and record undelivered closeout. Do not replace the

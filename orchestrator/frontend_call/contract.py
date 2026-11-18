@@ -7,13 +7,14 @@ import binascii
 import hashlib
 import io
 import json
+import os
 import re
 import wave
 
 PROTOCOL = 1
-MAX_BODY = 4 * 1024 * 1024
-MAX_AUDIO = 16000 * 2 * 60 + 4096
-MAX_IMAGE = 512 * 1024
+MAX_BODY = 8 * 1024 * 1024
+MAX_AUDIO = ((MAX_BODY - 8192) // 4) * 3
+MAX_IMAGE = 2 * 1024 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
 MAX_SPEECH_SEGMENTS = 32
 MAX_SPEECH_CHARS = 240
@@ -178,7 +179,7 @@ _FILLERS = {
     ),
 }
 _LOCALE_ALIASES = {"zh": "zh-CN", "zh-Hans": "zh-CN", "zh-Hant": "zh-TW"}
-LEASE_SECONDS = 45
+LEASE_SECONDS = 180
 MAX_CALL_SECONDS = 8 * 3600
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 COMMON = {"operation", "client_id", "agent_id", "session_id", "context_generation"}
@@ -203,11 +204,13 @@ OPERATIONS = {
         "audio_b64",
         "image_b64",
         "captured_at",
+        "read_structured",
     },
     "snapshot": {"generation", "call_id"},
     "camera": {"generation", "call_id", "enabled"},
-    "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at"},
+    "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at", "capture_clock"},
     "speech": {"generation", "call_id", "turn_id", "segment", "retry"},
+    "speech_advance": {"generation", "call_id", "turn_id", "segment"},
     "speech_commit": {"generation", "call_id", "turn_id", "segment", "output_protocol"},
     "speech_status": {"generation", "call_id", "turn_id", "segment"},
     "interrupt": {"generation", "call_id", "turn_id"},
@@ -257,6 +260,8 @@ def validate_body(body):
     integer(body.get("context_generation"))
     if body["operation"] == "start":
         call_locale(body.get("locale"))
+    if body["operation"] == "turn" and "read_structured" in body and type(body["read_structured"]) is not bool:
+        raise CallError("call_read_structured_invalid")
     return body
 
 
@@ -272,6 +277,99 @@ def digest(value):
     ).hexdigest()
 
 
+_CALL_MEDIA_DEFAULTS = {
+    "max_body_bytes": MAX_BODY,
+    "max_audio_bytes": MAX_AUDIO,
+    "max_audio_seconds": 180,
+    "max_audio_decoded_bytes": 64 * 1024 * 1024,
+    "max_image_bytes": MAX_IMAGE,
+    "max_image_dimension": 4096,
+    "max_image_pixels": 16_000_000,
+    "stt_segment_seconds": None,
+}
+
+
+def video_transport_limit(name, default):
+    """Return the configured in-memory AV budget shared by both transports."""
+    raw = os.environ.get("HASHI_CALL_VIDEO_" + name)
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdecimal():
+        raise CallError("call_video_capacity_invalid", 503)
+    try:
+        limit = int(raw)
+    except ValueError as exc:
+        raise CallError("call_video_capacity_invalid", 503) from exc
+    if limit < 1:
+        raise CallError("call_video_capacity_invalid", 503)
+    return limit
+
+
+def call_lease_policy():
+    """Instance-selected ownership lease and optional maximum Call duration."""
+    values = {}
+    for key, default in (("lease_seconds", LEASE_SECONDS),
+                         ("max_duration_seconds", 0)):
+        raw = os.environ.get("HASHI_CALL_" + key.upper())
+        if raw is None or raw == "":
+            raw = str(default)
+        if not raw.isascii() or not raw.isdecimal() or len(raw) > 10:
+            raise CallError("call_lease_policy_invalid", 503)
+        value = int(raw)
+        if value > 2**31 - 1 or (key == "lease_seconds" and value < 1):
+            raise CallError("call_lease_policy_invalid", 503)
+        values[key] = None if key == "max_duration_seconds" and value == 0 else value
+    return values
+
+
+def call_queue_capacity():
+    """Device-selected Call and per-call voice admission budgets."""
+    defaults = {"max_active_calls": 16, "concurrent_turns": 4, "max_pending_turns": 8}
+    result = {}
+    for key, default in defaults.items():
+        raw = os.environ.get("HASHI_CALL_" + key.upper())
+        if raw is None or raw == "":
+            raw = str(default)
+        if not raw.isascii() or not raw.isdecimal() or len(raw) > 18:
+            raise CallError("call_queue_capacity_invalid", 503)
+        value = int(raw)
+        if not 1 <= value <= 2**31 - 1:
+            raise CallError("call_queue_capacity_invalid", 503)
+        result[key] = value
+    if result["concurrent_turns"] > result["max_pending_turns"]:
+        raise CallError("call_queue_capacity_invalid", 503)
+    return result
+
+
+def call_media_capacity():
+    result = {}
+    for key, default in _CALL_MEDIA_DEFAULTS.items():
+        raw = os.environ.get("HASHI_CALL_" + key.upper())
+        if (raw is None or raw == "") and default is None:
+            result[key] = None
+            continue
+        if raw is None:
+            raw = str(default)
+        if not raw.isascii() or not raw.isdecimal():
+            raise CallError("call_media_capacity_invalid", 503)
+        try:
+            number = int(raw)
+        except ValueError as exc:
+            raise CallError("call_media_capacity_invalid", 503) from exc
+        if number < 1:
+            raise CallError("call_media_capacity_invalid", 503)
+        result[key] = number
+    wire_input = max(0, ((result["max_body_bytes"] - 4096) // 4) * 3)
+    if wire_input < 1:
+        raise CallError("call_media_capacity_invalid", 503)
+    for key in ("max_audio_bytes", "max_image_bytes"):
+        if os.environ.get("HASHI_CALL_" + key.upper()) is None:
+            result[key] = min(result[key], wire_input)
+        elif result[key] > wire_input:
+            raise CallError("call_media_capacity_invalid", 503)
+    return result
+
+
 def decode_base64(value, maximum):
     if not isinstance(value, str) or not value or len(value) > (maximum + 2) // 3 * 4:
         raise CallError("call_media_limit", 413)
@@ -285,30 +383,75 @@ def decode_base64(value, maximum):
 
 
 def decode_wav(value):
-    data = decode_base64(value, MAX_AUDIO)
+    capacity = call_media_capacity()
+    data = decode_base64(value, capacity["max_audio_bytes"])
     try:
         with wave.open(io.BytesIO(data), "rb") as audio:
-            if (
-                audio.getnchannels(),
-                audio.getsampwidth(),
-                audio.getframerate(),
-                audio.getcomptype(),
-            ) != (1, 2, 16000, "NONE"):
+            channels, width, rate, compression = (
+                audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()
+            )
+            if channels not in (1, 2) or width != 2 or not 8000 <= rate <= 96000 or compression != "NONE":
                 raise CallError("call_wav_format_required")
             frames = audio.getnframes()
-            if (
-                not 1600 <= frames <= 16000 * 60
-                or len(audio.readframes(frames)) != frames * 2
-            ):
+            decoded_size = frames * channels * width
+            if not 0 < frames <= rate * capacity["max_audio_seconds"]:
                 raise CallError("call_audio_duration_invalid")
+            normalized_size = ((frames * 16000 + rate - 1) // rate) * 2
+            if max(decoded_size, normalized_size) > capacity["max_audio_decoded_bytes"]:
+                raise CallError("call_media_limit", 413)
+            pcm = audio.readframes(frames)
+            if len(pcm) != decoded_size:
+                raise CallError("call_audio_duration_invalid")
+        if channels == 1 and rate == 16000:
+            return data
+        import audioop
+
+        if channels == 2:
+            pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
+        if rate != 16000:
+            pcm, _ = audioop.ratecv(pcm, 2, 1, rate, 16000, None)
+        if not pcm or len(pcm) > capacity["max_audio_decoded_bytes"]:
+            raise CallError("call_media_limit", 413)
+        output = io.BytesIO()
+        with wave.open(output, "wb") as normalized:
+            normalized.setnchannels(1)
+            normalized.setsampwidth(2)
+            normalized.setframerate(16000)
+            normalized.writeframes(pcm)
+        return output.getvalue()
     except (wave.Error, EOFError, OSError) as exc:
         raise CallError("call_wav_format_required") from exc
-    return data
+
+
+def split_wav(data, segment_seconds):
+    """Split normalized audio without changing sample order or duplicating frames."""
+    if segment_seconds is None:
+        return [data]
+    if type(segment_seconds) is not int or segment_seconds < 1:
+        raise CallError("call_media_capacity_invalid", 503)
+    with wave.open(io.BytesIO(data), "rb") as audio:
+        per_segment = segment_seconds * audio.getframerate()
+        if audio.getnframes() <= per_segment:
+            return [data]
+        result = []
+        while True:
+            pcm = audio.readframes(per_segment)
+            if not pcm:
+                break
+            output = io.BytesIO()
+            with wave.open(output, "wb") as part:
+                part.setnchannels(audio.getnchannels())
+                part.setsampwidth(audio.getsampwidth())
+                part.setframerate(audio.getframerate())
+                part.writeframes(pcm)
+            result.append(output.getvalue())
+        return result
 
 
 def decode_jpeg(value):
     """Header and dimension guard without introducing native model dependencies."""
-    data = decode_base64(value, MAX_IMAGE)
+    capacity = call_media_capacity()
+    data = decode_base64(value, capacity["max_image_bytes"])
     if not data.startswith(b"\xff\xd8") or not data.endswith(b"\xff\xd9"):
         raise CallError("call_jpeg_required")
     offset = 2
@@ -333,7 +476,9 @@ def decode_jpeg(value):
                 break
             height = int.from_bytes(data[offset + 3 : offset + 5], "big")
             width = int.from_bytes(data[offset + 5 : offset + 7], "big")
-            if not (1 <= width <= 2048 and 1 <= height <= 2048):
+            if not (1 <= width <= capacity["max_image_dimension"]
+                    and 1 <= height <= capacity["max_image_dimension"]
+                    and width * height <= capacity["max_image_pixels"]):
                 raise CallError("call_image_dimensions_invalid")
             return data
         if marker == 0xDA:
@@ -357,9 +502,9 @@ def _strip_leading_stage_directions(text: str) -> str:
 
 def clean_speech_text(text: str) -> str:
     """Remove non-spoken rendering without interpreting or rewriting an answer."""
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"```[\s\S]*?(?:```|$)", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
     text = "\n".join(
         _strip_leading_stage_directions(line) for line in text.splitlines()
     )
@@ -368,6 +513,42 @@ def clean_speech_text(text: str) -> str:
 
 
 _clean_speech_text = clean_speech_text
+
+
+def structured_speech_text(text: str) -> str:
+    """Render only the selected result for explicit structured-content speech."""
+    lines = []
+    source_lines = str(text or "").splitlines()
+    fence = None
+    in_table = False
+    separator = r"\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*"
+    for index, line in enumerate(source_lines):
+        match = re.match(r"^\s*(\x60{3,}|~{3,})(.*)$", line)
+        if match:
+            marker, rest = match.groups()
+            if fence is None:
+                fence = marker
+                in_table = False
+                continue
+            if marker[0] == fence[0] and len(marker) >= len(fence) and not rest.strip():
+                fence = None
+                continue
+        if fence is None:
+            if in_table and re.fullmatch(separator, line):
+                continue
+            if (index + 1 < len(source_lines) and "|" in line
+                    and re.fullmatch(separator, source_lines[index + 1])):
+                in_table = True
+            if in_table and "|" in line:
+                line = ", ".join(part.strip() for part in line.strip().strip("|").split("|"))
+            elif in_table:
+                in_table = False
+            line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1. \2", line)
+            line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+            line = line.replace(chr(96), "")
+        if line.strip():
+            lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _bounded_sentence(text: str) -> list[str]:
@@ -474,9 +655,10 @@ def _group_speech_parts(
 
 
 def _sentence_parts(
-    text: str, *, include_tail: bool, maximum_duration_units: int | None = None
+    text: str, *, include_tail: bool, maximum_duration_units: int | None = None,
+    already_clean: bool = False,
 ) -> tuple[list[str], str]:
-    clean = clean_speech_text(str(text or ""))
+    clean = str(text or "") if already_clean else clean_speech_text(str(text or ""))
     sentences: list[str] = []
     offset = 0
     for match in _SENTENCE_END.finditer(clean):
@@ -534,14 +716,15 @@ def _video_group_size(value: int, name: str) -> int:
 
 
 def _video_sentence_units(
-    text: str, *, include_tail: bool, maximum_chars: int | None
+    text: str, *, include_tail: bool, maximum_chars: int | None,
+    already_clean: bool = False,
 ) -> tuple[list[str], str]:
     """Keep natural sentences intact unless one exceeds the renderer hard limit."""
     if maximum_chars is not None and (
         type(maximum_chars) is not int or maximum_chars < 1
     ):
         raise ValueError("maximum_chars must be a positive integer")
-    clean = clean_speech_text(str(text or ""))
+    clean = str(text or "") if already_clean else clean_speech_text(str(text or ""))
     units: list[str] = []
     offset = 0
     for match in _SENTENCE_END.finditer(clean):
@@ -658,6 +841,8 @@ def video_speech_segments(
     first_segment_sentences: int = 1,
     group_sentences: int = 4,
     maximum_chars: int | None = None,
+    max_segments: int | None = MAX_SPEECH_SEGMENTS,
+    already_clean: bool = False,
 ):
     """Group a final VideoTTS answer by sentence count, preserving order."""
     first_segment_sentences = _video_group_size(
@@ -665,7 +850,7 @@ def video_speech_segments(
     )
     group_sentences = _video_group_size(group_sentences, "group_sentences")
     units, _remainder = _video_sentence_units(
-        text, include_tail=True, maximum_chars=maximum_chars
+        text, include_tail=True, maximum_chars=maximum_chars, already_clean=already_clean
     )
     parts, _pending = _group_video_units(
         units,
@@ -674,14 +859,27 @@ def video_speech_segments(
         complete_only=False,
         maximum_chars=maximum_chars,
     )
-    return parts[:MAX_SPEECH_SEGMENTS], len(parts) > MAX_SPEECH_SEGMENTS
+    if max_segments is None:
+        return parts, False
+    if type(max_segments) is not int or max_segments < 1:
+        raise ValueError("max_segments must be a positive integer or None")
+    return parts[:max_segments], len(parts) > max_segments
 
 
-def speech_segments(text: str, *, maximum_duration_units: int | None = None):
+def speech_segments(
+    text: str, *, maximum_duration_units: int | None = None,
+    max_segments: int | None = MAX_SPEECH_SEGMENTS,
+    already_clean: bool = False,
+):
     """Queue final TTS in natural, bounded chunks, in original order."""
     parts, _ = _sentence_parts(
         text,
         include_tail=True,
         maximum_duration_units=maximum_duration_units,
+        already_clean=already_clean,
     )
-    return parts[:MAX_SPEECH_SEGMENTS], len(parts) > MAX_SPEECH_SEGMENTS
+    if max_segments is None:
+        return parts, False
+    if type(max_segments) is not int or max_segments < 1:
+        raise ValueError("max_segments must be a positive integer or None")
+    return parts[:max_segments], len(parts) > max_segments

@@ -1527,7 +1527,7 @@ class TaskScheduler:
                     due_at = [float(item.get("last_due_at") or time.time())] * requested
                 for due_ts in due_at:
                     try:
-                        check_current_mutation()
+                        await asyncio.to_thread(check_current_mutation)
                     except StaleFencingToken:
                         origin_stopped = True
                         break
@@ -1605,7 +1605,10 @@ class TaskScheduler:
 
         async with self._recovery_lock:
             from orchestrator.agent_mutation import check_current_mutation
-            check_current_mutation()  # The caller may have stopped while waiting for this lock.
+            # The caller may have stopped while waiting for this lock. The
+            # PAO fence can itself wait on a busy SessionStore, so do not
+            # perform this check on the scheduler's event loop.
+            await asyncio.to_thread(check_current_mutation)
             batch = (self.state.get("recovery_batches") or {}).get(
                 normalized_batch_id
             )

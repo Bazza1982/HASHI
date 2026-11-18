@@ -440,6 +440,11 @@ async def handle_media_message(
     prompt: str,
     summary: str,
 ):
+    from orchestrator.telegram_freshness_gate import (
+        telegram_message_age_metadata, telegram_message_idempotency_key,
+    )
+
+    telegram_key = telegram_message_idempotency_key(runtime, update)
     runtime._record_active_chat(update)
     if runtime._should_redirect_after_transfer():
         await runtime._reply_text(update, runtime._transfer_redirect_text())
@@ -479,6 +484,8 @@ async def handle_media_message(
         return
     _print_user_message(runtime.name, summary, media_tag=media_kind)
     chat_id = update.effective_chat.id
+    if runtime_long.has_seen_telegram_update(runtime, chat_id, telegram_key):
+        return
     reservation_id = runtime_long.reserve_media(
         runtime,
         chat_id,
@@ -501,6 +508,7 @@ async def handle_media_message(
             rendered_prompt,
             local_path=local_path,
         ):
+            runtime_long.remember_telegram_update(runtime, chat_id, telegram_key)
             return
         transport = _transport_metadata(update, filename)
         request_content, manifest = _single_attachment_request(
@@ -523,7 +531,9 @@ async def handle_media_message(
             request_metadata={
                 **_single_attachment_metadata(request_content, manifest),
                 "ingress_transport": "telegram",
+                "_frontend_message_age": telegram_message_age_metadata(update),
             },
+            idempotency_key=telegram_key,
         )
         phase = "admit"
         await runtime.enqueue_request(
@@ -533,6 +543,7 @@ async def handle_media_message(
             summary,
             request_metadata=request_metadata,
             request_content=request_content,
+            idempotency_key=telegram_key,
         )
     except Exception as e:
         if reservation_id is not None:
@@ -703,6 +714,8 @@ def _admit_native_telegram_audio(
     semantic_role = (
         "voice_message" if media_kind.casefold() == "voice" else "audio_attachment"
     )
+    from orchestrator.telegram_freshness_gate import telegram_message_idempotency_key
+    telegram_key = telegram_message_idempotency_key(runtime, update)
     store = getattr(runtime, "session_store", None)
     if store is None:
         content, manifest = _single_attachment_request(
@@ -738,6 +751,10 @@ def _admit_native_telegram_audio(
         duration_ms=transport.get("duration_ms"),
         retention_seconds=retention_seconds,
         retention_indefinite=retention_indefinite,
+        idempotency_key=(
+            "telegram-audio:" + hashlib.sha256(telegram_key.encode("utf-8")).hexdigest()
+            if telegram_key else None
+        ),
     )
     store.upload_attachment_bytes(
         session_id=route_metadata["session_id"],
@@ -787,6 +804,9 @@ async def _present_safe_voice_transcript(
     attachment_id: str | None = None,
     native_audio: bool = False,
 ) -> None:
+    from orchestrator.telegram_freshness_gate import (
+        telegram_message_age_metadata, telegram_message_idempotency_key,
+    )
     chat_id = update.effective_chat.id
     locale = ui_language.preferred_locale(runtime, update)
     chat_key = str(chat_id)
@@ -800,6 +820,8 @@ async def _present_safe_voice_transcript(
         "native_audio": native_audio,
         "request_id": request_id,
         "attachment_id": attachment_id,
+        "telegram_ingress_key": telegram_message_idempotency_key(runtime, update),
+        "message_age": telegram_message_age_metadata(update),
     }
     preview = (
         transcript[:3500]
@@ -1133,10 +1155,34 @@ async def handle_voice_or_audio(
     caption: str = "",
 ):
     """Download voice/audio, transcribe locally, and dispatch as text."""
+    from orchestrator.telegram_freshness_gate import (
+        telegram_message_age_metadata, telegram_message_idempotency_key,
+    )
+
+    telegram_key = telegram_message_idempotency_key(runtime, update)
+    if runtime_long.has_seen_telegram_update(runtime, update.effective_chat.id, telegram_key):
+        return
+    pending_voice = getattr(runtime, "_pending_voice", None)
+    if telegram_key and isinstance(pending_voice, dict) and any(
+        isinstance(item, dict) and item.get("telegram_ingress_key") == telegram_key
+        for item in pending_voice.values()
+    ):
+        return
     runtime._record_active_chat(update)
     if runtime._should_redirect_after_transfer():
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
+    chat_id = update.effective_chat.id
+    voice_batch_id = (
+        str(getattr(runtime, "_long_batch_id", "") or "")
+        if runtime_long.is_collecting(runtime, chat_id) else ""
+    )
+    voice_reservation = (
+        runtime_long.reserve_media(runtime, chat_id, "voice_transcript", f"{media_kind}: {filename}")
+        if voice_batch_id else None
+    )
+    if voice_reservation:
+        runtime_long.remember_telegram_update(runtime, chat_id, telegram_key)
     _print_user_message(runtime.name, f"Transcribing {filename}...", media_tag=media_kind)
     phase, admission_started, submitted = "download", False, False
     transcript_state = None
@@ -1152,9 +1198,15 @@ async def handle_voice_or_audio(
                 native_requested = bool(native_enabled("telegram"))
             except TypeError:
                 native_requested = bool(native_enabled())
-        collecting = runtime_long.is_collecting(
-            runtime, update.effective_chat.id
-        )
+        if voice_reservation and (
+            str(getattr(runtime, "_long_batch_id", "") or "") != voice_batch_id
+            or not runtime_long.is_batch_active(runtime, chat_id)
+        ):
+            await runtime._reply_text(update, ui_language.tr(
+                "long.voice_batch_closed", locale=ui_language.preferred_locale(runtime, update)
+            ))
+            return
+        collecting = bool(voice_reservation)
         if native_requested and collecting:
             local_path.unlink(missing_ok=True)
             await runtime._reply_text(
@@ -1260,6 +1312,7 @@ async def handle_voice_or_audio(
             registry[attachment_id] = transcript_state
             request_metadata["voice_transcript_key"] = attachment_id
             request_metadata["safe_voice"] = False
+            request_metadata["_frontend_message_age"] = telegram_message_age_metadata(update)
             phase, admission_started = "admit", True
             request_id = await runtime.enqueue_request(
                 update.effective_chat.id,
@@ -1268,6 +1321,7 @@ async def handle_voice_or_audio(
                 f"{media_kind}: {filename}",
                 request_metadata=request_metadata,
                 request_content=request_content,
+                idempotency_key=telegram_key,
             )
             submitted = isinstance(request_id, str) and bool(request_id.strip())
             phase = "transcribe"
@@ -1350,16 +1404,21 @@ async def handle_voice_or_audio(
             f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
         )
 
-        chat_id = update.effective_chat.id
         batch_pending_key = None
-        if runtime._safevoice_enabled and runtime_long.is_collecting(runtime, chat_id):
+        if runtime._safevoice_enabled and voice_reservation:
             batch_pending_key = runtime_long.register_voice_confirmation(
                 runtime,
                 chat_id=chat_id,
                 prompt=prompt,
                 transcript=transcript,
                 summary=f"{media_kind}: {filename}",
+                reservation_id=voice_reservation,
             )
+            if not batch_pending_key:
+                await runtime._reply_text(update, ui_language.tr(
+                    "long.voice_batch_closed", locale=ui_language.preferred_locale(runtime, update)
+                ))
+                return
 
         if runtime._safevoice_enabled:
             locale = ui_language.preferred_locale(runtime, update)
@@ -1371,6 +1430,8 @@ async def handle_voice_or_audio(
                 "chat_id": chat_id,
                 "timestamp": datetime.now().isoformat(),
                 "long_batch": bool(batch_pending_key),
+                "telegram_ingress_key": telegram_key,
+                "message_age": telegram_message_age_metadata(update),
             }
             max_preview = 3500
             if len(transcript) > max_preview:
@@ -1410,19 +1471,20 @@ async def handle_voice_or_audio(
                 parse_mode="Markdown",
             )
         else:
-            if runtime_long.collect_media(
-                runtime,
-                chat_id,
-                prompt,
-                "voice_transcript",
-                f"{media_kind}: {filename}",
-            ):
+            if voice_reservation:
+                if runtime_long.complete_media(runtime, voice_reservation, prompt):
+                    return
+                await runtime._reply_text(update, ui_language.tr(
+                    "long.voice_batch_closed", locale=ui_language.preferred_locale(runtime, update)
+                ))
                 return
             phase, admission_started = "admit", True
             await runtime.enqueue_request(
                 update.effective_chat.id, prompt, "voice_transcript",
                 f"{media_kind}: {filename}",
-                request_metadata={"ingress_transport": "telegram"},
+                request_metadata={"ingress_transport": "telegram",
+                                  "_frontend_message_age": telegram_message_age_metadata(update)},
+                idempotency_key=telegram_key,
             )
     except Exception as e:
         public_error = e
@@ -1443,6 +1505,11 @@ async def handle_voice_or_audio(
             await runtime._reply_text(update, failure.render(locale=ui_language.preferred_locale(runtime, update)))
         except Exception:
             pass
+    finally:
+        if voice_reservation and voice_reservation in getattr(runtime, "_long_pending_media_ids", set()):
+            runtime_long.discard_media_reservation(runtime, voice_reservation)
+            if telegram_key and str(getattr(runtime, "_long_batch_id", "") or "") == voice_batch_id:
+                getattr(runtime, "_long_seen_telegram_updates", set()).discard(telegram_key)
 
 
 async def handle_video(runtime: Any, update: Any, context: Any):
@@ -1463,6 +1530,12 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
         await runtime._reply_text(update, runtime._transfer_redirect_text())
         return
     sticker = update.message.sticker
+    from orchestrator.telegram_freshness_gate import (
+        telegram_message_age_metadata, telegram_message_idempotency_key,
+    )
+    telegram_key = telegram_message_idempotency_key(runtime, update)
+    if runtime_long.has_seen_telegram_update(runtime, update.effective_chat.id, telegram_key):
+        return
     emoji = sticker.emoji or ""
     prompt, summary = build_media_prompt("sticker", "sticker", emoji=emoji)
     _print_user_message(runtime.name, emoji or "sticker", media_tag="Sticker")
@@ -1474,9 +1547,12 @@ async def handle_sticker(runtime: Any, update: Any, context: Any):
         summary,
         transport_metadata=_transport_metadata(update, "sticker"),
     ):
+        runtime_long.remember_telegram_update(runtime, update.effective_chat.id, telegram_key)
         return
     await runtime.enqueue_request(
         update.effective_chat.id, prompt, "sticker", summary,
-        request_metadata={"ingress_transport": "telegram"},
+        request_metadata={"ingress_transport": "telegram",
+                          "_frontend_message_age": telegram_message_age_metadata(update)},
+        idempotency_key=telegram_key,
     )
 # HASHI-Fingerprint: hfp_270c57aa7b814b09a31059505e05b4f7

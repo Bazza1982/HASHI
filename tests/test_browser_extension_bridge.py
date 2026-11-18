@@ -570,3 +570,191 @@ def test_browser_audit_sanitizes_unknown_runtime_objects(tmp_path: Path) -> None
     record = json.loads(audit_path.read_text(encoding="utf-8"))
     assert record["global_config"] == "[unsupported:GlobalConfig]"
     assert record["runtime"] == "[unsupported:object]"
+
+
+@pytest.mark.parametrize("failure", ["timeout", "partial_send", "empty", "invalid_json"])
+def test_extension_bridge_does_not_repeat_a_dispatched_action_on_timeout(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+    from tools import browser_extension_bridge as bridge
+
+    endpoint = tmp_path / "fixture.sock"
+    endpoint.touch()
+    sends = []
+
+    class FakeSocket:
+        def __init__(self, *_args):
+            self.number = len(sends)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, payload):
+            sends.append(payload)
+            if failure == "partial_send":
+                raise OSError("send may have written a prefix")
+
+        def recv(self, _size):
+            if self.number == 0:
+                if failure == "timeout":
+                    raise TimeoutError("response timed out")
+                if failure == "empty":
+                    return b""
+                if failure == "invalid_json":
+                    return b"invalid-json\n"
+            return b'{"ok":true,"output":"second dispatch"}\n'
+
+    monkeypatch.setattr(bridge, "socket", SimpleNamespace(
+        socket=FakeSocket, AF_UNIX=1, SOCK_STREAM=1, timeout=TimeoutError,
+    ))
+    monkeypatch.setattr(bridge, "is_windows_pipe", lambda _endpoint: False)
+    monkeypatch.setattr(bridge, "DEFAULT_RETRY_DELAY_S", 0)
+    with pytest.raises(BrowserBridgeError, match="unconfirmed"):
+        bridge.send_bridge_command("click", {"selector": "#fixture"}, socket_path=endpoint,
+                                   timeout_s=0.01, connect_wait_s=2)
+    assert len(sends) == 1
+
+
+def test_extension_bridge_retries_a_connection_that_never_dispatched(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools import browser_extension_bridge as bridge
+
+    endpoint = tmp_path / "fixture.sock"
+    endpoint.touch()
+    attempts = []
+    sends = []
+
+    class FakeSocket:
+        def __init__(self, *_args):
+            attempts.append(1)
+            self.number = len(attempts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            if self.number == 1:
+                raise ConnectionRefusedError("not yet listening")
+
+        def sendall(self, payload):
+            sends.append(payload)
+
+        def recv(self, _size):
+            return b'{"ok":true,"output":"connected"}\n'
+
+    monkeypatch.setattr(bridge, "socket", SimpleNamespace(
+        socket=FakeSocket, AF_UNIX=1, SOCK_STREAM=1, timeout=TimeoutError,
+    ))
+    monkeypatch.setattr(bridge, "is_windows_pipe", lambda _endpoint: False)
+    monkeypatch.setattr(bridge, "DEFAULT_RETRY_DELAY_S", 0)
+    result = bridge.send_bridge_command("get_text", {}, socket_path=endpoint, connect_wait_s=2)
+    assert result["output"] == "connected"
+    assert len(attempts) == 2 and len(sends) == 1
+
+
+def test_native_host_respects_requested_navigation_wait(monkeypatch):
+    from tools import browser_native_host as host
+    waits = []
+
+    class ImmediateQueue:
+        def __init__(self, maxsize):
+            pass
+
+        def get(self, timeout):
+            waits.append(timeout)
+            return {"ok": True, "output": "done"}
+
+    state = BridgeState(logger=logging.getLogger("test-browser-bridge"), request_timeout_s=20)
+    state.extension_connected.set()
+    monkeypatch.setattr(host.queue, "Queue", ImmediateQueue)
+    monkeypatch.setattr(state, "send_to_extension", lambda _message: None)
+    monkeypatch.setattr(state, "write_audit", lambda _record: None)
+    result = state.dispatch_request("get_text", {"timeout_ms": 90_000, "wait_ms": 500})
+    assert result["ok"] is True
+    assert waits == [92.5]
+
+
+def test_native_host_does_not_repeat_unconfirmed_session_creation(monkeypatch):
+    state = BridgeState(logger=logging.getLogger("test-browser-bridge"))
+    calls = []
+
+    def dispatch(action, args):
+        calls.append(action)
+        return {"ok": False, "error": "timeout waiting for extension; outcome unconfirmed"}
+
+    monkeypatch.setattr(state, "dispatch_request", dispatch)
+    response = dispatch_local_request(state, {"action": "session_create", "args": {
+        "session_id": "fixture", "url": "https://example.invalid", "timeout_ms": 90_000,
+    }})
+    assert response["ok"] is False and "unconfirmed" in response["error"]
+    assert calls == ["session_create"]
+
+
+def test_native_host_falls_back_only_for_explicit_unsupported_session(monkeypatch):
+    state = BridgeState(logger=logging.getLogger("test-browser-bridge"))
+    calls = []
+
+    def dispatch(action, args):
+        calls.append((action, args))
+        if action == "session_create":
+            return {"ok": False, "error": "unsupported action: session_create"}
+        return {"ok": True, "output": json.dumps({"tabId": 7, "url": "fixture"})}
+
+    monkeypatch.setattr(state, "dispatch_request", dispatch)
+    response = dispatch_local_request(state, {"action": "session_create", "args": {
+        "session_id": "fixture", "url": "https://example.invalid", "timeout_ms": 90_000,
+    }})
+    assert response["ok"] is True
+    assert [call[0] for call in calls] == ["session_create", "active_tab"]
+    assert calls[1][1]["timeout_ms"] == 90_000
+
+
+
+def test_native_host_records_unconfirmed_timeout_without_claiming_failure(monkeypatch):
+    from tools import browser_native_host as host
+    waits, audits = [], []
+
+    class TimeoutQueue:
+        def __init__(self, maxsize):
+            pass
+
+        def get(self, timeout):
+            waits.append(timeout)
+            raise host.queue.Empty()
+
+    state = BridgeState(logger=logging.getLogger("test-browser-bridge"), request_timeout_s=0.25)
+    state.extension_connected.set()
+    monkeypatch.setattr(host.queue, "Queue", TimeoutQueue)
+    monkeypatch.setattr(state, "send_to_extension", lambda _message: None)
+    monkeypatch.setattr(state, "write_audit", audits.append)
+    result = state.dispatch_request("get_text", {})
+    assert waits == [0.25]
+    assert result["effect_state"] == "unknown" and "unconfirmed" in result["error"]
+    assert audits[0]["response"] == result
+
+
+def test_session_setup_forwards_selected_transport_timeout(monkeypatch):
+    from tools import browser_extension_bridge as bridge
+    calls = []
+
+    def send(action, args, **kwargs):
+        calls.append((action, args, kwargs))
+        return {"ok": True, "session": {"session_id": "fixture"}}
+
+    monkeypatch.setattr(bridge, "send_bridge_command", send)
+    bridge.ensure_bridge_session(session_id="fixture", args={}, timeout_s=95.5)
+    assert calls[0][2]["timeout_s"] == 95.5

@@ -408,3 +408,161 @@ def test_invalid_unicode_request_is_a_clean_error(vision, image, monkeypatch):
     with pytest.raises(vision.VisionError):
         vision.ask("https://vlm.example.invalid", "fixture-model", "", [image],
                    chr(0xD800), 32, 0, 1, 0, 128, 1, False)
+
+
+
+def test_configured_query_reaches_only_selected_vision_endpoint(vision, image):
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            requests.append((self.path, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "choices": [{"message": {"content": "fixture"}}],
+            }).encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        url = "http://127.0.0.1:{}/v1?api-version=2026-01&deployment=a%2Fb".format(server.server_port)
+        record = vision.ask(url, "fixture-model", "fixture-token", [image], "Describe.",
+                            32, 0, 2, 0, 128, 1, False)
+        assert record["answer"] == "fixture"
+        assert requests == [("/v1/chat/completions?api-version=2026-01&deployment=a%2Fb",
+                             "Bearer fixture-token")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_query_is_preserved_but_redacted_from_configuration_diagnostics(vision, capsys):
+    url = "https://vlm.example.invalid/v1/chat/completions?api-version=1&key=PRIVATE_FIXTURE"
+    assert vision.completion_url(url) == url
+    assert vision.main(["--api-url", url, "--model", "fixture", "--show-config"]) == 0
+    shown = capsys.readouterr().out
+    assert "PRIVATE_FIXTURE" not in shown
+    assert "api-version=1" not in shown
+    assert json.loads(shown)["api_url"].endswith("?[redacted]")
+
+
+@pytest.mark.parametrize("url", [
+    "https://name:PRIVATE_FIXTURE@vlm.example.invalid/v1?api-version=1",
+    "https://vlm.example.invalid/v1?token=PRIVATE_FIXTURE#fragment",
+])
+def test_invalid_query_url_never_echoes_secrets_or_sends(vision, image, capsys, url):
+    assert vision.main([str(image), "--api-url", url, "--model", "fixture"]) == 2
+    assert "PRIVATE_FIXTURE" not in capsys.readouterr().err
+
+
+
+def test_selected_vision_budgets_replace_old_fixed_ceilings(vision, image, monkeypatch, capsys):
+    observed = []
+    monkeypatch.setattr(vision, "ask", lambda *a, **k: observed.append((a, k)) or result())
+    args = cli(image) + [
+        "--timeout", "3601", "--retries", "6", "--jobs", "33", "--temperature", "3",
+        "--max-side", "16385", "--max-mb", "129",
+        "--max-input-bytes", "134217729", "--max-response-bytes", "4194305",
+        "--resize-retries", "3",
+    ]
+    assert vision.main(args) == 0
+    assert observed[0][0][6:11] == (3.0, 3601.0, 6, 16385, 129.0)
+    assert observed[0][1] == {
+        "max_input_bytes": 134217729, "max_response_bytes": 4194305, "resize_retries": 3,
+    }
+    assert "fixture answer" in capsys.readouterr().out
+
+
+def test_selected_input_and_response_budgets_enforce_exact_boundaries(vision, image, monkeypatch):
+    size = image.stat().st_size
+    assert vision.prepare_image(image, 128, 1, True, size)["orig_bytes"] == size
+    with pytest.raises(vision.VisionError, match="input size limit"):
+        vision.prepare_image(image, 128, 1, True, size - 1)
+
+    class Opener:
+        def open(self, request, timeout):
+            return io.BytesIO(b"123456789")
+
+    monkeypatch.setattr(vision.urllib.request, "build_opener", lambda *a: Opener())
+    assert vision.post_with_retry("http://127.0.0.1/test", b"{}", "", 1, 0, 9) == b"123456789"
+    with pytest.raises(vision.VisionError, match="response exceeds the size limit"):
+        vision.post_with_retry("http://127.0.0.1/test", b"{}", "", 1, 0, 8)
+
+
+def test_selected_retry_budgets_are_used_without_unbounded_backoff(vision, image, tmp_path, monkeypatch):
+    import urllib.error
+    calls = []
+    sleeps = []
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(1)
+            if len(calls) <= 6:
+                raise urllib.error.HTTPError(request.full_url, 503, "fixture", {}, io.BytesIO(b""))
+            return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(vision.urllib.request, "build_opener", lambda *a: Opener())
+    monkeypatch.setattr(vision.time, "sleep", sleeps.append)
+    assert vision.post_with_retry("http://127.0.0.1/test", b"{}", "", 1, 6, 8) == b"{}"
+    assert len(calls) == 7 and sleeps == [1, 2, 4, 8, 16, 32]
+
+    calls.clear()
+    def too_large_then_success(*args):
+        calls.append(1)
+        if len(calls) <= 3:
+            raise vision.HTTP413Error("fixture")
+        return json.dumps({"choices": [{"message": {"content": "fixture"}}]}).encode()
+
+    monkeypatch.setattr(vision, "post_with_retry", too_large_then_success)
+    noise = tmp_path / "noise-retry.png"
+    Image.effect_noise((400, 400), 120).convert("RGB").save(noise)
+    record = vision.ask("http://127.0.0.1", "fixture", "", [noise], "Describe.",
+                        32, 0, 1, 0, 1280, 1.5, False, resize_retries=3)
+    assert record["answer"] == "fixture" and len(calls) == 4
+    calls.clear()
+    with pytest.raises(vision.VisionError, match="HTTP 413"):
+        vision.ask("http://127.0.0.1", "fixture", "", [noise], "Describe.",
+                   32, 0, 1, 0, 1280, 1.5, False, resize_retries=0)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("options", [
+    ["--temperature", "-1"], ["--max-input-bytes", "0"],
+    ["--max-response-bytes", "0"], ["--resize-retries", "-1"],
+])
+def test_invalid_vision_capacity_never_sends(vision, image, monkeypatch, capsys, options):
+    calls = []
+    monkeypatch.setattr(vision, "ask", lambda *a, **k: calls.append(1) or result())
+    assert vision.main(cli(image) + options) == 2
+    assert not calls and "Traceback" not in capsys.readouterr().err
+
+
+
+def test_resized_image_warns_about_fidelity(vision, image, monkeypatch, capsys):
+    answer = json.dumps({"choices": [{"message": {"content": "fixture"}}]}).encode()
+    monkeypatch.setattr(vision, "post_with_retry", lambda *a, **k: answer)
+    assert vision.main(cli(image) + ["--max-side", "32"]) == 0
+    output = capsys.readouterr()
+    assert "fixture" in output.out
+    assert "visual detail may be reduced" in output.err
+
+
+
+def test_large_selected_budget_does_not_preallocate_on_read(vision):
+    class Reader(io.BytesIO):
+        sizes = []
+
+        def read(self, size=-1):
+            self.sizes.append(size)
+            return super().read(size)
+
+    stream = Reader(b"small")
+    assert vision._read_limited(stream, 1 << 40, "limit") == b"small"
+    assert stream.sizes and max(stream.sizes) <= 1024 * 1024

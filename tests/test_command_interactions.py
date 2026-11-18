@@ -85,6 +85,37 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['messages'][0]['command_ui']['revision'], 2)
         self.assertEqual(result['notifications'], [{'text': 'Saved', 'alert': False}])
 
+    async def test_field_limit_and_full_value_survive_projection_and_action(self):
+        from orchestrator.chat_transcript_projection import _project_command_ui
+
+        capture = Capture(self.store, self.binding, 'getfile',
+                          lambda data: (self.fingerprint, self.callback) if data.startswith('getfile:path:') else None)
+        capture.chat_id = 7
+        value = '🌸' * 600
+        message = await capture.capture_reply('Path', reply_markup={'inline_keyboard': [[{
+            'text': 'Send', 'callback_data': 'getfile:path:token',
+            'hashi_text_input': {'label': 'Path', 'value': value, 'max_length': 4098},
+        }]]})
+        menu = message.menu
+        projected = _project_command_ui(self.store.render(menu))
+        self.assertEqual(projected['rows'][0][0]['text_input'],
+                         {'label': 'Path', 'value': value, 'max_length': 4098})
+        payload = self.payload(menu)
+        payload['input_text'] = 'x' * 4099
+        received = []
+
+        async def invoke(_resolved, query):
+            received.append(query.input_text)
+
+        with self.assertRaisesRegex(InteractionError, 'command_menu_input_invalid'):
+            await perform_action(self.store, self.binding, payload, capture, actor_id=7,
+                                 authorize=lambda _command: True, invoke=invoke)
+        self.assertEqual(received, [])
+        payload['input_text'] = value
+        await perform_action(self.store, self.binding, payload, capture, actor_id=7,
+                             authorize=lambda _command: True, invoke=invoke)
+        self.assertEqual(received, [value])
+
     async def test_duplicate_concurrent_request_executes_handler_once(self):
         _, menu = await self.open()
         payload = self.payload(menu)
@@ -141,6 +172,44 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['ok'])
         self.assertEqual(result['http_status'], 403)
         self.assertEqual(self.calls, [])
+
+    async def test_large_menu_pages_keep_every_action_and_fence_hidden_buttons(self):
+        from orchestrator.chat_transcript_projection import _project_command_ui
+
+        capture = self.capture()
+        buttons = [{'text': f'Choice {i}', 'callback_data': f'example:{i}'} for i in range(250)]
+        message = await capture.capture_reply('Large menu', reply_markup={'inline_keyboard': [buttons]})
+        menu = message.menu
+        first_id = menu.rows[0][0]['button_id']
+        seen = []
+        while True:
+            rendered = self.store.render(menu)
+            self.assertIsNotNone(_project_command_ui(rendered))
+            self.assertLessEqual(sum(len(row) for row in rendered['rows']), 100)
+            seen.extend(item['text'] for row in rendered['rows'] for item in row
+                        if item.get('button_id') not in menu.page_actions)
+            next_id = next((key for key, target in menu.page_actions.items()
+                            if target == menu.page + 1), None)
+            if next_id is None:
+                break
+            payload = {'version': 1, 'op': 'act', 'menu_id': menu.id,
+                       'revision': menu.revision, 'button_id': next_id}
+            result = await self.action(menu, request_id=f'request-page-{menu.page}-abcdefghijkl', payload=payload)
+            self.assertTrue(result['ok'])
+            self.assertEqual(self.calls, [])
+            if menu.page == 1:
+                hidden = {'version': 1, 'op': 'act', 'menu_id': menu.id,
+                          'revision': menu.revision, 'button_id': first_id}
+                rejected = await self.action(menu, request_id='request-hidden-abcdefghijkl', payload=hidden)
+                self.assertEqual(rejected['error_code'], 'command_menu_button_invalid')
+        self.assertEqual(seen, [f'Choice {i}' for i in range(250)])
+        last = menu.rows[0][-1]['button_id']
+        result = await self.action(menu, request_id='request-final-abcdefghijkl', payload={
+            'version': 1, 'op': 'act', 'menu_id': menu.id,
+            'revision': menu.revision, 'button_id': last,
+        })
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.calls, ['example:249'])
 
     async def test_changed_handler_fingerprint_is_rejected(self):
         _, menu = await self.open()
@@ -299,8 +368,7 @@ class MenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(msg.menu.actions)
         with self.assertRaisesRegex(InteractionError, 'markup_unsupported'):
             markup_rows("InlineKeyboardMarkup(fake)")
-        with self.assertRaisesRegex(InteractionError, 'too_large'):
-            markup_rows({'inline_keyboard': [[{}] * 101]})
+        self.assertEqual(len(markup_rows({'inline_keyboard': [[{}] * 101]})[0]), 101)
 
     async def test_to_dict_objects_and_unicode_render_without_runtime_reimplementation(self):
         class Markup:

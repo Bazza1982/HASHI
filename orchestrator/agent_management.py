@@ -137,7 +137,6 @@ class AgentManagementAction:
             if display_name is not None and (
                 not isinstance(display_name, str)
                 or not display_name.strip()
-                or len(display_name.strip()) > 160
             ):
                 raise ValueError("Agent display name is invalid")
             if emoji is not None and (

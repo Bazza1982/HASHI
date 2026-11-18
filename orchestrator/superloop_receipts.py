@@ -452,6 +452,10 @@ class SuperloopReceiptService:
                     "dispatch_instance_id": receipt["in_reply_to"],
                     "receipt_message_id": receipt["message_id"],
                     "receipt_request_id": receipt.get("request_id"),
+                    "receipt_from_agent": receipt["from_agent"],
+                    "receipt_from_instance": receipt["from_instance"],
+                    "receipt_to_agent": receipt["to_agent"],
+                    "receipt_to_instance": receipt["to_instance"],
                     "controller_agent": state["controller"]["agent"],
                     "review_verified": False, "attempts": 0,
                 }

@@ -114,9 +114,6 @@ The only already-authorised controls that may stop or bound work are:
 
 - an explicit user `/stop`, `/steer`, cancellation, or process-lifecycle stop;
 - the configured meaningful-progress idle detector in section 19;
-- the semantic cognitive-control boundary in section 3.2.2, which withholds
-  ordinary tools only after three identical action/result cycles and asks the
-  active model to finalise, declare a blocker, or record a distinct hypothesis;
 - a connection, read-inactivity, or protocol-safety guard scoped inside the
   relevant transport/parser operation, which resets on qualifying activity and
   never encloses a complete HER stage or tool loop;
@@ -143,26 +140,22 @@ The only already-authorised controls that may stop or bound work are:
 No implementation, adapter option, compatibility field, test fixture, or audit
 label may introduce an equivalent limit under another name such as `budget`,
 `lease`, `window`, `deadline`, `max_tokens`, `max_turns`, or `max_loops`.
-Legacy HER/Claw fields representing those ceilings remain invalid HERV2
-configuration and must be rejected rather than silently applied. Any new
-execution limit requires explicit user authorisation and an approved amendment
-to this section before implementation or supporting tests are added.
+Known retired HER/Claw control fields at the HER or provider-profile level are
+ignored with a diagnostic; unrelated nested provider or application data is
+preserved. Any newly selected execution limit requires explicit user authority.
 
 #### 3.2.2 Lifecycle-wide cognitive control
 
-Every tool-enabled HERV2 stage must use the same provider-neutral cognitive
-control. This includes Direct, tool-enabled Strategy/Triage, Planning,
-Execution, Replanning, Review, and delegated execution. The mechanism is a
-permanent Engine safety invariant for every Agent: it has no enable/disable
-configuration, rollout gate, Agent override, mode override, or provider
-override. Legacy switch fields are rejected. It is not a Planning special case
-and it is not a tool-round ceiling.
+Every tool-enabled HERV2 stage can record the same provider-neutral cognitive
+diagnostics, including Direct, Strategy/Triage, Planning, Execution, Replanning,
+Review, and delegated execution. Cycle detection is advisory; it does not
+change the authenticated owner's tool grant or require a model decision.
 
 One compact `TaskState` is always shared by every stage in the Turn. It
 contains the resolved goal, stable completion-criterion IDs, evidence-bound
 facts, open/resolved questions, focus, discarded paths, blockers, and an
 optional research working model. It is a projection of task conclusions, not a
-second planner or a hidden reasoning transcript. Tool-enabled model turns add
+second planner or a hidden reasoning transcript. Tool-enabled model turns may add
 an inline `_hashi_task_delta` to the ordinary tool call; Runtime strips that
 reserved field before executing the real tool, validates exact evidence refs,
 and applies the delta without an additional model call. Validated stage outputs
@@ -177,7 +170,7 @@ intact. A dead cycle requires three identical periodic sequences of semantic
 actions and semantic results with no positively observed state change. Repeated
 actions whose results continue to change are legitimate work and must not be
 interrupted.
-The exact-cycle detector remains the first safety net. A second deterministic
+The exact-cycle detector records an advisory. A second deterministic
 signal compares stable TaskState progress—satisfied criteria, resolved
 questions, evidence-bound facts, discarded paths, and blockers—so different
 actions cannot manufacture progress merely by changing parameters or wording.
@@ -185,26 +178,15 @@ Focus, plan text, confidence, and other label churn do not count. Pure cycles
 of tools explicitly classified as polling are also exempt because
 an unchanged external job state is valid evidence that waiting should continue.
 
-On the first dead-cycle observation, ordinary tools are temporarily replaced
-by one internal `hashi_cognitive_decision` boundary. The same active model must
-choose `FINALIZE`, `REVISE_DIRECTION`, or `BLOCKED`. A revised direction is
-accepted only when it names a stable new focus, a structurally different
-direction, the expected state change, an explicit stop condition, and a narrow
-set of already-authorised tools. Research and diagnosis may express the
-direction as a hypothesis. Only those tools reopen. If the same progress basin
-returns after that intervention, the typed condition becomes
-`NO_MEANINGFUL_PROGRESS`; another revision is not accepted and the model must
-finalise or report the blocker truthfully. The v1 `NEW_HYPOTHESIS` payload is
-accepted only as a rolling in-flight compatibility alias.
+On a repeated cycle, record and show a bounded advisory while keeping the
+existing owner and delegated tool grants unchanged. Repetition alone never
+forces finalisation, blocks an authorized tool, or creates a new approval step.
+The v1 `NEW_HYPOTHESIS` payload remains a rolling in-flight compatibility alias;
+any accepted direction is guidance and does not narrow the existing grant.
+Normal `/stop`, cancellation, audit, and lifecycle authority remain separate.
 
-This boundary does not count arbitrary calls, impose elapsed time, reduce the
-Agent's underlying permissions, launch another stage, or fork the provider
-thread. It makes a decision boundary explicit inside the existing continuous
-tool conversation and retains normal `/stop`, cancellation, audit, and
-lifecycle authority.
-
-This permanent decision is recorded in
-[HERV2 Mandatory Cognitive Control Decision](HER_V2_MANDATORY_COGNITIVE_CONTROL_DECISION.md).
+The earlier mandatory-control decision is historical and superseded by the advisory
+behavior described above.
 
 Provider-specific request construction belongs in provider adapters, not in the HER orchestration core.
 
@@ -1033,11 +1015,22 @@ own tool set. Its delegated catalogue may include:
 
 - `workspace_inspect` for bounded status, diff, search, hash, artifact, and
   before/after snapshot evidence. A normal Git workspace uses HEAD, status,
-  staged and unstaged diffs, plus content hashes for untracked files. When the
+  staged and unstaged diffs, plus content hashes for untracked files; it reports
+  that Git-ignored files and external symlink targets are outside that view. When the
   selected review root is itself excluded by Git ignore rules, snapshotting
-  uses the existing bounded filesystem content hash rooted at that workspace;
-  Git's intentionally empty view must not hide content changes, including
-  same-size replacements;
+  uses a streaming filesystem content hash rooted at that workspace; Git's
+  intentionally empty view must not hide content changes, including same-size
+  replacements. Filesystem snapshots report excluded paths and do not follow
+  symlink targets. When more than 20 paths are omitted and a Run-bound result
+  store is available, the complete inventory can be paged with tool_output_read;
+  otherwise the count and truncated list are explicitly reported. A file changed
+  during hashing causes an error, but the snapshot is not an atomic
+  filesystem-wide transaction. The Python search
+  fallback streams large literal files and labels excerpts. Regex fallback runs
+  in a cancellable managed process; large regex files, read errors and output
+  limits are explicitly partial, with file_search available for paged recovery.
+  Git snapshot, status, diff and external-search processes are stopped and
+  reaped on cancellation; file hashing cooperatively stops between chunks;
 - `verification_run` for a configured recipe or direct process `argv`. Commands
   run in the authoritative current workspace without copying or sandboxing it.
   They inherit the HASHI process identity, filesystem access, environment,

@@ -271,8 +271,10 @@ def test_telegram_checkpoint_binds_offset_to_bot_across_shared_recovery(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("split_roles", [False, True])
+@pytest.mark.parametrize("mode", ["replacement", "initial", "recovery", "restore"])
 async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_older(
     split_roles,
+    mode,
     tmp_path,
     monkeypatch,
 ):
@@ -295,8 +297,9 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
     assert current_source_commit != qualified.generation.receipt.source_commit
     config_loads = []
 
-    def load_config_bundle(*, bootstrap_local_api_credential=False):
-        config_loads.append(bootstrap_local_api_credential)
+    def load_config_bundle(*, bootstrap_local_api_credential=False,
+                           defer_personal_data_binding=False):
+        config_loads.append((bootstrap_local_api_credential, defer_personal_data_binding))
 
     app = SimpleNamespace(
         runtime_fingerprint=runtime,
@@ -333,6 +336,7 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
             "source_commit": current_source_commit,
             "kernel_pid": 123,
             "arguments": {},
+            **({mode: True} if mode != "replacement" else {}),
             "qualification_timing": {
                 "started_at": "2026-10-04T10:00:00+11:00",
                 "total_ms": 1200.0,
@@ -347,8 +351,8 @@ async def test_runtime_host_retains_qualified_source_commit_when_artifact_is_old
     assert ready["core_runtime_id"] == (core_runtime.runtime_id if split_roles else None)
     assert ready["functions_runtime_id"] == runtime.runtime_id
 
-    assert config_loads == [True]
-    assert app._shared_replacement_candidate is True
+    assert config_loads == [(True, mode != "initial")]
+    assert app._shared_replacement_candidate is (mode == "replacement")
     assert app.function_release_timing["phases_ms"]["isolated_probe"] == 800.0
     startup_generation, startup_root = app._startup_artifact
     assert startup_root == qualified.generation_root

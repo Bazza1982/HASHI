@@ -5,6 +5,8 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 import remote.api.server as remote_server
@@ -15,7 +17,7 @@ from orchestrator.frontend_delivery import (
 from orchestrator.message_context import verify_connector_evidence
 from remote.api.server import ProtocolTuiRequest, create_app
 from remote.security.pairing import PairingManager
-from remote.security.shared_token import build_auth_headers
+from remote.security.shared_token import HEADER_NONCE, build_auth_headers, build_response_auth
 from remote.terminal.executor import TerminalExecutor
 
 
@@ -35,6 +37,7 @@ class _Protocol:
 
     def __init__(self, peer):
         self.peer = peer
+        self._shared_token = "shared-secret"
 
     def get_protocol_status(self):
         return {"protocol_version": "2.0", "capabilities": ["tui_proxy_v1"]}
@@ -50,6 +53,11 @@ class _Protocol:
 
     def resolve_forward_urls(self, instance_id: str, path: str):
         return [f"http://peer.invalid:8767{path}"] if instance_id == self.peer.instance_id else []
+
+    def _post_json(self, url, payload, timeout=10):
+        assert url.endswith("/protocol/handshake")
+        assert payload["from_instance"] == "HASHI1"
+        return {"status": "handshake_accept", "instance_id": self.peer.instance_id}
 
 
 class _HealthResponse:
@@ -139,16 +147,104 @@ def test_protocol_tui_uses_valid_hmac_even_when_peer_registry_is_stale(tmp_path,
     }
 
 
-def test_loopback_tui_proxy_requires_completed_target_handshake(tmp_path):
+def test_loopback_tui_proxy_refreshes_pending_handshake_for_live_target(tmp_path, monkeypatch):
     client, _token = _client(tmp_path, _peer(handshake="handshake_pending"))
+    calls = []
+    monkeypatch.setattr(
+        remote_server, "_post_json_with_optional_hmac",
+        lambda url, payload, timeout=15: calls.append((url, payload)) or {
+            "ok": True, "target_instance": "HASHI2", "result": {"ok": True},
+        },
+    )
 
     response = client.post(
         "/tui/proxy",
         json={"target_instance": "HASHI2", "operation": "agents"},
     )
 
+    assert response.status_code == 200
+    assert calls[0][1]["target_instance"] == "HASHI2"
+
+
+def test_live_wrong_target_or_unverified_handshake_never_receives_operation(tmp_path, monkeypatch):
+    client, _token = _client(tmp_path, _peer(handshake="handshake_pending"))
+    calls = []
+    monkeypatch.setattr(remote_server, "_post_json_with_optional_hmac", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(_Protocol, "_post_json", lambda *a, **k: {
+        "status": "handshake_accept", "instance_id": "HASHI9",
+    })
+    request = {"target_instance": "HASHI2", "operation": "chat", "agent": "akane", "text": "hello"}
+    response = client.post("/tui/proxy", json=request)
+    assert response.status_code == 502
+    assert response.json()["error"] == "target_identity_mismatch"
+    assert calls == []
+
+    def forged(*args, **kwargs):
+        raise RuntimeError("protocol handshake response authentication failed")
+
+    monkeypatch.setattr(_Protocol, "_post_json", forged)
+    response = client.post("/tui/proxy", json=request)
+    assert response.status_code == 502
+    assert response.json()["error"] == "peer_identity_unverified"
+    assert calls == []
+
+
+def test_protocol_tui_rejects_signed_wrong_target_before_effect(tmp_path, monkeypatch):
+    client, token = _client(tmp_path)
+    effects = []
+    monkeypatch.setattr(remote_server, "_local_workbench_tui_request", lambda payload: effects.append(payload))
+    payload = {"from_instance": "HASHI2", "target_instance": "HASHI9", "operation": "health"}
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", **build_auth_headers(
+        shared_token=token, method="POST", path="/protocol/tui", from_instance="HASHI2", body_bytes=body,
+    )}
+    response = client.post("/protocol/tui", content=body, headers=headers)
     assert response.status_code == 409
-    assert response.json()["error"] == "handshake_required"
+    assert response.json()["error"] == "target_identity_mismatch"
+    assert effects == []
+
+
+def test_forward_route_verifies_nonce_bound_handshake_and_target(monkeypatch):
+    from remote.protocol_manager import ProtocolManager
+
+    manager = object.__new__(ProtocolManager)
+    manager._shared_token = "shared-secret"
+    manager._instance_info = {"instance_id": "HASHI1"}
+    monkeypatch.setattr(remote_server, "_protocol_manager", manager)
+    monkeypatch.setattr(remote_server, "_instance_info", {"instance_id": "HASHI1"})
+    monkeypatch.setattr(remote_server, "get_shared_token", lambda: "shared-secret")
+    peer = {"instance_id": "HASHI2", "signed": True}
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def open_handshake(req, timeout=None, context=None):
+        assert req.full_url == "http://peer.invalid:8767/protocol/handshake"
+        headers = {key.lower(): value for key, value in req.header_items()}
+        payload = {"status": "handshake_accept", "instance_id": peer["instance_id"]}
+        if peer["signed"]:
+            payload["response_auth"] = build_response_auth(
+                shared_token="shared-secret", request_nonce=headers[HEADER_NONCE.lower()], payload=payload,
+            )
+        return Response(payload)
+
+    monkeypatch.setattr("remote.protocol_manager.urllib_request.urlopen", open_handshake)
+    url = "http://peer.invalid:8767/protocol/tui"
+    assert remote_server._verify_forward_route_identity(url, "HASHI2") == (True, "ok")
+    peer["instance_id"] = "HASHI9"
+    assert remote_server._verify_forward_route_identity(url, "HASHI2") == (False, "target_identity_mismatch")
+    peer.update(instance_id="HASHI2", signed=False)
+    assert remote_server._verify_forward_route_identity(url, "HASHI2") == (False, "peer_identity_unverified")
 
 
 def test_loopback_tui_proxy_ignores_stale_liveness_and_capability_metadata(
@@ -855,8 +951,9 @@ def test_remote_tui_attachment_requires_typed_session_and_integrity():
     ) == (False, "attachment_digest_mismatch")
 
 
+@pytest.mark.parametrize("empty", [False, True])
 def test_remote_tui_attachment_stages_uploads_commits_and_binds_one_run(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, empty
 ):
     _client(tmp_path)
     monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
@@ -896,6 +993,11 @@ def test_remote_tui_attachment_stages_uploads_commits_and_binds_one_run(
 
     monkeypatch.setattr(remote_server.urllib_request, "urlopen", urlopen)
     request = _canonical_attachment_request()
+    if empty:
+        request = request.model_copy(update={"attachment": {
+            "filename": "empty.txt", "media_type": "text/plain",
+            "content_b64": "", "size_bytes": 0, "sha256": hashlib.sha256(b"").hexdigest(),
+        }})
     status, result = remote_server._local_workbench_tui_request(request)
 
     assert status == 202
@@ -1033,8 +1135,9 @@ def test_remote_tui_workzone_reference_rejects_traversal():
     )
 
 
+@pytest.mark.parametrize("reference", ["reports/weekly.pdf", r"C:\Workzone\weekly.pdf", "/allowed/weekly.pdf"])
 def test_remote_tui_workzone_reference_uses_target_session_asset_and_run(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, reference
 ):
     _client(tmp_path)
     monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ("127.0.0.1",))
@@ -1077,7 +1180,7 @@ def test_remote_tui_workzone_reference_uses_target_session_asset_and_run(
     request = _canonical_attachment_request().model_copy(update={
         "operation": "session_workzone_attachment_run",
         "attachment": None,
-        "workzone_ref": "reports/weekly.pdf",
+        "workzone_ref": reference,
     })
     status, result = remote_server._local_workbench_tui_request(request)
 
@@ -1090,7 +1193,7 @@ def test_remote_tui_workzone_reference_uses_target_session_asset_and_run(
         "/api/v1/sessions/ses-1/attachments/from-workzone",
         "/api/v1/sessions/ses-1/runs",
     ]
-    assert json.loads(calls[2][2]) == {"reference": "reports/weekly.pdf"}
+    assert json.loads(calls[2][2]) == {"reference": reference}
     assert json.loads(calls[3][2])["message"]["content"] == [
         {"type": "text", "text": "read this"},
         {"type": "attachment", "attachment_id": "att-1"},
@@ -1232,3 +1335,17 @@ def test_sidepanel_proxy_maps_to_read_only_workbench_paths(monkeypatch):
     assert captured[0][1].endswith("/api/agents/agent%20name/overview")
     assert captured[1][1].endswith("/api/agents/agent%20name/scheduler/jobs")
     assert captured[2][1].endswith("/api/background-jobs?agent=agent%20name&limit=7")
+
+
+
+def test_remote_tui_empty_document_requires_explicit_valid_content():
+    request = _canonical_attachment_request()
+    empty = {
+        "filename": "empty.txt", "media_type": "text/plain",
+        "content_b64": "", "size_bytes": 0, "sha256": hashlib.sha256(b"").hexdigest(),
+    }
+    assert remote_server._validate_tui_proxy_payload(request.model_copy(update={"attachment": empty})) == (True, "ok")
+    missing = {key: value for key, value in empty.items() if key != "content_b64"}
+    assert remote_server._validate_tui_proxy_payload(request.model_copy(update={"attachment": missing})) == (False, "invalid_attachment")
+    wrong = {**empty, "sha256": "0" * 64}
+    assert remote_server._validate_tui_proxy_payload(request.model_copy(update={"attachment": wrong})) == (False, "attachment_digest_mismatch")

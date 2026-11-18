@@ -17,6 +17,7 @@ ROUTES = (
     ("GET", "/calls/{call_id}", "snapshot"),
     ("POST", "/calls/{call_id}/resume", "resume"),
     ("GET", "/calls/{call_id}/events", "events"),
+    ("GET", "/calls/{call_id}/transcript", "transcript_page"),
     ("POST", "/calls/{call_id}/observations", "observe"),
     ("POST", "/calls/{call_id}/controls", "control"),
 )
@@ -85,7 +86,12 @@ def register_live_voice_routes(app: Any, service: LiveApplicationPort,
                 value = await service.invoke(operation, authority, payload)
                 return web.json_response(dict(value), headers={"Cache-Control": "no-store"})
             except LiveVoiceError as exc:
-                return web.json_response({"ok": False, "error_code": exc.code, "accepted": None if exc.status >= 500 and operation in {"start", "control"} else False},
+                unknown_resume = (
+                    operation == "resume"
+                    and exc.code in {"live_provider_create_unknown", "live_provider_answer_invalid", "live_outcome_unknown"}
+                )
+                uncertain = exc.status >= 500 and (operation in {"start", "control"} or unknown_resume)
+                return web.json_response({"ok": False, "error_code": exc.code, "accepted": None if uncertain else False},
                                          status=exc.status, headers={"Cache-Control": "no-store"})
             except json.JSONDecodeError:
                 return web.json_response({"ok": False, "error_code": "live_body_invalid", "accepted": False}, status=400,

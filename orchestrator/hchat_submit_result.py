@@ -21,6 +21,8 @@ class HChatSubmission:
     accepted: bool | None
     failure: OperationFailure | None = None
     recipients: tuple[HChatSubmission, ...] = ()
+    recipient: str | None = None
+    message_id: str | None = None
 
     def __bool__(self) -> bool:
         return self.handled
@@ -68,6 +70,15 @@ def record_hchat_failure(error: Exception | None = None, *, reason: str | None =
     return False
 
 
+def hchat_transport_definitely_unsent(error: Exception, *, phase: str = "request") -> bool:
+    source = error.reason if isinstance(error, URLError) and isinstance(error.reason, Exception) else error
+    number = getattr(source, "errno", None)
+    return phase == "request" and (
+        isinstance(source, (ConnectionRefusedError, socket.gaierror))
+        or number in {errno.ECONNREFUSED, 10061}
+    )
+
+
 def record_hchat_transport_failure(error: Exception, *, phase: str = "request") -> bool:
     capture = _CAPTURE.get()
     known = capture.result if capture is not None else None
@@ -80,7 +91,7 @@ def record_hchat_transport_failure(error: Exception, *, phase: str = "request") 
     missing_name = isinstance(source, socket.gaierror)
     reason = "connection_refused" if refused else "name_not_resolved" if missing_name else None
     return record_hchat_failure(source, reason=reason, phase=phase,
-        accepted=False if phase == "request" and (refused or missing_name) else None)
+        accepted=False if hchat_transport_definitely_unsent(error, phase=phase) else None)
 
 
 def record_hchat_response(payload: dict) -> None:

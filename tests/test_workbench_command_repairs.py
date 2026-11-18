@@ -147,3 +147,90 @@ def test_call_catalogue_uses_selected_locale_and_retired_hint_is_actionable(loca
     assert "/mode wrapper" not in hint
     assert "/mode" in hint
 # HASHI-Fingerprint: hfp_db3626b83d8e4204885fa93f89ff440c
+
+
+@pytest.mark.asyncio
+async def test_full_quoted_delay_retains_exact_unicode_text_and_coverage(tmp_path):
+    runtime = _FakeRuntime(tmp_path)
+    original = " \n" + ("正" * 4002) + "😀\nTAIL\t "
+    quote = {**QUOTE, "text": original, "text_coverage": "full", "source_complete": True}
+    result = await execute_local_command(
+        runtime, "/delay 5 reply", chat_id=42,
+        session_metadata={"reply_reference": quote},
+    )
+    assert result["ok"] is True
+    records = await runtime.orchestrator.scheduler.list_delayed_messages("zelda")
+    assert len(records) == 1
+    opening, reference, closing, message = records[0]["prompt"].split("\n", 3)
+    assert opening == "[[HASHI_QUOTE_V2]]"
+    assert closing == "[[/HASHI_QUOTE_V2]]"
+    assert json.loads(reference) == quote
+    assert message == "reply"
+
+
+def test_quote_coverage_rejects_false_full_or_unknown_fields():
+    from orchestrator.quoted_reply import normalize_quoted_reply
+
+    with pytest.raises(ValueError):
+        normalize_quoted_reply({**QUOTE, "text_coverage": "full", "source_complete": False})
+    with pytest.raises(ValueError):
+        normalize_quoted_reply({**QUOTE, "text_coverage": "full", "source_complete": True, "unexpected": "x"})
+
+
+@pytest.mark.asyncio
+async def test_command_wire_preserves_full_quote_and_keeps_current_session_binding(monkeypatch):
+    from orchestrator.command_interaction_transport import try_dispatch_command_interaction_transport
+
+    quote = {**QUOTE, "text": "  " + ("正" * 5000) + "😀TAIL  ",
+             "text_coverage": "full", "source_complete": True}
+    observed = []
+    monkeypatch.setattr(runtime_session, "current_session", lambda *a, **k:
+                        {"session_id": "current-session", "context_generation": 4})
+
+    async def dispatch(runtime, payload, metadata):
+        observed.append((payload, metadata))
+        return {"ok": True, "command_ui_version": 2}
+
+    monkeypatch.setattr("orchestrator.command_interaction_bridge.dispatch_command_interaction", dispatch)
+    result = await try_dispatch_command_interaction_transport(
+        _runtime(), _wire("open", command="/delay 5 message", reply_reference=quote),
+        source_channel="workbench_api",
+    )
+    assert result["ok"] is True, result
+    assert observed[0][1]["session_id"] == "current-session"
+    assert observed[0][1]["reply_reference"] == quote
+
+
+@pytest.mark.asyncio
+async def test_oversized_quoted_command_reports_exact_limit_before_execution():
+    from orchestrator.command_interactions import Binding, InteractionError, MAX_REQUEST_TEXT, MenuStore
+
+    store = MenuStore()
+    binding = Binding("i", "a", "owner", "session", 1, "client", "connection")
+    attempted = []
+
+    async def perform():
+        attempted.append(True)
+        return {"ok": True}
+
+    payload = {"command": "/delay 5 message", "reply_reference": {
+        **QUOTE, "text": "x" * (MAX_REQUEST_TEXT + 1), "text_coverage": "full",
+        "source_complete": True,
+    }}
+    with pytest.raises(InteractionError) as failure:
+        await store.once(binding, "request-id-00000001", payload, perform)
+    assert failure.value.code == "command_menu_request_too_large"
+    assert failure.value.status == 413
+    assert str(MAX_REQUEST_TEXT) in failure.value.error_message
+    assert attempted == []
+
+
+def test_oversized_command_transport_reports_a_concrete_limit():
+    from orchestrator.command_interaction_transport import MAX_TRANSPORT_LENGTH, TRANSPORT_PREFIX, _decode_transport
+    from orchestrator.command_interactions import InteractionError
+
+    with pytest.raises(InteractionError) as failure:
+        _decode_transport(TRANSPORT_PREFIX + ("A" * MAX_TRANSPORT_LENGTH))
+    assert failure.value.code == "command_menu_request_too_large"
+    assert failure.value.status == 413
+    assert str(MAX_TRANSPORT_LENGTH) in failure.value.error_message

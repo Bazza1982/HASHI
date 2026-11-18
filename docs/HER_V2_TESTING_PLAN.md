@@ -944,6 +944,11 @@ Tests must prove that false progress cannot keep a stalled turn alive indefinite
 
 ### 10.1.1 Semantic cognitive-control boundary
 
+> The original mandatory-decision assertions below are historical. The
+> approved 2026-11-17 remediation instead requires repeat diagnostics to keep
+> the owner and delegated tool grants available, and recognized legacy HER
+> fields to load with warnings. See product design section 3.2.2.
+
 Deterministic tests must first prove that cognitive control is an unconditional
 HERV2 Engine invariant: no constructor, runtime configuration, Agent setting,
 mode, stage, or provider can disable it, and every legacy switch field is

@@ -28,6 +28,9 @@ def api_fixture(control, tmp_path):
                               execute_slash_command=worker_rpc)
     server = WorkbenchApiServer.__new__(WorkbenchApiServer)
     server.global_config, server.config_path, server.session_store = config, path, store
+    # Model the existing authenticated Remote-to-Backend transport. The user
+    # session remains a separate proof for the permission decision itself.
+    server.admin_token = "test-remote-transport"
     server._runtime_map = lambda: {"agent": runtime}
     server._v1_owner_id = lambda request: context.owner_id
     server.permission_control = SimpleNamespace(
@@ -52,9 +55,16 @@ async def test_session_command_path_accepts_only_original_user_session_header(co
         "client_id": "frontendabcdefghijkl", "request_id": "approvalabcdefghijkl",
         "context_generation": int(context.context_generation), "ui_locale": "zh-CN",
     }
+    missing_transport = await server.handle_v1_session_command_invocation(_Request(
+        payload, match_info={"session_id": context.session_id},
+        headers={"Authorization": "Bearer " + session.token},
+    ))
+    assert missing_transport.status == 401
+    assert authority.decision_count(request.request_id) == 0
     response = await server.handle_v1_session_command_invocation(_Request(
         payload, match_info={"session_id": context.session_id},
-        headers={"Authorization": "Bearer " + (session.token if valid else "shared-admin-token")},
+        headers={"X-Workbench-Token": "test-remote-transport",
+                 "Authorization": "Bearer " + (session.token if valid else "shared-admin-token")},
     ))
     data = json.loads(response.text)
     assert data["ok"] is valid, data
@@ -64,7 +74,7 @@ async def test_session_command_path_accepts_only_original_user_session_header(co
     # Existing durable FC command retry returns the persisted rendition.
     replay = await server.handle_v1_session_command_invocation(_Request(
         payload, match_info={"session_id": context.session_id},
-        headers={"Authorization": "Bearer " + session.token},
+        headers={"X-Workbench-Token": "test-remote-transport", "Authorization": "Bearer " + session.token},
     ))
     replay_data = json.loads(replay.text)
     assert replay_data["replayed"]
@@ -87,7 +97,7 @@ async def test_existing_opaque_menu_action_is_private_and_cannot_be_replayed_cro
         "ui_locale": "zh-CN", "client_id": "frontendabcdefghijkl",
         "request_id": "displayabcdefghijklmnop",
     }
-    headers = {"Authorization": "Bearer " + session.token}
+    headers = {"X-Workbench-Token": "test-remote-transport", "Authorization": "Bearer " + session.token}
     response = await server.handle_agent_command(_Request(
         {"command": encoded(operation, context)}, match_info={"name": "agent"}, headers=headers,
     ))

@@ -118,9 +118,12 @@ def admit_session_media(
             replacements[part["local_ref"]] = canonical["local_ref"]
             parts.append(canonical)
     except Exception:
-        store.discard_unbound_attachments(
-            **scope, attachment_ids=attachment_ids
-        )
+        # An idempotent stage may be a prior attempt's still-unbound receipt.
+        # Preserve it for retry instead of deleting another attempt's bytes.
+        if not idempotency_key:
+            store.discard_unbound_attachments(
+                **scope, attachment_ids=attachment_ids
+            )
         raise
 
     def rewrite_paths(text: str) -> str:
@@ -158,6 +161,7 @@ def admit_telegram_media(
     prompt: str,
     request_content: dict[str, Any],
     request_metadata: dict[str, Any],
+    idempotency_key: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """Preserve the public Telegram admission adapter contract."""
     admitted_prompt, content, metadata, _ = admit_session_media(
@@ -167,5 +171,6 @@ def admit_telegram_media(
         prompt=prompt,
         request_content=request_content,
         request_metadata=request_metadata,
+        idempotency_key=idempotency_key,
     )
     return admitted_prompt, content, metadata

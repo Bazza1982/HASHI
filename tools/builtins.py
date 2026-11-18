@@ -641,6 +641,7 @@ async def execute_log_query(
     access_root: Path | Sequence[Path],
     workspace_dir: Path,
     *, continuations=None, search_scope=None, audit_context=None, options=None,
+    protected_read_paths=(),
 ) -> str | BuiltinExecutionResult:
     """Search bounded literal excerpts without materialising whole records."""
 
@@ -705,10 +706,14 @@ async def execute_log_query(
             read_roots=_access_roots(access_root), cwd=workspace_dir,
             search_scope=search_scope or {}, audit_context=audit_context or {},
             continuations=continuations or Continuations(), options=options or {},
-            operation='log_query')
+            protected_read_paths=protected_read_paths, operation='log_query')
         envelope = json.loads(result.output)
-        if envelope['data'] is None:
-            return BuiltinExecutionResult('Error: ' + envelope['error']['message'], result.details)
+        if envelope['status'] in {'failed', 'unavailable'}:
+            recovery = (envelope.get('data') or {}).get('recovery')
+            message = 'Error: ' + envelope['error']['message']
+            if recovery:
+                message += '\nRecovery: ' + json.dumps(recovery, ensure_ascii=False)
+            return BuiltinExecutionResult(message, result.details)
         payload = envelope['data']
         payload['matches'] = [{key: item[key] for key in (
             'term', 'line', 'character_offset', 'excerpt')} for item in payload['matches']]
@@ -725,7 +730,7 @@ async def execute_file_read(
     args: dict,
     access_root: Path | Sequence[Path],
     workspace_dir: Path,
-) -> str:
+) -> str | BuiltinExecutionResult:
     raw_path = args.get("path", "")
     if not raw_path:
         return "Error: no path provided"
@@ -742,42 +747,15 @@ async def execute_file_read(
 
     offset = max(1, int(args.get("offset", 1)))
     limit = max(1, min(500, int(args.get("limit", 500))))
-    max_chars = 20_000
+    from tools.file_read_pagination import read_file_page
 
     try:
-        selected: list[str] = []
-        remaining = max_chars
-        truncated = False
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for _ in range(offset - 1):
-                while True:
-                    chunk = handle.readline(8192)
-                    if not chunk:
-                        return f"[{path}] No lines at offset {offset}"
-                    if chunk.endswith("\n"):
-                        break
-            for _ in range(limit):
-                line = handle.readline(remaining + 1)
-                if not line:
-                    break
-                if len(line) > remaining:
-                    selected.append(line[:remaining])
-                    truncated = True
-                    break
-                selected.append(line)
-                remaining -= len(line)
-                if remaining == 0:
-                    truncated = bool(handle.read(1))
-                    break
-            else:
-                truncated = bool(handle.read(1))
-        header = f"[{path}] lines {offset}-{offset + len(selected) - 1}"
-        content = "".join(selected)
-        if truncated:
-            content += "\n[truncated by HASHI; use a narrower offset or log_query]"
-        return f"{header}\n{content}"
-    except Exception as e:
-        return f"Error reading file: {e}"
+        output, next_cursor = await read_file_page(path, offset, limit, args.get("cursor"))
+        return BuiltinExecutionResult(
+            output, {"complete_content": next_cursor is None, "file_read_continuation": next_cursor}
+        )
+    except (OSError, ValueError) as e:
+        return f"Error: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +846,7 @@ async def execute_web_search(
 async def execute_file_list(
     args: dict, access_root: Path | Sequence[Path], workspace_dir: Path,
     *, continuations=None, search_scope=None, audit_context=None, options=None,
+    protected_read_paths=(),
 ) -> str | BuiltinExecutionResult:
     raw_path = args.get('path', '')
     if not raw_path:
@@ -893,11 +872,15 @@ async def execute_file_list(
         read_roots=_access_roots(access_root), cwd=workspace_dir,
         search_scope=search_scope or {}, audit_context=audit_context or {},
         continuations=continuations or Continuations(), options=options or {},
-        operation='file_list')
+        protected_read_paths=protected_read_paths, operation='file_list')
     envelope = json.loads(result.output)
     data = envelope['data']
-    if data is None:
-        return BuiltinExecutionResult('Error: ' + envelope['error']['message'], result.details)
+    if envelope['status'] in {'failed', 'unavailable'}:
+        recovery = (data or {}).get('recovery')
+        message = 'Error: ' + envelope['error']['message']
+        if recovery:
+            message += '\nRecovery: ' + json.dumps(recovery, ensure_ascii=False)
+        return BuiltinExecutionResult(message, result.details)
     entries = [('[dir] ' if item['type'] == 'dir' else '      ') +
                str(Path(item['path']).relative_to(path)) +
                (f"  ({item['size_bytes']} bytes)" if item['type'] == 'file' else '')
@@ -1318,7 +1301,15 @@ async def execute_process_list(args: dict) -> str:
 
     try:
         import psutil
-        protected = _protected_runtime_pids()
+        ancestry_unavailable = False
+        try:
+            protected = _protected_runtime_pids()
+        except psutil.Error:
+            # Listing is read-only. Do not lose unrelated results when the OS
+            # cannot enumerate runtime ancestors, and do not imply those
+            # unverified ancestors are safe to terminate.
+            protected = {os.getpid(), os.getppid()}
+            ancestry_unavailable = True
         procs = []
         for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "cmdline"]):
             try:
@@ -1336,11 +1327,15 @@ async def execute_process_list(args: dict) -> str:
                 continue
 
         procs = procs[:limit]
+        note = (
+            "Note: runtime ancestry could not be verified; only the current "
+            "process and its direct parent are marked protected."
+        ) if ancestry_unavailable else ""
         if not procs:
-            return "No matching processes found."
+            return "\n".join(filter(None, (note, "No matching processes found.")))
 
-        lines = ["PID      NAME                     CPU%   MEM%   COMMAND"]
-        lines.append("-" * 70)
+        lines = [note] if note else []
+        lines.extend(["PID      NAME                     CPU%   MEM%   COMMAND", "-" * 70])
         for pid, name, cpu, mem, cmd in procs:
             lines.append(f"{pid:<8} {name:<25} {cpu:>5.1f}  {mem:>5.1f}  {cmd}")
         return "\n".join(lines)
@@ -2365,18 +2360,25 @@ async def execute_frontend_publish_deliverable(
     )
 
 
-async def execute_http_request(args: dict) -> str:
+async def execute_http_request(
+    args: dict, *, max_response_bytes: int = 16 * 1024 * 1024
+) -> str | BuiltinExecutionResult:
     url = str(args.get("url", "")).strip()
     if not url:
         return "Error: url is required"
+    timeout, error = _positive_seconds(args.get("timeout", 30), label="HTTP timeout")
+    if error:
+        return error
+    if type(max_response_bytes) is not int or max_response_bytes < 1:
+        return "Error: configured HTTP max_response_bytes must be a positive integer"
 
     method = str(args.get("method", "GET")).upper()
     headers = args.get("headers") or {}
     body = args.get("body")
-    timeout = min(int(args.get("timeout", 30)), 60)
-
+    status = None
     try:
         import httpx
+
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
@@ -2385,21 +2387,51 @@ async def execute_http_request(args: dict) -> str:
             req_kwargs: dict = {"headers": headers}
             if body:
                 req_kwargs["content"] = body.encode() if isinstance(body, str) else body
-
-            response = await client.request(method, url, **req_kwargs)
-
-        content_type = response.headers.get("content-type", "")
-        body_text = response.text
-        if len(body_text) > 10000:
-            body_text = body_text[:10000] + "\n...[truncated]"
-
-        return (
-            f"Status: {response.status_code}\n"
-            f"Content-Type: {content_type}\n\n"
-            f"{body_text}"
+            async with client.stream(method, url, **req_kwargs) as response:
+                status = response.status_code
+                content_type = response.headers.get("content-type", "")
+                encoding = response.encoding or "utf-8"
+                received = bytearray()
+                complete = True
+                observed_at_least = 0
+                async for chunk in response.aiter_bytes(chunk_size=min(65536, max_response_bytes + 1)):
+                    observed_at_least = len(received) + len(chunk)
+                    room = max_response_bytes - len(received)
+                    if len(chunk) > room:
+                        received.extend(chunk[:room])
+                        complete = False
+                        break
+                    received.extend(chunk)
+                try:
+                    body_text = received.decode(encoding, errors="replace")
+                except LookupError:
+                    body_text = received.decode("utf-8", errors="replace")
+        warning = (
+            ""
+            if complete
+            else (
+                f"\n[Response incomplete: selected {max_response_bytes}-byte "
+                "limit; the request may already have taken effect. No automatic retry.]"
+            )
         )
-    except Exception as e:
-        return f"Error making HTTP request: {e}"
+        return BuiltinExecutionResult(
+            f"Status: {status}\nContent-Type: {content_type}\n\n{body_text}{warning}",
+            {
+                "http_status": status,
+                "response_complete": complete,
+                "complete_content": complete,
+                "response_limit_bytes": max_response_bytes,
+                "response_bytes": len(received),
+                "response_observed_at_least_bytes": observed_at_least,
+                "timeout_seconds": timeout,
+            },
+        )
+    except Exception as exc:
+        return BuiltinExecutionResult(
+            "Error: HTTP response unavailable; the request may already have taken effect. "
+            f"Do not retry without checking ({type(exc).__name__}).",
+            {"http_status": status, "response_complete": False, "request_effect": "unknown"},
+        )
 
 
 async def execute_web_fetch(

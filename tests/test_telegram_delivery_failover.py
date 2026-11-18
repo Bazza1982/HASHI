@@ -942,7 +942,7 @@ async def test_runtime_notice_uses_original_bot_without_worker_then_same_destina
             if availability == "none" or (
                 availability == "fallback" and self.token == "source-test-token"
             ):
-                raise OSError("unavailable")
+                raise _prewrite_network_error()
             if availability == "rate_limited" and self.token == "source-test-token":
                 raise RetryAfter(timedelta(seconds=9))
             return SimpleNamespace(message_id=19)
@@ -1103,4 +1103,44 @@ async def test_runtime_notice_reuses_initialized_source_ingress_bot(
             "parse_mode": "HTML",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_notice_does_not_fail_over_after_unknown_send_outcome(tmp_path, monkeypatch):
+    calls = []
+
+    class DirectBot:
+        def __init__(self, token):
+            self.token = token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def send_message(self, **_kwargs):
+            calls.append(self.token)
+            if self.token == "source-test-token":
+                raise NetworkError("outcome unknown after request")
+            return SimpleNamespace(message_id=19)
+
+    monkeypatch.setattr("telegram.Bot", DirectBot)
+    kernel = SimpleNamespace(
+        global_cfg=SimpleNamespace(project_root=tmp_path, instance_id="HASHI2"),
+        _runtime_map=lambda: {},
+        _load_raw_config=lambda: {
+            "global": {"instance_id": "HASHI2"},
+            "agents": [{"name": "source", "telegram_token_key": "s"},
+                       {"name": "backup", "telegram_token_key": "b"}],
+        },
+        secrets={"s": "source-test-token", "b": "backup-test-token"},
+    )
+    result = await failover.send_runtime_notice(
+        kernel, source_agent="source", chat_id=42, render_text=lambda *_: "done",
+    )
+
+    assert calls == ["source-test-token"]
+    assert result["sent"] is False
+    assert result["delivery_state"] == "unknown"
 # HASHI-Fingerprint: hfp_76c7ee9016f84b31b040b370e339ab96

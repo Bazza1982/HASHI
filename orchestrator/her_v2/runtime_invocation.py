@@ -182,6 +182,7 @@ class RuntimeInvocationMixin:
         error: StageInvocationError,
         retry_index: int,
         side_effects_possible: bool,
+        provider_activity: ProviderActivityTracker,
     ) -> Mapping[str, Any] | None:
         """Resolve the PAO-level long capacity retry for this HER Turn."""
 
@@ -189,15 +190,26 @@ class RuntimeInvocationMixin:
         if not callable(resolve):
             return None
         try:
-            decision = resolve(
-                request=request,
-                selected=selected,
-                failure_code=error.error_code,
-                retryable=bool(error.retryable),
-                retry_after_s=error.retry_after_s,
-                retry_index=int(retry_index),
-                side_effects_possible=bool(side_effects_possible),
-            )
+            kwargs = {
+                "request": request,
+                "selected": selected,
+                "failure_code": error.error_code,
+                "retryable": bool(error.retryable),
+                "retry_after_s": error.retry_after_s,
+                "retry_index": int(retry_index),
+                "side_effects_possible": bool(side_effects_possible),
+            }
+            parameters = inspect.signature(resolve).parameters
+            if "recovery_evidence" in parameters or any(
+                item.kind is inspect.Parameter.VAR_KEYWORD
+                for item in parameters.values()
+            ):
+                kwargs["recovery_evidence"] = {
+                    "voice_transcript_sha256": error.details.get("voice_transcript_sha256"),
+                    "voice_projection_no_output": error.details.get("voice_projection_no_output"),
+                    "provider_activity_observed": provider_activity.event_count > 0,
+                }
+            decision = resolve(**kwargs)
             if inspect.isawaitable(decision):
                 decision = await decision
             return decision
@@ -488,6 +500,9 @@ class RuntimeInvocationMixin:
                 retry_invariant_hash=retry_invariant_hash,
                 fallback_level=fallback_level,
                 fallback_model_class=selected_model_class,
+                provider_recovery_remaining=max(
+                    0, self.retry_policy.max_provider_retries - provider_retry_count
+                ),
                 request_started_at=datetime.now(timezone.utc).isoformat(),
                 provider_stream_inactivity_timeout_s=(
                     provider_stream_inactivity_timeout_s
@@ -884,6 +899,16 @@ class RuntimeInvocationMixin:
                 0,
                 int(last_error.details.get("provider_local_recovery_count") or 0),
             )
+            try:
+                inner_retries = max(0, int(
+                    last_error.details.get("provider_transport_retry_count") or 0
+                ))
+            except (TypeError, ValueError, OverflowError):
+                inner_retries = 0
+            provider_retry_count += min(
+                inner_retries,
+                max(0, self.retry_policy.max_provider_retries - provider_retry_count),
+            )
             unobserved_side_effects = bool(
                 last_error.side_effects_possible and not provider_activity.tool_started
             )
@@ -897,6 +922,18 @@ class RuntimeInvocationMixin:
                 and not unobserved_side_effects
                 and not side_effects_seen
             )
+            voice_projection = last_error.details.get("voice_transcript_sha256")
+            if isinstance(voice_projection, str) and voice_projection:
+                previous_projection = base_context.get("_voice_retry_transcript_sha256")
+                if previous_projection and previous_projection != voice_projection:
+                    replay_safe = False
+                else:
+                    base_context["_voice_retry_transcript_sha256"] = voice_projection
+                # A spoken/text response or other observed activity cannot be
+                # replayed merely because the same transcript is available.
+                if (provider_activity.event_count
+                        or last_error.details.get("voice_projection_no_output") is not True):
+                    replay_safe = False
             retry_kind = "provider_recovery"
             retry_reason = "eligible"
             fallback_choice: tuple[int, ProviderProfile] | None = None
@@ -920,6 +957,7 @@ class RuntimeInvocationMixin:
                     error=last_error,
                     retry_index=capacity_retry_count,
                     side_effects_possible=side_effects_seen,
+                    provider_activity=provider_activity,
                 )
                 if (
                     capacity_retry_decision is not None
@@ -1024,13 +1062,8 @@ class RuntimeInvocationMixin:
                         (capacity_retry_decision or {}).get("delay_s") or 0.0
                     )
                 else:
-                    retry_delay = (
-                        last_error.retry_after_s
-                        if last_error.retry_after_s is not None
-                        else min(
-                            5.0,
-                            0.25 * (2 ** min(max(0, attempt - 1), 5)),
-                        )
+                    retry_delay = self.retry_policy.delay(
+                        provider_retry_count, last_error.retry_after_s
                     )
             try:
                 self._audit(
@@ -1293,6 +1326,7 @@ class RuntimeInvocationMixin:
                 allow_tools=False,
                 allow_side_effects=False,
                 invocation_id=invocation_id,
+                provider_recovery_remaining=0,
                 retry_invariant_hash=retry_invariant_hash,
                 provider_activity_callback=self._provider_activity_callback(
                     state, tracker
@@ -1481,13 +1515,8 @@ class RuntimeInvocationMixin:
             will_retry = retry_reason == "eligible"
             retry_delay = 0.0
             if will_retry:
-                retry_delay = (
-                    current_error.retry_after_s
-                    if current_error.retry_after_s is not None
-                    else min(
-                        5.0,
-                        0.25 * (2 ** min(max(0, repair_attempt - 1), 5)),
-                    )
+                retry_delay = self.retry_policy.delay(
+                    provider_retry_count, current_error.retry_after_s
                 )
             self._audit(
                 state,

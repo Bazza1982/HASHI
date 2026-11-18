@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -152,6 +154,41 @@ def _cancel_task(runtime: Any, attribute: str) -> None:
         setattr(runtime, attribute, None)
 
 
+
+def long_batch_idle_policy() -> dict[str, Any]:
+    """Return effective idle policy, with an honest invalid-configuration flag."""
+    valid = True
+    try:
+        seconds = float(os.environ.get("HASHI_LONG_BATCH_IDLE_SECONDS", "300"))
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("invalid idle duration")
+    except (TypeError, ValueError):
+        seconds, valid = 300.0, False
+    action = str(os.environ.get("HASHI_LONG_BATCH_IDLE_ACTION", "remind")).strip().casefold()
+    if action not in {"remind", "submit"}:
+        action, valid = "remind", False
+    if not valid:
+        action = "remind"
+    return {"idle_seconds": seconds, "idle_action": action, "configuration_valid": valid}
+
+
+def _refresh_idle_timeout(runtime: Any) -> None:
+    if not getattr(runtime, "_long_idle_timeout_enabled", False) or not is_collecting(runtime):
+        return
+    _cancel_task(runtime, "_long_buffer_timeout_task")
+    generation = int(getattr(runtime, "_long_idle_generation", 0)) + 1
+    runtime._long_idle_generation = generation
+    seconds = long_batch_idle_policy()["idle_seconds"]
+    if seconds == 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    runtime._long_buffer_timeout_task = loop.create_task(
+        long_buffer_timeout(runtime, batch_id=str(runtime._long_batch_id), generation=generation)
+    )
+
 def begin_batch(runtime: Any, chat_id: int, initial_text: str = "") -> None:
     _ensure_batch_state(runtime)
     _cancel_task(runtime, "_long_finalize_task")
@@ -163,7 +200,9 @@ def begin_batch(runtime: Any, chat_id: int, initial_text: str = "") -> None:
     runtime._long_buffer_ids = []
     runtime._long_buffer_metadata = []
     runtime._long_pending_media_ids = set()
+    runtime._long_seen_telegram_updates = set()
     runtime._long_buffer_active = True
+    runtime._long_idle_timeout_enabled = False
     runtime._long_buffer_state = LONG_BATCH_OPEN
     runtime._long_buffer_chat_id = chat_id
     runtime._long_batch_id = f"long-{uuid4().hex}"
@@ -199,6 +238,24 @@ def accepts_media(runtime: Any, chat_id: int) -> bool:
     return is_batch_active(runtime, chat_id)
 
 
+def has_seen_telegram_update(runtime: Any, chat_id: int, key: str | None) -> bool:
+    seen = getattr(runtime, "_long_seen_telegram_updates", None)
+    return bool(
+        key and is_batch_active(runtime, chat_id)
+        and isinstance(seen, set) and key in seen
+    )
+
+
+def remember_telegram_update(runtime: Any, chat_id: int, key: str | None) -> None:
+    if not key or not is_batch_active(runtime, chat_id):
+        return
+    seen = getattr(runtime, "_long_seen_telegram_updates", None)
+    if not isinstance(seen, set):
+        seen = set()
+        runtime._long_seen_telegram_updates = seen
+    seen.add(key)
+
+
 def collect_text(runtime: Any, chat_id: int, text: str) -> bool:
     if not is_collecting(runtime, chat_id):
         return False
@@ -208,6 +265,7 @@ def collect_text(runtime: Any, chat_id: int, text: str) -> bool:
     runtime._long_buffer_summaries.append(_safe_excerpt(str(text or "")))
     runtime._long_buffer_ids.append(None)
     runtime._long_buffer_metadata.append(None)
+    _refresh_idle_timeout(runtime)
     return True
 
 
@@ -273,6 +331,7 @@ def reserve_media(
     runtime._long_buffer_ids.append(item_id)
     runtime._long_buffer_metadata.append(receipt)
     runtime._long_pending_media_ids.add(item_id)
+    _refresh_idle_timeout(runtime)
     # A media handler may begin after /end because Telegram delivered an album
     # as several updates. Cancel the quiet timer while this download is pending.
     if getattr(runtime, "_long_buffer_state", LONG_BATCH_IDLE) == LONG_BATCH_CLOSING:
@@ -321,6 +380,7 @@ def complete_media(
             receipt["integrity"] = "unavailable"
     runtime._long_buffer_metadata[index] = receipt
     runtime._long_pending_media_ids.discard(reservation_id)
+    _refresh_idle_timeout(runtime)
     logger = getattr(runtime, "logger", None)
     if logger is not None:
         logger.info(
@@ -373,22 +433,41 @@ def register_voice_confirmation(
     prompt: str,
     transcript: str,
     summary: str,
+    reservation_id: str | None = None,
 ) -> str | None:
-    if not is_collecting(runtime, chat_id):
-        return None
+    if reservation_id:
+        if not is_batch_active(runtime, chat_id):
+            return None
+        try:
+            index = runtime._long_buffer_ids.index(reservation_id)
+        except ValueError:
+            return None
+        if reservation_id not in runtime._long_pending_media_ids:
+            return None
+    else:
+        if not is_collecting(runtime, chat_id):
+            return None
+        index = None
     _ensure_batch_state(runtime)
     pending_voice = getattr(runtime, "_pending_voice", None)
     if not isinstance(pending_voice, dict):
         pending_voice = {}
         runtime._pending_voice = pending_voice
     pending_key = f"long-{uuid4().hex[:12]}"
-    # Reserve the original Telegram ordering position without exposing the
-    # transcript to the eventual model request before SafeVoice approval.
-    runtime._long_buffer.append("")
-    runtime._long_buffer_kinds.append("pending_voice")
-    runtime._long_buffer_summaries.append(str(summary or "").strip())
-    runtime._long_buffer_ids.append(pending_key)
-    runtime._long_buffer_metadata.append(None)
+    # Keep the original receipt position while its transcript awaits approval.
+    if index is None:
+        runtime._long_buffer.append("")
+        runtime._long_buffer_kinds.append("pending_voice")
+        runtime._long_buffer_summaries.append(str(summary or "").strip())
+        runtime._long_buffer_ids.append(pending_key)
+        runtime._long_buffer_metadata.append(None)
+    else:
+        runtime._long_buffer[index] = ""
+        runtime._long_buffer_kinds[index] = "pending_voice"
+        runtime._long_buffer_summaries[index] = str(summary or "").strip()
+        runtime._long_buffer_ids[index] = pending_key
+        runtime._long_buffer_metadata[index] = None
+        runtime._long_pending_media_ids.discard(reservation_id)
     pending_voice[pending_key] = {
         "prompt": prompt,
         "transcript": transcript,
@@ -397,6 +476,8 @@ def register_voice_confirmation(
         "long_batch": True,
     }
     runtime._long_pending_voice_keys.add(pending_key)
+    _refresh_idle_timeout(runtime)
+    _schedule_closing_finalize(runtime)
     return pending_key
 
 
@@ -426,6 +507,7 @@ def resolve_voice_confirmation(runtime: Any, pending_key: str, pending: dict[str
     runtime._long_buffer_summaries[index] = str(pending.get("summary") or "Voice message")
     runtime._long_buffer_ids[index] = None
     runtime._long_buffer_metadata[index] = None
+    _refresh_idle_timeout(runtime)
     return True
 
 
@@ -446,6 +528,7 @@ def discard_voice_confirmation(runtime: Any, pending_key: str) -> None:
     _ensure_batch_state(runtime)
     runtime._long_pending_voice_keys.discard(pending_key)
     _remove_pending_placeholder(runtime, pending_key)
+    _refresh_idle_timeout(runtime)
 
 
 def pending_voice_count(runtime: Any) -> int:
@@ -481,7 +564,9 @@ def discard_batch(runtime: Any) -> dict[str, int | bool]:
     runtime._long_buffer_ids = []
     runtime._long_buffer_metadata = []
     runtime._long_pending_media_ids = set()
+    runtime._long_seen_telegram_updates = set()
     runtime._long_buffer_active = False
+    runtime._long_idle_timeout_enabled = False
     runtime._long_buffer_state = LONG_BATCH_IDLE
     runtime._long_buffer_chat_id = None
     runtime._long_batch_id = None
@@ -612,7 +697,9 @@ def consume_batch(runtime: Any, fallback_chat_id: int) -> LongBatchSubmission | 
     runtime._long_buffer_ids = []
     runtime._long_buffer_metadata = []
     runtime._long_pending_media_ids = set()
+    runtime._long_seen_telegram_updates = set()
     runtime._long_buffer_active = False
+    runtime._long_idle_timeout_enabled = False
     runtime._long_buffer_state = LONG_BATCH_IDLE
     runtime._long_buffer_chat_id = None
     runtime._long_batch_id = None
@@ -677,29 +764,29 @@ async def cmd_long(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     chat_id = update.effective_chat.id
+    args = [str(item) for item in (getattr(context, "args", None) or [])]
+    action = args[0].casefold() if len(args) == 1 else ""
     if is_batch_active(runtime):
-        if is_batch_active(runtime, chat_id):
-            if getattr(runtime, "_long_buffer_state", LONG_BATCH_IDLE) == LONG_BATCH_CLOSING:
-                await runtime._reply_text(
-                    update,
-                    ui_language.tr("long.previous_finalizing"),
-                )
-            else:
-                await runtime._reply_text(update, ui_language.tr("long.already_here"))
-        else:
+        if not is_batch_active(runtime, chat_id):
             await runtime._reply_text(update, ui_language.tr("long.active_elsewhere"))
+        elif getattr(runtime, "_long_buffer_state", LONG_BATCH_IDLE) == LONG_BATCH_CLOSING:
+            await runtime._reply_text(update, ui_language.tr("long.previous_finalizing"))
+        elif action == "discard":
+            discard_batch(runtime)
+            await runtime._reply_text(update, ui_language.tr("long.draft_discarded"))
+        elif action == "submit":
+            await cmd_end(runtime, update, context)
+        elif action == "continue":
+            _refresh_idle_timeout(runtime)
+            await runtime._reply_text(update, ui_language.tr("long.draft_continued"))
+        else:
+            await runtime._reply_text(update, ui_language.tr("long.already_here"))
         return
 
-    args_text = " ".join(context.args).strip() if context.args else ""
-    begin_batch(runtime, chat_id, args_text)
-    timeout_task = getattr(runtime, "_long_buffer_timeout_task", None)
-    if timeout_task and not timeout_task.done():
-        timeout_task.cancel()
-    runtime._long_buffer_timeout_task = asyncio.create_task(long_buffer_timeout(runtime))
-    await runtime._reply_text(
-        update,
-        ui_language.tr("long.started"),
-    )
+    begin_batch(runtime, chat_id, " ".join(args).strip())
+    runtime._long_idle_timeout_enabled = True
+    _refresh_idle_timeout(runtime)
+    await runtime._reply_text(update, ui_language.tr("long.started"))
 
 
 def _quiet_seconds(runtime: Any) -> float:
@@ -764,6 +851,8 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
     reason = str(getattr(runtime, "_long_finalize_reason", "user") or "user")
     update = getattr(runtime, "_long_finalize_update", None)
     discarded_voice = int(getattr(runtime, "_long_finalize_discarded_voice", 0) or 0)
+    discarded_voice += discard_pending_voice_confirmations(runtime)
+    runtime._long_finalize_discarded_voice = discarded_voice
     phase = "validate"
     try:
         submission = consume_batch(runtime, int(chat_id))
@@ -803,7 +892,9 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
                 purpose="long-timeout",
             )
         elif update is not None:
-            await runtime._reply_text(update, ui_language.tr("long.empty"))
+            suffix = (ui_language.tr("long.excluded_voice", count=discarded_voice)
+                      if discarded_voice else "")
+            await runtime._reply_text(update, ui_language.tr("long.empty") + suffix)
         return
 
     _print_user_message(runtime.name, submission.prompt)
@@ -849,7 +940,9 @@ async def _finish_batch(runtime: Any, batch_id: str) -> None:
             ui_language.tr("long.timeout_submitted", details=timeout_details, suffix=suffix),
             purpose="long-timeout", reference=f"long-timeout-{uuid4().hex[:8]}")
     elif update is not None:
-        await _batch_notice(runtime, submission.chat_id, update, details, purpose="long-submitted")
+        suffix = (ui_language.tr("long.excluded_voice", count=discarded_voice)
+                  if discarded_voice else "")
+        await _batch_notice(runtime, submission.chat_id, update, details + suffix, purpose="long-submitted")
 
 
 
@@ -876,23 +969,18 @@ async def cmd_end(runtime: Any, update: Any, context: Any) -> None:
     if getattr(runtime, "_long_buffer_state", LONG_BATCH_IDLE) == LONG_BATCH_CLOSING:
         await runtime._reply_text(update, ui_language.tr("long.finalizing"))
         return
-    unconfirmed = pending_voice_count(runtime)
-    if unconfirmed:
-        await runtime._reply_text(
-            update,
-            ui_language.tr("long.voice_pending", count=unconfirmed),
-        )
-        return
-
+    unconfirmed = discard_pending_voice_confirmations(runtime)
     _cancel_task(runtime, "_long_buffer_timeout_task")
+    runtime._long_idle_timeout_enabled = False
     runtime._long_buffer_state = LONG_BATCH_CLOSING
     runtime._long_finalize_update = update
     runtime._long_finalize_reason = "user"
-    runtime._long_finalize_discarded_voice = 0
+    runtime._long_finalize_discarded_voice = unconfirmed
     batch_id = str(runtime._long_batch_id or "")
     await runtime._reply_text(
         update,
-        ui_language.tr("long.finishing"),
+        ui_language.tr("long.finishing")
+        + (ui_language.tr("long.excluded_voice", count=unconfirmed) if unconfirmed else ""),
     )
     if _quiet_seconds(runtime) <= 0 and not runtime._long_pending_media_ids:
         await _finish_batch(runtime, batch_id)
@@ -900,25 +988,42 @@ async def cmd_end(runtime: Any, update: Any, context: Any) -> None:
         _schedule_closing_finalize(runtime)
 
 
-async def long_buffer_timeout(runtime: Any) -> None:
+async def long_buffer_timeout(
+    runtime: Any, *, batch_id: str | None = None, generation: int | None = None
+) -> None:
+    expected_batch = batch_id or str(getattr(runtime, "_long_batch_id", "") or "")
+    seconds = long_batch_idle_policy()["idle_seconds"]
+    if seconds == 0:
+        return
     try:
-        await asyncio.sleep(300)
+        await asyncio.sleep(seconds)
     except asyncio.CancelledError:
         return
-    if not is_collecting(runtime):
+    if (not is_collecting(runtime)
+            or str(getattr(runtime, "_long_batch_id", "") or "") != expected_batch
+            or (generation is not None
+                and generation != getattr(runtime, "_long_idle_generation", None))):
         return
 
+    if getattr(runtime, "_long_buffer_timeout_task", None) is asyncio.current_task():
+        runtime._long_buffer_timeout_task = None
     chat_id = getattr(runtime, "_long_buffer_chat_id", None)
-    discarded_voice = discard_pending_voice_confirmations(runtime)
-    runtime._long_buffer_timeout_task = None
     if chat_id is None:
         return
+    if long_batch_idle_policy()["idle_action"] == "remind":
+        await _batch_notice(
+            runtime, int(chat_id), None, ui_language.tr("long.idle_draft_retained"),
+            purpose="long-idle", reference=f"long-idle-{uuid4().hex[:8]}",
+        )
+        return
+
+    discarded_voice = discard_pending_voice_confirmations(runtime)
+    runtime._long_idle_timeout_enabled = False
     runtime._long_buffer_state = LONG_BATCH_CLOSING
     runtime._long_finalize_update = None
     runtime._long_finalize_reason = "timeout"
     runtime._long_finalize_discarded_voice = discarded_voice
-    batch_id = str(runtime._long_batch_id or "")
     if runtime._long_pending_media_ids:
         _schedule_closing_finalize(runtime)
         return
-    await _finish_batch(runtime, batch_id)
+    await _finish_batch(runtime, expected_batch)

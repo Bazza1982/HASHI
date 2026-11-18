@@ -8,18 +8,45 @@ display text cannot create false negatives. No search text is persisted.
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 
 MAX_SCAN_ROWS = 4000
 MAX_SCAN_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_QUERY_CHARACTERS = 16 * 1024
+MAX_CONFIGURABLE_QUERY_CHARACTERS = 1024 * 1024
+
+
+def history_search_query_limit():
+    raw = os.environ.get("HASHI_HISTORY_SEARCH_MAX_QUERY_CHARS")
+    if raw is None:
+        return DEFAULT_MAX_QUERY_CHARACTERS
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("HASHI_HISTORY_SEARCH_MAX_QUERY_CHARS must be a positive integer") from None
+    if not 1 <= limit <= MAX_CONFIGURABLE_QUERY_CHARACTERS:
+        raise ValueError("HASHI_HISTORY_SEARCH_MAX_QUERY_CHARS is outside the supported range")
+    return limit
+
+
+def history_search_limits():
+    limit = history_search_query_limit()
+    # A JSON-escaped non-BMP character can require twelve wire bytes. Keep
+    # room for the opaque cursor and envelope without truncating the query.
+    return {"max_query_characters": limit, "max_request_bytes": limit * 12 + 4096,
+            "max_scan_rows": MAX_SCAN_ROWS, "max_scan_bytes": MAX_SCAN_BYTES}
 
 
 def literal_candidate(query):
-    if (not isinstance(query, str) or not query or len(query) > 256
+    if (not isinstance(query, str) or not query
             or any(ord(char) < 9 or 10 < ord(char) < 13 or 13 < ord(char) < 32
-                   or ord(char) == 127 for char in query)):
+                   or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in query)):
         raise ValueError("history search query is invalid")
+    limit = history_search_query_limit()
+    if len(query) > limit:
+        raise ValueError(f"history search query exceeds configured limit of {limit} characters")
     pattern = re.compile(re.escape(query), re.IGNORECASE)
     # New Unicode assignments can differ across Python/renderer versions.
     # Unknown characters are retained for the renderer, never ruled out here.

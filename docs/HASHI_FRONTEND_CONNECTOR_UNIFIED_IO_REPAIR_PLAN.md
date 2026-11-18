@@ -919,7 +919,7 @@ Workbench 可按 Phase 2、3、7 调整 server proxy、Session client、event me
 - TUI 的本地备用地址只对可证明尚未连接的写请求尝试切换；写请求超时或连接中断且结果不明时返回 unknown，不向另一地址或旧接口重放，以防跨实例误投和重复执行。
 - TUI 新入口单独在 capability 中声明 `tui_session_ingress`；客户端不得从笼统的 v2 schema 版本推断该端点存在。Remote proxy 的支持仍由目标代理操作结果确认，未把另一常驻服务的状态冒充成本服务能力。
 - TUI 单附件加文字在 `attachment_runs` 明确能力存在时，经目标 Session 的 stage/upload/commit + Run 接纳；本地路径固定在已解析 Session 的地址，跨实例路径通过经认证的 Remote 代理在目标实例串行完成相同四步。目标代理在 stage 前再核对 Agent、实例和 primary Session；任何步骤回执不明均停止，不切换地址或重放。旧实例及旧代理在明确拒绝新操作且尚未尝试 canonical 写入时继续使用兼容入口。
-- `@workzone` 引用在单独声明 `workzone_attachment_runs` 能力时，也经 owner-scoped Session 接纳：只由目标 Agent 已启用的 Workzone 解析目标相对路径，将读取的 bytes 提交为受管附件，再绑定一个 Run；跨实例仅传相对引用，不从来源机猜路径。过渡期旧实例和旧代理仍能在明确未接纳 canonical 操作时回退；目标代理需要再次核对 Session/Agent/实例，结果不明不重放。该切片尚未现场采用，也不等于多附件 MediaGroup 完成。
+- `@workzone` references are resolved on the target Agent only. An enabled Workzone may be addressed with a target-relative reference or an explicit absolute path inside that root. The target validates its Session/Agent/instance, pins the file through the existing no-symlink reader, checks its root and file identity, and applies the configured Session file budget. Uncertain operations are not replayed. Canonical staging scans and copies ordinary files and supported audio in bounded chunks while retaining the open file identity. The legacy chat path still buffers bytes; UNC/WSL and deployed adoption remain to be verified.
 - Remote TUI proxy 对 mutating 操作先核对目标本地 Workbench 实例身份；无论 peer 线路还是目标本地地址，结果不明时均停止候选线路重试并返回 unknown。畸形附件大小、跨平台路径分隔符、控制字符和特殊文件名在入口拒绝。此处仍不等于 Remote/Exchange 全链路 typed relay 完成。
 - Workbench voice audio 通过 Session attachment stage/upload/commit + 一个 Session Run 接纳，保留 `voice_message` 语义及服务端冻结的 Telegram mirror policy。Safe Voice transcript 从该 Run 的 durable event 读取；确认/丢弃走 Session API typed decision，要求原始 Run 与当前 Session context generation 一致。Attachment stage 支持 digest-bound idempotency，同字节上传和 commit 可安全重放；过期附件不可复活。WorkBench 在目标未声明 stage 幂等能力时 fail closed。该切片已离线验证，未采用到运行 Worker。
 
@@ -984,3 +984,29 @@ Telegram 原生 slash/callback 的持久去重切片已完成离线验证，但�
 - M1/M2 源码范围现已收敛；干净提交后的 Function generation/Core gate 仍待
   最终记录。HASHI1 Worker 尚未热采用，真实前端及回滚验收未执行，M3 保持
   未完成。
+
+
+## TUI ordinary empty files
+
+An explicitly supplied zero-byte ordinary file is valid when its declared size
+and SHA-256 match. The direct and Remote TUI paths require explicit encoded
+content, preserve target Session/instance checks, and reject missing content or
+incorrect integrity metadata. Media-specific decoding may impose its own format
+requirements. The remaining TUI per-hop size limits still require consolidation
+with the selected Session attachment capability.
+
+
+## Session upload transport capacity
+
+The authenticated Session attachment upload resolves its owner and staged
+metadata before reading. Raw and multipart ordinary-file content is received
+in bounded chunks into a temporary file and copied in bounded chunks to the
+managed asset, with exact staged size and SHA-256 checked before publication.
+The selected Session attachment budget is enforced and an exceeded budget
+returns HTTP 413 with its actual bound; the generic aiohttp request body
+setting is not an additional ceiling for this streamed endpoint. Cancellation
+does not resend a write, and temporary files close after the in-flight local
+copy settles. Supported audio follows the same selected Session byte budget and streams into
+native-audio storage with format and digest checks. Audio retrieval and the
+legacy chat path may still buffer bytes; TUI, Remote and other frontend limits,
+actual decoder capabilities and deployed adoption need further alignment.

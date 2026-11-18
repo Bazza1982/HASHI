@@ -48,7 +48,8 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
             return False
 
         async def enqueue_request(
-            self, chat_id, prompt, source, summary, *, reply_to_message_id=None
+            self, chat_id, prompt, source, summary, *, reply_to_message_id=None,
+            idempotency_key=None, request_metadata=None,
         ):
             accepted.update(
                 chat_id=chat_id,
@@ -56,6 +57,8 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
                 source=source,
                 summary=summary,
                 reply_to_message_id=reply_to_message_id,
+                idempotency_key=idempotency_key,
+                request_metadata=request_metadata,
                 telegram_requested=telegram_delivery_for_admission(
                     source=source,
                     request_metadata=None,
@@ -107,6 +110,8 @@ async def test_native_telegram_text_message_enters_admission_as_telegram(
     assert accepted["chat_id"] == 99
     assert accepted["prompt"] == "hello from Telegram"
     assert accepted["reply_to_message_id"] is None
+    assert accepted["idempotency_key"] == "telegram-ingress:tg:testing:99:123"
+    assert accepted["request_metadata"]["_frontend_message_age"]["reason"] == "fresh"
 
 
 def test_frontend_delivery_policy_is_connector_neutral_client_bound_and_fail_visible():

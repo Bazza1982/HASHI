@@ -64,8 +64,16 @@ to LF. Mixed target line endings are never normalized. Native rejections remain
 authoritative and do not fall through to another adapter. Context mismatches
 are rejected without writing the target.
 
+The managed held-file adapter accepts one exact unified diff and preserves each
+unchanged line's LF, CRLF or CR ending. Replacements use the removed line's
+ending when present; insertions use a nearby ending. The existing managed size and one-file
+limits still apply.
+
 ### process_list
-List running processes with PID, name, CPU%, MEM%.
+List running processes with PID, name, CPU%, MEM%. If runtime ancestry cannot
+be read, the listing remains available and states that only the current process
+and its direct parent could be marked as protected. This does not authorize
+termination of other unverified processes.
 | Param | Required | Description |
 |-------|----------|-------------|
 | `filter` | No | Filter by process name substring |
@@ -101,7 +109,30 @@ Make an HTTP request with full control.
 | `method` | No | GET/POST/PUT/DELETE/PATCH (default GET) |
 | `headers` | No | Object of HTTP headers |
 | `body` | No | Request body string |
+| `body_file` | No | Managed Runs: stream the selected local file as the request body instead of `body` |
+| `response_file` | No | Managed Runs: stream the complete response to a new authorized local file |
 | `timeout` | No | Timeout in seconds |
+
+In a supported managed-permission Run, `follow_redirects: true` follows safe
+same-origin reads and may continue a 303 response as a bodyless GET under the
+same authorization decision; it never resends a write or sends a credential
+to another origin. `max_redirects` selects the hop budget (default 20).
+Opt-in `session_cookies: true` retains cookies only within this request,
+and removes their values from the result. Different origins, loops, exhausted
+budgets and unsupported method changes return the received response for review.
+These options apply to the managed HTTP executor.
+
+For a large upload in a supported managed Run, `body_file` streams an exact
+authorized local file in bounded pages. The same operation must have the
+existing file-read and destination-upload permissions. The file is held against
+replacement and writes while it is sent. Do not combine `body_file` with an
+inline `body`; an inline request still has a transport-size limit.
+
+Managed responses normally return a bounded preview and indicate `truncated`. With `response_file`, a supported managed Run streams the whole response to the selected new file using the existing file-create/write permission. The file is published only after the response completes. Known credential and cookie values are removed, and `body_redacted` reports that change. `body_saved` reports whether a file was published. For byte-preserving downloads, use `response_encoding: "base64"` and check that `body_redacted` is false. A partial HTTP response is still a partial resource even when its received bytes are complete.
+
+Current limitations: `response_file` does not replace an existing file or stream a credential policy's selected JSON fields. A compressed binary response containing known secrets is withheld if the server ignores the identity-encoding request. An abrupt process or machine crash can leave an unpublished temporary file in the selected directory. The installed Windows managed-service end-to-end path still requires qualification.
+
+For a server that supports byte ranges, `response_encoding: "base64"` and `Range`/`If-Range` can retrieve bounded parts; verify HTTP 206, validators and `body_redacted` before joining them.
 
 ## Communication Tools
 

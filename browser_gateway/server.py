@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import math
+import os
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -14,6 +18,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from browser_gateway.audit import OLLAuditLogger
 from browser_gateway.store import BrowserGatewayStore
+from browser_gateway.upload_sessions import UploadBusy, UploadSessions
 from orchestrator.pathing import resolve_instance_id
 from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_URL
 
@@ -21,20 +26,43 @@ logger = logging.getLogger("hashi.oll_gateway")
 
 
 class RateLimiter:
-    def __init__(self, limit: int = 30, window_s: int = 60):
+    """Optional per-device rolling budget; zero means no selected rate limit."""
+
+    def __init__(self, limit: int = 0, window_s: int = 60, *, per_device=None, clock=None):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("rate limit must be a non-negative integer")
+        if isinstance(window_s, bool) or not isinstance(window_s, int) or window_s <= 0:
+            raise ValueError("rate window must be a positive integer")
         self.limit = limit
         self.window_s = window_s
-        self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._clock = clock or time.monotonic
+        self._per_device = dict(per_device or {})
+        if any(not isinstance(key, str) or not key.strip()
+               or isinstance(value, bool) or not isinstance(value, int) or value < 0
+               for key, value in self._per_device.items()):
+            raise ValueError("per-device rate limits must be non-negative integers")
+        self._events: dict[str, deque[float]] = {}
 
-    def allow(self, key: str) -> bool:
-        now = time.time()
-        bucket = self._events[key]
-        while bucket and now - bucket[0] > self.window_s:
-            bucket.popleft()
-        if len(bucket) >= self.limit:
-            return False
+    def limit_for(self, key: str) -> int:
+        return self._per_device.get(key, self.limit)
+
+    def admit(self, key: str) -> int | None:
+        """Return retry seconds on denial, or None after admission."""
+        limit = self.limit_for(key)
+        if limit == 0:
+            return None
+        now = self._clock()
+        # Drop expired buckets so retained accounting scales with active devices.
+        for device, events in list(self._events.items()):
+            while events and now - events[0] >= self.window_s:
+                events.popleft()
+            if not events:
+                self._events.pop(device, None)
+        bucket = self._events.setdefault(key, deque())
+        if len(bucket) >= limit:
+            return max(1, math.ceil(self.window_s - (now - bucket[0])))
         bucket.append(now)
-        return True
+        return None
 
 
 class EventBroker:
@@ -70,6 +98,12 @@ class BrowserGatewayServer:
         state_db: Path,
         audit_log: Path,
         public_base_url: str = "",
+        chat_requests_per_minute: int = 0,
+        upload_requests_per_minute: int = 0,
+        device_rate_limits: dict[str, dict[str, int]] | None = None,
+        json_body_bytes: int = 32 * 1024 * 1024,
+        upload_chunk_bytes: int = 4 * 1024 * 1024,
+        upload_max_bytes: int = 0,
     ):
         self.project_root = project_root
         self.instance_id = resolve_instance_id(project_root / "agents.json").upper()
@@ -79,13 +113,37 @@ class BrowserGatewayServer:
         self.public_base_url = public_base_url.strip()
         self.store = BrowserGatewayStore(state_db)
         self.audit = OLLAuditLogger(audit_log)
-        self.rate_limiter = RateLimiter()
+        overrides = {} if device_rate_limits is None else device_rate_limits
+        if not isinstance(overrides, dict) or any(
+            not isinstance(key, str) or not isinstance(value, dict)
+            or bool(set(value) - {"chat", "upload"})
+            for key, value in overrides.items()
+        ):
+            raise ValueError("device_rate_limits must map device ids to chat/upload limits")
+        self.chat_rate_limiter = RateLimiter(
+            chat_requests_per_minute,
+            per_device={key: value["chat"] for key, value in overrides.items() if "chat" in value},
+        )
+        self.upload_rate_limiter = RateLimiter(
+            upload_requests_per_minute,
+            per_device={key: value["upload"] for key, value in overrides.items() if "upload" in value},
+        )
         self.broker = EventBroker()
         self.runner = None
         self.site = None
         self.upload_root = self.project_root / "state" / "oll_uploads"
         self.upload_root.mkdir(parents=True, exist_ok=True)
-        self.app = web.Application(client_max_size=32 * 1024 * 1024)
+        for name, value, minimum in (
+            ("json_body_bytes", json_body_bytes, 1),
+            ("upload_chunk_bytes", upload_chunk_bytes, 1),
+            ("upload_max_bytes", upload_max_bytes, 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        self.upload_chunk_bytes = upload_chunk_bytes
+        self.upload_max_bytes = upload_max_bytes
+        self.upload_sessions = UploadSessions(self.store, self.project_root)
+        self.app = web.Application(client_max_size=json_body_bytes)
         self.app.router.add_get("/browser/health", self.handle_health)
         self.app.router.add_post("/browser/pair/request", self.handle_pair_request)
         self.app.router.add_post("/browser/pair/complete", self.handle_pair_complete)
@@ -99,6 +157,11 @@ class BrowserGatewayServer:
         self.app.router.add_get("/browser/thread/{thread_id}", self.handle_thread_get)
         self.app.router.add_get("/browser/thread/{thread_id}/attachments", self.handle_thread_attachments)
         self.app.router.add_post("/browser/file/upload", self.handle_file_upload)
+        self.app.router.add_post("/browser/file/upload/start", self.handle_upload_start)
+        self.app.router.add_get("/browser/file/upload/{upload_id}", self.handle_upload_status)
+        self.app.router.add_put("/browser/file/upload/{upload_id}", self.handle_upload_chunk)
+        self.app.router.add_delete("/browser/file/upload/{upload_id}", self.handle_upload_cancel)
+        self.app.router.add_post("/browser/file/upload/{upload_id}/finish", self.handle_upload_finish)
         self.app.router.add_post("/browser/chat/send", self.handle_chat_send)
         self.app.router.add_get("/browser/chat/stream/{thread_id}", self.handle_chat_stream)
         self.app.router.add_get("/browser/device/status", self.handle_device_status)
@@ -132,6 +195,16 @@ class BrowserGatewayServer:
         if device is None:
             return self._json({"ok": False, "error": "unauthorized"}, status=401)
         return device
+
+    def _rate_limit_response(self, limiter: RateLimiter, device_id: str) -> web.Response | None:
+        wait = limiter.admit(device_id)
+        if wait is None:
+            return None
+        return web.json_response(
+            {"ok": False, "error": "rate limit exceeded", "retry_after_seconds": wait},
+            status=429,
+            headers={"Retry-After": str(wait)},
+        )
 
     async def _fetch_workbench_agents(self) -> list[dict[str, Any]]:
         async with ClientSession() as session:
@@ -310,13 +383,247 @@ class BrowserGatewayServer:
         attachments = self.store.list_attachments(thread_id, device["device_id"])
         return self._json({"ok": True, "attachments": attachments})
 
+    async def handle_upload_start(self, request: web.Request) -> web.Response:
+        device = await self._require_device(request)
+        if isinstance(device, web.Response):
+            return device
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return self._json({"ok": False, "error": "upload metadata must be an object"}, status=400)
+        thread_id = str(payload.get("thread_id") or "").strip()
+        filename = str(payload.get("filename") or "").strip()
+        digest = str(payload.get("ciphertext_sha256") or "").strip().lower()
+        size = payload.get("ciphertext_bytes")
+        plaintext_size = payload.get("plaintext_bytes", 0)
+        encryption = payload.get("encryption", {})
+        notify = payload.get("notify_agent", True)
+        if (not thread_id or not filename or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or isinstance(size, bool) or not isinstance(size, int) or not 0 <= size < 2**63
+                or isinstance(plaintext_size, bool) or not isinstance(plaintext_size, int)
+                or not 0 <= plaintext_size < 2**63 or not isinstance(encryption, dict)
+                or not isinstance(notify, bool)):
+            return self._json({"ok": False, "error": "invalid upload metadata"}, status=400)
+        if self.upload_max_bytes and size > self.upload_max_bytes:
+            return self._json({"ok": False, "error": "selected upload limit exceeded",
+                               "upload_max_bytes": self.upload_max_bytes}, status=413)
+        if self.store.get_thread(thread_id, device["device_id"]) is None:
+            return self._json({"ok": False, "error": "thread not found"}, status=404)
+        rate_response = self._rate_limit_response(self.upload_rate_limiter, device["device_id"])
+        if rate_response is not None:
+            return rate_response
+        metadata = {
+            "filename": filename,
+            "mime_type": str(payload.get("mime_type") or "application/octet-stream"),
+            "plaintext_bytes": plaintext_size,
+            "encryption": encryption,
+            "note": str(payload.get("note") or ""),
+            "notify_agent": notify,
+        }
+        row = self.upload_sessions.create(
+            device_id=device["device_id"], thread_id=thread_id, metadata=metadata,
+            ciphertext_bytes=size, ciphertext_sha256=digest,
+        )
+        return self._json({"ok": True, "upload_id": row["upload_id"],
+                           "offset": 0, "chunk_bytes": self.upload_chunk_bytes})
+
+    async def _get_upload(self, request: web.Request):
+        device = await self._require_device(request)
+        if isinstance(device, web.Response):
+            return device, None
+        row = self.upload_sessions.get(request.match_info["upload_id"], device["device_id"])
+        if row is None or self.store.get_thread(row["thread_id"], device["device_id"]) is None:
+            return self._json({"ok": False, "error": "upload not found"}, status=404), None
+        return device, row
+
+    async def handle_upload_status(self, request: web.Request) -> web.Response:
+        device, row = await self._get_upload(request)
+        if row is None:
+            return device
+        return self._json({
+            "ok": True, "upload_id": row["upload_id"], "status": row["status"],
+            "offset": row["received_bytes"], "ciphertext_bytes": row["ciphertext_bytes"],
+            "chunk_bytes": self.upload_chunk_bytes,
+            "notification_status": (
+                "sending_or_unknown" if row["notification_status"] == "sending"
+                else row["notification_status"]
+            ),
+            "attachment_id": row["attachment_id"] if row["status"] == "completed" else None,
+        })
+
+    async def handle_upload_chunk(self, request: web.Request) -> web.Response:
+        device, row = await self._get_upload(request)
+        if row is None:
+            return device
+        try:
+            offset = int(request.headers.get("Upload-Offset", ""))
+        except ValueError:
+            return self._json({"ok": False, "error": "valid Upload-Offset is required"}, status=400)
+        size = request.content_length
+        if size is None or size <= 0:
+            return self._json({"ok": False, "error": "positive Content-Length is required"}, status=400)
+        if size > self.upload_chunk_bytes:
+            return self._json({"ok": False, "error": "chunk exceeds selected limit",
+                               "chunk_bytes": self.upload_chunk_bytes}, status=413)
+        try:
+            with self.upload_sessions.exclusive(row):
+                row = self.upload_sessions.get(row["upload_id"], device["device_id"])
+                if row is None:
+                    return self._json({"ok": False, "error": "upload not found"}, status=404)
+                if row["status"] != "open" or self.upload_sessions.final_path(row).exists():
+                    return self._json({"ok": False, "error": "upload is not open for chunks"}, status=409)
+                if offset != row["received_bytes"] or offset + size > row["ciphertext_bytes"]:
+                    return self._json({"ok": False, "error": "upload offset mismatch",
+                                       "offset": row["received_bytes"]}, status=409)
+                path = self.upload_sessions.partial_path(row)
+                if not path.is_file() or path.stat().st_size < offset:
+                    return self._json({"ok": False, "error": "staged upload is incomplete"}, status=409)
+                with path.open("r+b") as stream:
+                    stream.truncate(offset)
+                    stream.seek(offset)
+                    written = 0
+                    try:
+                        async for chunk in request.content.iter_chunked(64 * 1024):
+                            written += len(chunk)
+                            if written > size:
+                                raise ValueError("chunk exceeded declared length")
+                            stream.write(chunk)
+                        if written != size:
+                            raise ValueError("chunk was incomplete")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                        if not self.upload_sessions.advance(row, offset + written):
+                            raise ValueError("upload offset changed")
+                    except BaseException:
+                        current = self.upload_sessions.get(row["upload_id"], device["device_id"])
+                        if current is not None and current["received_bytes"] == offset:
+                            stream.truncate(offset)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        raise
+                return self._json({"ok": True, "upload_id": row["upload_id"],
+                                   "offset": offset + written})
+        except UploadBusy:
+            return self._json({"ok": False, "error": "upload is busy; retry"}, status=409)
+        except ValueError as exc:
+            return self._json({"ok": False, "error": str(exc)}, status=409)
+
+    async def handle_upload_cancel(self, request: web.Request) -> web.Response:
+        device, row = await self._get_upload(request)
+        if row is None:
+            return device
+        try:
+            with self.upload_sessions.exclusive(row):
+                if not self.upload_sessions.cancel(row):
+                    return self._json({"ok": False, "error": "completed upload cannot be cancelled"}, status=409)
+        except UploadBusy:
+            return self._json({"ok": False, "error": "upload is busy; retry"}, status=409)
+        return self._json({"ok": True, "cancelled": True})
+
+    @staticmethod
+    def _upload_digest(path: Path) -> str:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    async def handle_upload_finish(self, request: web.Request) -> web.Response:
+        device, row = await self._get_upload(request)
+        if row is None:
+            return device
+        try:
+            with self.upload_sessions.exclusive(row):
+                row = self.upload_sessions.get(row["upload_id"], device["device_id"])
+                if row is None:
+                    return self._json({"ok": False, "error": "upload not found"}, status=404)
+                final_path = self.upload_sessions.final_path(row)
+                partial_path = self.upload_sessions.partial_path(row)
+                if row["received_bytes"] != row["ciphertext_bytes"]:
+                    return self._json({"ok": False, "error": "upload is incomplete",
+                                       "offset": row["received_bytes"]}, status=409)
+                source = final_path if final_path.is_file() else partial_path
+                if not source.is_file() or source.stat().st_size != row["ciphertext_bytes"]:
+                    return self._json({"ok": False, "error": "staged upload size mismatch"}, status=409)
+                if await asyncio.to_thread(self._upload_digest, source) != row["ciphertext_sha256"]:
+                    return self._json({"ok": False, "error": "ciphertext hash mismatch"}, status=409)
+                newly_completed = row["status"] == "open"
+                if source == partial_path:
+                    final_path.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(partial_path, final_path)
+                row = self.upload_sessions.finish(row)
+                attachment = self.store.get_attachment(row["attachment_id"], device["device_id"])
+                if attachment is None:
+                    return self._json({"ok": False, "error": "attachment record unavailable"}, status=409)
+                metadata = json.loads(row["metadata_json"])
+                attachment["encryption"] = metadata["encryption"]
+                if newly_completed:
+                    self.audit.log("file_uploaded", device_id=device["device_id"],
+                                   thread_id=row["thread_id"], attachment_id=row["attachment_id"],
+                                   ciphertext_bytes=row["ciphertext_bytes"],
+                                   plaintext_bytes=metadata["plaintext_bytes"])
+                    await self.broker.publish(row["thread_id"], {
+                        "type": "attachment_uploaded", "thread_id": row["thread_id"],
+                        "attachment": attachment,
+                    })
+                if self.upload_sessions.claim_notification(row):
+                    await self._notify_uploaded_attachment(row, attachment, metadata)
+                    row = self.upload_sessions.get(row["upload_id"], device["device_id"])
+                elif row["notification_status"] == "sending":
+                    # Acquiring the upload lock proves no prior sender still holds
+                    # this session. Its delivery result is unknown, not retried.
+                    self.upload_sessions.finish_notification(
+                        row, "unknown", {"ok": False, "error": "notification outcome unknown after interruption"}
+                    )
+                    row = self.upload_sessions.get(row["upload_id"], device["device_id"])
+                result = (json.loads(row["notification_result_json"])
+                          if row.get("notification_result_json") else None)
+                return self._json({"ok": True, "attachment": attachment,
+                                   "notification_status": row["notification_status"],
+                                   "agent_result": result})
+        except UploadBusy:
+            return self._json({"ok": False, "error": "upload is busy; retry"}, status=409)
+
+    async def _notify_uploaded_attachment(self, row: dict, attachment: dict, metadata: dict) -> None:
+        thread = self.store.get_thread(row["thread_id"], row["device_id"])
+        try:
+            if thread is None:
+                raise ValueError("thread no longer exists")
+            reference = (
+                "[Browser attachment]\n"
+                f"attachment_id: {attachment['attachment_id']}\n"
+                f"filename: {metadata['filename']}\n"
+                f"mime_type: {metadata['mime_type']}\n"
+                f"plaintext_bytes: {metadata['plaintext_bytes']}\n"
+                f"ciphertext_bytes: {row['ciphertext_bytes']}\n"
+                "encrypted: true\n"
+                f"thread_id: {row['thread_id']}\n"
+                f"note: {metadata['note'] or '(none)'}\n"
+                "The file payload is stored in the HASHI Browser Gateway attachment registry."
+            )
+            message_id = self.store.append_message(row["thread_id"], "user", "queued",
+                                                   text_preview=f"[attachment] {metadata['filename']}")
+            source = f"browser-upload:{row['device_id']}:{row['thread_id']}:{row['attachment_id']}:{message_id}"
+            result = await self._send_to_workbench(agent=thread["agent_id"], text=reference, source=source)
+            self.store.complete_message(message_id, "completed" if result.get("ok") else "failed",
+                                        text_preview=f"[attachment] {metadata['filename']}")
+            self.store.append_message(row["thread_id"], "assistant",
+                                      "completed" if result.get("ok") else "failed",
+                                      text_preview=str(result.get("text") or result.get("error") or ""),
+                                      source_tag=source)
+            self.store.set_thread_checkpoint(row["thread_id"], str(result.get("request_id") or ""))
+            await self.broker.publish(row["thread_id"], {
+                "type": "reply_ready" if result.get("ok") else "reply_error",
+                "thread_id": row["thread_id"], "request_id": result.get("request_id"),
+                "attachment_id": row["attachment_id"], "text": result.get("text"),
+                "error": result.get("error"),
+            })
+            self.upload_sessions.finish_notification(row, "sent" if result.get("ok") else "failed", result)
+        except Exception as exc:
+            self.upload_sessions.finish_notification(
+                row, "unknown", {"ok": False, "error": f"notification outcome unknown: {type(exc).__name__}"}
+            )
+
     async def handle_file_upload(self, request: web.Request) -> web.Response:
         device = await self._require_device(request)
         if isinstance(device, web.Response):
             return device
-        if not self.rate_limiter.allow(device["device_id"]):
-            return self._json({"ok": False, "error": "rate limit exceeded"}, status=429)
-
         payload = await request.json()
         thread_id = str(payload.get("thread_id") or "").strip()
         filename = str(payload.get("filename") or "").strip()
@@ -338,6 +645,10 @@ class BrowserGatewayServer:
             ciphertext = base64.b64decode(ciphertext_b64, validate=True)
         except Exception:
             return self._json({"ok": False, "error": "ciphertext_b64 is invalid"}, status=400)
+
+        rate_response = self._rate_limit_response(self.upload_rate_limiter, device["device_id"])
+        if rate_response is not None:
+            return rate_response
 
         attachment_id = f"att-{uuid4().hex[:12]}"
         date_prefix = time.strftime("%Y%m%d")
@@ -441,9 +752,6 @@ class BrowserGatewayServer:
         device = await self._require_device(request)
         if isinstance(device, web.Response):
             return device
-        if not self.rate_limiter.allow(device["device_id"]):
-            return self._json({"ok": False, "error": "rate limit exceeded"}, status=429)
-
         payload = await request.json()
         thread_id = str(payload.get("thread_id") or "").strip()
         text = str(payload.get("text") or "").strip()
@@ -453,6 +761,10 @@ class BrowserGatewayServer:
         thread = self.store.get_thread(thread_id, device["device_id"])
         if thread is None:
             return self._json({"ok": False, "error": "thread not found"}, status=404)
+
+        rate_response = self._rate_limit_response(self.chat_rate_limiter, device["device_id"])
+        if rate_response is not None:
+            return rate_response
 
         user_message_id = self.store.append_message(thread_id, "user", "queued", text_preview=text)
         source_tag = f"browser:{device['device_id']}:{thread_id}:{user_message_id}"
@@ -548,4 +860,15 @@ class BrowserGatewayServer:
         if isinstance(device, web.Response):
             return device
         data = self.store.device_status(device["device_id"])
-        return self._json({"ok": True, "device": data})
+        return self._json({
+            "ok": True,
+            "device": data,
+            "ingress_limits": {
+                "window_seconds": self.chat_rate_limiter.window_s,
+                "chat_requests": self.chat_rate_limiter.limit_for(device["device_id"]) or None,
+                "upload_requests": self.upload_rate_limiter.limit_for(device["device_id"]) or None,
+                "json_body_bytes": self.app._client_max_size,
+                "upload_chunk_bytes": self.upload_chunk_bytes,
+                "upload_max_bytes": self.upload_max_bytes or None,
+            },
+        })

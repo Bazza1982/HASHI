@@ -3,8 +3,9 @@
 This primitive is not an authorization check, sandbox, or process supervisor.
 The caller must use an already authorized immutable Scope, serialize the
 authority start/revoke barrier, and keep all returned handles private.
-Only local drive paths are supported; reparse points, hard links, UNC paths,
-and case-sensitive directories are rejected rather than guessed.
+Only local drive paths are supported; normal bound operations reject reparse
+points, hard links, UNC paths, and case-sensitive directories. Managed search
+may inspect a held reparse point and separately bind an authorized target.
 Creation installs a new name only and never replaces existing files. A process
 crash can leave a temporary file; protected recovery has not been implemented.
 """
@@ -189,7 +190,7 @@ class _Windows:
             raise FileBindingError("cannot create a private temporary file")
         return handle.value
 
-    def write_all(self, handle: int, data: bytes) -> None:
+    def write_unflushed(self, handle: int, data: bytes) -> None:
         offset = 0
         while offset < len(data):
             chunk = data[offset:offset + 65536]
@@ -198,6 +199,9 @@ class _Windows:
             if not self.kernel.WriteFile(handle, buffer, len(chunk), ctypes.byref(count), None) or not count.value:
                 raise FileBindingError("cannot write temporary file")
             offset += count.value
+
+    def write_all(self, handle: int, data: bytes) -> None:
+        self.write_unflushed(handle, data)
         if not self.kernel.FlushFileBuffers(handle):
             raise FileBindingError("cannot flush temporary file")
 
@@ -226,15 +230,22 @@ class _Windows:
         if status < 0:
             raise FileBindingError("temporary file cleanup could not be confirmed")
 
-    def check(self, handle: int, expected: str, *, directory: bool) -> None:
+    def is_reparse(self, handle: int) -> bool:
         info = _FileInformation()
         if not self.kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
             raise FileBindingError("cannot inspect approved file")
-        if bool(info.attributes & _DIRECTORY_ATTRIBUTE) != directory or info.attributes & _REPARSE_ATTRIBUTE:
+        return bool(info.attributes & _REPARSE_ATTRIBUTE)
+
+    def check(self, handle: int, expected: str, *, directory: bool, reparse: bool = False) -> None:
+        info = _FileInformation()
+        if not self.kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise FileBindingError("cannot inspect approved file")
+        if (bool(info.attributes & _DIRECTORY_ATTRIBUTE) != directory
+                or bool(info.attributes & _REPARSE_ATTRIBUTE) != reparse):
             raise FileBindingError("reparse points and unexpected object types are not allowed")
-        if not directory and info.links != 1:
+        if not reparse and not directory and info.links != 1:
             raise FileBindingError("multiple hard links are not allowed")
-        if directory:
+        if not reparse and directory:
             case = _CaseSensitiveInfo()
             if not self.kernel.GetFileInformationByHandleEx(
                 handle, _CASE_SENSITIVE_INFO, ctypes.byref(case), ctypes.sizeof(case)
@@ -283,6 +294,38 @@ class _BoundHandles:
 class BoundWindowsRead(_BoundHandles):
     """A held final handle plus every directory handle from its drive root."""
 
+    def identity(self):
+        if not self._handles:
+            raise FileBindingError("bound handle is closed")
+        info = _FileInformation()
+        if not self._api.kernel.GetFileInformationByHandle(self._handles[-1], ctypes.byref(info)):
+            raise FileBindingError("cannot identify held file")
+        file_id = (int(info.index_high) << 32) | int(info.index_low)
+        if not file_id:
+            raise FileBindingError("held file identity is unavailable")
+        return {
+            "volume": int(info.volume_serial), "file_id": file_id,
+            "created": (int(info.creation.dwHighDateTime) << 32) | int(info.creation.dwLowDateTime),
+            "write_time": (int(info.write.dwHighDateTime) << 32) | int(info.write.dwLowDateTime),
+            "size": (int(info.size_high) << 32) | int(info.size_low),
+        }
+
+    def read_at(self, *, offset: int, max_bytes: int) -> bytes:
+        """Read one bounded page from the held file, without resolving a path."""
+        if not self._handles:
+            raise FileBindingError("bound handle is closed")
+        if (type(offset) is not int or not 0 <= offset < 2**63
+                or type(max_bytes) is not int or not 0 < max_bytes <= 1024 * 1024):
+            raise FileBindingError("invalid read range")
+        handle = self._handles[-1]
+        if not self._api.kernel.SetFilePointerEx(handle, offset, None, 0):
+            raise FileBindingError("cannot seek approved file")
+        buffer = ctypes.create_string_buffer(max_bytes)
+        received = wintypes.DWORD()
+        if not self._api.kernel.ReadFile(handle, buffer, max_bytes, ctypes.byref(received), None):
+            raise FileBindingError("cannot read approved file")
+        return buffer.raw[:received.value]
+
     def read(self, *, max_bytes: int) -> bytes:
         if not self._handles:
             raise FileBindingError("bound handle is closed")
@@ -327,6 +370,37 @@ class BoundWindowsCreate(_BoundHandles):
         self._name = name
         self._used = False
 
+    def begin_stream(self):
+        if not self._handles or self._used:
+            raise FileBindingError("create binding is closed or already used")
+        self._used = True
+        parent = self._handles[-1]
+        # Refuse an already occupied destination before any HTTP request. A
+        # racing creator is still rejected by the final new-only rename.
+        try:
+            occupied = self._api.open_child(parent, self._name, directory=False)
+        except FileBindingError as error:
+            if getattr(error, "ntstatus", None) != 0xC0000034:
+                raise
+        else:
+            if not self._api.kernel.CloseHandle(occupied):
+                raise FileBindingError("existing target cleanup could not be confirmed")
+            raise FileBindingError("target already exists")
+        name = ".hashi-permission-" + uuid4().hex + ".tmp"
+        temporary = self._api.create_temporary(parent, name)
+        expected = ntpath.join(self._directory, name)
+        try:
+            self._api.check(temporary, expected, directory=False)
+        except BaseException:
+            try:
+                self._api.check(temporary, expected, directory=False)
+                self._api.discard_temporary(temporary)
+            finally:
+                if not self._api.kernel.CloseHandle(temporary):
+                    raise FileBindingError("temporary handle cleanup could not be confirmed")
+            raise
+        return BoundWindowsCreateStream(self._api, parent, temporary, expected, self._name)
+
     def commit(self, data: bytes) -> None:
         if not self._handles or self._used:
             raise FileBindingError("create binding is closed or already used")
@@ -353,6 +427,50 @@ class BoundWindowsCreate(_BoundHandles):
         finally:
             if not self._api.kernel.CloseHandle(temporary):
                 raise FileBindingError("temporary handle cleanup could not be confirmed")
+
+
+class BoundWindowsCreateStream:
+    """Write a new file through a held parent, then publish with an atomic rename."""
+
+    def __init__(self, api, parent: int, temporary: int, expected: str, name: str) -> None:
+        self._api, self._parent, self._temporary = api, parent, temporary
+        self._expected, self._name = expected, name
+        self._committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+
+    def write(self, data: bytes) -> None:
+        if (not self._temporary or self._committed or not isinstance(data, bytes)
+                or len(data) > 1024 * 1024):
+            raise FileBindingError("invalid streamed file content")
+        self._api.write_unflushed(self._temporary, data)
+
+    def commit(self) -> None:
+        if not self._temporary or self._committed:
+            raise FileBindingError("streamed create is closed or already committed")
+        if not self._api.kernel.FlushFileBuffers(self._temporary):
+            raise FileBindingError("cannot flush streamed temporary file")
+        self._api.rename_new(self._temporary, self._parent, self._name)
+        self._committed = True
+
+    def close(self) -> None:
+        if not self._temporary:
+            return
+        temporary = self._temporary
+        try:
+            if not self._committed:
+                # A failed rename can have an uncertain outcome. Never delete
+                # the user target if the handle no longer names our temporary.
+                self._api.check(temporary, self._expected, directory=False)
+                self._api.discard_temporary(temporary)
+        finally:
+            if not self._api.kernel.CloseHandle(temporary):
+                raise FileBindingError("temporary handle cleanup could not be confirmed")
+            self._temporary = 0
 
 
 def _path_parts(scope: Scope, required: frozenset[str]) -> tuple[str, list[str]]:
@@ -449,7 +567,20 @@ class _DirectoryInformation(ctypes.Structure):
 class BoundWindowsDirectory(_BoundHandles):
     """Enumerate the already held directory, without resolving its path again."""
 
-    def entries(self):
+    def identity(self):
+        if not self._handles:
+            raise FileBindingError("bound handle is closed")
+        info = _FileInformation()
+        if not self._api.kernel.GetFileInformationByHandle(self._handles[-1], ctypes.byref(info)):
+            raise FileBindingError("cannot identify held directory")
+        file_id = (int(info.index_high) << 32) | int(info.index_low)
+        if not file_id:
+            raise FileBindingError("held directory identity is unavailable")
+        return {"volume": int(info.volume_serial), "file_id": file_id,
+                "created": (int(info.creation.dwHighDateTime) << 32) | int(info.creation.dwLowDateTime),
+                "write_time": (int(info.write.dwHighDateTime) << 32) | int(info.write.dwLowDateTime)}
+
+    def entries(self, *, include_metadata=False):
         first = True
         while True:
             buffer = ctypes.create_string_buffer(65536)
@@ -473,9 +604,13 @@ class BoundWindowsDirectory(_BoundHandles):
                     if (not name or name.endswith((" ", ".")) or any(
                             char in name for char in ':/*?"<>|\x00\\')):
                         raise FileBindingError("unsafe directory entry name")
-                    yield {"name": name, "directory": bool(value.attributes & _DIRECTORY_ATTRIBUTE),
-                           "reparse": bool(value.attributes & _REPARSE_ATTRIBUTE),
-                           "hidden": bool(value.attributes & 2), "size": int(value.size)}
+                    item = {"name": name, "directory": bool(value.attributes & _DIRECTORY_ATTRIBUTE),
+                            "reparse": bool(value.attributes & _REPARSE_ATTRIBUTE),
+                            "hidden": bool(value.attributes & 2), "size": int(value.size)}
+                    if include_metadata:
+                        item.update(file_id=int(value.file_id), write_time=int(value.write),
+                                    change_time=int(value.change), created=int(value.creation))
+                    yield item
                 if not value.next:
                     break
                 if value.next < _DirectoryInformation.name.offset or offset + value.next >= len(buffer):

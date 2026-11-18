@@ -1,12 +1,10 @@
 import asyncio
 import json
 import logging
-import sys
 from dataclasses import replace
 
 import pytest
 
-from adapters.stream_events import StreamEvent
 from orchestrator.her_message_router import HERMessageRouter
 from orchestrator.request_activity import RequestActivityStore
 from orchestrator.her_v2.turn_services import TurnServices
@@ -29,11 +27,24 @@ async def test_verbose_activity_survives_commentary_off_and_live_toggle(tmp_path
                               persist_event=lambda e: store.publish_stream('run', e))
     registry = ToolRegistry(['shell'], tmp_path, tmp_path, {}, tool_options={
         'tool_activity': {'long_threshold_seconds': .02, 'snapshot_interval_seconds': .01}})
+    observed = []
+
+    async def observe(event):
+        observed.append(event)
+        await router.route(event)
+
     task = asyncio.create_task(registry.execute_with_audit_context(
-        'shell', {'command': pause_command(.4)}, 'call',
-        audit_context={'request_id': 'run', 'tool_activity_observer': router.route}))
+        'shell', {'command': pause_command(2)}, 'call',
+        audit_context={'request_id': 'run', 'tool_activity_observer': observe}))
     try:
-        await asyncio.sleep(.12)
+        for _ in range(200):
+            if any(event.metadata.get('liveness') == 'alive' for event in observed):
+                break
+            if task.done():
+                pytest.fail('process exited before reporting live activity')
+            await asyncio.sleep(.01)
+        else:
+            pytest.fail('process did not report live activity')
         off = store.poll('run')
         assert not shown and not off['active_tool_activities']
         after = off['latest_sequence']

@@ -15,6 +15,7 @@ from adapters.openrouter_api import (
     _assistant_content_text,
     _diagnostic_headers,
     _message_structured_data,
+    _live_camera_request_extensions,
     _provider_http_failure_diagnostics,
     _read_http_error_body,
     _request_wire_evidence,
@@ -236,6 +237,52 @@ class XaiApiAdapter(OpenRouterAdapter):
         return payload
 
     def _build_responses_payload(self, messages: list[dict], *, use_streaming: bool = False) -> dict:
+        has_images = any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(part, dict) and part.get("type") == "image_url"
+                    for part in message["content"])
+            for message in messages
+        )
+        if has_images:
+            from orchestrator.frontend_call.transient_live_media import translate_live_frame_part
+
+            content_parts: list[dict[str, Any]] = []
+            for message in messages:
+                role = str(message.get("role") or "user")
+                content = message.get("content")
+                prefix = "System: " if role == "system" else "Assistant: " if role == "assistant" else ""
+                if isinstance(content, str):
+                    if content.strip():
+                        content_parts.append({"type": "input_text", "text": prefix + content.strip()})
+                    continue
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        content_parts.append({"type": "input_text", "text": prefix + str(part)})
+                        prefix = ""
+                        continue
+                    kind = part.get("type")
+                    if kind == "text":
+                        translated = {"type": "input_text", "text": prefix + str(part.get("text") or "")}
+                        prefix = ""
+                    elif kind == "image_url":
+                        image = part.get("image_url")
+                        url = image.get("url") if isinstance(image, dict) else image
+                        translated = {"type": "input_image", "image_url": url}
+                        if isinstance(image, dict) and image.get("detail"):
+                            translated["detail"] = image["detail"]
+                    else:
+                        translated = dict(part)
+                    content_parts.append(translate_live_frame_part(part, translated))
+            payload: dict[str, Any] = {
+                "model": self.config.model,
+                "input": [{"role": "user", "content": content_parts}],
+            }
+            if use_streaming:
+                payload["stream"] = True
+            return payload
+
         parts: list[str] = []
         for message in messages:
             role = str(message.get("role") or "user")
@@ -317,7 +364,10 @@ class XaiApiAdapter(OpenRouterAdapter):
 
     async def _call_api_once(self, payload, headers, on_stream_event, *, api_url=None) -> _APIResult:
         request_url = api_url or self._api_url()
-        response = await self.client.post(request_url, json=payload, headers=headers)
+        response = await self.client.post(
+            request_url, json=payload, headers=headers,
+            **_live_camera_request_extensions(payload),
+        )
         if response.status_code in _AUTH_RETRY_STATUSES:
             await _read_http_error_body(response)
             context = dict(
@@ -347,6 +397,9 @@ class XaiApiAdapter(OpenRouterAdapter):
             await self._resolve_bearer(force_refresh=True)
             headers = self._xai_headers()
             retry_url = self._chat_url() if api_url is not None else self._api_url()
+            from orchestrator.frontend_call.transient_live_media import project_live_frame_payload
+
+            payload, _ = project_live_frame_payload(payload, retain_tags=True)
             self._record_provider_wire_evidence(
                 "authentication_retry_prepared",
                 request_id=str(context.get("request_id") or ""),
@@ -365,7 +418,10 @@ class XaiApiAdapter(OpenRouterAdapter):
                     "body": payload,
                 },
             )
-            response = await self.client.post(retry_url, json=payload, headers=headers)
+            response = await self.client.post(
+                retry_url, json=payload, headers=headers,
+                **_live_camera_request_extensions(payload),
+            )
         await _read_http_error_body(response)
         response.raise_for_status()
         data = response.json()
@@ -540,7 +596,8 @@ class XaiApiAdapter(OpenRouterAdapter):
                     )
 
         async with self.client.stream(
-            "POST", request_url, json=payload, headers=headers
+            "POST", request_url, json=payload, headers=headers,
+            **_live_camera_request_extensions(payload),
         ) as response:
             if response.status_code in _AUTH_RETRY_STATUSES:
                 await _read_http_error_body(response)
@@ -570,6 +627,9 @@ class XaiApiAdapter(OpenRouterAdapter):
                 await self._resolve_bearer(force_refresh=True)
                 retry_url = self._chat_url() if api_url is not None else self._api_url()
                 retry_headers = self._xai_headers()
+                from orchestrator.frontend_call.transient_live_media import project_live_frame_payload
+
+                payload, _ = project_live_frame_payload(payload, retain_tags=True)
                 self._record_provider_wire_evidence(
                     "authentication_retry_prepared",
                     request_id=str(context.get("request_id") or ""),
@@ -586,6 +646,7 @@ class XaiApiAdapter(OpenRouterAdapter):
                     retry_url,
                     json=payload,
                     headers=retry_headers,
+                    **_live_camera_request_extensions(payload),
                 ) as retry_response:
                     await _read_http_error_body(retry_response)
                     retry_response.raise_for_status()

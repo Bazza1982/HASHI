@@ -1053,3 +1053,100 @@ async def test_duplicate_start_waits_for_same_negotiated_output(tmp_path):
     assert all(result["output"]["mode"] == "external_av" for result in results)
     assert output.starts == 1 and adapters.tts == 0
     await service.close()
+
+
+
+async def test_video_synthesis_is_bounded_by_each_acknowledged_speech_window(tmp_path):
+    service, _ports, _adapters, base, gen, output, body = await arranged(tmp_path)
+    await service.invoke("owner", body)
+    call = service.calls["call-1"]
+    call.turn = {"turn_id": "long-video", "phase": "complete", "speech_segments": []}
+    binding = {**base, "call_id": "call-1", "generation": service.generation}
+    try:
+        for index in range(65):
+            service._queue_speech(call, call.turn, f"Sentence {index:03d}.", "answer")
+        assert call.speech_index == 31
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert len(output.prepared) == 32
+        snapshot = await service.invoke("owner", {**binding, "operation": "snapshot"})
+        assert snapshot["turn"]["speech_more"] is True
+        assert len(snapshot["turn"]["speech_segments"]) == 32
+        advance = {**binding, "operation": "speech_advance", "turn_id": "long-video", "segment": 31}
+        with pytest.raises(CallError, match="call_speech_not_ready"):
+            await service.invoke("owner", advance)
+        for index in range(32):
+            asset = await service.invoke("owner", {
+                **binding, "operation": "speech", "turn_id": "long-video", "segment": index,
+            })
+            assert asset["ready"]
+        next_window = await service.invoke("owner", advance)
+        repeated = await service.invoke("owner", advance)
+        assert next_window["turn"]["speech_offset"] == repeated["turn"]["speech_offset"] == 32
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert len(output.prepared) == 64
+        assert call.speech_index == 63
+        assert len(gen.references) == 64
+    finally:
+        await service.close()
+
+async def test_explicit_structured_result_reaches_video_synthesizer(tmp_path):
+    service, ports, _adapters, base, gen, _output, body = await arranged(tmp_path)
+    answer = chr(96) * 3 + "python\nprint(42)\n" + chr(96) * 3
+    ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": answer}
+    observed = []
+    original = gen.synthesize
+
+    async def synthesize(selection, reference, text, **kwargs):
+        observed.append(text)
+        return await original(selection, reference, text, **kwargs)
+
+    gen.synthesize = synthesize
+    try:
+        await service.invoke("owner", body)
+        binding = {**base, "call_id": "call-1", "generation": service.generation}
+        await service.invoke("owner", {
+            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1,
+            "audio_b64": wav(), "read_structured": True,
+        })
+        call = service.calls["call-1"]
+        await call.task
+        await asyncio.gather(*list(call.speech_tasks.values()))
+        assert call.turn["phase"] == "complete"
+        assert call.turn["answer"] == answer
+        assert "print(42)" in "".join(observed)
+    finally:
+        await service.close()
+
+
+async def test_unconnected_call_ignores_unused_external_selection_failure(tmp_path):
+    service, _ports, _adapters, _base, _gen, _output, body = await arranged(
+        tmp_path, connected=False
+    )
+
+    def invalid_selection(_revision):
+        raise CallError("call_configuration_changed", 409)
+
+    service.config.video_tts_selection = invalid_selection
+    try:
+        result = await service.invoke("owner", body)
+        assert result["phase"] == "active"
+        assert result.get("output", {}).get("mode", "window_audio") == "window_audio"
+    finally:
+        await service.close()
+
+
+async def test_connected_output_protocol_error_precedes_selection_failure(tmp_path):
+    service, _ports, _adapters, _base, _gen, output, body = await arranged(
+        tmp_path, protocol=None
+    )
+
+    def invalid_selection(_revision):
+        raise CallError("call_configuration_changed", 409)
+
+    service.config.video_tts_selection = invalid_selection
+    try:
+        with pytest.raises(CallError, match="call_output_client_upgrade_required"):
+            await service.invoke("owner", body)
+        assert output.starts == 0
+    finally:
+        await service.close()

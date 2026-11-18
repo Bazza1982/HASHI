@@ -29,6 +29,7 @@ PRIVATE_AUTHORIZATION_CONFIG_KEY = "hashi_private_shared_credentials"
 DEFAULT_PROOF_TTL_SECONDS = 90
 MAX_PROOF_TTL_SECONDS = 300
 MAX_PROOFS_PER_MESSAGE = 16
+MAX_RESOURCES_PER_MESSAGE = 64
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PRIVATE_AUTHORIZATION_CAPABILITIES = {
     "type": "hashi.private-authorization-capabilities",
@@ -38,6 +39,7 @@ PRIVATE_AUTHORIZATION_CAPABILITIES = {
     "default_ttl_seconds": DEFAULT_PROOF_TTL_SECONDS,
     "max_ttl_seconds": MAX_PROOF_TTL_SECONDS,
     "max_proofs_per_message": MAX_PROOFS_PER_MESSAGE,
+    "max_resources_per_message": MAX_RESOURCES_PER_MESSAGE,
     "binding_fields": [
         "message_id",
         "from_instance",
@@ -80,7 +82,38 @@ def _clean_agent(value: Any) -> str:
     return _clean_identifier(value, field="agent").casefold()
 
 
-def _clean_resources(value: Any) -> list[str]:
+def _private_policy(config: Mapping[str, Any] | None) -> dict[str, int]:
+    defaults = {
+        "default_ttl_seconds": DEFAULT_PROOF_TTL_SECONDS,
+        "max_ttl_seconds": MAX_PROOF_TTL_SECONDS,
+        "max_proofs_per_message": MAX_PROOFS_PER_MESSAGE,
+        "max_resources_per_message": MAX_RESOURCES_PER_MESSAGE,
+    }
+    # The legacy flat map may have a credential literally named "policy".
+    # Policy is recognized only in the explicit nested credentials format.
+    selected = (config.get("policy") if isinstance(config, Mapping)
+                and isinstance(config.get("credentials"), Mapping) else None)
+    if selected is None:
+        return defaults
+    if not isinstance(selected, Mapping):
+        raise ValueError("private authorization policy must be an object")
+    for key in defaults:
+        if key not in selected:
+            continue
+        value = selected[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"invalid private authorization policy: {key}")
+        defaults[key] = value
+    if "default_ttl_seconds" not in selected:
+        defaults["default_ttl_seconds"] = min(
+            defaults["default_ttl_seconds"], defaults["max_ttl_seconds"]
+        )
+    if defaults["default_ttl_seconds"] > defaults["max_ttl_seconds"]:
+        raise ValueError("private authorization default TTL exceeds maximum")
+    return defaults
+
+
+def _clean_resources(value: Any, *, max_resources: int | None = MAX_RESOURCES_PER_MESSAGE) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, (list, tuple, set, frozenset)):
@@ -91,7 +124,7 @@ def _clean_resources(value: Any) -> list[str]:
             for item in value
         }
     )
-    if len(result) > 64:
+    if max_resources is not None and len(result) > max_resources:
         raise ValueError("too many resources")
     return result
 
@@ -113,7 +146,9 @@ def authorization_content_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def normalize_authorization_binding(value: Mapping[str, Any]) -> dict[str, Any]:
+def normalize_authorization_binding(
+    value: Mapping[str, Any], *, max_resources: int = MAX_RESOURCES_PER_MESSAGE
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("authorization binding must be an object")
     content_sha256 = str(value.get("content_sha256") or "").strip().casefold()
@@ -126,7 +161,7 @@ def normalize_authorization_binding(value: Mapping[str, Any]) -> dict[str, Any]:
         "to_instance": _clean_instance(value.get("to_instance")),
         "to_agent": _clean_agent(value.get("to_agent")),
         "content_sha256": content_sha256,
-        "resources": _clean_resources(value.get("resources")),
+        "resources": _clean_resources(value.get("resources"), max_resources=max_resources),
     }
 
 
@@ -207,21 +242,28 @@ def build_private_authorization_proofs(
     credential_ids: Iterable[str],
     binding: Mapping[str, Any],
     now: float | None = None,
-    ttl_seconds: int = DEFAULT_PROOF_TTL_SECONDS,
+    ttl_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
     """Build proofs only for the credentials explicitly selected this message."""
 
-    normalized_binding = normalize_authorization_binding(binding)
-    records = _credential_map(config)
     selected: list[str] = []
     for value in credential_ids:
         credential_id = _clean_identifier(value, field="credential_id")
         if credential_id not in selected:
             selected.append(credential_id)
-    if len(selected) > MAX_PROOFS_PER_MESSAGE:
+    if not selected:
+        return []
+    policy = _private_policy(config)
+    normalized_binding = normalize_authorization_binding(
+        binding, max_resources=policy["max_resources_per_message"]
+    )
+    records = _credential_map(config)
+    if len(selected) > policy["max_proofs_per_message"]:
         raise ValueError("too many private credentials selected")
     timestamp = int(time.time() if now is None else now)
-    ttl = min(max(1, int(ttl_seconds)), MAX_PROOF_TTL_SECONDS)
+    ttl = policy["default_ttl_seconds"] if ttl_seconds is None else ttl_seconds
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= policy["max_ttl_seconds"]:
+        raise ValueError("private authorization TTL is outside configured policy")
     proofs: list[dict[str, Any]] = []
     for credential_id in selected:
         record = records.get(credential_id)
@@ -268,6 +310,19 @@ class PrivateAuthorizationStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS private_authorization_message_bindings (
+                    credential_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    target_instance TEXT NOT NULL,
+                    target_agent TEXT NOT NULL,
+                    binding_sha256 TEXT NOT NULL,
+                    first_verified_at INTEGER NOT NULL,
+                    PRIMARY KEY(credential_id, message_id, target_instance, target_agent)
+                )
+                """
+            )
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -282,6 +337,8 @@ class PrivateAuthorizationStore:
         credential_id: str,
         nonce: str,
         message_id: str,
+        target_instance: str,
+        target_agent: str,
         binding_sha256: str,
         proof_sha256: str,
         expires_at: int,
@@ -290,6 +347,9 @@ class PrivateAuthorizationStore:
         """Return ``new``, ``same`` (idempotent retry), or ``replay``."""
 
         with self._lock, self._connection() as connection:
+            # Multiple store objects can share this database; a SQLite write
+            # transaction makes binding selection and nonce insertion atomic.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "DELETE FROM private_authorization_nonces WHERE expires_at < ?",
                 (int(now) - MAX_PROOF_TTL_SECONDS,),
@@ -300,12 +360,26 @@ class PrivateAuthorizationStore:
                    WHERE credential_id=? AND nonce=?""",
                 (credential_id, nonce),
             ).fetchone()
-            if row is not None:
-                return (
-                    "same"
-                    if tuple(row) == (message_id, binding_sha256, proof_sha256)
-                    else "replay"
+            if row is not None and tuple(row) != (message_id, binding_sha256, proof_sha256):
+                return "replay"
+            target = (credential_id, message_id, target_instance, target_agent)
+            binding_row = connection.execute(
+                """SELECT binding_sha256 FROM private_authorization_message_bindings
+                   WHERE credential_id=? AND message_id=? AND target_instance=? AND target_agent=?""",
+                target,
+            ).fetchone()
+            if binding_row is not None and binding_row[0] != binding_sha256:
+                return "replay"
+            if binding_row is None:
+                connection.execute(
+                    """INSERT INTO private_authorization_message_bindings(
+                           credential_id, message_id, target_instance, target_agent,
+                           binding_sha256, first_verified_at
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (*target, binding_sha256, int(now)),
                 )
+            if row is not None:
+                return "same"
             connection.execute(
                 """
                 INSERT INTO private_authorization_nonces(
@@ -358,12 +432,34 @@ def verify_private_authorization_proofs(
 ) -> list[dict[str, Any]]:
     """Verify proofs and return only non-secret receiver-owned facts."""
 
-    normalized_binding = normalize_authorization_binding(binding)
+    supplied = list(proofs or ())
+    if not supplied:
+        return []
+    try:
+        policy = _private_policy(config)
+    except ValueError:
+        return [{**_failure("unknown", "invalid"), "reason": "policy_invalid"}]
+    if len(supplied) > policy["max_proofs_per_message"]:
+        return [{
+            **_failure("unknown", "invalid"),
+            "reason": "proof_budget_exceeded",
+            "provided_count": len(supplied),
+            "max_proofs": policy["max_proofs_per_message"],
+        }]
+    try:
+        normalized_binding = normalize_authorization_binding(
+            binding, max_resources=policy["max_resources_per_message"]
+        )
+    except ValueError as exc:
+        if str(exc) != "too many resources":
+            raise
+        return [{
+            **_failure("unknown", "invalid"),
+            "reason": "resource_budget_exceeded",
+            "max_resources": policy["max_resources_per_message"],
+        }]
     records = _credential_map(config)
     timestamp = int(time.time() if now is None else now)
-    supplied = list(proofs or ())
-    if len(supplied) > MAX_PROOFS_PER_MESSAGE:
-        supplied = supplied[:MAX_PROOFS_PER_MESSAGE]
     results: list[dict[str, Any]] = []
     for raw in supplied:
         if not isinstance(raw, Mapping):
@@ -389,7 +485,9 @@ def verify_private_authorization_proofs(
             issued_at = int(claims.get("issued_at"))
             expires_at = int(claims.get("expires_at"))
             nonce = _clean_identifier(claims.get("nonce"), field="nonce")
-            proof_binding = normalize_authorization_binding(claims.get("binding"))
+            proof_binding = normalize_authorization_binding(
+                claims.get("binding"), max_resources=policy["max_resources_per_message"]
+            )
         except (TypeError, ValueError):
             results.append(_failure(credential_id, "invalid", proof_id=proof_id))
             continue
@@ -409,7 +507,7 @@ def verify_private_authorization_proofs(
             expires_at <= timestamp
             or issued_at > timestamp + 30
             or expires_at <= issued_at
-            or expires_at - issued_at > MAX_PROOF_TTL_SECONDS
+            or expires_at - issued_at > policy["max_ttl_seconds"]
         ):
             results.append(_failure(credential_id, "expired", proof_id=proof_id))
             continue
@@ -434,7 +532,7 @@ def verify_private_authorization_proofs(
             results.append(_failure(credential_id, "invalid", proof_id=proof_id))
             continue
         try:
-            allowed_resources = _clean_resources(record.get("allowed_resources"))
+            allowed_resources = _clean_resources(record.get("allowed_resources"), max_resources=None)
         except ValueError:
             results.append(_failure(credential_id, "invalid", proof_id=proof_id))
             continue
@@ -462,6 +560,8 @@ def verify_private_authorization_proofs(
             credential_id=credential_id,
             nonce=nonce,
             message_id=normalized_binding["message_id"],
+            target_instance=normalized_binding["to_instance"],
+            target_agent=normalized_binding["to_agent"],
             binding_sha256=binding_sha256,
             proof_sha256=proof_sha256,
             expires_at=expires_at,
@@ -540,8 +640,20 @@ def build_configured_proofs(
     )
 
 
-def public_private_authorization_capabilities() -> dict[str, Any]:
-    return json.loads(json.dumps(PRIVATE_AUTHORIZATION_CAPABILITIES))
+def public_private_authorization_capabilities(
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    capabilities = json.loads(json.dumps(PRIVATE_AUTHORIZATION_CAPABILITIES))
+    try:
+        capabilities.update(_private_policy(config))
+    except ValueError:
+        # This optional feature must not make unrelated capability discovery
+        # fail; do not falsely advertise a usable proof policy.
+        for key in ("default_ttl_seconds", "max_ttl_seconds",
+                    "max_proofs_per_message", "max_resources_per_message"):
+            capabilities[key] = None
+        capabilities.update(available=False, error_code="private_authorization_policy_invalid")
+    return capabilities
 
 
 __all__ = [

@@ -143,10 +143,19 @@ resume epoch is left untouched.
 A replacement transport in `connecting` is governed by its fresh controller
 lease. The previous provider's `max_ends_at` applies only while `active`, so
 it cannot immediately push a new connection back to `recovering`. Workbench
-may retry recovery with exponential delay, but PAO permits at most five
+may retry recovery with exponential delay, with an automatic budget of five
 consecutive replacement attempts since the last verified `active` state.
-Exhaustion settles the logical call as `failed` and publishes the terminal
-state instead of leaving an endless recovery loop.
+Exhaustion pauses automatic retry while keeping the logical call in
+`recovering`. A user can explicitly request a new attempt for the same call.
+The `manual_resume_after_budget` capability is advertised in context and
+snapshot responses; clients send `manual_retry: true` only for a deliberate
+retry when the capability is present. The request remains idempotent.
+
+Terminal calls stay terminal. A prior provider creation with an unknown
+outcome remains unsettled and is not blindly replayed as a new attempt;
+the snapshot reports this separately. A connection's old epoch cannot
+mutate its replacement. This source-level behavior still requires a real
+nonproduction reconnect journey for runtime acceptance.
 
 SessionStore schema 23 adds `phone_context_handoffs` and
 `phone_context_consumption`. They are Session-owned data, distinct from the

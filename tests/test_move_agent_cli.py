@@ -107,3 +107,38 @@ def test_keep_source_compatibility_flag_stages_nothing(monkeypatch, capsys):
         move_agent.main()
 
     assert "/clone" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("selection,expected", [("active", True), ("inactive", False), ("preserve", None)])
+def test_direct_move_cli_passes_target_state_to_preview(monkeypatch, capsys, selection, expected):
+    monkeypatch.setattr(move_agent, "load_instances", lambda *_args: {"hashi2": {}})
+    monkeypatch.setattr(move_agent, "local_instance_id", lambda: "HASHI1")
+    preview = []
+    monkeypatch.setattr(move_agent, "preview_outbound_move", lambda *args, **kwargs: preview.append(kwargs) or {"ok": True})
+    monkeypatch.setattr(sys, "argv", ["move_agent.py", "zelda", "hashi2", "--transfer-mode", "workspace", "--target-state", selection, "--dry-run"])
+    move_agent.main()
+    assert preview[0]["desired_target_active"] is expected
+    assert '"ok": true' in capsys.readouterr().out
+
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_direct_move_cli_passes_retained_history_policy_before_confirmation(monkeypatch, capsys, dry_run):
+    monkeypatch.setattr(move_agent, "load_instances", lambda *_args: {"hashi2": {}})
+    monkeypatch.setattr(move_agent, "local_instance_id", lambda: "HASHI1")
+    calls = []
+    def prepare(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "package_id": "synthetic-move"}
+    monkeypatch.setattr(move_agent, "preview_outbound_move", prepare)
+    monkeypatch.setattr(move_agent, "prepare_outbound_move", prepare)
+    argv = ["move_agent.py", "zelda", "hashi2", "--transfer-mode", "workspace",
+            "--history-mode", "retain_source"]
+    if dry_run:
+        argv.append("--dry-run")
+    monkeypatch.setattr(sys, "argv", argv)
+    move_agent.main()
+    assert len(calls) == 1
+    assert calls[0]["history_mode"] == "retain_source"
+    assert calls[0]["transfer_mode"] == "workspace"
+    assert '"ok": true' in capsys.readouterr().out

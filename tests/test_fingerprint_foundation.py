@@ -57,6 +57,48 @@ def test_policy_snapshot_is_json_roundtrippable_and_detects_version_mismatch():
         FingerprintPolicy.from_snapshot(snapshot)
 
 
+def test_policy_preserves_legacy_snapshots_and_freezes_explicit_required_mode():
+    optional = FingerprintPolicy(enabled=True)
+    legacy = optional.snapshot()
+    assert "required" not in legacy
+    assert FingerprintPolicy.from_snapshot(legacy) == optional
+    required = FingerprintPolicy(enabled=True, required=True)
+    frozen = required.snapshot()
+    assert frozen["required"] is True
+    assert FingerprintPolicy.from_snapshot(json.loads(json.dumps(frozen))) == required
+    frozen["required"] = False
+    with pytest.raises(ValueError):
+        FingerprintPolicy.from_snapshot(frozen)
+    with pytest.raises(ValueError):
+        FingerprintPolicy.from_mapping({"required": "true"})
+
+
+def test_management_cli_explicit_mode_is_persisted_and_preserved(tmp_path, monkeypatch, capsys):
+    import argparse
+    from orchestrator.fingerprint import cli
+
+    admin = admin_at(tmp_path)
+    store = store_at(tmp_path)
+    monkeypatch.setattr(cli, "_management", lambda _args: (admin, store))
+    parser = argparse.ArgumentParser()
+    cli.configure_parser(parser.add_subparsers(dest="command", required=True))
+    revision = admin.read_fingerprint_policy().revision
+    args = parser.parse_args(["fingerprint", "set", "on", "--mode", "required",
+                              "--actor", "owner", "--expected-revision", revision])
+    assert cli.run(args) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "required"
+    assert admin.read_fingerprint_policy().policy == FingerprintPolicy(enabled=True, required=True)
+    revision = admin.read_fingerprint_policy().revision
+    args = parser.parse_args(["fingerprint", "set", "off",
+                              "--actor", "owner", "--expected-revision", revision])
+    assert cli.run(args) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "required"
+    assert admin.read_fingerprint_policy().policy == FingerprintPolicy(enabled=False, required=True)
+    status = parser.parse_args(["fingerprint", "status"])
+    assert cli.run(status) == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "required"
+
+
 def test_disabled_service_requires_no_identity_audit_or_observation():
     audit = FingerprintAudit(None)
     assert audit.record_operation(

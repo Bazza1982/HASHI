@@ -1104,6 +1104,8 @@ class HerSessionStore:
             "message_count": int(value.get("message_count") or 0),
             "reasoning_count": int(value.get("reasoning_count") or 0),
             "digest": str(digest or ""),
+            **({"ephemeral_media_omitted": True}
+               if value.get("ephemeral_media_omitted") is True else {}),
         }
 
     @staticmethod
@@ -1285,12 +1287,13 @@ class HerSessionStore:
         boundary: str,
         messages: Sequence[Mapping[str, Any]],
         reasoning: Sequence[Mapping[str, Any]] = (),
+        ephemeral_media_omitted: bool = False,
         provider_request_id: str = "",
         invocation_id: str = "",
         producer_run_claim: Mapping[str, Any] | None = None,
         execution_owner_id: str = "",
     ) -> dict[str, Any]:
-        """Persist one complete provider boundary for exact private continuation."""
+        """Persist one provider boundary, recording omitted transient media when present."""
 
         clean_boundary = str(boundary or "").strip()
         if clean_boundary not in {
@@ -1340,6 +1343,7 @@ class HerSessionStore:
             "invocation_id": str(invocation_id or ""),
             "message_count": len(clean_messages),
             "reasoning_count": len(clean_reasoning),
+            **({"ephemeral_media_omitted": True} if ephemeral_media_omitted else {}),
         }
         encoded_metadata = _json(context_metadata)
         digest = _provider_context_digest(

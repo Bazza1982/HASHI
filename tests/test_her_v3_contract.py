@@ -11,6 +11,7 @@ from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.models import Stage, StageResponse, parse_effort
 from orchestrator.her_v2.presentation import FinalStyleResult
 from orchestrator.her_v2.turn_services import parse_health
+from orchestrator.her_v2.v3_config import CompanionConfig
 from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.pcm import render_pcm_document
@@ -75,6 +76,15 @@ def test_agent_companion_only_intervenes_on_high_confidence_trouble():
     assert parse_health(payload)
     payload["answers"]["health"]["probabilities"] = {"continue": 0.2, "trouble": 0.7, "unknown": 0.1}
     assert not parse_health(payload)
+
+
+def test_companion_policy_defaults_to_advice_and_validates_explicit_enforcement():
+    assert CompanionConfig.from_mapping({"enabled": True}).mode == "advisory"
+    assert CompanionConfig.from_mapping({"enabled": True, "mode": "enforce"}).mode == "enforce"
+    with pytest.raises(ValueError, match="mode"):
+        CompanionConfig.from_mapping({"mode": []})
+    config = HERv2Config.from_mapping({**_legacy_config(), "agent_companion": {"mode": "enforce"}})
+    assert config.agent_companion.mode == "enforce"
 
 
 class _MainProvider:

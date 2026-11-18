@@ -210,6 +210,56 @@ async def test_notify_edit_and_close_publish_one_revision_of_text_and_actions(
     )
 
 
+@pytest.mark.asyncio
+async def test_large_menu_pages_survive_durable_projection(command_runtime, monkeypatch):
+    runtime, metadata, _ = command_runtime
+    calls = []
+
+    async def large_status(update, _context):
+        await update.message.reply_text('Many choices', reply_markup={
+            'inline_keyboard': [[{'text': f'Choice {i}', 'callback_data': f'fixture:{i}'}
+                                 for i in range(250)]],
+        })
+
+    async def action(_runtime, update, _context):
+        calls.append(update.callback_query.data)
+
+    runtime.cmd_status = large_status
+    monkeypatch.setattr(bridge, '_resolve', lambda _runtime, data: (
+        (('fixture', data), action, True, None) if data.startswith('fixture:') else None
+    ))
+    opened = await bridge.dispatch_command_interaction(runtime, operation('/status'), metadata)
+    assert opened['ok'], opened
+    menu_id = opened['messages'][-1]['command_ui']['menu_id']
+    menu = runtime._command_interaction_store.menus[menu_id]
+    labels = []
+    for page in range(3):
+        projected = build_chat_projection(
+            runtime.session_store,
+            session=runtime.session_store.get_session(metadata['session_id'], owner_id='user:7'),
+            owner_id='user:7', include_command_ui=True,
+        )
+        shown = projected['messages'][-1]['command_ui']
+        assert shown['revision'] == menu.revision
+        labels.extend(item['text'] for row in shown['rows'] for item in row
+                      if item.get('button_id') not in menu.page_actions)
+        next_id = next((key for key, target in menu.page_actions.items() if target == page + 1), None)
+        if next_id is not None:
+            result = await bridge.dispatch_command_interaction(runtime, operation(
+                '', op='act', request_id=f'pagination-request-{page}-abcdef',
+                menu_id=menu_id, revision=menu.revision, button_id=next_id,
+            ), metadata)
+            assert result['ok'], result
+    assert labels == [f'Choice {i}' for i in range(250)]
+    chosen = menu.rows[0][-1]['button_id']
+    result = await bridge.dispatch_command_interaction(runtime, operation(
+        '', op='act', request_id='pagination-final-abcdef',
+        menu_id=menu_id, revision=menu.revision, button_id=chosen,
+    ), metadata)
+    assert result['ok'], result
+    assert calls == ['fixture:249']
+
+
 def test_explicit_publication_rejects_foreign_session_without_default_fallback(
     command_runtime,
 ):

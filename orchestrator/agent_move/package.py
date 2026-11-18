@@ -21,7 +21,7 @@ import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Iterable, Mapping
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -53,16 +53,24 @@ from orchestrator.session_store import (
 )
 from orchestrator.telegram_identity import resolve_owner_scope_id, resolve_telegram_owner_id
 
+PERSONAL_CLONE_HISTORY_NOT_INCLUDED_WARNING = (
+    "The selected owner has no conversation history; other local "
+    "conversation history remains on the source and was not included"
+)
+
 PACKAGE_TYPE = "hashi-agent-move"
 PACKAGE_SCHEMA_MIN_VERSION = 1
 PACKAGE_SCHEMA_VERSION = 5
 TRANSFER_MODES_CAPABILITY = "agent_transfer_modes_v1"
 CONVERSATION_CONTINUITY_CAPABILITY = "agent_conversation_continuity_v1"
+RETAIN_SOURCE_HISTORY_CAPABILITY = "agent_move_retain_source_history_v1"
 WORKSPACE_LIMIT_BYTES = 1_000_000_000
 TRANSFER_MODES = {"identity_memory", "workspace"}
 AGENT_MOVE_CAPABILITY = "agent_move_receive_v1"
 RETAINED_IDENTITY_CAPABILITY = "agent_move_retained_identity_v1"
 AGENT_TRANSFER_LIFECYCLE_CAPABILITY = "agent_transfer_lifecycle_v1"
+INACTIVE_MOVE_CAPABILITY = "agent_move_inactive_target_v1"
+INACTIVE_CLONE_BACKUP_CAPABILITY = "agent_clone_inactive_backup_v1"
 PACKAGE_EXTENSION = ".hashi-agent"
 RETAINED_IDENTITY_ARCHIVE_PATH = "retained-identity/AGENT.md"
 RETAINED_IDENTITY_METADATA_PATH = "metadata/retained-identity.json"
@@ -168,6 +176,12 @@ class CloneImportPreflightError(AgentMoveError):
     code = "CLONE_IMPORT_PREFLIGHT_FAILED"
 
 
+class AccessScopePreviewChanged(AgentMoveError):
+    """The target rejected commit before publication because its policy changed."""
+
+    code = "ACCESS_SCOPE_PREVIEW_CHANGED"
+
+
 class _WorkspaceChangedError(AgentMoveError):
     def __init__(self, changes: list[dict[str, Any]]) -> None:
         self.workspace_changes = {
@@ -202,6 +216,8 @@ class AgentMoveArchive:
     conversation_continuity: dict[str, Any] | None
     checksums: dict[str, str]
     names: tuple[str, ...]
+    unpacked_bytes: int
+    workspace_bytes: int
 
     @property
     def package_id(self) -> str:
@@ -210,6 +226,154 @@ class AgentMoveArchive:
     @property
     def agent_id(self) -> str:
         return str(self.manifest["agent_id"])
+
+
+def _positive_archive_member_limit(value: Any, *, label: str = "archive member") -> int:
+    if isinstance(value, bool):
+        raise AgentMoveError(f"{label} limit must be a positive integer")
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, str) and value.isascii() and value.isdecimal():
+        try:
+            result = int(value)
+        except ValueError as exc:
+            raise AgentMoveError(f"{label} limit must be a positive integer") from exc
+    else:
+        raise AgentMoveError(f"{label} limit must be a positive integer")
+    if result <= 0:
+        raise AgentMoveError(f"{label} limit must be a positive integer")
+    return result
+
+
+def configured_archive_member_limit() -> int:
+    configured = os.environ.get("HASHI_AGENT_MOVE_MAX_ARCHIVE_MEMBERS")
+    return _positive_archive_member_limit(
+        MAX_ARCHIVE_MEMBERS if configured is None else configured.strip()
+    )
+
+
+def configured_transfer_package_limit() -> int:
+    configured = os.environ.get("HASHI_AGENT_MOVE_MAX_PACKAGE_BYTES")
+    return _positive_archive_member_limit(
+        MAX_TRANSFER_PACKAGE_BYTES if configured is None else configured.strip(),
+        label="package byte",
+    )
+
+
+def configured_unpacked_byte_limit() -> int:
+    configured = os.environ.get("HASHI_AGENT_MOVE_MAX_UNPACKED_BYTES")
+    return _positive_archive_member_limit(
+        MAX_UNPACKED_BYTES if configured is None else configured.strip(),
+        label="expanded package byte",
+    )
+
+
+def receiver_unpacked_byte_limit(capabilities: Mapping[str, Any]) -> int:
+    return _positive_archive_member_limit(
+        capabilities.get("max_unpacked_bytes", MAX_UNPACKED_BYTES),
+        label="expanded package byte",
+    )
+
+
+def configured_workspace_byte_limit() -> int:
+    configured = os.environ.get("HASHI_AGENT_MOVE_MAX_WORKSPACE_BYTES")
+    return _positive_archive_member_limit(
+        WORKSPACE_LIMIT_BYTES if configured is None else configured.strip(),
+        label="workspace byte",
+    )
+
+
+def receiver_workspace_byte_limit(capabilities: Mapping[str, Any]) -> int:
+    return _positive_archive_member_limit(
+        capabilities.get("max_workspace_bytes", WORKSPACE_LIMIT_BYTES),
+        label="workspace byte",
+    )
+
+
+class _UnpackedBudgetWriter:
+    def __init__(self, stream: Any, archive: Any):
+        self.stream = stream
+        self.archive = archive
+
+    def write(self, data: bytes) -> int:
+        total = self.archive.unpacked_written + len(data)
+        if total > self.archive.unpacked_limit:
+            raise AgentMoveError(
+                f"expanded Agent move package would exceed {total} bytes; "
+                f"receiver limit is {self.archive.unpacked_limit} bytes"
+            )
+        written = self.stream.write(data)
+        self.archive.unpacked_written += written
+        return written
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: Any):
+        return self.stream.__exit__(*args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
+
+class _BudgetedZipFile(zipfile.ZipFile):
+    def __init__(self, *args: Any, unpacked_limit: int | None = None, **kwargs: Any):
+        self.unpacked_limit = unpacked_limit
+        self.unpacked_written = 0
+        super().__init__(*args, **kwargs)
+
+    def open(self, name: Any, mode: str = "r", pwd: bytes | None = None,
+             *, force_zip64: bool = False):
+        stream = super().open(name, mode, pwd, force_zip64=force_zip64)
+        if mode == "w" and self.unpacked_limit is not None:
+            return _UnpackedBudgetWriter(stream, self)
+        return stream
+
+
+class _BoundedArchiveWriter:
+    def __init__(self, stream: Any, limit: int):
+        self.stream = stream
+        self.limit = limit
+
+    def write(self, data: bytes) -> int:
+        end = self.stream.tell() + len(data)
+        if end > self.limit:
+            raise AgentMoveError(
+                f"Agent move package would exceed {end} bytes; receiver limit is {self.limit} bytes"
+            )
+        return self.stream.write(data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
+
+@contextmanager
+def _write_archive(path: Path, max_package_bytes: int | None, *,
+                   max_unpacked_bytes: int | None = None):
+    unpacked_limit = (None if max_unpacked_bytes is None
+                      else _positive_archive_member_limit(max_unpacked_bytes, label="expanded package byte"))
+    with path.open("w+b") as stream:
+        writer = (_BoundedArchiveWriter(stream, max_package_bytes)
+                  if max_package_bytes is not None else stream)
+        with _BudgetedZipFile(
+            writer, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True,
+            unpacked_limit=unpacked_limit,
+        ) as archive:
+            yield archive
+
+
+def receiver_archive_member_limit(capabilities: Mapping[str, Any]) -> int:
+    # Older receivers did not advertise this dimension and enforce the
+    # historical protocol limit. Never infer a larger allowance for them.
+    value = capabilities.get("max_archive_members", MAX_ARCHIVE_MEMBERS)
+    return _positive_archive_member_limit(value)
+
+
+def _source_inventory_entry_limit() -> int | None:
+    configured = os.environ.get("HASHI_AGENT_MOVE_MAX_INVENTORY_ENTRIES")
+    if configured is None:
+        return None
+    return _positive_archive_member_limit(configured.strip(), label="source workspace inventory entry")
 
 
 def utc_now_iso() -> str:
@@ -363,12 +527,17 @@ def create_agent_move_package(
     secret_passphrase: str | None = None,
     package_id: str | None = None,
     max_package_bytes: int | None = None,
+    max_archive_members: int | None = None,
+    max_unpacked_bytes: int | None = None,
+    max_workspace_bytes: int | None = None,
     operation: str = "move",
     include_telegram_secret: bool = True,
     schema_version: int | None = None,
     transfer_mode: str | None = None,
     history_mode: str | None = None,
     conversation_owner_id: str | None = None,
+    desired_target_active: bool | None = None,
+    retain_telegram_backup: bool = False,
 ) -> AgentMoveArchive:
     """Create one checksummed Agent move archive.
 
@@ -377,26 +546,38 @@ def create_agent_move_package(
     passphrase is supplied.
     """
 
+    member_limit = (configured_archive_member_limit() if max_archive_members is None
+                    else _positive_archive_member_limit(max_archive_members))
+    package_limit = (None if max_package_bytes is None
+                     else _positive_archive_member_limit(max_package_bytes, label="package byte"))
+    unpacked_limit = (configured_unpacked_byte_limit() if max_unpacked_bytes is None
+                      else _positive_archive_member_limit(max_unpacked_bytes, label="expanded package byte"))
     root = Path(hashi_root).expanduser().resolve()
     name = normalize_agent_id(agent_id)
     transfer_operation = str(operation or "").strip().lower()
     if transfer_operation not in {"move", "clone"}:
         raise AgentMoveError("Agent transfer operation must be 'move' or 'clone'")
-    # Clone is always a new Bot identity, including for direct API callers
-    # that leave the legacy Move-oriented argument at its default.
-    include_telegram_secret = (
-        transfer_operation == "move" and include_telegram_secret
+    if desired_target_active is not None and type(desired_target_active) is not bool:
+        raise AgentMoveError("destination activation must be a boolean")
+    if type(retain_telegram_backup) is not bool:
+        raise AgentMoveError("Telegram backup selection must be boolean")
+    if retain_telegram_backup and (
+        transfer_operation != "clone" or desired_target_active is not False
+    ):
+        raise AgentMoveError("Telegram backup requires an explicitly inactive clone")
+    if retain_telegram_backup and (not include_agent_secrets or not secret_passphrase):
+        raise AgentMoveError("Telegram backup requires encrypted Agent credentials")
+    # Ordinary Clone retains the independent identity default. The explicitly
+    # inactive backup mode carries a token only inside encrypted credentials.
+    include_telegram_secret = bool(
+        (transfer_operation == "move" and include_telegram_secret)
+        or (transfer_operation == "clone" and retain_telegram_backup)
     )
     package_key = str(package_id or uuid4())
     _validate_package_id(package_key)
     output = Path(output_path).expanduser().resolve()
 
     raw_config = _find_agent_config(root, name)
-    if transfer_operation == "move" and raw_config.get("is_active", True) is False:
-        raise AgentMoveError(
-            f"source Agent '{name}' is inactive; activate and verify the intended "
-            "source copy before moving it"
-        )
     if raw_config.get("transfer_state") == "moved_out_pending_reboot":
         raise AgentMoveError(
             f"source Agent '{name}' has already moved to another instance"
@@ -404,15 +585,18 @@ def create_agent_move_package(
     workspace = _resolve_workspace(root, raw_config, name)
     if transfer_mode is not None and transfer_mode not in TRANSFER_MODES:
         raise AgentMoveError("unknown Agent transfer mode")
+    inventory_limit = (_source_inventory_entry_limit()
+                       if transfer_mode and transfer_operation == "move" else None)
+    workspace_limit = (
+        (configured_workspace_byte_limit() if max_workspace_bytes is None
+         else _positive_archive_member_limit(max_workspace_bytes, label="workspace byte"))
+        if transfer_mode else MAX_WORKSPACE_BYTES
+    )
     # Move discloses all files that source cleanup would delete. Clone neither
     # copies nor deletes excluded software/cache trees; inventorying/counting
     # those trees would introduce unrelated size, file-count and access gates.
-    inventory = _workspace_inventory(workspace) if transfer_mode and transfer_operation == "move" else []
+    inventory = _workspace_inventory(workspace, max_entries=inventory_limit) if transfer_mode and transfer_operation == "move" else []
     total_workspace_bytes = sum(item["size"] for item in inventory)
-    if transfer_mode == "workspace" and total_workspace_bytes > WORKSPACE_LIMIT_BYTES:
-        raise AgentMoveError(
-            f"Workspace is {total_workspace_bytes:,} bytes; full move limit is 1 GB "
-            "(1,000,000,000 bytes). Move large projects outside the Agent workspace or clean it first.")
     retained_identity_bytes, retained_identity = (
         (None, None) if transfer_mode == "identity_memory"
         else _read_retained_identity(workspace, name)
@@ -423,6 +607,15 @@ def create_agent_move_package(
         raise AgentMoveError("explicit transfer modes require schema 4")
     if requested_schema not in range(PACKAGE_SCHEMA_MIN_VERSION, PACKAGE_SCHEMA_VERSION + 1):
         raise AgentMoveError(f"unsupported requested Agent package schema {requested_schema}")
+    inactive_source = transfer_operation == "move" and raw_config.get("is_active", True) is False
+    inactive_target = (
+        (transfer_operation == "move" and (
+            desired_target_active is False or (desired_target_active is None and inactive_source)
+        ))
+        or (transfer_operation == "clone" and desired_target_active is False)
+    )
+    if (inactive_source or inactive_target) and requested_schema < 3:
+        raise AgentMoveError("inactive Agent move requires transfer lifecycle support")
     if retained_identity is not None and requested_schema == 1:
         raise AgentMoveError("schema 1 cannot preserve retained root AGENT.md")
     agent_capability = (
@@ -431,6 +624,7 @@ def create_agent_move_package(
     package_schema = requested_schema
     normalized_history_mode: str | None = None
     conversation_continuity: dict[str, Any] | None = None
+    history_selection_warnings: list[str] = []
     if package_schema >= 5:
         normalized_history_mode = str(
             history_mode
@@ -438,7 +632,7 @@ def create_agent_move_package(
             else ("move" if transfer_operation == "move" else "none")
         ).strip().lower()
         allowed_history_modes = (
-            {"move"}
+            {"move", "retain_source"}
             if transfer_operation == "move"
             else {"none", "inherit_read_only", "copy"}
         )
@@ -446,7 +640,7 @@ def create_agent_move_package(
             raise AgentMoveError(
                 f"history mode {normalized_history_mode!r} is invalid for {transfer_operation}"
             )
-        if normalized_history_mode != "none":
+        if normalized_history_mode not in {"none", "retain_source"}:
             configured_source_id = str(_configured_instance_id(root) or "").upper()
             if not configured_source_id:
                 raise AgentMoveError(
@@ -464,6 +658,7 @@ def create_agent_move_package(
                 transfer_id=package_key,
                 history_mode=normalized_history_mode,
                 explicit_owner_id=conversation_owner_id,
+                selection_warnings=history_selection_warnings,
             )
     elif history_mode is not None or conversation_owner_id is not None:
         raise AgentMoveError("conversation history options require package schema 5")
@@ -474,6 +669,7 @@ def create_agent_move_package(
         root, raw_config, name
     )
     delivery_state = None
+    retained_pending_count = 0
     if transfer_operation == "move":
         lifecycle_id = raw_config.get(AGENT_LIFECYCLE_FIELD)
         bot_fingerprint = telegram_bot_fingerprint(
@@ -499,10 +695,11 @@ def create_agent_move_package(
             if request_id
         }
         if pending_requests and transfer_mode != "workspace":
-            raise AgentMoveError(
-                "Agent has owned undelivered Telegram content; use the full "
-                "workspace transfer mode so business responses are preserved"
-            )
+            # The source cleanup retains the complete workspace and an
+            # owner-bound recovery-state snapshot. Do not send pointers to
+            # response files that this narrower package does not carry.
+            retained_pending_count = len(pending_requests)
+            delivery_state = None
     if not include_telegram_secret:
         secret_values.pop(telegram_secret_key, None)
         required_secret_keys = [
@@ -523,9 +720,12 @@ def create_agent_move_package(
     entries: list[WorkspaceEntry] = []
     exclusions: list[dict[str, str]] = []
     if include_workspace or transfer_mode:
+        workspace_payload_limit = workspace_limit - (len(pcm_text.encode("utf-8")) if transfer_mode else 0)
+        if workspace_payload_limit < 0:
+            raise AgentMoveError(f"Agent workspace identity exceeds the {workspace_limit} byte limit")
         entries, exclusions = _scan_workspace(
             workspace,
-            max_workspace_bytes=WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES,
+            max_workspace_bytes=workspace_payload_limit,
             transfer_mode=transfer_mode,
             include_undelivered=transfer_operation == "move",
         )
@@ -553,12 +753,14 @@ def create_agent_move_package(
             {
                 "telegram_secret_key": telegram_secret_key,
                 "telegram_secret_included": bool(
-                    include_telegram_secret and telegram_secret_key in secret_values
+                    encrypted_secrets and include_telegram_secret and telegram_secret_key in secret_values
                 ),
                 "operation": transfer_operation,
                 "telegram_delivery_state": delivery_state,
             }
         )
+        if retained_pending_count:
+            access_requirements["source_retained_pending_count"] = retained_pending_count
     workspace_metadata = {
         "schema_version": 1,
         "policy": "durable-workspace-v1"
@@ -620,7 +822,14 @@ def create_agent_move_package(
         ],
         "compatibility_floor": f"agent-move-v{package_schema}",
         "warnings": [
+            *history_selection_warnings,
             *config_warnings,
+            *(
+                [f"{retained_pending_count} undelivered Telegram response(s) and their "
+                 "recovery state will remain on the source; the target will not "
+                 "automatically deliver those responses"]
+                if retained_pending_count else []
+            ),
             *(
                 [
                     "root AGENT.md will be retained as a non-authoritative attachment; "
@@ -637,6 +846,14 @@ def create_agent_move_package(
         manifest["required_receiver_capabilities"].insert(
             1, AGENT_TRANSFER_LIFECYCLE_CAPABILITY
         )
+    if inactive_target:
+        manifest["desired_target_active"] = False
+        manifest["required_receiver_capabilities"].append(
+            INACTIVE_CLONE_BACKUP_CAPABILITY if transfer_operation == "clone"
+            else INACTIVE_MOVE_CAPABILITY
+        )
+    if retain_telegram_backup:
+        manifest["retain_telegram_backup"] = True
 
     if transfer_mode:
         manifest["transfer_mode"] = transfer_mode
@@ -659,6 +876,10 @@ def create_agent_move_package(
         manifest["required_receiver_capabilities"].append(
             CONVERSATION_CONTINUITY_CAPABILITY
         )
+        if normalized_history_mode == "retain_source":
+            manifest["required_receiver_capabilities"].append(
+                RETAIN_SOURCE_HISTORY_CAPABILITY
+            )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.{package_key}.tmp")
@@ -669,6 +890,8 @@ def create_agent_move_package(
         temp_dir = Path(temp_name)
         prepared_entries = _prepare_workspace_entries(
             entries, temp_dir, freeze_files=transfer_operation == "clone",
+            max_workspace_bytes=(workspace_limit - len(pcm_text.encode("utf-8"))
+                                 if transfer_mode else workspace_limit),
         )
         sqlite_snapshot_paths = {
             item.relative_path for item in prepared_entries if item.sqlite_snapshot
@@ -678,12 +901,6 @@ def create_agent_move_package(
         for item in workspace_metadata["files"]:
             item["sqlite_snapshot"] = item["path"] in sqlite_snapshot_paths
         prepared_bytes = sum(item.size for item in prepared_entries)
-        snapshot_growth = prepared_bytes - sum(item.size for item in entries)
-        inventory_limit = (
-            WORKSPACE_LIMIT_BYTES - snapshot_growth
-            if transfer_mode == "workspace"
-            else None
-        )
         if transfer_operation == "clone" and transfer_mode:
             inventory = [
                 {"path": item.relative_path, "size": item.size, "mtime_ns": 0, "link": False}
@@ -700,38 +917,29 @@ def create_agent_move_package(
                 # files outside the selected scope. Unknown size is explicit.
                 discarded=[{"path": item["path"], "size": 0, "size_known": False, "reason": item["reason"]} for item in exclusions],
             )
-        if transfer_mode == "workspace" and (
-            total_workspace_bytes + (snapshot_growth if transfer_operation == "move" else 0)
-        ) > WORKSPACE_LIMIT_BYTES:
-            raise AgentMoveError("consistent workspace snapshots exceed the 1 GB full move limit")
-        if prepared_bytes > (WORKSPACE_LIMIT_BYTES if transfer_mode else MAX_WORKSPACE_BYTES):
+        if prepared_bytes + (len(pcm_text.encode("utf-8")) if transfer_mode else 0) > workspace_limit:
             raise AgentMoveError(
-                "consistent Agent workspace snapshots exceed the portable move "
-                f"limit of {MAX_WORKSPACE_BYTES} bytes"
+                f"consistent Agent workspace snapshots exceed the portable move limit of {workspace_limit} bytes"
             )
         try:
-            with zipfile.ZipFile(
-                temporary, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
-            ) as archive:
-                _write_bytes(archive, "manifest.json", _json_bytes(manifest), checksums)
-                _write_bytes(
-                    archive, "identity/agent.json", _json_bytes(agent_config), checksums
-                )
+            with _write_archive(temporary, package_limit, max_unpacked_bytes=unpacked_limit) as archive:
+                _write_json_member(archive, "manifest.json", manifest, checksums)
+                _write_json_member(archive, "identity/agent.json", agent_config, checksums)
                 _write_bytes(
                     archive, "identity/agent.md", pcm_text.encode("utf-8"), checksums
                 )
                 if agent_capability is not None:
-                    _write_bytes(
+                    _write_json_member(
                         archive,
                         AGENT_CAPABILITY_ARCHIVE_PATH,
-                        _json_bytes(agent_capability),
+                        agent_capability,
                         checksums,
                     )
                 if conversation_continuity is not None:
-                    _write_bytes(
+                    _write_json_member(
                         archive,
                         CONVERSATION_CONTINUITY_ARCHIVE_PATH,
-                        _json_bytes(conversation_continuity),
+                        conversation_continuity,
                         checksums,
                     )
                 if retained_identity_bytes is not None and retained_identity is not None:
@@ -741,21 +949,19 @@ def create_agent_move_package(
                         retained_identity_bytes,
                         checksums,
                     )
-                    _write_bytes(
+                    _write_json_member(
                         archive,
                         RETAINED_IDENTITY_METADATA_PATH,
-                        _json_bytes(retained_identity),
+                        retained_identity,
                         checksums,
                     )
-                _write_bytes(
+                _write_json_member(
                     archive,
                     "access/requirements.json",
-                    _json_bytes(access_requirements),
+                    access_requirements,
                     checksums,
                 )
-                _write_bytes(
-                    archive, "schedules/tasks.json", _json_bytes(schedules), checksums
-                )
+                _write_json_member(archive, "schedules/tasks.json", schedules, checksums)
                 if encrypted_secrets is not None:
                     _write_bytes(
                         archive, "secrets/agent.enc", encrypted_secrets, checksums
@@ -769,13 +975,12 @@ def create_agent_move_package(
                         mode=item.mode,
                     )
                 if transfer_mode and transfer_operation == "move":
-                    final_inventory = _workspace_inventory(workspace)
+                    final_inventory = _workspace_inventory(workspace, max_entries=inventory_limit)
                     _assert_packaging_inventory_current(
                         inventory, final_inventory, sqlite_snapshot_paths,
-                        max_workspace_bytes=inventory_limit,
                     )
                     # Retain the complete observed inventory for deletion
-                    # disclosure and limits, including reader-created sidecars.
+                    # disclosure, including reader-created sidecars.
                     workspace_metadata.update({
                         "inventory": final_inventory,
                         "total_workspace_bytes": sum(
@@ -786,36 +991,34 @@ def create_agent_move_package(
                             if item["path"] not in selected
                         ],
                     })
-                _write_bytes(
+                _write_json_member(
                     archive,
                     "metadata/workspace.json",
-                    _json_bytes(workspace_metadata),
+                    workspace_metadata,
                     checksums,
                 )
-                archive.writestr(
-                    "checksums.json",
-                    _json_bytes(
-                        {"schema_version": 1, "files": dict(sorted(checksums.items()))}
-                    ),
+                _write_json_member(
+                    archive, "checksums.json",
+                    {"schema_version": 1, "files": dict(sorted(checksums.items()))},
+                    None,
                 )
-            if max_package_bytes is not None and temporary.stat().st_size > int(
-                max_package_bytes
-            ):
+            if package_limit is not None and temporary.stat().st_size > package_limit:
                 raise AgentMoveError(
                     f"Agent move package is {temporary.stat().st_size} bytes; "
-                    f"receiver limit is {int(max_package_bytes)} bytes"
+                    f"receiver limit is {package_limit} bytes"
                 )
             if os.name != "nt":
                 temporary.chmod(0o600)
             # Validate the completed archive before replacing a caller's
             # existing output. This also catches files that grew after the
             # initial workspace scan.
-            read_agent_move_package(temporary, verify=True)
+            read_agent_move_package(temporary, verify=True, max_archive_members=member_limit,
+                                    max_unpacked_bytes=unpacked_limit,
+                                    max_workspace_bytes=workspace_limit)
             if transfer_mode and transfer_operation == "move":
-                final_inventory = _workspace_inventory(workspace)
+                final_inventory = _workspace_inventory(workspace, max_entries=inventory_limit)
                 _assert_packaging_inventory_current(
                     inventory, final_inventory, sqlite_snapshot_paths,
-                    max_workspace_bytes=inventory_limit,
                 )
             if conversation_continuity is not None and transfer_operation == "move":
                 final_continuity = _export_conversation_continuity_snapshot(
@@ -837,7 +1040,9 @@ def create_agent_move_package(
             temporary.unlink(missing_ok=True)
             raise
 
-    return read_agent_move_package(output, verify=True)
+    return read_agent_move_package(output, verify=True, max_archive_members=member_limit,
+                                   max_unpacked_bytes=unpacked_limit,
+                                   max_workspace_bytes=workspace_limit)
 
 
 def read_agent_move_package(
@@ -845,7 +1050,16 @@ def read_agent_move_package(
     *,
     verify: bool = True,
     target_platform: str | None = None,
+    max_archive_members: int | None = None,
+    max_unpacked_bytes: int | None = None,
+    max_workspace_bytes: int | None = None,
 ) -> AgentMoveArchive:
+    workspace_limit = (configured_workspace_byte_limit() if max_workspace_bytes is None
+                       else _positive_archive_member_limit(max_workspace_bytes, label="workspace byte"))
+    unpacked_limit = (configured_unpacked_byte_limit() if max_unpacked_bytes is None
+                      else _positive_archive_member_limit(max_unpacked_bytes, label="expanded package byte"))
+    member_limit = (configured_archive_member_limit() if max_archive_members is None
+                    else _positive_archive_member_limit(max_archive_members))
     path = Path(package_path).expanduser().resolve()
     if not path.is_file():
         raise AgentMoveError(f"Agent move package not found: {path}")
@@ -856,8 +1070,10 @@ def read_agent_move_package(
 
     with archive:
         infos = archive.infolist()
-        if len(infos) > MAX_ARCHIVE_MEMBERS:
-            raise AgentMoveError("Agent move archive contains too many files")
+        if len(infos) > member_limit:
+            raise AgentMoveError(
+                f"Agent move archive contains {len(infos)} members; limit is {member_limit}"
+            )
         names = [info.filename for info in infos]
         if len(names) != len(set(names)):
             raise AgentMoveError("Agent move archive contains duplicate member names")
@@ -865,8 +1081,10 @@ def read_agent_move_package(
             _safe_member_name(name)
         _validate_control_member_sizes(infos)
         unpacked = sum(max(0, int(info.file_size)) for info in infos)
-        if unpacked > MAX_UNPACKED_BYTES:
-            raise AgentMoveError("Agent move archive expands beyond the supported size")
+        if unpacked > unpacked_limit:
+            raise AgentMoveError(
+                f"expanded Agent move archive is {unpacked} bytes; receiver limit is {unpacked_limit} bytes"
+            )
 
         manifest = _read_json(archive, "manifest.json")
         checksums_obj = _read_json(archive, "checksums.json")
@@ -895,8 +1113,19 @@ def read_agent_move_package(
                 raise AgentMoveError(
                     "schema 3 access requirements omit Telegram credential policy"
                 )
-            if operation == "clone" and access.get("telegram_secret_included"):
-                raise AgentMoveError("clone package declares a Telegram credential")
+            if (operation == "clone" and access.get("telegram_secret_included")
+                    and manifest.get("retain_telegram_backup") is not True):
+                raise AgentMoveError("active clone package declares a Telegram credential")
+            if access.get("telegram_secret_included") and "secrets/agent.enc" not in names:
+                raise AgentMoveError("packaged Telegram credential is not encrypted")
+            retained_count = access.get("source_retained_pending_count", 0)
+            if (type(retained_count) is not int or retained_count < 0
+                    or (retained_count and (
+                        operation != "move"
+                        or manifest.get("transfer_mode") == "workspace"
+                        or access.get("telegram_delivery_state") is not None
+                    ))):
+                raise AgentMoveError("source-retained pending delivery declaration is invalid")
             delivery_state = access.get("telegram_delivery_state")
             if delivery_state is not None:
                 if operation != "move" or not isinstance(delivery_state, dict):
@@ -913,17 +1142,27 @@ def read_agent_move_package(
                     )
         schedules = _read_json(archive, "schedules/tasks.json")
         workspace_metadata = _read_json(archive, "metadata/workspace.json")
+        workspace_bytes = sum(
+            info.file_size for info in infos
+            if info.filename.startswith("workspace/") or info.filename == "identity/agent.md"
+        )
         if int(manifest.get("schema_version") or 0) >= 4:
             mode = manifest.get("transfer_mode")
             if mode not in TRANSFER_MODES or workspace_metadata.get("transfer_mode") != mode:
                 raise AgentMoveError("package transfer mode is invalid or inconsistent")
             if TRANSFER_MODES_CAPABILITY not in manifest.get("required_receiver_capabilities", []):
                 raise AgentMoveError("package omits explicit transfer mode capability")
-            actual_bytes = sum(info.file_size for info in infos if info.filename.startswith("workspace/") or info.filename == "identity/agent.md")
-            if actual_bytes > WORKSPACE_LIMIT_BYTES:
-                raise AgentMoveError("Agent transfer payload exceeds the 1 GB limit")
-            if mode == "workspace" and int(workspace_metadata.get("total_workspace_bytes", -1)) not in range(WORKSPACE_LIMIT_BYTES + 1):
-                raise AgentMoveError("workspace inventory exceeds the 1 GB limit")
+            if workspace_bytes > workspace_limit:
+                raise AgentMoveError(
+                    f"Agent workspace payload is {workspace_bytes} bytes; receiver limit is {workspace_limit} bytes"
+                )
+            if mode == "workspace":
+                try:
+                    inventory_bytes = int(workspace_metadata.get("total_workspace_bytes", -1))
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise AgentMoveError("workspace inventory size is invalid") from exc
+                if inventory_bytes < 0:
+                    raise AgentMoveError("workspace inventory size is invalid")
             if mode == "identity_memory" and any(name.startswith("workspace/") and not is_portable_memory_path(name[len("workspace/"):]) for name in names):
                 raise AgentMoveError("identity-memory package contains files outside PCM scope")
 
@@ -934,7 +1173,7 @@ def read_agent_move_package(
             operation = str(manifest.get("operation") or "").strip().lower()
             history_mode = str(manifest.get("history_mode") or "").strip().lower()
             allowed_history_modes = (
-                {"move"}
+                {"move", "retain_source"}
                 if operation == "move"
                 else {"none", "inherit_read_only", "copy"}
             )
@@ -947,7 +1186,7 @@ def read_agent_move_package(
                 raise AgentMoveError(
                     "conversation continuity attachment does not match the manifest"
                 )
-            if (history_mode == "none") != (not continuity_present):
+            if (history_mode in {"none", "retain_source"}) != (not continuity_present):
                 raise AgentMoveError(
                     "package conversation history mode and attachment are inconsistent"
                 )
@@ -957,6 +1196,11 @@ def read_agent_move_package(
                 raise AgentMoveError(
                     "package omits conversation continuity receiver capability"
                 )
+            if (history_mode == "retain_source" and
+                    RETAIN_SOURCE_HISTORY_CAPABILITY not in manifest.get(
+                        "required_receiver_capabilities", []
+                    )):
+                raise AgentMoveError("package omits retain-source history receiver capability")
             if continuity_present:
                 conversation_continuity = _read_json(
                     archive,
@@ -1036,6 +1280,8 @@ def read_agent_move_package(
         conversation_continuity=conversation_continuity,
         checksums={str(k): str(v) for k, v in checksums.items()},
         names=tuple(names),
+        unpacked_bytes=unpacked,
+        workspace_bytes=workspace_bytes,
     )
 
 
@@ -1200,6 +1446,7 @@ def archive_snapshot_fingerprint(
         "agent_credentials": credentials,
         "transfer_mode": package.manifest.get("transfer_mode"),
         "history_mode": package.manifest.get("history_mode"),
+        "desired_target_active": package.manifest.get("desired_target_active", True),
         "conversation_continuity": _durable_conversation_continuity(
             package.conversation_continuity
         ),
@@ -1216,7 +1463,10 @@ def archive_snapshot_fingerprint(
             not in _FRESHNESS_EXCLUDED_WORKSPACE_PATHS
         ],
     }
-    return hashlib.sha256(_json_bytes(payload)).hexdigest()
+    digest = hashlib.sha256()
+    for chunk in _iter_json_bytes(payload):
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _find_agent_config(root: Path, agent_id: str) -> dict[str, Any]:
@@ -1277,7 +1527,9 @@ def _configured_instance_id(root: Path) -> str | None:
     return str((data.get("global") or {}).get("instance_id") or "").strip() or None
 
 
-def _configured_owner_id(root: Path, *, instance_role: str = "source") -> str:
+def _configured_owner_identity(
+    root: Path, *, instance_role: str = "source"
+) -> tuple[str, bool]:
     data = _load_json_file(root / "agents.json")
     global_config = data.get("global") if isinstance(data, Mapping) else {}
     if not isinstance(global_config, Mapping):
@@ -1285,24 +1537,36 @@ def _configured_owner_id(root: Path, *, instance_role: str = "source") -> str:
             f"{instance_role} authorized conversation owner configuration is invalid"
         )
     try:
+        from orchestrator.enterprise.profile import resolve_deployment_profile
+        from orchestrator.personal_data_owner import read_personal_data_binding
+
+        if resolve_deployment_profile(dict(global_config)).value == "personal":
+            binding = read_personal_data_binding(root)
+            if binding is not None:
+                return binding
         # PAO ownership remains stable when a Telegram account is replaced.
         # Telegram is optional when an explicit PAO owner scope exists.
         if str(global_config.get("owner_scope_id") or "").strip():
-            return resolve_owner_scope_id(global_config, None)
+            return resolve_owner_scope_id(global_config, None), True
         secrets_path = root / "secrets.json"
         secrets = _load_json_file(secrets_path) if secrets_path.is_file() else {}
         if not isinstance(secrets, Mapping):
             raise ValueError("owner compatibility configuration must be an object")
-        telegram_owner = resolve_telegram_owner_id(global_config, secrets)
-        if telegram_owner is not None:
-            return resolve_owner_scope_id(global_config, telegram_owner)
+        try:
+            telegram_owner = resolve_telegram_owner_id(global_config, secrets)
+        except ValueError:
+            if resolve_deployment_profile(dict(global_config)).value != "personal":
+                raise
+            # Do not make an unrelated malformed connector a personal transfer
+            # gate or infer an unknown legacy owner's history.
+            telegram_owner = None
+        return resolve_owner_scope_id(global_config, telegram_owner), (
+            telegram_owner is not None
+        )
     except ValueError as exc:
         raise AgentMoveError(
             f"{instance_role} authorized conversation owner configuration is invalid"
         ) from exc
-    raise AgentMoveError(
-        f"{instance_role} authorized conversation owner is not configured"
-    )
 
 
 def _export_conversation_continuity_snapshot(
@@ -1313,6 +1577,7 @@ def _export_conversation_continuity_snapshot(
     transfer_id: str,
     history_mode: str,
     explicit_owner_id: str | None,
+    selection_warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Export through a disposable SQLite snapshot without migrating live state."""
 
@@ -1332,10 +1597,19 @@ def _export_conversation_continuity_snapshot(
                     "could not create a consistent SessionStore snapshot"
                 ) from exc
         store = SessionStore(snapshot_path, instance_id=source_instance)
-        owner = _resolve_conversation_owner(
+        owner, has_explicit_owner = _resolve_conversation_owner(
             root,
             explicit_owner_id=explicit_owner_id,
         )
+        if not has_explicit_owner:
+            owners_with_history = store.conversation_history_owner_ids(agent_id=agent_id)
+            if owners_with_history and owner not in owners_with_history:
+                if (history_mode in {"copy", "inherit_read_only", "move"}
+                        and _personal_transfer_source(root)):
+                    if selection_warnings is not None:
+                        selection_warnings.append(PERSONAL_CLONE_HISTORY_NOT_INCLUDED_WARNING)
+                else:
+                    _assert_source_history_owner(owner, owners_with_history)
         return store.export_conversation_continuity(
             owner_id=owner,
             agent_id=agent_id,
@@ -1366,21 +1640,111 @@ def export_conversation_continuity_snapshot(
     )
 
 
+def establish_personal_target_conversation_owner(root: Path) -> str | None:
+    """Establish the target's existing local data key after transfer verification."""
+    from orchestrator.enterprise.profile import resolve_deployment_profile
+    from orchestrator.personal_data_owner import resolve_personal_data_owner
+
+    data = _load_json_file(root / "agents.json")
+    global_config = data.get("global") if isinstance(data, Mapping) else None
+    if not isinstance(global_config, Mapping):
+        raise AgentMoveError("target conversation owner configuration is invalid")
+    if resolve_deployment_profile(dict(global_config)).value != "personal":
+        return None
+    secrets_path = root / "secrets.json"
+    secrets = _load_json_file(secrets_path) if secrets_path.is_file() else {}
+    if not isinstance(secrets, Mapping):
+        raise AgentMoveError("target compatibility configuration is invalid")
+    try:
+        telegram_owner = resolve_telegram_owner_id(global_config, secrets)
+    except ValueError:
+        # A malformed connector identity cannot authorize or block local transfer.
+        telegram_owner = None
+    return resolve_personal_data_owner(root, global_config, telegram_owner, establish=True)
+
+
 def configured_conversation_owner_id(
-    root: Path, *, instance_role: str = "source"
+    root: Path, *, instance_role: str = "source", agent_id: str | None = None
 ) -> str:
     """Return the configured conversation owner without exposing secret values."""
 
-    return _configured_owner_id(root, instance_role=instance_role)
+    owner, has_explicit_owner = _configured_owner_identity(root, instance_role=instance_role)
+    if agent_id and not has_explicit_owner:
+        try:
+            owners = SessionStore.existing_conversation_history_owner_ids(
+                root / "state" / "sessions.sqlite3",
+                instance_id=str(_configured_instance_id(root) or "HASHI").upper(),
+                agent_id=agent_id,
+            )
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise AgentMoveError("source conversation ownership could not be read") from exc
+        _assert_source_history_owner(owner, owners)
+    return owner
+
+
+def _personal_transfer_source(root: Path) -> bool:
+    from orchestrator.enterprise.profile import resolve_deployment_profile
+
+    data = _load_json_file(root / "agents.json")
+    global_config = data.get("global") if isinstance(data, Mapping) else None
+    if not isinstance(global_config, Mapping):
+        raise AgentMoveError("source deployment configuration is invalid")
+    try:
+        return resolve_deployment_profile(dict(global_config)).value == "personal"
+    except ValueError as exc:
+        raise AgentMoveError("source deployment profile is invalid") from exc
+
+
+def authenticated_conversation_command_owner(
+    root: Path, *, allow_expired_context: bool = False,
+) -> str | None:
+    """Use the established command principal to select, never grant, history."""
+    from orchestrator.frontend_command_context import transfer_command_owner_for_instance
+    from orchestrator.telegram_actor_scope import transfer_owner_for_instance
+
+    try:
+        owner = transfer_command_owner_for_instance(root, allow_expired=allow_expired_context)
+        if owner:
+            return owner
+        return transfer_owner_for_instance(root, allow_expired=allow_expired_context)
+    except ValueError as exc:
+        raise AgentMoveError(str(exc)) from exc
+
+
+def source_conversation_owner_id(
+    root: Path, *, agent_id: str | None = None, operation: str | None = None,
+) -> str:
+    """Resolve source history for the active authenticated command."""
+
+    owner = authenticated_conversation_command_owner(root)
+    if owner:
+        return owner
+    # Personal clone and move retain source partitions; the selected owner's
+    # empty partition is valid even if another owner has historical messages.
+    if operation in {"clone", "move"} and _personal_transfer_source(root):
+        return configured_conversation_owner_id(root)
+    return configured_conversation_owner_id(root, agent_id=agent_id)
+
+
+def _assert_source_history_owner(owner: str, owners_with_history: list[str]) -> None:
+    if owners_with_history and owner not in owners_with_history:
+        raise AgentMoveError(
+            "source authorized conversation owner is not configured for existing history"
+        )
 
 
 def _resolve_conversation_owner(
     root: Path,
     *,
     explicit_owner_id: str | None,
-) -> str:
-    configured = _configured_owner_id(root)
+) -> tuple[str, bool]:
     explicit = str(explicit_owner_id or "").strip()
+    authenticated = authenticated_conversation_command_owner(root)
+    if authenticated:
+        if explicit and explicit != authenticated:
+            raise AgentMoveError("SessionStore history owner does not match the authenticated command owner")
+        return authenticated, True
+    configured, has_explicit_owner = _configured_owner_identity(root)
     if explicit and explicit != configured:
         raise AgentMoveError(
             "SessionStore history owner does not match the configured authorized owner"
@@ -1388,7 +1752,7 @@ def _resolve_conversation_owner(
     # SessionStore already filters export by exact owner + Agent + instance.
     # Other scopes (including empty transport-account Sessions) neither grant
     # access nor veto the configured owner's export. No history is also valid.
-    return configured
+    return configured, has_explicit_owner
 
 
 def _collect_agent_capability(
@@ -1425,23 +1789,36 @@ def _collect_agent_capability(
 
 def _collect_schedules(root: Path, agent_id: str) -> dict[str, Any]:
     path = root / "tasks.json"
+    sections = ("heartbeats", "crons", "nudges")
     if not path.is_file():
-        return {"version": 1, "heartbeats": [], "crons": [], "nudges": []}
+        return {"version": 1, **{section: [] for section in sections},
+                "source_enabled": {section: [] for section in sections},
+                "source_originals": {section: [] for section in sections}}
     data = _load_json_file(path)
     result: dict[str, Any] = {
-        "version": data.get("version", 1) if isinstance(data, dict) else 1
+        "version": data.get("version", 1) if isinstance(data, dict) else 1,
+        "source_enabled": {},
+        "source_originals": {},
     }
-    for section in ("heartbeats", "crons", "nudges"):
+    for section in sections:
         rows = data.get(section, []) if isinstance(data, dict) else []
         selected = []
+        source_enabled = []
+        source_originals = []
         for row in rows:
             if not isinstance(row, dict) or row.get("agent") != agent_id:
                 continue
             item = dict(row)
+            source_originals.append(dict(row))
+            # The package stays quarantined for older receivers, while the
+            # authenticated snapshot separately preserves the source intent.
+            source_enabled.append(bool(item.get("enabled", False)))
             item["enabled"] = False
             item["import_state"] = "disabled_review_draft"
             selected.append(item)
         result[section] = selected
+        result["source_enabled"][section] = source_enabled
+        result["source_originals"][section] = source_originals
     return result
 
 
@@ -1474,7 +1851,7 @@ def _collect_agent_secrets(
     return values, required, token_key
 
 
-def _workspace_inventory(workspace: Path) -> list[dict[str, Any]]:
+def _workspace_inventory(workspace: Path, *, max_entries: int | None = None) -> list[dict[str, Any]]:
     entries = []
     def fail(error):
         raise AgentMoveError(f"workspace inventory cannot be inspected: {error}") from error
@@ -1492,8 +1869,10 @@ def _workspace_inventory(workspace: Path) -> list[dict[str, Any]]:
             entries.append({"path": path.relative_to(workspace).as_posix(),
                             "size": 0 if link else info.st_size,
                             "mtime_ns": info.st_mtime_ns, "link": link})
-            if len(entries) > MAX_ARCHIVE_MEMBERS:
-                raise AgentMoveError("workspace inventory exceeds the file-count limit")
+            if max_entries is not None and len(entries) > max_entries:
+                raise AgentMoveError(
+                    f"source workspace inventory exceeds its {max_entries} entry limit"
+                )
     return sorted(entries, key=lambda item: item["path"])
 
 
@@ -1526,8 +1905,6 @@ def _assert_packaging_inventory_current(
     before: list[dict[str, Any]],
     after: list[dict[str, Any]],
     sqlite_snapshot_paths: set[str],
-    *,
-    max_workspace_bytes: int | None,
 ) -> None:
     old = {
         item["path"]: item
@@ -1544,13 +1921,76 @@ def _assert_packaging_inventory_current(
     ]
     if changes:
         raise _WorkspaceChangedError(changes)
-    if (
-        max_workspace_bytes is not None
-        and sum(item["size"] for item in after) > max_workspace_bytes
-    ):
+
+
+def _workspace_directory_exclusion(
+    directory: Path, *, relative_path: str, at_workspace_root: bool,
+    transfer_mode: str | None, include_undelivered: bool,
+) -> str:
+    """Apply the portable-workspace directory policy to a real directory."""
+    name = directory.name.casefold()
+    if name == PCM_FILENAME.casefold() and (not transfer_mode or at_workspace_root):
         raise AgentMoveError(
-            "consistent workspace snapshots exceed the 1 GB full move limit"
+            f"workspace/{relative_path} conflicts with the reserved Agent identity; "
+            "only exact root AGENT.md may be retained as a non-authoritative attachment"
         )
+    if name in _SKIP_DIR_NAMES and not (
+        include_undelivered and transfer_mode == "workspace"
+        and at_workspace_root and name == "undelivered"
+    ) and (
+        not transfer_mode or at_workspace_root
+        or name not in {"state", "tmp", "undelivered", "backend_state"}
+    ):
+        return "ephemeral_or_environment_directory"
+    if directory.is_symlink() or _is_windows_junction(directory):
+        return "directory_symlink_not_portable"
+    if not transfer_mode and (directory / ".git").exists():
+        return "nested_project_not_agent_state"
+    return ""
+
+
+def _workspace_file_exclusion(path: Path) -> str:
+    """Keep the same policy for the selected name and any resolved link target."""
+    name = path.name.casefold()
+    environment_secret = name.startswith(".env.") and not name.endswith(
+        (".example", ".sample", ".template")
+    )
+    credential = (
+        name in {
+            ".env", ".git-credentials", ".netrc", ".npmrc", ".pypirc",
+            "auth.json", "credentials.json", "id_ed25519", "id_rsa",
+            "oauth.json", "secrets.json", "service-account.json", "token.json",
+        }
+        or environment_secret
+        or path.suffix.lower() in _SECRET_FILE_SUFFIXES
+    )
+    if name in _SKIP_FILE_NAMES or credential or any(name.endswith(x) for x in _SKIP_SUFFIXES):
+        return "credential_material_requires_encrypted_rebind" if credential else "ephemeral_runtime_file"
+    return ""
+
+
+def _resolved_workspace_target_exclusion(
+    target: Path, workspace: Path, *, transfer_mode: str | None,
+    include_undelivered: bool,
+) -> str:
+    """A link cannot give excluded content a different, apparently safe name."""
+    relative = target.relative_to(workspace)
+    parent = workspace
+    for part in relative.parts[:-1]:
+        child = parent / part
+        reason = _workspace_directory_exclusion(
+            child, relative_path=child.relative_to(workspace).as_posix(),
+            at_workspace_root=parent == workspace, transfer_mode=transfer_mode,
+            include_undelivered=include_undelivered,
+        )
+        if reason:
+            return reason
+        parent = child
+    if target.name.casefold() == PCM_FILENAME.casefold() and (
+        not transfer_mode or parent == workspace
+    ):
+        return "agent_identity_is_not_workspace_content"
+    return _workspace_file_exclusion(target)
 
 
 def _scan_workspace(
@@ -1570,27 +2010,10 @@ def _scan_workspace(
         for directory in sorted(dir_names):
             child = current_path / directory
             relative = child.relative_to(workspace).as_posix()
-            normalized_directory = directory.casefold()
-            reason = ""
-            if normalized_directory == PCM_FILENAME.casefold() and (not transfer_mode or current_path == workspace):
-                raise AgentMoveError(
-                    f"workspace/{relative} conflicts with the reserved Agent identity; "
-                    "only exact root AGENT.md may be retained as a non-authoritative attachment"
-                )
-            if normalized_directory in _SKIP_DIR_NAMES and not (
-                include_undelivered
-                and transfer_mode == "workspace"
-                and current_path == workspace
-                and normalized_directory == "undelivered"
-            ) and (
-                not transfer_mode or current_path == workspace
-                or normalized_directory not in {"state", "tmp", "undelivered", "backend_state"}
-            ):
-                reason = "ephemeral_or_environment_directory"
-            elif child.is_symlink() or _is_windows_junction(child):
-                reason = "directory_symlink_not_portable"
-            elif not transfer_mode and (child / ".git").exists():
-                reason = "nested_project_not_agent_state"
+            reason = _workspace_directory_exclusion(
+                child, relative_path=relative, at_workspace_root=current_path == workspace,
+                transfer_mode=transfer_mode, include_undelivered=include_undelivered,
+            )
             if reason:
                 excluded.append({"path": relative, "reason": reason})
             else:
@@ -1610,41 +2033,8 @@ def _scan_workspace(
                     f"workspace/{relative} conflicts with the reserved Agent identity; "
                     "only exact root AGENT.md may be retained as a non-authoritative attachment"
                 )
-            is_environment_secret = normalized_filename.startswith(
-                ".env."
-            ) and not normalized_filename.endswith((".example", ".sample", ".template"))
-            is_credential_material = (
-                normalized_filename
-                in {
-                    ".env",
-                    ".git-credentials",
-                    ".netrc",
-                    ".npmrc",
-                    ".pypirc",
-                    "auth.json",
-                    "credentials.json",
-                    "id_ed25519",
-                    "id_rsa",
-                    "oauth.json",
-                    "secrets.json",
-                    "service-account.json",
-                    "token.json",
-                }
-                or is_environment_secret
-                or source.suffix.lower() in _SECRET_FILE_SUFFIXES
-            )
-            if (
-                normalized_filename in _SKIP_FILE_NAMES
-                or is_credential_material
-                or any(
-                    normalized_filename.endswith(suffix) for suffix in _SKIP_SUFFIXES
-                )
-            ):
-                reason = (
-                    "credential_material_requires_encrypted_rebind"
-                    if is_credential_material
-                    else "ephemeral_runtime_file"
-                )
+            reason = _workspace_file_exclusion(source)
+            if reason:
                 excluded.append({"path": relative, "reason": reason})
                 continue
             if transfer_mode == "identity_memory" and not is_portable_memory_path(relative):
@@ -1663,6 +2053,13 @@ def _scan_workspace(
                     or not actual.is_file()
                 ):
                     excluded.append({"path": relative, "reason": "external_symlink"})
+                    continue
+                reason = _resolved_workspace_target_exclusion(
+                    actual, workspace_resolved, transfer_mode=transfer_mode,
+                    include_undelivered=include_undelivered,
+                )
+                if reason:
+                    excluded.append({"path": relative, "reason": reason})
                     continue
                 materialized = True
             try:
@@ -1710,11 +2107,19 @@ def _is_windows_junction(path: Path) -> bool:
 
 def _prepare_workspace_entries(
     entries: Iterable[WorkspaceEntry], temp_dir: Path, *, freeze_files: bool = False,
+    max_workspace_bytes: int = MAX_WORKSPACE_BYTES,
 ) -> list[WorkspaceEntry]:
     prepared: list[WorkspaceEntry] = []
+    prepared_total = 0
     for index, item in enumerate(entries):
         if not item.sqlite_snapshot:
-            prepared.append(_freeze_workspace_file(item, temp_dir, index) if freeze_files else item)
+            frozen = (_freeze_workspace_file(item, temp_dir, index,
+                                             max_file_bytes=max_workspace_bytes - prepared_total)
+                      if freeze_files else item)
+            prepared_total += frozen.size
+            if prepared_total > max_workspace_bytes:
+                raise AgentMoveError(f"workspace snapshots exceed the {max_workspace_bytes} byte limit")
+            prepared.append(frozen)
             continue
         snapshot = temp_dir / f"sqlite-{index}.db"
         try:
@@ -1752,11 +2157,17 @@ def _prepare_workspace_entries(
                     sqlite_snapshot=False,
                     materialized_symlink=item.materialized_symlink,
                 )
-            prepared.append(_freeze_workspace_file(fallback, temp_dir, index) if freeze_files else fallback)
+            prepared.append(_freeze_workspace_file(
+                fallback, temp_dir, index, max_file_bytes=max_workspace_bytes - prepared_total
+            ) if freeze_files else fallback)
+        prepared_total += prepared[-1].size
+        if prepared_total > max_workspace_bytes:
+            raise AgentMoveError(f"workspace snapshots exceed the {max_workspace_bytes} byte limit")
     return prepared
 
 
-def _freeze_workspace_file(item: WorkspaceEntry, temp_dir: Path, index: int) -> WorkspaceEntry:
+def _freeze_workspace_file(item: WorkspaceEntry, temp_dir: Path, index: int, *,
+                           max_file_bytes: int) -> WorkspaceEntry:
     """Capture one stable file; later source work cannot veto this clone.
 
     SQLite uses the backup API above. Ordinary files are checked across the
@@ -1781,8 +2192,11 @@ def _freeze_workspace_file(item: WorkspaceEntry, temp_dir: Path, index: int) -> 
             copied = 0
             while chunk := reader.read(1024 * 1024):
                 copied += len(chunk)
-                if copied > WORKSPACE_LIMIT_BYTES:
-                    raise AgentMoveError(f"clone snapshot file exceeds the workspace limit: {item.relative_path!r}")
+                if copied > max_file_bytes:
+                    raise AgentMoveError(
+                        f"clone snapshot file exceeds its remaining workspace limit "
+                        f"of {max_file_bytes} bytes: {item.relative_path!r}"
+                    )
                 writer.write(chunk)
             after = os.fstat(reader.fileno())
         end = item.source.lstat()
@@ -1804,6 +2218,20 @@ def _write_bytes(
     _safe_member_name(name)
     archive.writestr(name, content)
     checksums[name] = hashlib.sha256(content).hexdigest()
+
+
+def _write_json_member(
+    archive: zipfile.ZipFile, name: str, value: Mapping[str, Any],
+    checksums: dict[str, str] | None,
+) -> None:
+    _safe_member_name(name)
+    digest = hashlib.sha256()
+    with archive.open(name, "w", force_zip64=True) as writer:
+        for chunk in _iter_json_bytes(value):
+            writer.write(chunk)
+            digest.update(chunk)
+    if checksums is not None:
+        checksums[name] = digest.hexdigest()
 
 
 def _write_file(
@@ -1852,6 +2280,20 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
     required = manifest.get("required_receiver_capabilities")
     if not isinstance(required, list) or AGENT_MOVE_CAPABILITY not in required:
         raise AgentMoveError("manifest does not require the agent-move-v1 receiver")
+    if "desired_target_active" in manifest:
+        operation = manifest.get("operation")
+        capability = (
+            INACTIVE_CLONE_BACKUP_CAPABILITY if operation == "clone" else INACTIVE_MOVE_CAPABILITY
+        )
+        if (manifest.get("desired_target_active") is not False or schema < 3
+                or operation not in {"move", "clone"} or capability not in required):
+            raise AgentMoveError("inactive target policy is invalid or unsupported")
+    if "retain_telegram_backup" in manifest:
+        if (manifest.get("retain_telegram_backup") is not True
+                or manifest.get("operation") != "clone"
+                or manifest.get("desired_target_active") is not False
+                or INACTIVE_CLONE_BACKUP_CAPABILITY not in required):
+            raise AgentMoveError("Telegram backup requires an explicitly inactive clone")
     sections = manifest.get("sections")
     if not isinstance(sections, Mapping):
         raise AgentMoveError("manifest sections must be an object")
@@ -2147,6 +2589,14 @@ def _load_json_file(path: Path) -> Any:
         raise AgentMoveError(f"invalid JSON file: {path.name}") from exc
 
 
+def _iter_json_bytes(value: Mapping[str, Any]) -> Iterable[bytes]:
+    encoder = json.JSONEncoder(ensure_ascii=False, indent=2, sort_keys=True)
+    for fragment in encoder.iterencode(value):
+        for offset in range(0, len(fragment), 16 * 1024):
+            yield fragment[offset:offset + 16 * 1024].encode("utf-8")
+    yield b"\n"
+
+
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -2198,3 +2648,4 @@ def _apply_mode(path: Path, mode: int, target_platform: str) -> None:
         path.chmod(int(mode) & 0o777)
     except OSError:
         pass
+# HASHI-Fingerprint: hfp_50ee4c20cff0470abcff26b8567c4f6b

@@ -72,7 +72,7 @@ async def test_http_guard_rejects_unauthorized_and_reused_slot_then_preserves_co
         body = {"expected_revision":old_revision, "authorization":"explicit_user_authorization"}
         url = "/api/agents/momo/parked-topics/1/delete-if-unchanged"
         assert (await client.post(url, json=body)).status == 401
-        assert (await client.post(url, headers=headers(), json={"expected_revision":old_revision})).status == 403
+        assert (await client.post(url, headers=headers(), json={"expected_revision":"bad"})).status == 400
 
         store.delete_topic(1)
         assert create_topic(store, "Replacement topic")["slot_id"] == 1
@@ -80,7 +80,7 @@ async def test_http_guard_rejects_unauthorized_and_reused_slot_then_preserves_co
         assert stale.status == 409
         assert (await stale.json())["error_code"] == "snapshot_changed"
         assert store.get_topic(1)["title"] == "Replacement topic"
-        body["expected_revision"] = revision(store)
+        body = {"expected_revision": revision(store)}
         deleted = await client.post(url, headers=headers(), json=body)
         assert deleted.status == 200
         assert store.list_topics() == []

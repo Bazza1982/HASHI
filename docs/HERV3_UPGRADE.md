@@ -1,5 +1,16 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+The 2026-11-17 remediation candidate keeps the previous Compact thresholds as
+defaults but honors explicitly configured manual, automatic and target values.
+A forced manual Compact may run below the default manual threshold; raw source
+history and compare-and-swap checks remain. If the model route is unavailable,
+the history operation reports failure while any completed WIP recovery remains
+visible. Model-switch and compatible-provider preflight now record approximate
+over-budget estimates as advisory rather than treating them as exact provider
+rejections. Default planning headroom scales for small models; explicitly set
+headroom remains selected. Actual provider limits, output-budget projection,
+user-visible warnings and nonproduction runtime acceptance still need review.
+
 ## 2026-10-19 long-running execution invariant
 
 HERV3 foreground work has no HASHI total token, message, Turn, model-call,
@@ -58,6 +69,29 @@ The 2026-10-04 [scoped-search Function change](HERV3_SCOPED_SEARCH.md) retains
 the single model/tool loop and direct Shell use. Execution facts drive technical
 verbose activity independently of commentary; AC heartbeat is not actual progress.
 The owning decision separates source verification from live adoption.
+
+For a wildcard tool grant, HERV3 exposes its supported structured `media_read`
+tool. A configured local `vision_inspect` route is also available under the
+same grant. Explicit per-tool disable still applies. A remote vision endpoint
+is not implicitly authorized just because its address or model is configured;
+its existing explicit grant and privacy routing remain required.
+
+For an enabled vision tool, an operator-configured endpoint supplies the
+destination without requiring its host to be repeated in a second list.
+An explicitly configured vision allowed_hosts list still restricts remote
+hosts, and selected enterprise or network policies also apply to the actual
+configured endpoint. Dispatch rechecks the selected endpoint and freezes its
+options for that request. Vision requests do not follow HTTP redirects and
+request errors do not expose configured query values. As before, loopback
+hosts are accepted by the vision-specific list; a narrower network policy can
+still deny them.
+
+The canonical Session event store remains authoritative for effect intent and
+result records. If it confirms an event while both optional audit projections
+are unavailable, the operation continues and the projection failure is logged.
+If canonical persistence is unavailable or no canonical receipt exists, the
+legacy durable audit requirement still applies. A subsequent replay of the same
+event can retry the projection without duplicating the canonical event.
 
 Voice-message uploads use the Worker-owned local transcript in the current
 Execution loop and text-only Direct route, rather than relying on retired
@@ -375,9 +409,11 @@ paths return one final response through FC.
 AC is an optional 5/10-minute liveness observer. JEV receives bounded observable runtime
 state (tool names, hashes/status, activity/progress timing), not hidden reasoning. A
 `continue` or `unknown` judgement is silent. A high-confidence `trouble` judgement queues
-one notice at the next safe tool boundary; that one tool action is not executed and the
-same main model decides whether to change direction, report a blocker, or finish.
-Deterministic cycle control and user cancellation remain independent safety controls.
+one notice at the next safe tool boundary. The default `advisory` mode executes the
+already-admitted action and includes the notice with its result. An operator may
+explicitly select `agent_companion.mode: enforce` to stop that action instead.
+The companion never widens the existing owner or delegated grants. Cycle diagnostics
+are advisory; user cancellation remains an independent control.
 
 ## Habit and Meditation retention
 
@@ -555,3 +591,22 @@ counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
 Privacy Level 2 is HERV3/DeepSeek-only, risk-accepted and fail-closed on
 detector errors. Isolated dependencies or synthetic readiness prove neither
 activation nor Worker adoption.
+
+
+### Same-target provider recovery
+
+A Turn can select a provider recovery policy independently of allowed fallback
+destinations. In the HERV3 configuration, set the provider_recovery object
+under her_v2; a request-local object with the same name overrides individual
+configured values. Fields are max_provider_retries, base_delay_s, max_delay_s,
+and a list of capacity_delays_s. Empty capacity delays disable the extended
+capacity wait. Provider Retry-After can lengthen a selected wait. Healthy
+operations have no elapsed deadline from these settings. Completed or uncertain
+effects remain subject to existing replay and continuation checks; these
+settings do not authorize a destination switch.
+
+A voice-message text stage may use same-target capacity recovery when its
+released transcript is the exact one used by the failed attempt and no output
+or tool effect was observed. A changed transcript prevents the next call.
+Live phone/call, native-audio continuation and voice destination switching
+still need their own implemented and verified media contracts.

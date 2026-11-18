@@ -733,9 +733,81 @@ def _unconfirmed_stopped_requests(runtime: Any, request_ids: set[str]) -> tuple[
     return tuple(unconfirmed)
 
 
+def _scoped_stop_owner(runtime: Any) -> str | None:
+    """Use only the authenticated ingress context, never request metadata."""
+    from orchestrator.frontend_command_context import frontend_command_owner
+    from orchestrator.telegram_actor_scope import current_actor
+
+    actor = current_actor(runtime)
+    if actor is not None:
+        return None if actor.is_primary else actor.owner_id
+    principal = frontend_command_owner(runtime)
+    if not principal:
+        return None
+    configured_owner = runtime_session.SessionStore.owner_id_for(runtime.global_config)
+    if principal.startswith("enterprise:") or principal != configured_owner:
+        return principal
+    return None
+
+
+async def _stop_scoped_runs(runtime: Any, update: Any, context: Any, owner: str) -> dict[str, Any]:
+    """Cancel this authenticated owner's Runs without stopping another owner."""
+    from orchestrator import runtime_cancel
+    from orchestrator.run_questions import QuestionError, RunQuestions
+
+    store = runtime_session.ensure_store(runtime)
+    question_id = getattr(context, "_hashi_question_stop_id", None)
+    try:
+        if question_id:
+            claim = await asyncio.to_thread(
+                RunQuestions(store).stop_claim, question_id=str(question_id), agent_id=runtime.name,
+            )
+            run = store.get_run(claim["run_id"], owner_id=owner)
+            if (run["session_id"] != claim["session_id"] or run["request_id"] != claim["request_id"]
+                    or run["agent_id"] != runtime.name):
+                raise runtime_session.SessionNotFound("question Run does not match")
+            runs = [run]
+        else:
+            _, _, route_owner, _ = runtime_session._update_session_route(runtime, update)
+            if route_owner != owner:
+                raise runtime_session.SessionNotFound("command owner does not match")
+            selected = runtime_session.current_session_for_update(runtime, update)
+            if selected["owner_id"] != owner or selected["agent_id"] != runtime.name:
+                raise runtime_session.SessionNotFound("command Session does not match")
+            runs = [run for run in store.list_active_runs(owner_id=owner)
+                    if run["agent_id"] == runtime.name]
+    except (QuestionError, runtime_session.SessionNotFound, LookupError, OSError, ValueError):
+        await _reply(runtime, update, ui_language.tr("control.stop.scoped_not_found"))
+        return {"ok": False, "error_code": "question_stop_not_active" if question_id else "session_not_found"}
+
+    outcomes = []
+    for run in runs:
+        try:
+            outcomes.append(await runtime_cancel.cancel_session_run(
+                runtime, owner_id=owner, session_id=run["session_id"],
+                run_id=run["run_id"], request_id=run["request_id"],
+            ))
+        except (runtime_session.SessionNotFound, LookupError, OSError, ValueError):
+            runtime.logger.warning("Scoped Run cancellation failed", exc_info=True)
+            outcomes.append({"ok": False, "terminal": False})
+    stopped = sum(bool(item.get("ok") and item.get("terminal")) for item in outcomes)
+    pending = sum(bool(item.get("ok") and not item.get("terminal")) for item in outcomes)
+    failed = sum(not item.get("ok") for item in outcomes)
+    await _reply(runtime, update, ui_language.tr(
+        "control.stop.scoped_result", stopped=stopped, pending=pending, failed=failed,
+    ))
+    if question_id and (pending or failed or stopped != 1):
+        return {"ok": False, "error_code": "question_stop_unconfirmed"}
+    return {"ok": not failed, "stopped": stopped, "pending": pending, "failed": failed}
+
+
 async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
+
+    scoped_owner = _scoped_stop_owner(runtime)
+    if scoped_owner is not None:
+        return await _stop_scoped_runs(runtime, update, context, scoped_owner)
 
     active = getattr(runtime.config, "active_backend", None) or getattr(runtime.config, "engine", "")
     runtime.logger.warning(

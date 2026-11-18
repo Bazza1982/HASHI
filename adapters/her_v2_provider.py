@@ -374,6 +374,8 @@ def _backend_response_error(
         "provider_protocol_forensic_path",
         "provider_local_recovery_count",
         "provider_local_recovery_limit",
+        "provider_transport_retry_limit",
+        "provider_tool_repair_limit",
         "provider_local_recovery_exhausted",
         "provider_transport_retry_count",
         "provider_tool_repair_count",
@@ -1621,14 +1623,10 @@ class _UnboundedToolRegistry:
 
 
 class _CognitiveControlToolRegistry:
-    """Maintain TaskState and expose a typed boundary when progress stalls.
+    """Maintain TaskState and report repeated observations as advice.
 
-    This wrapper is request-local and stage-neutral.  It does not count tool
-    calls or impose an execution ceiling. Each ordinary tool schema carries one
-    reserved inline TaskState delta that is removed before real execution. After
-    a detected cycle or structural progress stall, only the internal cognitive
-    decision tool is advertised until the same model finalises, reports a
-    blocker, or records a distinct direction with a narrow tool set.
+    This request-local wrapper does not narrow the owner or delegated tool
+    grant. Optional legacy TaskState deltas are removed before tool execution.
     """
 
     def __init__(
@@ -2089,6 +2087,7 @@ class _CognitiveControlToolRegistry:
         tool_call_id: str,
         result: Any,
         delta_application: TaskDeltaApplication,
+        companion_advisory: str = "",
     ):
         self._observe_run_question_result(name, result)
         details = dict(getattr(result, "details", None) or {})
@@ -2122,16 +2121,19 @@ class _CognitiveControlToolRegistry:
                     "task_state": task_snapshot,
                 }
             )
+        if companion_advisory:
+            output += "\n\nHASHI_AGENT_COMPANION_ADVISORY\n" + companion_advisory
+            details["agent_companion_advisory"] = companion_advisory
         if interrupt is not None:
             payload = self.controller.interrupt_payload()
             self._audit(
-                "cognitive_interrupt",
+                "cognitive_advisory",
                 {
                     "interrupt": interrupt.as_dict(),
                     "state": self.controller.snapshot(),
                 },
             )
-            output += "\n\nHASHI_COGNITIVE_INTERRUPT\n" + json.dumps(
+            output += "\n\nHASHI_COGNITIVE_ADVISORY\n" + json.dumps(
                 payload,
                 ensure_ascii=False,
                 sort_keys=True,
@@ -2139,7 +2141,7 @@ class _CognitiveControlToolRegistry:
             )
             details.update(
                 {
-                    "control_disposition": "cognitive_interrupt",
+                    "control_disposition": "cognitive_advisory",
                     "cognitive_interrupt": interrupt.as_dict(),
                     "cognitive_control": self.controller.snapshot(),
                 }
@@ -2221,9 +2223,10 @@ class _CognitiveControlToolRegistry:
             )
 
         semantic_arguments, delta = self._split_arguments(arguments)
+        notice = ""
         if self._turn_services is not None:
             notice = str(self._turn_services.take_intervention() or "").strip()
-            if notice:
+            if notice and getattr(self._turn_services, "companion_mode", "advisory") == "enforce":
                 return self._result(
                     tool_call_id=tool_call_id,
                     output=(
@@ -2246,6 +2249,7 @@ class _CognitiveControlToolRegistry:
             tool_call_id=tool_call_id,
             result=result,
             delta_application=delta_application,
+            companion_advisory=notice,
         )
 
     async def record_policy_denial(
@@ -3534,21 +3538,23 @@ class HashiStageProvider(StageProvider):
         retry_after_s: float | None,
         retry_index: int,
         side_effects_possible: bool,
+        recovery_evidence: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any] | None:
         """Resolve one long same-target retry inside the active HER Turn.
 
-        HERV3 owns the Turn and can therefore continue its unfinished work
-        without replaying the enclosing PAO Run.  Consent and the per-source
-        A/B side-effect choice remain owned by PAO's fallback policy.
+        HERV3 owns the Turn. A replay-safe same-target retry does not depend
+        on destination switching. The selected side-effect recovery policy
+        remains separate and is not widened by a retry budget.
         """
 
         from orchestrator import model_fallback_policy as policy_owner
         runtime = self.runtime_context
         if runtime is None:
-            return None
-        policy, _document = policy_owner.read_policy(
-            runtime, _fallback_actor(runtime)
-        )
+            policy = policy_owner.default_policy()
+        else:
+            policy, _document = policy_owner.read_policy(
+                runtime, _fallback_actor(runtime)
+            )
         source = policy_owner.SOURCE_HERV3
         modality = _Herv3ProviderFallbackPort(
             self,
@@ -3556,6 +3562,33 @@ class HashiStageProvider(StageProvider):
             selected,
             purpose="capacity_retry",
         )._modality()
+        evidence = recovery_evidence if isinstance(recovery_evidence, Mapping) else {}
+        context = request.context if isinstance(request.context, Mapping) else {}
+        request_mode = str(context.get("request_mode") or "").strip().casefold()
+        manifest = attachment_manifest(request.request_content)
+        voice_state = self._native_voice_state(request) if modality == "voice" else None
+        transcript = str(voice_state.get("text") or "").strip() if voice_state else ""
+        voice_digest = str(evidence.get("voice_transcript_sha256") or "")
+        options = getattr(selected, "options", {})
+        options = options if isinstance(options, Mapping) else {}
+        # Only a released voice-message transcript previously projected into
+        # this exact failed text stage can be replayed. Native/live audio,
+        # any observed activity, extra media and unknown transcript states stay
+        # unsupported until their own continuation contracts exist.
+        voice_text_recovery = bool(
+            modality == "voice"
+            and request_mode not in policy_owner.EXCLUDED_MODALITIES
+            and request.stage is not Stage.TRIAGE
+            and not options.get("_native_audio_route")
+            and len(manifest) == 1
+            and manifest[0].get("semantic_role") == "voice_message"
+            and voice_state and voice_state.get("status") == "released"
+            and transcript and len(voice_digest) == 64
+            and hashlib.sha256(transcript.encode("utf-8")).hexdigest() == voice_digest
+            and evidence.get("provider_activity_observed") is False
+            and evidence.get("voice_projection_no_output") is True
+            and not side_effects_possible
+        )
         decision = policy_owner.resolve_capacity_retry(
             policy,
             policy_owner.CapacityRetryFacts(
@@ -3564,14 +3597,19 @@ class HashiStageProvider(StageProvider):
                 retryable=bool(retryable),
                 retry_index=int(retry_index),
                 retry_after_s=retry_after_s,
+                retry_delays_s=self.retry_policy.capacity_delays_s,
                 side_effects_possible=bool(side_effects_possible),
                 # This call is made only while the durable HER Turn remains
                 # active; option B continues that Turn rather than replaying it.
                 resumable_session=bool(request.turn_id),
                 modality=modality,
+                media_recovery_verified=voice_text_recovery,
             ),
         )
-        return decision.to_dict()
+        result = decision.to_dict()
+        if decision.allowed and voice_text_recovery:
+            result["voice_transcript_sha256"] = voice_digest
+        return result
 
     def interrupt_nowait(self, reason: str = "USER_STOP") -> int:
         """Interrupt active provider subprocesses from the control thread."""
@@ -4986,6 +5024,7 @@ class HashiStageProvider(StageProvider):
         media_routing: tuple[dict[str, Any], ...] = visual_fallback_routing
         provider_request_content = request.request_content
         media_preflight_error: StageInvocationError | None = None
+        voice_projection_sha256: str | None = None
         local_fallback_modalities = (
             _media_fallback_modalities(selected_registry)
             if request.allow_tools
@@ -5093,6 +5132,21 @@ class HashiStageProvider(StageProvider):
                         validation_source="runtime_voice_boundary",
                     )
             if needs_text_transcript:
+                voice_projection_sha256 = hashlib.sha256(
+                    transcript.encode("utf-8")
+                ).hexdigest()
+                expected_voice = request.context.get("_voice_retry_transcript_sha256")
+                if expected_voice and expected_voice != voice_projection_sha256:
+                    media_preflight_error = StageInvocationError(
+                        "Voice transcript changed since the failed attempt",
+                        retryable=False,
+                        code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                        human_description=(
+                            "The confirmed transcript changed during recovery; "
+                            "no repeated provider request was sent."
+                        ),
+                    )
+                    voice_projection_sha256 = None
                 original_manifest = tuple(request.attachment_manifest)
                 remaining_ids = {
                     str(item.get("attachment_id") or "")
@@ -5534,6 +5588,9 @@ class HashiStageProvider(StageProvider):
                 )
             if media_preflight_error is not None:
                 raise media_preflight_error
+            configure_recovery = getattr(backend, "configure_herv3_recovery", None)
+            if callable(configure_recovery) and request.provider_recovery_remaining is not None:
+                configure_recovery(request.provider_recovery_remaining, self.retry_policy)
             initialized = await backend.initialize()
             if not initialized:
                 raise StageInvocationError(
@@ -6398,12 +6455,24 @@ class HashiStageProvider(StageProvider):
                 fallback_metadata["native_audio_fallback"] = True
                 response.stream_metadata = fallback_metadata
             if not response.is_success:
-                raise _backend_response_error(
+                failure = _backend_response_error(
                     response,
                     fallback=(
                         f"{profile.engine}/{profile.model} returned an unsuccessful response"
                     ),
                 )
+                if voice_projection_sha256 is not None:
+                    # A failed adapter result is replayable only when it does
+                    # not itself contain a partial answer, audio, or tool call.
+                    failure.details["voice_projection_no_output"] = not bool(
+                        str(response.text or "").strip()
+                        or _provider_structured_data(response)
+                        or getattr(response, "content", ())
+                        or response.tool_call_count
+                        or response.tool_loop_count
+                        or response.side_effects_possible
+                    )
+                raise failure
             if (
                 not _normalise_backend_text(response.text).strip()
                 and not _provider_structured_data(response)
@@ -6489,6 +6558,8 @@ class HashiStageProvider(StageProvider):
         except ProviderCallObserverError as exc:
             raise self._accounting_observer_failure(exc) from exc
         except StageInvocationError as exc:
+            if voice_projection_sha256 is not None:
+                exc.details["voice_transcript_sha256"] = voice_projection_sha256
             if provider_request_inflight is not None:
                 engine, model, label, physically_observed = provider_request_inflight
                 if (
@@ -6716,11 +6787,7 @@ class HashiStageProvider(StageProvider):
                     else "provider_recovery_already_used"
                 )
             )
-            retry_delay = (
-                last_error.retry_after_s
-                if last_error.retry_after_s is not None
-                else 0.25
-            )
+            retry_delay = self.retry_policy.delay(attempt - 1, last_error.retry_after_s)
             if self.audit_log is not None:
                 self.audit_log.append(
                     event_id=f"{invocation_id}:attempt:{attempt}:failed",
@@ -6866,12 +6933,16 @@ class HashiStageProvider(StageProvider):
             effective_prompt = prompt
             if not _install_system_prompt(backend, system_prompt):
                 effective_prompt = f"{system_prompt}\n\n{prompt}"
+            generation_kwargs = {
+                "is_retry": attempt > 1,
+                "silent": True,
+                "on_stream_event": _discard_stream,
+            }
+            if "provider_call_limit" in inspect.signature(backend.generate_response).parameters:
+                # Persona is tool-free: the outer retry policy owns each call.
+                generation_kwargs["provider_call_limit"] = 1
             response = await backend.generate_response(
-                effective_prompt,
-                request_id,
-                is_retry=attempt > 1,
-                silent=True,
-                on_stream_event=_discard_stream,
+                effective_prompt, request_id, **generation_kwargs
             )
             if not response.is_success:
                 raise _backend_response_error(

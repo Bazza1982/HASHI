@@ -36,11 +36,41 @@ An unavailable original does not invalidate a separately retained Workbench copy
 
 `GET /api/v1/file-content/capabilities` reports readiness without loading a model.
 Admin-authenticated `POST /api/v1/file-content` uses one strict UTF-8 JSON body:
-`filename`, `operation` (`ocr` or `transcribe`), Boolean `allow_compute`, and canonical
-base64 `payload` (at most 32 MiB decoded). Metadata and bytes share the existing Remote
-HMAC signature. Custom policy headers and multipart framing are not accepted. The encoded
-request fits the existing 64 MiB HTTP limit; only two requests may parse/process at once. Results include the verified instance, bounded text segments, real locators,
+`filename`, `operation` (`ocr` or `transcribe`), optional Boolean `allow_compute`,
+and canonical base64 `payload`. Metadata and bytes share the existing Remote
+HMAC signature. Custom policy headers and multipart framing are not accepted.
+The default decoded-input limit is 32 MiB, configurable up to the current 64 MiB
+JSON wire budget; capabilities report both the configured input limit and the
+selected transcription service limit. Receive and processing concurrency default
+to two each, with eight cancellable waiters. Only a full configured queue returns
+busy. Results include the verified instance, bounded text segments, real locators,
 and ready/partial status. Failures carry stable safe codes, without private paths.
+
+Instance settings `HASHI_FILE_CONTENT_MAX_INPUT_BYTES`,
+`HASHI_FILE_CONTENT_MAX_IMAGE_PIXELS`, `HASHI_FILE_CONTENT_MAX_DECODED_BYTES`,
+`HASHI_FILE_CONTENT_RECEIVING_CONCURRENCY`,
+`HASHI_FILE_CONTENT_PROCESSING_CONCURRENCY`, and
+`HASHI_FILE_CONTENT_QUEUE_LIMIT` are positive integer budgets (queue limit may
+be zero). The current decoder estimates eight bytes per source pixel and defaults
+to 64 million pixels and 256 MiB estimated decode budget. Images are downscaled
+before RGB conversion; a request beyond the selected budgets fails explicitly.
+These active settings are returned by the capabilities endpoint.
+`HASHI_FILE_CONTENT_OCR_TIMEOUT_SECONDS` selects the local OCR worker budget
+(default 120 seconds). `HASHI_FILE_CONTENT_REQUEST_TIMEOUT_SECONDS` selects the
+authenticated file-content request budget including queueing (default 7200 seconds).
+Set the latter consistently in the target HASHI Remote and the Workbench process;
+the capability reports the target HASHI process setting, not proof of the Remote
+or Workbench environment. Explicit caller cancellation remains available. A lower
+selected request budget may expire before queued work completes; operators should
+choose it according to the selected queue and transcription configuration.
+
+When the chosen transcription provider is Compute, the existing instance
+transcription configuration may set `max_compute_input_bytes` to the actual
+service upload budget; its default remains 8 MiB. Workbench asks the selected
+HASHI for capacity before processing audio or video above its ordinary 32 MiB
+preview boundary, and checks both the instance and the service-specific budget.
+The current JSON protocol is still buffered and cannot carry arbitrarily large
+files; larger transfers require a separate streaming design.
 
 OCR normalizes bounded image pixels before calling the existing OCR owner. Its native
 worker is an explicit Function import dependency and launches by its qualified artifact
@@ -49,9 +79,12 @@ so success from a mutable source checkout alone cannot qualify the deployed OCR 
 Failed extraction retains the native owner's safe reason in the diagnostic log. Transcription
 uses the existing configured VoiceTranscriber and its isolated local helper. Optional
 `include_segments` preserves the default legacy text protocol and returns actual
-faster-whisper start/end times when requested. Compute use requires a separate explicit
-body field `allow_compute: true`; the configured service must still satisfy the existing
-local/LAN destination policy. No automatic cloud fallback or model selection occurs.
+faster-whisper start/end times when requested. An omitted `allow_compute` follows the
+owner's configured transcription route. An explicit `false` means local-only and is
+enforced again when the transcriber dispatches, even if its configuration changed.
+The configured Compute service must satisfy the existing local/LAN destination policy.
+No automatic cloud fallback or model selection occurs. Workbench defaults new file
+libraries to the configured route and preserves previously saved local-only choices.
 Text-only Compute responses remain searchable but are marked partial with no invented
 time points. Native cancellation retains admission until the actual work terminates;
 temporary input files are removed and late results cannot grant input authority.

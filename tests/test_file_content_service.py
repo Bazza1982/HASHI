@@ -69,7 +69,7 @@ async def test_timed_transcription_uses_the_shared_owner_and_removes_temporary_i
 
 
 @pytest.mark.asyncio
-async def test_configured_service_requires_an_explicit_opt_in_before_any_media_leaves_the_local_processor():
+async def test_configured_service_uses_selected_route_unless_local_only_is_explicit():
     calls = []
 
     class Transcriber:
@@ -82,15 +82,36 @@ async def test_configured_service_requires_an_explicit_opt_in_before_any_media_l
     )
     with pytest.raises(FileContentError, match="opt_in"):
         await service.process(
-            b"audio", filename="recording.wav", operation="transcribe"
+            b"audio", filename="recording.wav", operation="transcribe", allow_compute=False
         )
     assert calls == []
     result = await service.process(
-        b"audio", filename="recording.wav", operation="transcribe", allow_compute=True
+        b"audio", filename="recording.wav", operation="transcribe"
     )
+    assert len(calls) == 1
     assert result["status"] == "partial"
     assert result["error_code"] == "fileshare_timestamps_unavailable"
     assert result["segments"][0]["locator"] == {"kind": "text"}
+
+
+@pytest.mark.asyncio
+async def test_local_only_is_checked_again_at_actual_transcriber_dispatch(tmp_path, monkeypatch):
+    from orchestrator import voice_transcriber
+
+    calls = []
+    transcriber = voice_transcriber.VoiceTranscriber()
+    async def must_not_send(*args, **kwargs):
+        calls.append(args)
+        pytest.fail("local-only input must not reach Compute")
+    monkeypatch.setattr(transcriber, "_transcribe_compute", must_not_send)
+    monkeypatch.setattr(voice_transcriber, "_transcription_configuration",
+                        lambda: (tmp_path, {"provider": "compute"}))
+    # The configured route changes after FileContentService read its local snapshot.
+    service = FileContentService(transcriber=transcriber, configuration=lambda: {"provider": "local"})
+    with pytest.raises(FileContentError, match="TRANSCRIPTION_ACCESS_DENIED"):
+        await service.process(b"audio", filename="recording.wav", operation="transcribe",
+                              allow_compute=False)
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -174,6 +195,7 @@ async def content_api(tmp_path, monkeypatch, service):
         lambda request: request.headers.get("X-Workbench-Token") == "synthetic-admin",
     )
     app = web.Application(client_max_size=64 * 1024 * 1024)
+    app.router.add_get("/api/v1/file-content/capabilities", server.handle_v1_file_content_capabilities)
     app.router.add_post("/api/v1/file-content", server.handle_v1_file_content)
     async with TestClient(TestServer(app)) as client:
         yield client, runtime
@@ -284,7 +306,7 @@ async def test_signed_content_limits_and_retired_header_protocol_do_not_start_pr
 
 
 @pytest.mark.asyncio
-async def test_body_admission_is_bounded_before_reading_and_cancellation_releases_it():
+async def test_body_admission_queues_and_cancels_before_reading():
     entered, release = asyncio.Event(), asyncio.Event()
     reads = []
 
@@ -296,26 +318,187 @@ async def test_body_admission_is_bounded_before_reading_and_cancellation_release
             if len(reads) == 2:
                 entered.set()
             await release.wait()
-            raise AssertionError("cancelled reads must not reach parsing")
+            return json.dumps({"filename": "x.wav", "operation": "transcribe",
+                               "payload": "eA=="}).encode()
 
-    service = FileContentService()
-    pending = [
-        asyncio.create_task(service.process_request(Request())) for _ in range(2)
-    ]
+    service = FileContentService(capacity={"queue_limit": 1})
+    async def process(payload, **metadata):
+        return {"payload": payload, "metadata": metadata}
+    service.process = process
+    first = [asyncio.create_task(service.process_request(Request())) for _ in range(2)]
     await entered.wait()
-    try:
-        with pytest.raises(FileContentError, match="fileshare_content_busy"):
-            await service.process_request(Request())
-        assert len(reads) == 2
-    finally:
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-    assert service.receiving == 0 and service.active == 0
+    third = asyncio.create_task(service.process_request(Request()))
+    await asyncio.sleep(0)
+    assert service.receiving == 2 and service.receiving_waiters == 1 and len(reads) == 2
+    with pytest.raises(FileContentError, match="fileshare_content_busy"):
+        await service.process_request(Request())
+    third.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await third
+    assert service.receiving_waiters == 0 and len(reads) == 2
+    queued = asyncio.create_task(service.process_request(Request()))
+    await asyncio.sleep(0)
+    assert service.receiving_waiters == 1 and len(reads) == 2
+    release.set()
+    results = await asyncio.gather(*first, queued)
+    assert [row["payload"] for row in results] == [b"x"] * 3
+    assert len(reads) == 3
+    assert service.receiving == service.active == service.receiving_waiters == 0
 
 
 @pytest.mark.asyncio
-async def test_only_body_bound_compute_opt_in_can_authorize_the_configured_service(
+async def test_configured_large_input_is_accepted_by_real_backend_api(tmp_path, monkeypatch):
+    import hashlib
+    size = 33 * 1024 * 1024
+    payload = b"x" * size
+    expected = hashlib.sha256(payload).hexdigest()
+    seen = []
+
+    class Transcriber:
+        async def transcribe_result(self, filename, **kwargs):
+            digest = hashlib.sha256()
+            with Path(filename).open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            seen.append((Path(filename).stat().st_size, digest.hexdigest()))
+            return TranscriptionResult(text="large synthetic media")
+
+    service = FileContentService(
+        transcriber=Transcriber(), configuration=lambda: {"provider": "local"},
+        capacity={"max_input_bytes": 34 * 1024 * 1024},
+    )
+    async with content_api(tmp_path, monkeypatch, service) as (client, _):
+        headers = {"X-Workbench-Token": "synthetic-admin"}
+        response = await client.get("/api/v1/file-content/capabilities", headers=headers)
+        capabilities = await response.json()
+        assert capabilities["max_bytes"] == 34 * 1024 * 1024
+        assert capabilities["instance_id"]
+        response = await client.post(
+            "/api/v1/file-content",
+            data=content_body(metadata={"filename": "large.wav", "operation": "transcribe"},
+                              payload=payload),
+            headers=headers,
+        )
+        assert response.status == 200
+        assert seen == [(size, expected)]
+        assert (await response.json())["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_processing_queue_is_cancellable_and_next_work_runs_after_release():
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    class Transcriber:
+        async def transcribe_result(self, filename, **kwargs):
+            calls.append(Path(filename).read_bytes())
+            if len(calls) == 2:
+                entered.set()
+            await release.wait()
+            return TranscriptionResult(text="finished")
+
+    service = FileContentService(
+        transcriber=Transcriber(), configuration=lambda: {"provider": "local"},
+        capacity={"processing_concurrency": 2, "queue_limit": 1},
+    )
+    async def process():
+        return await service.process(b"audio", filename="x.wav", operation="transcribe")
+    first = [asyncio.create_task(process()) for _ in range(2)]
+    await entered.wait()
+    third = asyncio.create_task(process())
+    await asyncio.sleep(0)
+    assert service.active == 2 and service.processing_waiters == 1 and len(calls) == 2
+    with pytest.raises(FileContentError, match="fileshare_content_busy"):
+        await process()
+    third.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await third
+    queued = asyncio.create_task(process())
+    await asyncio.sleep(0)
+    assert service.processing_waiters == 1
+    release.set()
+    assert len(await asyncio.gather(*first, queued)) == 3
+    assert len(calls) == 3
+    assert service.active == service.processing_waiters == 0
+
+
+def test_capacity_is_configurable_and_rejects_wire_overcommit(monkeypatch):
+    from orchestrator.file_content_service import CONTENT_WIRE_MAX_INPUT_BYTES
+    monkeypatch.setenv("HASHI_FILE_CONTENT_MAX_INPUT_BYTES", str(40 * 1024 * 1024))
+    service = FileContentService(capacity={"processing_concurrency": 3, "queue_limit": 2})
+    advertised = service.capabilities()
+    assert advertised["max_bytes"] == 40 * 1024 * 1024
+    assert advertised["capacity"]["processing_concurrency"] == 3
+    assert advertised["capacity"]["queue_limit"] == 2
+    with pytest.raises(ValueError, match="transport"):
+        FileContentService(capacity={"max_input_bytes": CONTENT_WIRE_MAX_INPUT_BYTES + 1})
+
+
+@pytest.mark.asyncio
+async def test_ocr_and_request_timeouts_follow_explicit_capacity(monkeypatch):
+    from tools import ocr as ocr_owner
+
+    seen = []
+    monkeypatch.setenv("HASHI_FILE_CONTENT_OCR_TIMEOUT_SECONDS", "125")
+    monkeypatch.setenv("HASHI_FILE_CONTENT_REQUEST_TIMEOUT_SECONDS", "350")
+    monkeypatch.setattr(
+        ocr_owner, "extract_image_bytes",
+        lambda data, *, timeout_seconds: (
+            seen.append(timeout_seconds) or SimpleNamespace(status="ok", text="word")
+        ),
+    )
+    service = FileContentService()
+    assert service.capabilities()["capacity"]["ocr_timeout_seconds"] == 125
+    assert service.capabilities()["capacity"]["request_timeout_seconds"] == 350
+    result = await service.process(image_bytes(), filename="image.png", operation="ocr")
+    assert result["status"] == "ready"
+    assert seen == [125]
+    monkeypatch.setenv("HASHI_FILE_CONTENT_REQUEST_TIMEOUT_SECONDS", "invalid")
+    with pytest.raises(ValueError, match="timeout"):
+        service.capabilities()
+
+
+@pytest.mark.asyncio
+async def test_capabilities_and_dispatch_honor_selected_compute_audio_budget():
+    calls = []
+    class Transcriber:
+        async def transcribe_result(self, *args, **kwargs):
+            calls.append(True)
+            return TranscriptionResult(text="ok")
+    service = FileContentService(
+        transcriber=Transcriber(),
+        configuration=lambda: {"provider": "compute", "max_compute_input_bytes": 1024},
+        capacity={"max_input_bytes": 2048},
+    )
+    assert service.capabilities()["transcription"]["max_bytes"] == 1024
+    with pytest.raises(FileContentError, match="fileshare_content_limit"):
+        await service.process(b"x" * 1025, filename="x.wav", operation="transcribe")
+    assert calls == []
+    assert (await service.process(b"x" * 1024, filename="x.wav",
+                                  operation="transcribe"))["status"] == "partial"
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_large_valid_image_is_downscaled_and_real_decode_budget_is_honored():
+    source = io.BytesIO()
+    Image.new("RGB", (5000, 4100), "white").save(source, format="JPEG")
+    seen = []
+    def ocr(data):
+        with Image.open(io.BytesIO(data)) as image:
+            seen.append(image.size)
+        return SimpleNamespace(status="ok", text="large photo")
+    service = FileContentService(ocr=ocr)
+    result = await service.process(source.getvalue(), filename="large.jpg", operation="ocr")
+    assert result["segments"][0]["text"] == "large photo"
+    assert max(seen[0]) <= 2400
+    restricted = FileContentService(ocr=lambda _: pytest.fail("over budget must not decode"),
+                                    capacity={"max_decoded_bytes": 1024})
+    with pytest.raises(FileContentError, match="fileshare_content_limit"):
+        await restricted.process(source.getvalue(), filename="large.jpg", operation="ocr")
+
+
+@pytest.mark.asyncio
+async def test_body_local_only_is_respected_and_selected_route_needs_no_second_grant(
     tmp_path, monkeypatch
 ):
     calls = []
@@ -344,6 +527,14 @@ async def test_only_body_bound_compute_opt_in_can_authorize_the_configured_servi
         )
         assert response.status == 403
         assert not calls
+        metadata.pop("allow_compute")
+        response = await client.post(
+            "/api/v1/file-content",
+            data=content_body(metadata=metadata, payload=b"audio"),
+            headers={"X-Workbench-Token": "synthetic-admin"},
+        )
+        assert response.status == 200
+        assert len(calls) == 1
         metadata["allow_compute"] = True
         response = await client.post(
             "/api/v1/file-content",
@@ -354,4 +545,4 @@ async def test_only_body_bound_compute_opt_in_can_authorize_the_configured_servi
             },
         )
         assert response.status == 200
-        assert len(calls) == 1 and runtime.enqueue_request_calls == 0
+        assert len(calls) == 2 and runtime.enqueue_request_calls == 0

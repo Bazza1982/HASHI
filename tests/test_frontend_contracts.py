@@ -745,3 +745,41 @@ def test_attachment_transport_receipt_rejects_duplicate_or_wrong_proof_type():
     wrong = {**base, "proof": {**base["proof"], "type": "other-connector"}}
     with pytest.raises(ValueError, match="Telegram"):
         normalize_delivery_receipt(wrong)
+
+
+
+def test_exchange_ingress_preserves_public_relay_address_without_treating_it_as_a_local_instance():
+    address = "planner@home.barrytianli"
+    value = _ingress(
+        connector={"id": "exchange", "endpoint_id": "ep_exchange"},
+        principal={"kind": "agent", "assurance": "exchange_verified"},
+        network_authentication="exchange_wss",
+        relay_chain=[address],
+    )
+    assert normalize_frontend_ingress_envelope(value)["relay_chain"] == [address]
+    with pytest.raises(ValueError):
+        normalize_frontend_ingress_envelope({**value, "relay_chain": ["not-an-address"]})
+    with pytest.raises(ValueError):
+        normalize_frontend_ingress_envelope({**value, "network_authentication": "not_applicable"})
+
+
+def test_exchange_relay_preserves_opaque_registered_instance_id():
+    origin = "1Mixed_" + "abcDEFGH" * 8
+    value = {
+        "type": "hashi.frontend-relay", "version": 1,
+        "correlation_id": "corr-exchange",
+        "origin_instance": origin, "target_instance": "HASHI1",
+        "relay_chain": [origin], "hop_limit": 4,
+        "payload_ref": {"type": "exchange-message", "id": "msg-1"},
+    }
+    relay = normalize_relay_envelope(value)
+    assert relay["origin_instance"] == origin
+    assert relay["relay_chain"] == [origin]
+    with pytest.raises(ValueError):
+        normalize_relay_envelope({**value, "origin_instance": "invalid@id"})
+    with pytest.raises(ValueError):
+        normalize_relay_envelope({**value, "relay_chain": [origin, origin]})
+    with pytest.raises(ValueError):
+        normalize_relay_envelope({
+            **value, "payload_ref": {"type": "hashi.frontend-ingress", "id": "msg-1"}
+        })

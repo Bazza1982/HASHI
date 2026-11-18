@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from orchestrator.config_json import ConfigDocument, write_config_json
+from orchestrator.config_json import ConfigConflictError, ConfigDocument, read_config_json, write_config_json
 
 
 _WINDOWS_SID = re.compile(r"S-1(?:-\d+)+", re.IGNORECASE)
@@ -163,20 +163,87 @@ def resolve_remote_runtime_sids(root: Path) -> tuple[str, ...]:
     return _windows_remote_runtime_sids(root)
 
 
+def ensure_remote_runtime_access(secrets_path: Path, root: Path) -> None:
+    """Prepare credentials only when the configured optional Remote needs them."""
+    from orchestrator.remote_lifecycle import load_settings
+
+    root = Path(root).expanduser().resolve()
+    path = Path(secrets_path).expanduser().resolve()
+    if not load_settings(root).enabled:
+        return
+    runtime_sids = resolve_remote_runtime_sids(root)
+    document = read_config_json(path)
+    network = document.get("hashi_remote_shared_token")
+    if network is not None and not isinstance(network, str):
+        raise ValueError("hashi_remote_shared_token must be a string")
+    local = document.get("workbench_admin_token")
+    if (
+        path == root / "secrets.json"
+        and isinstance(local, str) and local.strip()
+        and not (isinstance(network, str) and network.strip())
+        and not os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()
+    ):
+        # Publish only after resolving the precise Remote consumer. The
+        # revision-checked private candidate preserves concurrent edits.
+        updated = document.copy()
+        updated["hashi_remote_shared_token"] = secrets.token_urlsafe(48)
+        write_config_json(path, updated, private_full_control_sids=runtime_sids)
+        return
+    if runtime_sids:
+        from tools.private_files import protect_private_file
+
+        protect_private_file(path, additional_full_control_sids=runtime_sids)
+
+
+def scheduler_delegation_path(root: Path) -> Path:
+    return Path(root) / "state" / "scheduler_delegation.json"
+
+
+def scheduler_delegation_key(root: Path, *, create: bool = False) -> str:
+    """Read an instance-private signing key; bootstrap creates it atomically once."""
+    path = scheduler_delegation_path(root)
+    try:
+        document = read_config_json(path)
+    except FileNotFoundError:
+        if not create:
+            return ""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            write_config_json(path, {"key": secrets.token_urlsafe(48)}, expected_revision=None)
+        except ConfigConflictError:
+            # Another Function bootstrap won the absent-file publication race.
+            pass
+        document = read_config_json(path)
+    key = document.get("key")
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("invalid scheduler delegation key")
+    return key
+
+
 def ensure_local_api_credential(
     document: ConfigDocument,
     *,
     profile: str,
     remote_runtime_sids: Iterable[str] | None = None,
+    scheduler_root: Path | None = None,
+    defer_missing_remote: bool = False,
 ) -> ConfigDocument:
-    """Prepare missing personal instance keys without replacing existing secrets.
+    """Prepare missing local keys without replacing existing secrets.
 
-    The local API and authenticated Remote lifecycle hop are installed together.
-    Publish both keys privately in one revision-checked transaction so a normal
-    installation never needs a separate feature-enablement step. Enterprise
-    credentials remain owned by the configured authentication provider.
+    Missing keys are published privately in a revision-checked transaction.
+    When an existing local key is sufficient, or the secrets document is empty,
+    the configured Remote lifecycle may prepare its network key asynchronously.
+    Enterprise credentials
+    remain owned by the configured authentication provider. A
+    governed instance gets a separate local Scheduler delegation key; it does
+    not authenticate users or grant administrator access.
     """
     if profile != "personal":
+        try:
+            scheduler_delegation_key(scheduler_root or document.source.parent, create=True)
+        except (OSError, ValueError, ConfigConflictError) as exc:
+            # A local optional tool must not prevent Functions from starting.
+            logging.getLogger(__name__).warning("Scheduler delegation key unavailable: %s", type(exc).__name__)
         return document
     current = document.get("workbench_admin_token")
     if current is not None and not isinstance(current, str):
@@ -191,6 +258,27 @@ def ensure_local_api_credential(
     needs_local = not (isinstance(current, str) and current.strip())
     if isinstance(remote_runtime_sids, (str, bytes)):
         raise TypeError("remote_runtime_sids must be an iterable of SIDs")
+    if (
+        defer_missing_remote and remote_runtime_sids is None
+        and needs_local and not document
+    ):
+        # An empty document has no existing consumer data or credentials to
+        # strand. Bootstrap only the private local key; optional Remote can
+        # create its network key and reconcile its exact ACL when available.
+        updated = document.copy()
+        updated["workbench_admin_token"] = secrets.token_urlsafe(48)
+        updated.revision = write_config_json(updated.source, updated)
+        return updated
+    if (
+        defer_missing_remote and remote_runtime_sids is None
+        and not needs_local and needs_network
+    ):
+        # The optional Remote lifecycle can publish its own missing key later.
+        return document
+    if not needs_local and not needs_network and remote_runtime_sids is None:
+        # No publication is needed. Remote can reconcile its own consumer ACL
+        # asynchronously without delaying the local Backend API.
+        return document
     runtime_sids = (
         tuple(remote_runtime_sids)
         if remote_runtime_sids is not None
@@ -219,7 +307,7 @@ def ensure_local_api_credential(
 
 
 def issue_scheduler_tool_token(secret, *, instance_id, agent_id, request_id, audience, tools,
-                               run_id=None, fencing_token=None, now=None):
+                               run_id=None, fencing_token=None, owner_id=None, now=None):
     """Delegate Scheduler calls to one signed Run attempt, never API administration."""
     import base64
     import hashlib
@@ -237,12 +325,17 @@ def issue_scheduler_tool_token(secret, *, instance_id, agent_id, request_id, aud
         if not isinstance(run_id, str) or not run_id.strip() or type(fencing_token) is not int or fencing_token <= 0:
             raise ValueError("Scheduler tool credential requires a valid Run attempt")
         claims.update(run_id=run_id, fencing_token=fencing_token)
+    if owner_id is not None:
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            raise ValueError("Scheduler tool credential requires a valid owner")
+        claims["owner_id"] = owner_id
     body = base64.urlsafe_b64encode(json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
     signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
     return body + "." + signature
 
 
-def scheduler_tool_token_claims(secret, token, *, instance_id, agent_id, audience, tool, now=None):
+def scheduler_tool_token_claims(secret, token, *, instance_id, agent_id, audience, tool, now=None,
+                                allow_expired_for_renewal=False):
     """Return authenticated claims only; PAO must separately fence the live effect."""
     import base64
     import hashlib
@@ -269,7 +362,9 @@ def scheduler_tool_token_claims(secret, token, *, instance_id, agent_id, audienc
             and isinstance(claims.get("request"), str) and claims["request"]
             and isinstance(claims.get("tools"), list) and tool in claims["tools"]
             and type(claims.get("expires")) is int
-            and current < claims["expires"] <= current + 3600
+            and claims["expires"] > 0
+            and (allow_expired_for_renewal or current < claims["expires"])
+            and claims["expires"] <= current + 3660
         )
         return claims if valid else None
     except (ValueError, TypeError, KeyError, UnicodeError):

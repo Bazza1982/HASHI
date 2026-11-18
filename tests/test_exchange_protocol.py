@@ -8,7 +8,6 @@ import pytest
 from remote.exchange_protocol import (
     AUTHORIZED_ROUTES_CAPABILITY,
     CAPABILITIES,
-    REQUIRED_CAPABILITIES,
     ExchangeProtocolError,
     decode_server_frame,
     delivery_payload_digest,
@@ -103,7 +102,7 @@ def test_legacy_server_without_optional_directory_remains_compatible():
         "actor_id": "actor_legacy",
         "registered_instance_id": "instance_legacy",
         "instance_address": "legacy.example",
-        "capabilities": list(REQUIRED_CAPABILITIES),
+        "capabilities": ["hchat_v1", "receipt_v1", "agent_reply_v1", "public_address_v1"],
         "limits": {
             "max_message_bytes": 65536,
             "max_published_agents": 100,
@@ -114,6 +113,11 @@ def test_legacy_server_without_optional_directory_remains_compatible():
 
     decoded = decode_server_frame(json.dumps(frame))
     assert AUTHORIZED_ROUTES_CAPABILITY not in decoded["capabilities"]
+    assert "message_freshness_v1" not in decoded["capabilities"]
+    assert "message_freshness_v1" in CAPABILITIES
+    frame["capabilities"].remove("receipt_v1")
+    with pytest.raises(ExchangeProtocolError, match="UNSUPPORTED_CAPABILITY"):
+        decode_server_frame(json.dumps(frame))
 
 
 def test_authorized_routes_snapshot_is_strict_and_bounded():

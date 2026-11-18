@@ -6,7 +6,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 import pytest
-from orchestrator.execution_resources import FileLease, leases, limit, tool_resource
+from orchestrator.execution_resources import FileLease, execution_configuration, leases, limit, tool_resource
 
 
 def test_os_leases_allow_independent_readers_but_exclude_overlapping_mutations(tmp_path):
@@ -35,7 +35,8 @@ async def test_failed_multi_quota_pass_releases_partial_slots_and_cancellation_r
             pytest.fail('occupied slot admitted another owner')
     task=asyncio.create_task(waiting())
     try:
-        while not reasons:await asyncio.sleep(.01)
+        while not reasons:
+            await asyncio.sleep(.01)
         available=FileLease(tmp_path,'a:0')
         assert available.try_acquire(), 'a blocked group cannot retain an earlier quota'
         available.close()
@@ -102,7 +103,107 @@ def test_os_resource_lease_excludes_a_separate_worker_process(tmp_path):
     assert entered.exists()
 
 
-@pytest.mark.parametrize('value',[True,False,'2',2.5,0,65])
+@pytest.mark.parametrize('value',[True,False,'2',2.5,0,-1])
 def test_execution_limit_rejects_unqualified_configuration_values(value):
     with pytest.raises(ValueError):limit(value,'budget',8)
+
+
+def test_execution_capacity_uses_the_selected_positive_values_without_fixed_small_caps():
+    settings={'execution_limits':{'instance_sessions':96,'engines':{'example':80},'queue_wait_seconds':30}}
+    assert execution_configuration(settings,{'max_concurrent_sessions':12}) == settings['execution_limits']
+    assert limit(96,'instance_sessions',8)==96
+
+
+@pytest.mark.parametrize('value',[True,False,'30',0,-1,float('nan'),float('inf'),10**400])
+def test_execution_queue_timeout_rejects_invalid_selected_values(value):
+    with pytest.raises(ValueError):
+        execution_configuration({'execution_limits':{'queue_wait_seconds':value}},{})
+
+
+@pytest.mark.asyncio
+async def test_unlimited_capacity_wait_does_not_expire_and_remains_cancellable(tmp_path,monkeypatch):
+    import orchestrator.execution_resources as resources
+    clock=SimpleNamespace(now=0.0)
+    monkeypatch.setattr(resources,'time',SimpleNamespace(monotonic=lambda:clock.now))
+    held=FileLease(tmp_path,'instance:0')
+    assert held.try_acquire()
+    reasons=[]
+    async def wait():
+        async with leases(tmp_path,[('instance',1,False)],on_wait=reasons.append,timeout=None):
+            pytest.fail('occupied slot admitted another owner')
+    task=asyncio.create_task(wait())
+    try:
+        while not reasons:
+            await asyncio.sleep(.01)
+        clock.now=601.0
+        await asyncio.sleep(.08)
+        assert not task.done(), 'no implicit ten-minute deadline'
+        task.cancel()
+        assert isinstance((await asyncio.gather(task,return_exceptions=True))[0],asyncio.CancelledError)
+    finally:
+        held.close()
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
+    async with leases(tmp_path,[('instance',1,False)],timeout=None):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_execution_budget_uses_owner_selected_deadline_and_clears_wait_reason(tmp_path,monkeypatch):
+    from unittest.mock import AsyncMock
+    from orchestrator import runtime_lifecycle
+    from orchestrator.execution_resources import execution_budget, instance_state
+    monkeypatch.setattr(runtime_lifecycle,'_publish_worker_metadata',AsyncMock())
+    runtime=SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path),
+                            config=SimpleNamespace(project_root=tmp_path))
+    config=SimpleNamespace(extra={},active_backend='example')
+    frozen={'config':config,'settings':{'_agents_json_global':{'execution_limits':{
+        'instance_sessions':1,'engines':{'example':1},'queue_wait_seconds':.03}}}}
+    item=SimpleNamespace(request_id='selected-deadline')
+    held=FileLease(instance_state(runtime),'instance-sessions:0')
+    assert held.try_acquire()
+    try:
+        with pytest.raises(TimeoutError,match='execution_resource_wait_timeout'):
+            async with execution_budget(runtime,item,frozen):
+                pytest.fail('occupied capacity entered')
+        assert runtime._execution_queue_reasons == {}
+    finally:
+        held.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_budget_default_wait_survives_ten_minutes_and_cancels(tmp_path,monkeypatch):
+    from unittest.mock import AsyncMock
+    import orchestrator.execution_resources as resources
+    from orchestrator import runtime_lifecycle
+    clock=SimpleNamespace(now=0.0)
+    monkeypatch.setattr(resources,'time',SimpleNamespace(monotonic=lambda:clock.now))
+    monkeypatch.setattr(runtime_lifecycle,'_publish_worker_metadata',AsyncMock())
+    runtime=SimpleNamespace(global_config=SimpleNamespace(project_root=tmp_path),
+                            config=SimpleNamespace(project_root=tmp_path))
+    frozen={'config':SimpleNamespace(extra={},active_backend='example'),
+            'settings':{'_agents_json_global':{'execution_limits':{'instance_sessions':1}}}}
+    item=SimpleNamespace(request_id='default-wait')
+    held=FileLease(resources.instance_state(runtime),'instance-sessions:0')
+    assert held.try_acquire()
+    async def wait():
+        async with resources.execution_budget(runtime,item,frozen):
+            pytest.fail('occupied capacity entered')
+    task=asyncio.create_task(wait())
+    try:
+        for _ in range(100):
+            if getattr(runtime,'_execution_queue_reasons',{}).get(item.request_id):
+                break
+            await asyncio.sleep(.01)
+        assert runtime._execution_queue_reasons[item.request_id]=='instance_capacity'
+        clock.now=601.0
+        await asyncio.sleep(.08)
+        assert not task.done()
+        task.cancel()
+        assert isinstance((await asyncio.gather(task,return_exceptions=True))[0],asyncio.CancelledError)
+        assert runtime._execution_queue_reasons == {}
+    finally:
+        held.close()
+        task.cancel()
+        await asyncio.gather(task,return_exceptions=True)
 # HASHI-Fingerprint: hfp_12b4015e6db54ed88682cc8a203b5e3e

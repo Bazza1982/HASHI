@@ -168,3 +168,32 @@ async def test_openrouter_exposes_each_tool_loop_provider_call(tmp_path):
     assert len(calls) == 2
     assert [call["input"] for call in calls] == [31_000, 41_000]
     assert all(call["thinking_in_output"] is True for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_approximate_overestimate_does_not_block_provider_request(tmp_path):
+    from tests.test_context_compaction import _Runtime
+    adapter = _adapter(tmp_path)
+    adapter.config.engine = "openrouter-api"
+    adapter.config._hashi_runtime = _Runtime(tmp_path / "runtime", capacity=8192, headroom=1024)
+    adapter._call_api_once = AsyncMock(return_value=_APIResult(text="provider accepted", tool_calls=None,
+                                                               finish_reason="stop", prompt_tokens=3000,
+                                                               completion_tokens=2))
+    response = await adapter.generate_response("x" * 40000, "approximate-overestimate")
+    assert response.is_success and response.text == "provider accepted"
+    assert adapter._call_api_once.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_actual_provider_capacity_rejection_remains_typed(tmp_path):
+    import httpx
+    from tests.test_context_compaction import _Runtime
+    adapter = _adapter(tmp_path)
+    adapter.config.engine = "openrouter-api"
+    adapter.config._hashi_runtime = _Runtime(tmp_path / "runtime", capacity=8192, headroom=1024)
+    request = httpx.Request("POST", "https://provider.invalid/chat")
+    raw = httpx.Response(400, json={"error": {"code": "context_length_exceeded"}}, request=request)
+    adapter._call_api_once = AsyncMock(side_effect=httpx.HTTPStatusError("capacity", request=request, response=raw))
+    response = await adapter.generate_response("x" * 40000, "actual-overflow")
+    assert not response.is_success and response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert adapter._call_api_once.await_count == 1

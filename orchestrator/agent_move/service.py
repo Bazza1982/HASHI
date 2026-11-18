@@ -4,7 +4,8 @@ The source sends an opaque ``agent-move-v1`` archive.  The receiver validates
 and stages it without touching live configuration, then performs an explicit
 inactive import.  Activation is a separate operation so a source can be
 disabled first.  Once a new Move records forward intent, every retry continues
-that same cutover; it never restores the source or rolls back the target.
+that same cutover. An authenticated staged-only abort may resolve a rejected
+policy preview without touching a committed or active target.
 """
 
 from __future__ import annotations
@@ -13,9 +14,12 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
+import zipfile
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -48,19 +52,26 @@ from orchestrator.flexible_backend_registry import (
     migrate_provider_only_active_backend,
     normalize_allowed_backends,
 )
+from orchestrator.telegram_configuration_lock import TELEGRAM_PROTECTED_SECRET_KEYS
 from orchestrator.telegram_delivery_state import (
     adopt_transferred_state,
     retire_agent_state,
     telegram_bot_fingerprint,
 )
-from orchestrator.session_store import SessionConflict, SessionStore
+from orchestrator.session_store import (
+    ConversationContinuityBinding,
+    SessionConflict,
+    SessionStore,
+)
 
 from .package import (
     AGENT_MOVE_CAPABILITY,
     AGENT_ID_MAX_LENGTH,
     CONVERSATION_CONTINUITY_CAPABILITY,
+    RETAIN_SOURCE_HISTORY_CAPABILITY,
     AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
-    MAX_UNPACKED_BYTES,
+    INACTIVE_MOVE_CAPABILITY,
+    INACTIVE_CLONE_BACKUP_CAPABILITY,
     MAX_TRANSFER_PACKAGE_BYTES,
     TRANSFER_MODES_CAPABILITY,
     PACKAGE_SCHEMA_MIN_VERSION,
@@ -68,9 +79,20 @@ from .package import (
     RETAINED_IDENTITY_CAPABILITY,
     AgentMoveArchive,
     AgentMoveError,
+    authenticated_conversation_command_owner,
+    configured_archive_member_limit,
+    configured_transfer_package_limit,
+    configured_unpacked_byte_limit,
+    receiver_unpacked_byte_limit,
+    configured_workspace_byte_limit,
+    receiver_workspace_byte_limit,
+    receiver_archive_member_limit,
+    AccessScopePreviewChanged,
     CloneImportPreflightError,
     normalize_agent_id,
+    package_sha256,
     configured_conversation_owner_id,
+    establish_personal_target_conversation_owner,
     decrypt_agent_secrets,
     detect_environment_kind,
     extract_agent_workspace,
@@ -104,8 +126,18 @@ _SOURCE_BOUND_CONFIG_FIELDS = {
 }
 
 
+class InvalidTargetScopePolicy(AgentMoveError):
+    """A configured target scope value cannot be interpreted."""
+
+
 def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
     root = _root(hashi_root)
+    policy_error = {}
+    try:
+        maximum = _target_max_access_scope(root)
+    except InvalidTargetScopePolicy as exc:
+        maximum = None
+        policy_error["max_access_scope_error"] = str(exc)
     return {
         "ok": True,
         "capability": AGENT_MOVE_CAPABILITY,
@@ -114,13 +146,18 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
             TRANSFER_MODES_CAPABILITY,
             RETAINED_IDENTITY_CAPABILITY,
             AGENT_TRANSFER_LIFECYCLE_CAPABILITY,
+            INACTIVE_MOVE_CAPABILITY,
+            INACTIVE_CLONE_BACKUP_CAPABILITY,
             CONVERSATION_CONTINUITY_CAPABILITY,
+            RETAIN_SOURCE_HISTORY_CAPABILITY,
         ],
         "package_type": "hashi-agent-move",
         "schema_min": PACKAGE_SCHEMA_MIN_VERSION,
         "schema_max": PACKAGE_SCHEMA_VERSION,
-        "max_package_bytes": MAX_PACKAGE_BYTES,
-        "max_unpacked_bytes": MAX_UNPACKED_BYTES,
+        "max_package_bytes": configured_transfer_package_limit(),
+        "max_archive_members": configured_archive_member_limit(),
+        "max_unpacked_bytes": configured_unpacked_byte_limit(),
+        "max_workspace_bytes": configured_workspace_byte_limit(),
         "environment_kind": detect_environment_kind(),
         "instance_id": _configured_instance_id(root),
         "target_owned_import": True,
@@ -138,7 +175,8 @@ def receiver_capabilities(hashi_root: Path | str) -> dict[str, Any]:
             "move_default": "move",
             "clone_modes": ["none", "inherit_read_only", "copy"],
         },
-        "max_access_scope": _target_max_access_scope(root),
+        "max_access_scope": maximum,
+        **policy_error,
     }
 
 
@@ -198,6 +236,29 @@ def resolve_agent_transfer_target(
     }
 
 
+def _staged_archive_member_limit(record: Mapping[str, Any]) -> int:
+    accepted = record.get("archive_member_count")
+    if accepted is not None:
+        return receiver_archive_member_limit({"max_archive_members": accepted})
+    # Old journals were accepted under the former built-in limit. A later
+    # lower configuration must not invalidate an already staged transaction.
+    return max(configured_archive_member_limit(), receiver_archive_member_limit({}))
+
+
+def _staged_unpacked_byte_limit(record: Mapping[str, Any]) -> int:
+    accepted = record.get("archive_unpacked_bytes")
+    if accepted is not None:
+        return receiver_unpacked_byte_limit({"max_unpacked_bytes": accepted})
+    return max(configured_unpacked_byte_limit(), receiver_unpacked_byte_limit({}))
+
+
+def _staged_workspace_byte_limit(record: Mapping[str, Any]) -> int:
+    accepted = record.get("archive_workspace_bytes")
+    if accepted is not None:
+        return receiver_workspace_byte_limit({"max_workspace_bytes": accepted})
+    return max(configured_workspace_byte_limit(), receiver_workspace_byte_limit({}))
+
+
 def stage_agent_move(
     hashi_root: Path | str,
     package_bytes: bytes | Path,
@@ -213,14 +274,18 @@ def stage_agent_move(
     """Verify and persist an archive without changing Agent configuration."""
 
     root = _root(hashi_root)
+    member_limit = configured_archive_member_limit()
+    unpacked_limit = configured_unpacked_byte_limit()
+    workspace_limit = configured_workspace_byte_limit()
+    package_limit = configured_transfer_package_limit()
     source = _normalize_instance(source_instance)
     transfer_operation = _normalize_operation(operation)
     source_file = package_bytes if isinstance(package_bytes, Path) else None
     size = source_file.stat().st_size if source_file else len(package_bytes)
     if not size:
         raise AgentMoveError("Agent move package is empty")
-    if size > MAX_PACKAGE_BYTES:
-        raise AgentMoveError("Agent move package exceeds the receiver size limit")
+    if size > package_limit:
+        raise AgentMoveError(f"Agent move package is {size} bytes; receiver limit is {package_limit} bytes")
 
     move_root = _move_root(root)
     target_kind = target_platform or detect_environment_kind()
@@ -236,8 +301,8 @@ def stage_agent_move(
                 with source_file.open("rb") as reader:
                     while chunk := reader.read(1024 * 1024):
                         copied += len(chunk)
-                        if copied > MAX_PACKAGE_BYTES:
-                            raise AgentMoveError("Agent move package exceeds the receiver size limit")
+                        if copied > package_limit:
+                            raise AgentMoveError(f"Agent move package exceeds {copied} bytes; receiver limit is {package_limit} bytes")
                         digest_state.update(chunk)
                         writer.write(chunk)
                 size = copied
@@ -257,16 +322,26 @@ def stage_agent_move(
             upload,
             verify=True,
             target_platform=target_kind,
+            max_archive_members=member_limit,
+            max_unpacked_bytes=unpacked_limit,
+            max_workspace_bytes=workspace_limit,
         )
         manifest_operation = str(package.manifest.get("operation") or "").lower()
         if transfer_operation != "legacy_move" and manifest_operation != transfer_operation:
             raise AgentMoveError(
                 "Agent transfer operation does not match the package manifest"
             )
-        if transfer_operation == "clone" and package.access_requirements.get(
-            "telegram_secret_included"
-        ):
-            raise AgentMoveError("clone packages must not contain a Telegram token")
+        if (package.manifest.get("desired_target_active") is False
+                and transfer_operation not in {"move", "clone"}):
+            raise AgentMoveError("inactive target policy requires a modern transfer")
+        backup_clone = (
+            transfer_operation == "clone"
+            and package.manifest.get("desired_target_active") is False
+            and package.manifest.get("retain_telegram_backup") is True
+        )
+        if (transfer_operation == "clone" and
+                package.access_requirements.get("telegram_secret_included") and not backup_clone):
+            raise AgentMoveError("active clone packages must not contain a Telegram token")
         manifest_source = _normalize_instance(package.manifest.get("source_instance"))
         if manifest_source != source:
             raise AgentMoveError(
@@ -277,12 +352,18 @@ def stage_agent_move(
         )
         if target == source and transfer_operation != "clone":
             raise AgentMoveError("source and target HASHI instances must be different")
-        if package.conversation_continuity is not None:
-            target_owner = _configured_session_owner_id(root)
-            if str(package.conversation_continuity.get("owner_id") or "") != target_owner:
-                raise AgentMoveError(
-                    "conversation continuity owner does not match the target authorized owner"
-                )
+        local_principal = None
+        if source == target and transfer_operation == "clone":
+            local_principal = authenticated_conversation_command_owner(root)
+        local_history_owner = (
+            str(package.conversation_continuity.get("owner_id") or "").strip()
+            if package.conversation_continuity is not None else ""
+        )
+        _require_governed_history_mapping(
+            root, package, local_authenticated=bool(
+                local_principal and local_principal == local_history_owner
+            ),
+        )
         if "secrets/agent.enc" in package.names:
             # Decrypt during staging so a bad/mismatched shared key fails before
             # any target configuration is touched.
@@ -294,8 +375,12 @@ def stage_agent_move(
                 transfer_operation == "clone"
                 and telegram_key
                 and telegram_key in decrypted
+                and not backup_clone
             ):
-                raise AgentMoveError("clone packages must not contain a Telegram token")
+                raise AgentMoveError("active clone packages must not contain a Telegram token")
+            if (backup_clone and bool(telegram_key and telegram_key in decrypted)
+                    != package.access_requirements.get("telegram_secret_included")):
+                raise AgentMoveError("Telegram backup declaration does not match encrypted credentials")
 
         with _mutation_lock(root):
             record_dir = _record_dir(root, package.package_id)
@@ -310,6 +395,16 @@ def stage_agent_move(
                 if _record_operation(current) != transfer_operation:
                     raise AgentMoveError(
                         "package_id already exists for a different transfer operation"
+                    )
+                recorded_target = str(current.get("target_instance") or "").strip()
+                if recorded_target and _normalize_instance(recorded_target) != target:
+                    raise AgentMoveError(
+                        "package_id already exists for a different target instance"
+                    )
+                recorded_source = str(current.get("source_instance") or "").strip()
+                if recorded_source and _normalize_instance(recorded_source) != source:
+                    raise AgentMoveError(
+                        "package_id already exists for a different source instance"
                     )
                 requested = str(target_agent_id or "").strip()
                 current_target = str(
@@ -343,6 +438,18 @@ def stage_agent_move(
                     root, package, target_agent_id=selected_agent_id,
                     passphrase=secret_passphrase,
                 )
+            if package.conversation_continuity is not None and (source != target or not local_principal):
+                from orchestrator.telegram_configuration_lock import telegram_configuration_lock
+
+                # Bind the target's local data partition once, without using it
+                # as network authority. Keep configuration stable during the
+                # one-time migration lookup.
+                with (
+                    telegram_configuration_lock(root / "secrets.json"),
+                    file_write_lock(root / "secrets.json"),
+                    file_write_lock(root / "agents.json"),
+                ):
+                    establish_personal_target_conversation_owner(root)
             record_dir.mkdir(parents=True, exist_ok=False)
             incomplete_record_dir = record_dir
             os.replace(upload, package_path)
@@ -350,6 +457,9 @@ def stage_agent_move(
                 package_path,
                 verify=True,
                 target_platform=target_kind,
+                max_archive_members=member_limit,
+                max_unpacked_bytes=unpacked_limit,
+                max_workspace_bytes=workspace_limit,
             )
             retained_identity = _preserve_retained_identity(
                 root,
@@ -362,11 +472,7 @@ def stage_agent_move(
                 secret_passphrase,
                 target_agent_id=selected_agent_id,
             )
-            if transfer_operation == "move" and credential_status["missing_keys"]:
-                raise AgentMoveError(
-                    "target credentials are incomplete: "
-                    + ", ".join(credential_status["missing_keys"])
-                )
+            access_scope_plan = _access_scope_plan(root, package)
             record = {
                 "schema_version": MOVE_STATE_SCHEMA_VERSION,
                 "package_id": package.package_id,
@@ -374,12 +480,17 @@ def stage_agent_move(
                 "source_agent_id": package.agent_id,
                 "target_agent_id": selected_agent_id,
                 "operation": transfer_operation,
+                "desired_target_active": package.manifest.get("desired_target_active", True),
+                "retain_telegram_backup": package.manifest.get("retain_telegram_backup", False),
                 "source_instance": source,
                 "target_instance": target,
                 "source_environment": package.manifest.get("source_environment"),
                 "target_environment": target_kind,
                 "sha256": digest,
                 "package_bytes": size,
+                "archive_member_count": len(package.names),
+                "archive_unpacked_bytes": package.unpacked_bytes,
+                "archive_workspace_bytes": package.workspace_bytes,
                 "package_schema": package.manifest.get("schema_version"),
                 "history_mode": package.manifest.get("history_mode"),
                 "conversation_continuity_summary": package.manifest.get(
@@ -388,6 +499,7 @@ def stage_agent_move(
                 "status": "staged",
                 "staged_at": utc_now_iso(),
                 "credential_status": credential_status,
+                "access_scope_plan": access_scope_plan,
                 "retained_identity": retained_identity,
                 "replaces_dormant_source": bool(dormant),
                 "dormant_package_id": (
@@ -398,10 +510,34 @@ def stage_agent_move(
                     package,
                     credential_status,
                     target_environment=target_kind,
+                    access_scope_plan=access_scope_plan,
                     replaces_dormant_source=bool(dormant),
                 ),
                 "reboot_required": False,
             }
+            if package.conversation_continuity is not None:
+                # A local clone has the same authenticated user at both ends.
+                # Never replace that principal with an unrelated legacy config.
+                local_owner = None
+                if source == target and transfer_operation == "clone":
+                    local_owner = authenticated_conversation_command_owner(root)
+                    if local_owner and local_owner != str(
+                        package.conversation_continuity["owner_id"]
+                    ).strip():
+                        raise AgentMoveError(
+                            "local clone history does not match the authenticated command owner"
+                        )
+                binding = _conversation_owner_binding(
+                    root, package, source_instance=source,
+                    target_instance=target, target_agent_id=selected_agent_id,
+                    target_owner_id=local_owner,
+                )
+                record["conversation_owner_binding"] = asdict(binding)
+                # This is transaction data, not a credential. The journal is
+                # target-owned and already reached through the transfer boundary.
+                record["conversation_target_owner_id"] = binding.target_owner_id
+                if local_owner:
+                    record["conversation_target_owner_origin"] = "authenticated_local"
             _atomic_json(record_path, record, mode=0o600)
             incomplete_record_dir = None
             return _public_state(record)
@@ -440,7 +576,7 @@ def commit_agent_move(
                 "rolled-back Agent move packages cannot be committed again"
             )
         if record.get("status") == "committing":
-            if str(record.get("history_mode") or "none") != "none":
+            if str(record.get("history_mode") or "none") not in {"none", "retain_source"}:
                 _rollback_target_conversation_continuity(root, str(package_id))
             _restore_recovery_snapshots(root, record_dir)
             _recover_interrupted_workspace_commit(root, record_dir, record)
@@ -454,6 +590,9 @@ def commit_agent_move(
         package = read_agent_move_package(
             record_dir / "package.hashi-agent",
             verify=True,
+            max_archive_members=_staged_archive_member_limit(record),
+            max_unpacked_bytes=_staged_unpacked_byte_limit(record),
+            max_workspace_bytes=_staged_workspace_byte_limit(record),
             target_platform=(
                 target_platform
                 or str(record.get("target_environment") or "")
@@ -462,8 +601,95 @@ def commit_agent_move(
         )
         if package.package_id != str(record.get("package_id")):
             raise AgentMoveError("staged Agent move state does not match its package")
+        if package_sha256(record_dir / "package.hashi-agent") != str(
+            record.get("sha256") or ""
+        ).lower():
+            raise AgentMoveError("staged Agent move package digest changed")
         operation = _record_operation(record)
+        if operation != "legacy_move" and operation != str(
+            package.manifest.get("operation") or ""
+        ).lower():
+            raise AgentMoveError("staged Agent transfer operation changed")
         target_agent_id = str(record.get("target_agent_id") or package.agent_id)
+        if (record.get("desired_target_active", True) != package.manifest.get("desired_target_active", True)
+                or record.get("retain_telegram_backup", False) != package.manifest.get("retain_telegram_backup", False)):
+            raise AgentMoveError("staged target activation policy changed")
+        continuity_binding = None
+        if package.conversation_continuity is not None:
+            source_instance = _normalize_instance(record.get("source_instance"))
+            target_instance = _normalize_instance(record.get("target_instance"))
+            if source_instance != _normalize_instance(
+                package.manifest.get("source_instance")
+            ) or target_instance != _configured_instance_id(root):
+                raise AgentMoveError("staged Agent move instance identity changed")
+            saved_binding = record.get("conversation_owner_binding")
+            staged_target_owner = record.get("conversation_target_owner_id")
+            if staged_target_owner is None and isinstance(saved_binding, Mapping):
+                # Older authenticated journals stored the mapping in one place.
+                staged_target_owner = saved_binding.get("target_owner_id")
+            if staged_target_owner is not None and (
+                not isinstance(staged_target_owner, str) or not staged_target_owner.strip()
+            ):
+                raise AgentMoveError("staged conversation owner binding is invalid")
+            if record.get("conversation_target_owner_origin") == "authenticated_local":
+                if (operation != "clone" or source_instance != target_instance
+                        or staged_target_owner != str(
+                            package.conversation_continuity["owner_id"]
+                        ).strip()):
+                    raise AgentMoveError("staged local conversation owner binding changed")
+                current_owner = authenticated_conversation_command_owner(
+                    root, allow_expired_context=True,
+                )
+                if current_owner and current_owner != staged_target_owner:
+                    raise AgentMoveError(
+                        "authenticated command owner does not match the staged local clone"
+                    )
+            continuity_binding = _conversation_owner_binding(
+                root, package, source_instance=source_instance,
+                target_instance=target_instance, target_agent_id=target_agent_id,
+                target_owner_id=staged_target_owner,
+            )
+            if saved_binding is not None and saved_binding != asdict(continuity_binding):
+                raise AgentMoveError("staged conversation owner binding changed")
+            if record.get("conversation_target_owner_origin") != "authenticated_local":
+                # Both copies in a staged journal can be altered together.
+                # Compare with the target's independent, stable local data
+                # binding, not with the source owner or Telegram account.
+                from orchestrator.personal_data_owner import read_personal_data_owner_for_config
+
+                config = _load_json(root / "agents.json")
+                global_config = config.get("global", {}) if isinstance(config, Mapping) else None
+                if not isinstance(global_config, Mapping):
+                    raise AgentMoveError("target deployment configuration is invalid")
+                try:
+                    from orchestrator.enterprise.profile import resolve_deployment_profile
+
+                    profile = resolve_deployment_profile(dict(global_config)).value
+                    local_owner = read_personal_data_owner_for_config(root, global_config)
+                    if profile == "personal" and local_owner is None:
+                        if saved_binding is not None:
+                            raise AgentMoveError("staged conversation target data binding is missing")
+                        # A pre-binding legacy journal may establish its target
+                        # once; newer staged records must retain their binding.
+                        local_owner = establish_personal_target_conversation_owner(root)
+                except AgentMoveError:
+                    raise
+                except ValueError as exc:
+                    raise AgentMoveError("target data binding is invalid") from exc
+                if local_owner is not None and local_owner != continuity_binding.target_owner_id:
+                    raise AgentMoveError("staged conversation target data binding changed")
+            _require_governed_history_mapping(
+                root, package, local_authenticated=(
+                    record.get("conversation_target_owner_origin") == "authenticated_local"
+                    and operation == "clone" and source_instance == target_instance
+                ),
+            )
+            if saved_binding is None:
+                # Older authenticated stage records predate this binding.
+                # Freeze it only after the independent target binding succeeds.
+                record["conversation_owner_binding"] = asdict(continuity_binding)
+                record["conversation_target_owner_id"] = continuity_binding.target_owner_id
+                _atomic_json(record_dir / "state.json", record, mode=0o600)
         dormant = (
             _assert_target_available(
                 root,
@@ -482,17 +708,45 @@ def commit_agent_move(
                 "target dormant Agent state changed after the move was staged"
             )
         source_secret_values = decrypt_agent_secrets(package, secret_passphrase)
+        backup_clone = operation == "clone" and package.manifest.get("retain_telegram_backup") is True
+        source_telegram_key = str(package.access_requirements.get("telegram_secret_key") or "")
+        backup_token = source_secret_values.pop(source_telegram_key, None) if backup_clone else None
         secret_values, secret_key_mapping = _remap_agent_secrets(
             source_secret_values,
             source_agent_id=package.agent_id,
             target_agent_id=target_agent_id,
         )
+        agents_path = root / "agents.json"
+        agents_data = _load_json(agents_path)
+        try:
+            access_scope_plan = _access_scope_plan(root, package, target_config=agents_data)
+        except InvalidTargetScopePolicy as exc:
+            if record.get("access_scope_plan") is not None:
+                raise AccessScopePreviewChanged(
+                    "target access scope policy became invalid after preview; fix it and prepare again"
+                ) from exc
+            raise
+        saved_scope_plan = record.get("access_scope_plan")
+        if saved_scope_plan is None:
+            # Older journals have no bound preview. Never introduce a restriction
+            # that the original confirmation could not have observed.
+            if access_scope_plan["effective"] != access_scope_plan["requested"]:
+                raise AgentMoveError(
+                    "staged transfer has no bound access scope preview; prepare it again"
+                )
+            record["access_scope_plan"] = access_scope_plan
+            _atomic_json(record_dir / "state.json", record, mode=0o600)
+        elif saved_scope_plan != access_scope_plan:
+            raise AccessScopePreviewChanged(
+                "target access scope policy changed after preview; prepare the transfer again"
+            )
         imported_config, access_warning = _prepare_import_config(
             root,
             package,
             target_agent_id=target_agent_id,
             operation=operation,
             secret_key_mapping=secret_key_mapping,
+            access_scope_plan=access_scope_plan,
         )
         lifecycle_id = str(
             imported_config.get(AGENT_LIFECYCLE_FIELD) or ""
@@ -512,12 +766,14 @@ def commit_agent_move(
             lifecycle_id = journal_lifecycle
             imported_config[AGENT_LIFECYCLE_FIELD] = lifecycle_id
         record["imported_agent_lifecycle_id"] = lifecycle_id
+        if not journal_lifecycle:
+            # A backup may be published before the rest of commit. Its
+            # lifecycle must remain stable across an interrupted retry.
+            _atomic_json(record_dir / "state.json", record, mode=0o600)
 
-        agents_path = root / "agents.json"
         tasks_path = root / "tasks.json"
         secrets_path = root / "secrets.json"
         capabilities_path = root / "agent_capabilities.json"
-        agents_data = _load_json(agents_path)
         tasks_data = _load_json_or_default(
             tasks_path,
             {"version": 1, "heartbeats": [], "crons": [], "nudges": []},
@@ -525,6 +781,10 @@ def commit_agent_move(
         secrets_data = _load_json_or_default(secrets_path, {})
         if not isinstance(secrets_data, dict):
             raise AgentMoveError("target secrets.json must contain a JSON object")
+        if operation == "clone":
+            imported_config["telegram_token_key"] = _unbound_clone_telegram_key(
+                agents_data, secrets_data, secret_values,
+            )
         capabilities_data = _load_json_or_default(
             capabilities_path,
             {"agents": []},
@@ -546,6 +806,7 @@ def commit_agent_move(
                 secrets_data,
                 secret_values,
                 replace_conflicts_for_agent=(target_agent_id if dormant else None),
+                preserve_backup_key=backup_clone and backup_token is not None,
             )
         )
         added_secret_hashes = {
@@ -560,6 +821,25 @@ def commit_agent_move(
             target_agent_id=target_agent_id,
         )
         imported_task_hashes = _imported_task_hashes(tasks_data, imported_task_ids)
+        schedule_intent = _imported_schedule_intent(package.schedules, imported_task_ids)
+        from orchestrator.personal_data_owner import read_personal_data_owner_for_config
+
+        global_data = agents_data.get("global") if isinstance(agents_data, dict) else None
+        if isinstance(global_data, dict):
+            local_data_owner = read_personal_data_owner_for_config(root, global_data)
+            if local_data_owner and not str(global_data.get("owner_scope_id") or "").strip():
+                # A compatibility projection lets older generations locate the
+                # same local data. It does not authorize the transfer.
+                global_data["owner_scope_id"] = local_data_owner
+            elif local_data_owner and str(global_data.get("owner_scope_id") or "").strip() != local_data_owner:
+                warning = (
+                    "Legacy local data projection differs; verify older-generation "
+                    "history continuity before downgrade."
+                )
+                warnings = list(record.get("warnings") or [])
+                if warning not in warnings:
+                    warnings.append(warning)
+                record["warnings"] = warnings
         agents_data = _append_agent_config(agents_data, imported_config)
         capabilities_data = _append_agent_capability(
             capabilities_data,
@@ -584,6 +864,11 @@ def commit_agent_move(
         if dormant and not final_workspace.is_dir():
             raise AgentMoveError("dormant target Agent workspace is no longer available")
 
+        if backup_clone and backup_token is not None:
+            record["retained_telegram_backup"] = _preserve_encrypted_clone_backup(
+                root, record_dir, package, target_agent_id=target_agent_id,
+                lifecycle_id=lifecycle_id, token=backup_token, secrets_data=secrets_data,
+            )
         _write_recovery_snapshots(root, record_dir)
         record["status"] = "committing"
         record["commit_started_at"] = utc_now_iso()
@@ -683,10 +968,11 @@ def commit_agent_move(
                 try:
                     continuity_result = _session_store(root).import_conversation_continuity(
                         package.conversation_continuity,
-                        owner_id=_configured_session_owner_id(root),
+                        owner_id=continuity_binding.target_owner_id,
                         agent_id=target_agent_id,
                         transfer_id=package.package_id,
                         history_mode=str(package.manifest.get("history_mode") or ""),
+                        owner_binding=continuity_binding,
                     )
                 except (SessionConflict, ValueError) as exc:
                     raise AgentMoveError(
@@ -720,6 +1006,7 @@ def commit_agent_move(
                     "workspace": f"workspaces/{target_agent_id}",
                     "imported_task_ids": imported_task_ids,
                     "imported_task_hashes": imported_task_hashes,
+                    "schedule_intent": schedule_intent,
                     "imported_config_hash": _agent_config_hash(imported_config),
                     "imported_secret_hashes": {
                         key: _secret_value_hash(value)
@@ -796,9 +1083,16 @@ def activate_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
             raise AgentMoveError(
                 f"Agent move must be committed inactive before activation (status={record.get('status')!r})"
             )
+        if record.get("desired_target_active") is False:
+            raise AgentMoveError("this transfer selected an inactive target")
         package = read_agent_move_package(
-            record_dir / "package.hashi-agent", verify=True
+            record_dir / "package.hashi-agent", verify=True,
+            max_archive_members=_staged_archive_member_limit(record),
+            max_unpacked_bytes=_staged_unpacked_byte_limit(record),
+            max_workspace_bytes=_staged_workspace_byte_limit(record),
         )
+        if package.manifest.get("desired_target_active") is False:
+            raise AgentMoveError("this transfer selected an inactive target")
         target_agent_id = str(record.get("target_agent_id") or package.agent_id)
         credentials = dict(record.get("credential_status") or {})
 
@@ -835,7 +1129,7 @@ def finalize_agent_move(
     hashi_root: Path | str,
     package_id: str,
     *,
-    runtime_online: bool,
+    runtime_online: bool | None,
 ) -> dict[str, Any]:
     """Finish an already-started target without revalidating mutable state.
 
@@ -850,23 +1144,42 @@ def finalize_agent_move(
         record_dir, record = _load_record(root, package_id)
         if record.get("status") == "completed":
             return _public_state(record)
+        inactive_target = record.get("desired_target_active") is False
         if record.get("status") not in {
             "activated_pending_reboot",
             "target_finalizing",
             "target_cleanup_pending",
-        }:
+        } and not (inactive_target and record.get("status") == "committed_inactive"):
             raise AgentMoveError(
                 "Agent transfer target must be active before final verification "
                 f"(status={record.get('status')!r})"
             )
         package_path = record_dir / "package.hashi-agent"
         if not record.get("target_verified"):
-            if not runtime_online:
+            if inactive_target:
+                if runtime_online is not False:
+                    raise AgentMoveError("inactive target runtime is online or its status is unknown")
+                target_agent_id = str(record.get("target_agent_id") or record.get("agent_id") or "")
+                row = _find_owned_agent(_load_json(root / "agents.json"), target_agent_id, package_id)
+                if row.get("is_active") is not False or row.get("transfer_import_state") != "committed_inactive":
+                    raise AgentMoveError("target Agent is not the committed inactive transfer")
+                verification = {"runtime_online": False, "runtime_present": False,
+                                "presence_checked": True, "desired_active": False,
+                                "config_inactive": True}
+                credential_status = record.get("credential_status")
+                if isinstance(credential_status, Mapping) and credential_status.get("telegram_backup_quarantined"):
+                    # Do not discard the transport package or claim a backup
+                    # until the target-encrypted credential can be recovered.
+                    _recover_quarantined_telegram_token_locked(root, package_id)
+                    verification["telegram_backup_recoverable"] = True
+            elif runtime_online is not True:
                 raise AgentMoveError(
                     "target Agent is not online in the Workbench/API runtime"
                 )
+            else:
+                verification = {"runtime_online": True}
             record["target_verified"] = True
-            record["target_verification"] = {"runtime_online": True}
+            record["target_verification"] = verification
             record["verified_at"] = utc_now_iso()
 
         record["status"] = "target_finalizing"
@@ -907,7 +1220,9 @@ def finalize_agent_move(
         return _public_state(record)
 
 
-def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, Any]:
+def rollback_agent_move(
+    hashi_root: Path | str, package_id: str, *, staged_only: bool = False,
+) -> dict[str, Any]:
     """Remove an imported target config and quarantine its workspace."""
 
     root = _root(hashi_root)
@@ -915,9 +1230,13 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
         record_dir, record = _load_record(root, package_id)
         status = str(record.get("status") or "")
         if status == "rolled_back":
+            if staged_only and record.get("staged_abort") is not True:
+                raise AgentMoveError("target was not rolled back by the staged-only abort")
             return _public_state(record)
+        if staged_only and status != "staged":
+            raise AgentMoveError("staged-only abort cannot touch a committed or active target")
         if status == "committing":
-            if str(record.get("history_mode") or "none") != "none":
+            if str(record.get("history_mode") or "none") not in {"none", "retain_source"}:
                 _rollback_target_conversation_continuity(root, str(package_id))
             _restore_recovery_snapshots(root, record_dir)
             _recover_interrupted_workspace_commit(root, record_dir, record)
@@ -952,7 +1271,7 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
             raise AgentMoveError(
                 f"Agent move cannot be rolled back from status {status!r}"
             )
-        elif str(record.get("history_mode") or "none") != "none":
+        elif str(record.get("history_mode") or "none") not in {"none", "retain_source"}:
             # A prior compensation failure can leave a fully journaled import
             # behind while the config/workspace transaction safely returns to
             # staged. Explicit rollback must still retire that import.
@@ -965,6 +1284,8 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
                 lifecycle_id=record.get("imported_agent_lifecycle_id"),
                 reason="agent_transfer_rolled_back",
             )
+        if staged_only:
+            record["staged_abort"] = True
         record.update(
             {
                 "status": "rolled_back",
@@ -985,6 +1306,11 @@ def rollback_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, An
         return _public_state(record)
 
 
+def abort_staged_agent_move(hashi_root: Path | str, package_id: str) -> dict[str, Any]:
+    """Atomically abort only an unpublished staged target; safe to replay."""
+    return rollback_agent_move(hashi_root, package_id, staged_only=True)
+
+
 def get_agent_move_status(hashi_root: Path | str, package_id: str) -> dict[str, Any]:
     _, record = _load_record(_root(hashi_root), package_id)
     return _public_state(record)
@@ -997,12 +1323,13 @@ def deactivate_source_agent(
     *,
     target_instance: str,
     history_mode: str | None = None,
+    history_source_owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Disable the source config while retaining its complete workspace."""
 
     root = _root(hashi_root)
     normalized_history_mode = str(history_mode or "none").strip().lower()
-    if normalized_history_mode not in {"none", "move"}:
+    if normalized_history_mode not in {"none", "move", "retain_source"}:
         raise AgentMoveError("source Move conversation history mode is invalid")
     with _mutation_lock(root):
         state_path = _source_state_path(root, package_id)
@@ -1016,6 +1343,14 @@ def deactivate_source_agent(
                 raise AgentMoveError(
                     "source move conversation history mode conflicts with this move"
                 )
+            frozen_owner = str(state.get("history_source_owner_id") or "")
+            if history_source_owner_id and frozen_owner and (
+                str(history_source_owner_id) != frozen_owner
+            ):
+                raise AgentMoveError("source move conversation owner conflicts with its journal")
+            if history_source_owner_id and not frozen_owner and normalized_history_mode == "move":
+                state["history_source_owner_id"] = str(history_source_owner_id).strip()
+                _atomic_json(state_path, state, mode=0o600)
             if state.get("status") == "source_disabled_pending_reboot":
                 return state
             if (
@@ -1057,18 +1392,6 @@ def deactivate_source_agent(
             raise AgentMoveError(
                 "source Agent lifecycle identity changed during move"
             )
-        if state is None:
-            active_names = [
-                str(item.get("name") or item.get("id") or "")
-                for item in rows
-                if item.get("is_active", True) is not False
-                and item.get("transfer_state") != "moved_out_pending_reboot"
-            ]
-            if len(active_names) <= 1:
-                raise AgentMoveError(
-                    f"cannot move Agent '{agent_id}': it is the source instance's "
-                    "last active Agent; create or clone another Agent here first"
-                )
         current_owner = row.get("transfer_package_id")
         previous_transfer_fields = {
             key: row[key] for key in _SOURCE_TRANSFER_FIELDS if key in row
@@ -1116,12 +1439,13 @@ def deactivate_source_agent(
             raise AgentMoveError("source tasks.json must contain a JSON object")
         if state is None:
             schedule_states: dict[str, bool] = {}
+            schedule_enabled_present: dict[str, bool] = {}
             for section in ("heartbeats", "crons", "nudges"):
                 for index, item in enumerate(tasks.get(section, [])):
                     if isinstance(item, dict) and item.get("agent") == agent_id:
-                        schedule_states[_schedule_state_key(section, item, index)] = (
-                            bool(item.get("enabled", True))
-                        )
+                        key = _schedule_state_key(section, item, index)
+                        schedule_states[key] = bool(item.get("enabled", False))
+                        schedule_enabled_present[key] = "enabled" in item
             state = new_config_json(state_path, {
                 "schema_version": MOVE_STATE_SCHEMA_VERSION,
                 "package_id": package_id,
@@ -1129,9 +1453,15 @@ def deactivate_source_agent(
                 "source_agent_lifecycle_id": source_lifecycle_id,
                 "target_instance": _normalize_instance(target_instance),
                 "history_mode": normalized_history_mode,
+                "history_source_owner_id": (
+                    str(history_source_owner_id).strip()
+                    if normalized_history_mode == "move" and history_source_owner_id
+                    else None
+                ),
                 "previous_active": bool(row.get("is_active", True)),
                 "previous_transfer_fields": previous_transfer_fields,
                 "schedule_states": schedule_states,
+                "schedule_enabled_present": schedule_enabled_present,
                 "status": "source_disabling",
                 "disable_started_at": utc_now_iso(),
                 "workspace_retained": True,
@@ -1249,6 +1579,7 @@ def restore_source_agent(hashi_root: Path | str, package_id: str) -> dict[str, A
         if not isinstance(tasks, dict):
             raise AgentMoveError("source tasks.json must contain a JSON object")
         schedule_states = dict(state.get("schedule_states") or {})
+        schedule_enabled_present = dict(state.get("schedule_enabled_present") or {})
         for section in ("heartbeats", "crons", "nudges"):
             for index, item in enumerate(tasks.get(section, [])):
                 key = _schedule_state_key(section, item, index)
@@ -1256,7 +1587,10 @@ def restore_source_agent(hashi_root: Path | str, package_id: str) -> dict[str, A
                     isinstance(item, dict)
                     and item.get("transfer_disabled_by") == package_id
                 ):
-                    item["enabled"] = bool(schedule_states.get(key, False))
+                    if key in schedule_enabled_present and not schedule_enabled_present[key]:
+                        item.pop("enabled", None)
+                    else:
+                        item["enabled"] = bool(schedule_states.get(key, False))
                     item.pop("transfer_disabled_by", None)
 
         if state.get("status") != "source_restoring":
@@ -1279,8 +1613,10 @@ def cleanup_source_agent(
     source_secret_keys: list[str] | tuple[str, ...],
     target_instance: str,
     target_agent_id: str,
+    source_secret_snapshot: Mapping[str, Any] | None = None,
+    source_schedule_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Permanently remove a verified moved source, retaining only audit facts."""
+    """Remove only source data proven transferred; retain unproven schedules."""
 
     root = _root(hashi_root)
     with _mutation_lock(root):
@@ -1303,13 +1639,15 @@ def cleanup_source_agent(
         if not agent_id:
             raise AgentMoveError("source cleanup journal has no Agent ID")
         history_mode = str(state.get("history_mode") or "none").strip().lower()
-        if history_mode not in {"none", "move"}:
+        if history_mode not in {"none", "move", "retain_source"}:
             raise AgentMoveError("source cleanup conversation history mode is invalid")
         # Resolve the configured owner before publishing any destructive source
         # cleanup. An absent owner is a hard provenance boundary, not a reason to
         # archive an inferred/default user's Sessions after config removal.
         history_owner = (
-            _configured_session_owner_id(root) if history_mode == "move" else None
+            str(state.get("history_source_owner_id") or "")
+            or configured_conversation_owner_id(root, agent_id=agent_id)
+            if history_mode == "move" else None
         )
         agents_path = root / "agents.json"
         tasks_path = root / "tasks.json"
@@ -1356,38 +1694,51 @@ def cleanup_source_agent(
         )
         if not isinstance(tasks, dict):
             raise AgentMoveError("source tasks.json must contain a JSON object")
-        for section in ("heartbeats", "crons", "nudges"):
-            tasks[section] = [
-                item
-                for item in list(tasks.get(section) or [])
-                if not (
-                    isinstance(item, dict)
-                    and item.get("agent") == agent_id
-                )
-            ]
+        preserved_schedules = _separate_source_schedules(
+            tasks, state, source_schedule_snapshot, agent_id=agent_id, package_id=package_id,
+        )
 
         secrets_data = _load_json_or_default(secrets_path, {})
         if not isinstance(secrets_data, dict):
             raise AgentMoveError("source secrets.json must contain a JSON object")
-        retained_secret_keys: list[str] = []
+        preserved_secret_keys: list[str] = []
         for raw_key in source_secret_keys:
             key = str(raw_key)
             if not key or key not in secrets_data:
                 continue
+            # A successfully imported package proves only the values it actually
+            # contained. Keep omitted or subsequently changed source credentials.
+            if (
+                source_secret_snapshot is None
+                or key not in source_secret_snapshot
+                or source_secret_snapshot[key] != secrets_data[key]
+            ):
+                preserved_secret_keys.append(key)
+                continue
             if _value_references_secret(agents, key):
-                retained_secret_keys.append(key)
+                preserved_secret_keys.append(key)
                 continue
             secrets_data.pop(key, None)
-        if retained_secret_keys:
-            raise AgentMoveError(
-                "source Agent secret cleanup is unsafe because remaining Agents "
-                "reference: " + ", ".join(sorted(retained_secret_keys))
-            )
 
         AgentDirectory.remove_local_memberships(agents, agent_id)
         capabilities = _load_json_or_default(capabilities_path, {"agents": []})
         _remove_source_agent_capability(capabilities, agent_id)
 
+        state["preserved_source_secret_keys"] = sorted(
+            set(state.get("preserved_source_secret_keys") or ()) | set(preserved_secret_keys)
+        )
+        previous_preserved = state.get("preserved_source_schedules") or {}
+        merged_preserved = {}
+        for section in ("heartbeats", "crons", "nudges"):
+            previous = list(previous_preserved.get(section) or [])
+            known = {_secret_value_hash(item) for item in previous}
+            for item in preserved_schedules[section]:
+                digest = _secret_value_hash(item)
+                if digest not in known:
+                    previous.append(item)
+                    known.add(digest)
+            merged_preserved[section] = previous
+        state["preserved_source_schedules"] = merged_preserved
         state["status"] = "source_cleanup_in_progress"
         state.setdefault("cleanup_started_at", utc_now_iso())
         _atomic_json(state_path, state, mode=0o600)
@@ -1399,6 +1750,12 @@ def cleanup_source_agent(
                     owner_id=str(history_owner),
                     agent_id=agent_id,
                     transfer_id=package_id,
+                )
+            elif history_mode == "retain_source":
+                # Retain every owner's records on this instance but archive and
+                # unbind them so a future same-name Agent starts independently.
+                history_retirement = _session_store(root).archive_retained_agent_sessions(
+                    agent_id=agent_id, transfer_id=package_id,
                 )
             else:
                 history_retirement = {
@@ -1414,7 +1771,7 @@ def cleanup_source_agent(
                 _atomic_json(secrets_path, secrets_data, mode=0o600)
             if capabilities_path.exists():
                 _atomic_json(capabilities_path, capabilities)
-            _remove_source_workspace(root, state)
+            _preserve_source_workspace(root, state, state_path)
             _record_moved_agent(
                 root,
                 agent_id=agent_id,
@@ -1424,11 +1781,30 @@ def cleanup_source_agent(
                 agent_lifecycle_id=source_lifecycle_id,
             )
             if valid_agent_lifecycle_id(source_lifecycle_id):
+                def preserve_delivery_record(record: dict[str, Any]) -> None:
+                    chats = record.get("per_chat") or {}
+                    pending = {
+                        str(request_id)
+                        for chat in chats.values() if isinstance(chat, dict)
+                        for request_id in chat.get("undelivered_request_ids", [])
+                        if request_id
+                    } if isinstance(chats, dict) else set()
+                    state["retained_source_delivery"] = {
+                        "record": record,
+                        "pending_count": len(pending),
+                        "workspace_path": state.get("retained_source_workspace"),
+                        "workspace_status": (state.get("workspace_retention") or {}).get("status"),
+                        "retained_at": utc_now_iso(),
+                        "package_id": package_id,
+                    }
+                    _atomic_json(state_path, state, mode=0o600)
+
                 retire_agent_state(
                     root,
                     agent_id,
                     lifecycle_id=source_lifecycle_id,
                     reason="verified_move_source_cleaned",
+                    before_retire=preserve_delivery_record,
                 )
         except Exception as exc:
             state["status"] = "source_cleanup_pending"
@@ -1440,7 +1816,7 @@ def cleanup_source_agent(
             {
                 "status": "source_cleaned",
                 "cleaned_at": utc_now_iso(),
-                "workspace_retained": False,
+                "workspace_retained": bool(state.get("retained_source_workspace")),
                 "reboot_required": False,
             }
         )
@@ -1534,7 +1910,12 @@ def _completed_agent_returns(root: Path, source: str, departures: list[dict]) ->
             lifecycle = receipt.get("imported_agent_lifecycle_id")
             agent_id = receipt.get("target_agent_id") or receipt.get("agent_id")
             if (receipt.get("status") != "completed" or receipt.get("target_verified") is not True
-                    or receipt.get("target_verification", {}).get("runtime_online") is not True
+                    or not (receipt.get("target_verification", {}).get("runtime_online") is True
+                        or (receipt.get("desired_target_active") is False
+                            and receipt.get("target_verification", {}).get("runtime_online") is False
+                            and receipt.get("target_verification", {}).get("runtime_present") is False
+                            and receipt.get("target_verification", {}).get("presence_checked") is True
+                            and receipt.get("target_verification", {}).get("config_inactive") is True))
                     or receipt.get("target_instance") != source
                     or receipt.get("package_id") != path.parent.name
                     or (agent_id, lifecycle) not in current
@@ -1604,9 +1985,12 @@ def _preflight_clone_import(
     showing a confirmation. Commit still checks revisions and ownership: a
     competing writer after staging must never be overwritten.
     """
+    source_values = decrypt_agent_secrets(package, passphrase)
+    backup_clone = package.manifest.get("retain_telegram_backup") is True
+    if backup_clone:
+        source_values.pop(str(package.access_requirements.get("telegram_secret_key") or ""), None)
     values, mapping = _remap_agent_secrets(
-        decrypt_agent_secrets(package, passphrase),
-        source_agent_id=package.agent_id, target_agent_id=target_agent_id,
+        source_values, source_agent_id=package.agent_id, target_agent_id=target_agent_id,
     )
     errors: list[str] = []
     try:
@@ -1620,7 +2004,11 @@ def _preflight_clone_import(
         data = _load_json_or_default(root / "secrets.json", {})
         if not isinstance(data, dict):
             raise AgentMoveError("must contain a JSON object")
-        _merge_secrets_preview(data, values)
+        _merge_secrets_preview(
+            data, values, preserve_backup_key=(
+                backup_clone and bool(package.access_requirements.get("telegram_secret_included"))
+            ),
+        )
     except (AgentMoveError, ValueError, TypeError) as exc:
         errors.append(f"secrets.json: {exc}")
     try:
@@ -1643,6 +2031,26 @@ def _preflight_clone_import(
         raise CloneImportPreflightError("clone target import preflight failed: " + "; ".join(errors))
 
 
+def _unbound_clone_telegram_key(
+    agents_data: Any,
+    existing_secrets: Mapping[str, Any],
+    imported_secrets: Mapping[str, Any],
+) -> str:
+    """Select a vacant reference; a Clone must never adopt another Bot."""
+    occupied = set(existing_secrets) | set(imported_secrets) | set(TELEGRAM_PROTECTED_SECRET_KEYS)
+    for row in _agent_rows(agents_data):
+        name = str(row.get("name") or row.get("id") or "").strip()
+        key = str(row.get("telegram_token_key") or name).strip()
+        if key:
+            occupied.add(key)
+    # An unpredictable, vacant reference also prevents a different writer
+    # adding the conventional Agent-name secret during the commit window.
+    while True:
+        candidate = "__hashi_clone_telegram_" + uuid4().hex
+        if candidate not in occupied:
+            return candidate
+
+
 def _prepare_import_config(
     root: Path,
     package: AgentMoveArchive,
@@ -1650,6 +2058,7 @@ def _prepare_import_config(
     target_agent_id: str,
     operation: str,
     secret_key_mapping: Mapping[str, str],
+    access_scope_plan: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     row = _rewrite_secret_references(dict(package.agent_config), secret_key_mapping)
     row.pop("id", None)
@@ -1715,17 +2124,9 @@ def _prepare_import_config(
         )
     row["default_mode"] = mode
 
-    requested = str(
-        package.access_requirements.get("access_scope")
-        or row.get("access_scope")
-        or "project"
-    ).lower()
-    if requested not in VALID_ACCESS_SCOPES:
-        requested = "workspace"
-    maximum = _target_max_access_scope(root)
-    effective = (
-        requested if _ACCESS_RANK[requested] <= _ACCESS_RANK[maximum] else maximum
-    )
+    plan = access_scope_plan or _access_scope_plan(root, package)
+    requested = plan["requested"]
+    effective = plan["effective"]
     row["access_scope"] = effective
     warning = None
     if effective != requested:
@@ -1840,11 +2241,16 @@ def _merge_secrets_preview(
     imported: Mapping[str, Any],
     *,
     replace_conflicts_for_agent: str | None = None,
+    preserve_backup_key: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     added: list[str] = []
     reused: list[str] = []
     replaced: list[str] = []
     for key, value in imported.items():
+        if key == _RETAINED_BACKUP_KEY and (
+            preserve_backup_key or (key in target and target[key] != value)
+        ):
+            raise AgentMoveError("target credential collides with local encrypted backup key")
         if key in target:
             if target[key] != value:
                 if not _agent_owns_secret_key(key, replace_conflicts_for_agent):
@@ -2107,16 +2513,20 @@ def _credential_status(
     if decrypt and "secrets/agent.enc" in package.names:
         packaged = decrypt_agent_secrets(package, passphrase)
     selected_target = str(target_agent_id or package.agent_id)
+    backup_clone = package.manifest.get("retain_telegram_backup") is True
+    if backup_clone:
+        packaged.pop(str(package.access_requirements.get("telegram_secret_key") or ""), None)
     packaged, _mapping = _remap_agent_secrets(
         packaged,
         source_agent_id=package.agent_id,
         target_agent_id=selected_target,
     )
     packaged_keys = set(packaged)
+    source_telegram_key = str(package.access_requirements.get("telegram_secret_key") or "")
     required = {
         _remap_secret_key(str(item), package.agent_id, selected_target)
         for item in package.access_requirements.get("agent_secret_keys", [])
-        if str(item).strip()
+        if str(item).strip() and not (backup_clone and str(item) == source_telegram_key)
     }
     return {
         "required_keys": sorted(required),
@@ -2127,9 +2537,188 @@ def _credential_status(
             package.access_requirements.get("target_rebind_required") or []
         ),
         "telegram_configured": bool(
-            package.access_requirements.get("telegram_secret_included")
+            not backup_clone and package.access_requirements.get("telegram_secret_included")
+        ),
+        "telegram_backup_quarantined": bool(
+            backup_clone and package.access_requirements.get("telegram_secret_included")
         ),
     }
+
+
+_RETAINED_BACKUP_KEY = "_hashi_agent_move_backup_key_v1"
+_RETAINED_BACKUP_PREFIX = "hashi-agent-backup-v1:"
+_RETAINED_BACKUP_FORMAT = "local-instance-v1"
+
+
+def _backup_cipher(secrets_data: Mapping[str, Any]):
+    from cryptography.fernet import Fernet
+
+    raw = secrets_data.get(_RETAINED_BACKUP_KEY)
+    if not isinstance(raw, str) or not raw.startswith(_RETAINED_BACKUP_PREFIX):
+        raise AgentMoveError("local encrypted backup key is unavailable")
+    try:
+        return Fernet(raw.removeprefix(_RETAINED_BACKUP_PREFIX).encode("ascii"))
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise AgentMoveError("local encrypted backup key is invalid") from exc
+
+
+def _ensure_backup_cipher(root: Path, secrets_data: dict):
+    from cryptography.fernet import Fernet
+
+    if _RETAINED_BACKUP_KEY not in secrets_data:
+        # Use the existing instance credential store, with its normal private
+        # publication and revision checks. The key survives transport rotation.
+        secrets_data[_RETAINED_BACKUP_KEY] = (
+            _RETAINED_BACKUP_PREFIX + Fernet.generate_key().decode("ascii")
+        )
+        _atomic_json(root / "secrets.json", secrets_data, mode=0o600)
+    return _backup_cipher(secrets_data)
+
+
+def _read_local_backup(path: Path, cipher, expected: Mapping[str, Any]) -> str:
+    from cryptography.fernet import InvalidToken
+
+    try:
+        if _workspace_path_is_link(path) or not path.is_file():
+            raise ValueError("missing or linked backup")
+        data = json.loads(cipher.decrypt(path.read_bytes()).decode("utf-8"))
+        if not isinstance(data, dict) or set(data) != set(expected) | {"token"}:
+            raise ValueError("invalid backup shape")
+        if any(data.get(name) != value for name, value in expected.items()):
+            raise ValueError("backup binding differs")
+        token = data.get("token")
+        if not isinstance(token, str) or not token:
+            raise ValueError("invalid backup credential")
+        return token
+    except (InvalidToken, ValueError, TypeError, UnicodeError, OSError) as exc:
+        raise AgentMoveError("local encrypted Telegram backup could not be verified") from exc
+
+
+def _preserve_encrypted_clone_backup(
+    root: Path, record_dir: Path, package: AgentMoveArchive, *,
+    target_agent_id: str, lifecycle_id: str, token: Any, secrets_data: dict,
+) -> dict[str, Any]:
+    """Retain a target-encrypted credential without binding a live connector."""
+    if not isinstance(token, str) or not token:
+        raise AgentMoveError("Telegram backup credential is invalid")
+    with zipfile.ZipFile(package.package_path, "r") as archive:
+        transport = archive.read("secrets/agent.enc")
+    transport_digest = hashlib.sha256(transport).hexdigest()
+    if transport_digest != package.checksums.get("secrets/agent.enc"):
+        raise AgentMoveError("encrypted Telegram backup checksum changed")
+    directory = record_dir / "retained-telegram-backup"
+    if _workspace_path_is_link(directory):
+        raise AgentMoveError("encrypted Telegram backup directory is a link")
+    directory.mkdir(mode=0o700, exist_ok=True)
+
+    def publish_once(path: Path, payload: bytes, verify_existing) -> None:
+        if _workspace_path_is_link(path):
+            raise AgentMoveError("existing encrypted Telegram backup is a link")
+        if path.exists():
+            verify_existing()
+            return
+        fd, temporary_name = tempfile.mkstemp(prefix="." + path.name + "-", dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                os.chmod(temporary_name, 0o600)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary_name, path)
+            except FileExistsError:
+                verify_existing()
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+
+    transport_path = directory / "agent.enc"
+
+    def verify_transport() -> None:
+        if (not transport_path.is_file()
+                or hashlib.sha256(transport_path.read_bytes()).hexdigest() != transport_digest):
+            raise AgentMoveError("existing encrypted Telegram transport backup differs")
+
+    publish_once(transport_path, transport, verify_transport)
+    cipher = _ensure_backup_cipher(root, secrets_data)
+    binding = {
+        "version": 1,
+        "package_id": package.package_id,
+        "source_instance": str(package.manifest.get("source_instance") or "").upper(),
+        "target_instance": _configured_instance_id(root),
+        "source_agent_id": package.agent_id,
+        "target_agent_id": target_agent_id,
+        "agent_lifecycle_id": lifecycle_id,
+    }
+    local_path = directory / "local-telegram.enc"
+
+    def verify_local() -> None:
+        if _read_local_backup(local_path, cipher, binding) != token:
+            raise AgentMoveError("existing local encrypted Telegram backup differs")
+
+    local_payload = json.dumps({**binding, "token": token}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    publish_once(local_path, cipher.encrypt(local_payload), verify_local)
+    verify_local()
+    return {
+        "status": "quarantined",
+        "storage_path": local_path.relative_to(root).as_posix(),
+        "transport_backup_path": transport_path.relative_to(root).as_posix(),
+        "encryption": _RETAINED_BACKUP_FORMAT,
+        "sha256": hashlib.sha256(local_path.read_bytes()).hexdigest(),
+        "source_agent_id": package.agent_id,
+        "target_agent_id": target_agent_id,
+        "agent_lifecycle_id": lifecycle_id,
+        "source_instance": package.manifest.get("source_instance"),
+        "source_credential_key": package.access_requirements.get("telegram_secret_key"),
+        "bot_fingerprint": telegram_bot_fingerprint(token),
+        "live_connector": False,
+    }
+
+
+def _recover_quarantined_telegram_token(hashi_root: Path | str, package_id: str) -> str:
+    """Internal target-side read; never starts or changes a Telegram connector."""
+    root = _root(hashi_root)
+    with _mutation_lock(root):
+        return _recover_quarantined_telegram_token_locked(root, package_id)
+
+
+def _recover_quarantined_telegram_token_locked(root: Path, package_id: str) -> str:
+    record_dir, record = _load_record(root, package_id)
+    if record.get("status") not in {
+        "committed_inactive", "target_finalizing", "target_cleanup_pending", "completed",
+    }:
+        raise AgentMoveError("quarantined Telegram backup is not available for this transfer")
+    backup = record.get("retained_telegram_backup")
+    if (not isinstance(backup, Mapping) or backup.get("status") != "quarantined"
+            or backup.get("live_connector") is not False
+            or backup.get("encryption") != _RETAINED_BACKUP_FORMAT):
+        raise AgentMoveError("local encrypted Telegram backup is unavailable")
+    agent_id = str(record.get("target_agent_id") or record.get("agent_id") or "")
+    rows = [row for row in _agent_rows(_load_json(root / "agents.json"))
+            if str(row.get("name") or row.get("id") or "") == agent_id]
+    if (len(rows) != 1 or str(rows[0].get(AGENT_LIFECYCLE_FIELD) or "").casefold()
+            != str(record.get("imported_agent_lifecycle_id") or "").casefold()):
+        raise AgentMoveError("Telegram backup target lifecycle changed")
+    directory = record_dir / "retained-telegram-backup"
+    path = directory / "local-telegram.enc"
+    if (_workspace_path_is_link(directory)
+            or backup.get("storage_path") != path.relative_to(root).as_posix()
+            or _workspace_path_is_link(path) or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != backup.get("sha256")):
+        raise AgentMoveError("local encrypted Telegram backup changed")
+    binding = {
+        "version": 1,
+        "package_id": str(record["package_id"]),
+        "source_instance": str(record.get("source_instance") or "").upper(),
+        "target_instance": _configured_instance_id(root),
+        "source_agent_id": str(record.get("source_agent_id") or record.get("agent_id") or ""),
+        "target_agent_id": agent_id,
+        "agent_lifecycle_id": str(record.get("imported_agent_lifecycle_id") or "").casefold(),
+    }
+    token = _read_local_backup(path, _backup_cipher(_load_json(root / "secrets.json")), binding)
+    if telegram_bot_fingerprint(token) != backup.get("bot_fingerprint"):
+        raise AgentMoveError("local encrypted Telegram backup fingerprint changed")
+    return token
 
 
 def _preserve_retained_identity(
@@ -2166,13 +2755,21 @@ def _stage_warnings(
     credential_status: Mapping[str, Any],
     *,
     target_environment: str,
+    access_scope_plan: Mapping[str, str] | None = None,
     replaces_dormant_source: bool = False,
 ) -> list[str]:
     warnings = [str(item) for item in package.manifest.get("warnings", [])]
     if str(package.manifest.get("operation") or "").lower() == "clone":
-        warnings.append(
-            "clone excludes the Telegram token; the new Agent uses local Workbench/API until a distinct token is configured"
-        )
+        if package.manifest.get("retain_telegram_backup") is True:
+            warnings.append(
+                "inactive clone retains an encrypted Telegram credential backup without installing or starting its connector"
+                if package.access_requirements.get("telegram_secret_included")
+                else "inactive clone has no source Telegram credential to retain"
+            )
+        else:
+            warnings.append(
+                "clone excludes the Telegram token; the new Agent uses local Workbench/API until a distinct token is configured"
+            )
     if package.manifest.get("source_environment") != target_environment:
         warnings.append(
             "cross-platform move: target rebuilt filesystem paths and permissions from portable metadata"
@@ -2190,13 +2787,11 @@ def _stage_warnings(
         warnings.append(
             "target credentials are incomplete; configure them before using dependent backends"
         )
-    requested = str(
-        package.access_requirements.get("access_scope") or "project"
-    ).lower()
-    maximum = _target_max_access_scope(root)
-    if requested in _ACCESS_RANK and _ACCESS_RANK[requested] > _ACCESS_RANK[maximum]:
+    plan = access_scope_plan or _access_scope_plan(root, package)
+    requested, effective = plan["requested"], plan["effective"]
+    if requested != effective:
         warnings.append(
-            f"target policy will clamp access_scope from {requested} to {maximum}"
+            f"target policy will clamp access_scope from {requested} to {effective}"
         )
     schedule_count = sum(
         len(package.schedules.get(section, []) or [])
@@ -2385,6 +2980,87 @@ def _agent_config_hash(value: Mapping[str, Any]) -> str:
     return _secret_value_hash(durable)
 
 
+def _separate_source_schedules(
+    tasks: dict[str, Any],
+    state: Mapping[str, Any],
+    snapshot: Mapping[str, Any] | None,
+    *,
+    agent_id: str,
+    package_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Keep unproven source schedules disabled, with exact originals in the journal."""
+    originals = snapshot.get("source_originals") if isinstance(snapshot, Mapping) else None
+    source_enabled = snapshot.get("source_enabled") if isinstance(snapshot, Mapping) else None
+    states = dict(state.get("schedule_states") or {})
+    present = dict(state.get("schedule_enabled_present") or {})
+    retained: dict[str, list[dict[str, Any]]] = {}
+    reserved = {"import_state", "import_package_id", "import_source_instance",
+                "source_task_id", "source_agent_id"}
+    for section in ("heartbeats", "crons", "nudges"):
+        source_rows = originals.get(section) if isinstance(originals, Mapping) else None
+        packaged_rows = snapshot.get(section) if isinstance(snapshot, Mapping) else None
+        flags = source_enabled.get(section) if isinstance(source_enabled, Mapping) else None
+        proven = []
+        if (isinstance(source_rows, list) and isinstance(packaged_rows, list)
+                and isinstance(flags, list)
+                and len(source_rows) == len(packaged_rows) == len(flags)):
+            for original, packaged, enabled in zip(source_rows, packaged_rows, flags):
+                if not isinstance(original, dict) or not isinstance(packaged, dict) or type(enabled) is not bool:
+                    continue
+                expected = dict(original)
+                expected["enabled"] = False
+                expected["import_state"] = "disabled_review_draft"
+                if (original.get("agent") == agent_id and not reserved.intersection(original)
+                        and bool(original.get("enabled", False)) == enabled and expected == packaged):
+                    proven.append(original)
+
+        kept = []
+        retained[section] = []
+        for index, raw in enumerate(list(tasks.get(section) or [])):
+            if not isinstance(raw, dict) or raw.get("agent") != agent_id:
+                kept.append(raw)
+                continue
+            key = _schedule_state_key(section, raw, index)
+            candidate = dict(raw)
+            candidate.pop("transfer_disabled_by", None)
+            if key in present and key in states:
+                if present[key]:
+                    candidate["enabled"] = states[key]
+                else:
+                    candidate.pop("enabled", None)
+            is_owned = raw.get("transfer_disabled_by") == package_id and raw.get("enabled") is False
+            if is_owned and key in present and key in states and candidate in proven:
+                proven.remove(candidate)
+                continue
+            retained[section].append(dict(raw))
+            item = dict(raw)
+            item["enabled"] = False
+            kept.append(item)
+        tasks[section] = kept
+    return retained
+
+
+def _imported_schedule_intent(
+    schedules: Mapping[str, Any], imported_ids: Mapping[str, list[str]]
+) -> dict[str, dict[str, bool]] | None:
+    source_enabled = schedules.get("source_enabled")
+    if source_enabled is None:
+        # Older packages erased this information. Never infer disabled.
+        return None
+    if not isinstance(source_enabled, dict):
+        raise AgentMoveError("imported schedule intent is malformed")
+    intent: dict[str, dict[str, bool]] = {}
+    for section in ("heartbeats", "crons", "nudges"):
+        originals = [item for item in schedules.get(section, []) or [] if isinstance(item, dict)]
+        target_ids = imported_ids.get(section, [])
+        values = source_enabled.get(section)
+        if (not isinstance(values, list) or len(values) != len(originals)
+                or len(originals) != len(target_ids) or any(type(value) is not bool for value in values)):
+            raise AgentMoveError(f"imported schedule intent is incomplete for {section}")
+        intent[section] = dict(zip(target_ids, values))
+    return intent
+
+
 def _imported_task_hashes(
     tasks: Mapping[str, Any],
     imported_task_ids: Mapping[str, list[str]],
@@ -2437,20 +3113,107 @@ def _source_workspace_path(
     return path.resolve()
 
 
-def _remove_source_workspace(root: Path, state: Mapping[str, Any]) -> None:
+def _rename_workspace_without_replacement(source: Path, target: Path) -> None:
+    """Move on the same filesystem without replacing a different object."""
+    if os.name == "nt":
+        os.rename(source, target)
+        return
+    import ctypes
+    import errno
+    import sys
+    if sys.platform.startswith("linux"):
+        library = ctypes.CDLL(None, use_errno=True)
+        rename = getattr(library, "renameat2", None)
+        if rename is not None:
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1) == 0:
+                return
+            number = ctypes.get_errno()
+            raise OSError(number, os.strerror(number), str(target))
+    raise OSError(errno.ENOTSUP, "atomic no-replace directory rename is unavailable")
+
+
+def _workspace_path_is_link(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    # Windows junctions and other reparse points are not always reported as
+    # symlinks by older Python versions. Never follow or move one as a directory.
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & reparse)
+
+
+def _preserve_source_workspace(root: Path, state: dict[str, Any], state_path: Path) -> None:
+    """Retain the entire source directory; packaging may omit or predate files.
+
+    The reservation is journaled before the rename so an interrupted cleanup
+    recovers the same directory rather than moving or replacing another object.
+    """
     raw = str(state.get("workspace_path") or "").strip()
     if not raw:
         raise AgentMoveError("source cleanup journal has no workspace path")
-    workspace = Path(raw).expanduser().resolve()
+    candidate = Path(raw).expanduser()
+    if _workspace_path_is_link(candidate):
+        raise AgentMoveError("refusing to relocate a linked source workspace")
+    workspace = candidate.resolve()
     protected = {root, root.parent, Path.home().resolve(), Path(workspace.anchor)}
     if workspace in protected:
-        raise AgentMoveError("refusing to remove a broad source workspace path")
-    if workspace.is_symlink():
-        raise AgentMoveError("refusing to remove a symlinked source workspace")
+        raise AgentMoveError("refusing to relocate a broad source workspace path")
     if workspace.exists() and not workspace.is_dir():
         raise AgentMoveError("source workspace is no longer a directory")
-    if workspace.exists():
-        shutil.rmtree(workspace)
+    retention = state.get("workspace_retention")
+    if not isinstance(retention, dict):
+        if not workspace.exists():
+            state["workspace_retention"] = {"status": "missing", "original_path": str(workspace)}
+            return
+        container = workspace.parent / f".hashi-move-retained-{uuid4().hex}"
+        container.mkdir(mode=0o700)
+        retention = {
+            "status": "preparing", "original_path": str(workspace),
+            "container": str(container), "path": str(container / workspace.name),
+        }
+        state["workspace_retention"] = retention
+        _atomic_json(state_path, state, mode=0o600)
+    if retention.get("original_path") != str(workspace):
+        raise AgentMoveError("source workspace retention journal changed")
+    container = Path(str(retention.get("container") or ""))
+    destination = Path(str(retention.get("path") or ""))
+    if retention.get("status") == "missing":
+        return
+    if retention.get("status") == "in_place":
+        if not workspace.is_dir():
+            raise AgentMoveError("retained source workspace is unavailable")
+        state["retained_source_workspace"] = str(workspace)
+        return
+    if (container.parent != workspace.parent
+            or not container.name.startswith(".hashi-move-retained-")
+            or destination != container / workspace.name
+            or _workspace_path_is_link(container)
+            or not container.is_dir()):
+        raise AgentMoveError("source workspace retention journal is invalid")
+    if retention.get("status") == "preserved":
+        if not destination.is_dir() or _workspace_path_is_link(destination):
+            raise AgentMoveError("retained source workspace is unavailable")
+    elif destination.exists():
+        if workspace.exists() or not destination.is_dir() or _workspace_path_is_link(destination):
+            raise AgentMoveError("source workspace retention outcome is ambiguous")
+        retention["status"] = "preserved"
+    elif workspace.exists():
+        try:
+            _rename_workspace_without_replacement(workspace, destination)
+            retention["status"] = "preserved"
+        except OSError:
+            if not workspace.is_dir() or os.path.lexists(destination):
+                raise AgentMoveError("source workspace retention outcome is ambiguous")
+            # Some mounts cannot rename a live directory. Keep it in place.
+            retention["status"] = "in_place"
+    else:
+        raise AgentMoveError("source workspace retention outcome is unknown")
+    state["workspace_retention"] = retention
+    state["retained_source_workspace"] = str(workspace if retention["status"] == "in_place" else destination)
+    _atomic_json(state_path, state, mode=0o600)
 
 
 def _remove_source_agent_capability(data: Any, agent_id: str) -> None:
@@ -2658,15 +3421,35 @@ def _restore_recovery_snapshots(root: Path, record_dir: Path) -> None:
             )
 
 
-def _target_max_access_scope(root: Path) -> str:
-    try:
-        data = _load_json(root / "agents.json")
-        global_cfg = data.get("global") if isinstance(data, dict) else {}
-        move_cfg = global_cfg.get("agent_move") if isinstance(global_cfg, dict) else {}
-        value = str((move_cfg or {}).get("max_access_scope") or "drive").lower()
-    except AgentMoveError:
-        value = "drive"
-    return value if value in VALID_ACCESS_SCOPES else "workspace"
+def _target_max_access_scope(root: Path, *, target_config: Any = None) -> str:
+    data = target_config if target_config is not None else _load_json(root / "agents.json")
+    if not isinstance(data, dict):
+        return "drive"  # Legacy list-shaped Agent configuration has no global policy.
+    global_cfg = data.get("global", {})
+    if not isinstance(global_cfg, dict):
+        raise AgentMoveError("target global configuration is malformed")
+    move_cfg = global_cfg.get("agent_move", {})
+    if not isinstance(move_cfg, dict):
+        raise InvalidTargetScopePolicy("target Agent move policy is malformed")
+    raw = move_cfg.get("max_access_scope", "drive")
+    value = raw.strip().lower() if isinstance(raw, str) else ""
+    if value not in VALID_ACCESS_SCOPES:
+        raise InvalidTargetScopePolicy("target max_access_scope is invalid")
+    return value
+
+
+def _access_scope_plan(
+    root: Path, package: AgentMoveArchive, *, target_config: Any = None
+) -> dict[str, str]:
+    requirements = package.access_requirements
+    config = package.agent_config
+    raw = requirements.get("access_scope", config.get("access_scope", "project"))
+    requested = raw.strip().lower() if isinstance(raw, str) else ""
+    if requested not in VALID_ACCESS_SCOPES:
+        raise AgentMoveError("imported Agent access_scope is invalid")
+    maximum = _target_max_access_scope(root, target_config=target_config)
+    effective = requested if _ACCESS_RANK[requested] <= _ACCESS_RANK[maximum] else maximum
+    return {"requested": requested, "target_maximum": maximum, "effective": effective}
 
 
 def _configured_instance_id(root: Path) -> str:
@@ -2681,8 +3464,57 @@ def _configured_instance_id(root: Path) -> str:
     return "HASHI"
 
 
+def _require_governed_history_mapping(
+    root: Path, package: AgentMoveArchive, *, local_authenticated: bool
+) -> None:
+    capsule = package.conversation_continuity
+    if capsule is None or local_authenticated:
+        return
+    summary = capsule.get("summary") or {}
+    if int(summary.get("session_count") or 0) == 0:
+        return
+    from orchestrator.enterprise.profile import resolve_deployment_profile
+
+    config = _load_json(root / "agents.json")
+    global_config = config.get("global", {})
+    if not isinstance(global_config, Mapping):
+        raise AgentMoveError("target deployment configuration is invalid")
+    if resolve_deployment_profile(dict(global_config)).value != "personal":
+        # Instance HMAC is not a governed user or project decision. This
+        # incomplete cross-instance path must not silently attribute history to
+        # a different user while a verified mapping is being implemented.
+        raise AgentMoveError(
+            "governed target needs an authenticated user mapping for conversation history"
+        )
+
+
 def _configured_session_owner_id(root: Path) -> str:
     return configured_conversation_owner_id(root, instance_role="target")
+
+
+def _conversation_owner_binding(
+    root: Path,
+    package: AgentMoveArchive,
+    *,
+    source_instance: str,
+    target_instance: str,
+    target_agent_id: str,
+    target_owner_id: str | None = None,
+) -> ConversationContinuityBinding:
+    capsule = package.conversation_continuity
+    if capsule is None:
+        raise AgentMoveError("conversation continuity capsule is missing")
+    return ConversationContinuityBinding(
+        source_owner_id=str(capsule["owner_id"]).strip(),
+        target_owner_id=target_owner_id or _configured_session_owner_id(root),
+        source_instance=source_instance,
+        target_instance=target_instance,
+        source_agent_id=package.agent_id.lower(),
+        target_agent_id=target_agent_id.lower(),
+        transfer_id=package.package_id,
+        history_mode=str(package.manifest.get("history_mode") or "").lower(),
+        capsule_digest=str(capsule["capsule_digest"]).lower(),
+    )
 
 
 def _session_store(root: Path) -> SessionStore:
@@ -2707,6 +3539,7 @@ def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
         "source_agent_id",
         "target_agent_id",
         "operation",
+        "desired_target_active",
         "source_instance",
         "target_instance",
         "source_environment",
@@ -2723,10 +3556,15 @@ def _public_state(record: Mapping[str, Any]) -> dict[str, Any]:
         "verified_at",
         "completed_at",
         "rolled_back_at",
+        "staged_abort",
         "workspace",
         "imported_task_ids",
+        "schedule_intent",
+        "access_scope_plan",
         "credential_status",
         "telegram_delivery_state",
+        "retained_telegram_backup",
+        "retain_telegram_backup",
         "conversation_continuity",
         "retained_identity",
         "replaces_dormant_source",
@@ -2811,9 +3649,9 @@ def _load_json_or_default(path: Path, default: Any) -> Any:
 def _credential_publication_options(path: Path) -> dict:
     if path.name.casefold() != "secrets.json":
         return {}
-    from orchestrator.workbench_auth import _windows_remote_runtime_sids
+    from orchestrator.workbench_auth import resolve_remote_runtime_sids
 
-    return {"private_full_control_sids": _windows_remote_runtime_sids(path.parent)}
+    return {"private_full_control_sids": resolve_remote_runtime_sids(path.parent)}
 
 
 def _atomic_json(path: Path, value: Any, *, mode: int | None = None) -> None:

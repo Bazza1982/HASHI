@@ -298,6 +298,170 @@ def test_runtime_command_allowed_honors_enterprise_policy_deny(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_frontend_command_policy_uses_authenticated_enterprise_user(tmp_path):
+    from orchestrator.admin_local_testing import _command_allowed_for_session, execute_local_command
+    from orchestrator.command_interaction_bridge import _allowed
+    from orchestrator.frontend_command_context import (
+        bind_frontend_command_principal, frontend_command_policy_context,
+    )
+
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    evaluator.add_rule(
+        action="command.execute", resource="command:status", effect="deny",
+        scope_type="user", scope_id="usr-denied",
+    )
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.workspace_dir = tmp_path
+    runtime.global_config = _global_config(tmp_path)
+    runtime._disabled_commands = set()
+    runtime._enabled_commands = set()
+    runtime._command_policy_mode = "allow_all"
+    denied = {"_hashi_owner_id": "enterprise:usr-denied"}
+    allowed = {"_hashi_owner_id": "enterprise:usr-allowed"}
+
+    assert not _command_allowed_for_session(runtime, "status", denied)
+    assert _command_allowed_for_session(runtime, "status", allowed)
+    assert not _allowed(runtime, "status", denied["_hashi_owner_id"])
+    assert _allowed(runtime, "status", allowed["_hashi_owner_id"])
+
+    calls = []
+
+    async def status(_update, _context):
+        calls.append(True)
+
+    runtime.cmd_status = status
+    result = await execute_local_command(runtime, "/status", session_metadata=denied)
+    assert result["ok"] is False
+    assert result["error_code"] == "command_disabled"
+    assert not calls
+    with bind_frontend_command_principal(runtime, "enterprise:usr-denied"):
+        assert frontend_command_policy_context(runtime)["user_id"] == "usr-denied"
+    assert frontend_command_policy_context(runtime) == {}
+
+
+@pytest.mark.asyncio
+async def test_governed_menu_transport_uses_authenticated_user_policy_and_session(tmp_path, monkeypatch):
+    from orchestrator import admin_local_testing, command_registry, telegram_notifications
+    from orchestrator.command_interaction_transport import try_dispatch_command_interaction_transport
+    from orchestrator.commands.notify import COMMANDS, CALLBACKS
+    from orchestrator.session_store import SessionStore
+    from tests.test_command_interaction_transport import _wire
+
+    _init_org(tmp_path)
+    evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")
+    evaluator.add_rule(action="command.execute", resource="command:notify", effect="deny",
+                       scope_type="user", scope_id="usr-denied")
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.workspace_dir = tmp_path / "workspace"
+    runtime.workspace_dir.mkdir()
+    runtime.global_config = _global_config(tmp_path)
+    runtime.global_config.instance_id = "TEST"
+    runtime.global_config.authorized_id = 0
+    runtime._authorized_telegram_ids = ()
+    runtime._disabled_commands, runtime._enabled_commands = set(), set()
+    runtime._command_policy_mode = "allow_all"
+    runtime.session_store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="TEST")
+    allowed = runtime.session_store.create_session(owner_id="enterprise:usr-allowed", agent_id="zelda")
+    denied = runtime.session_store.create_session(owner_id="enterprise:usr-denied", agent_id="zelda")
+    commands = {item.name: item for item in COMMANDS}
+    writes = []
+    monkeypatch.setattr(admin_local_testing, "runtime_command_map", lambda: commands)
+    monkeypatch.setattr(command_registry, "runtime_command_map", lambda: commands)
+    monkeypatch.setattr(command_registry, "load_runtime_callbacks", lambda: CALLBACKS)
+    monkeypatch.setattr(telegram_notifications, "notification_mode", lambda _: "on")
+    monkeypatch.setattr(telegram_notifications, "set_notification_mode", lambda _, mode: writes.append(mode) or mode)
+
+    def wire(session, **changes):
+        return _wire("open", command="/notify", session_id=session["session_id"],
+                     context_generation=changes.get("generation", 1))
+
+    async def invoke(text, owner=None, source="workbench_api"):
+        return await try_dispatch_command_interaction_transport(
+            runtime, text, source_channel=source,
+            session_metadata={"_hashi_owner_id": owner} if owner else {},
+        )
+
+    assert not (await invoke(wire(allowed)))["ok"]
+    assert not (await invoke(wire(allowed), "local:spoof"))["ok"]
+    assert not (await invoke(wire(allowed), "enterprise:usr-allowed", source="telegram"))["ok"]
+    assert not (await invoke(wire(denied), "enterprise:usr-allowed"))["ok"]
+    assert not (await invoke(wire(allowed, generation=2), "enterprise:usr-allowed"))["ok"]
+    assert not (await invoke(wire(denied), "enterprise:usr-denied"))["ok"]
+    assert writes == []
+
+    opened = await invoke(wire(allowed), "enterprise:usr-allowed")
+    assert opened["ok"], opened
+    card = opened["messages"][-1]
+    menu = runtime._command_interaction_store.menus[card["command_ui"]["menu_id"]]
+    button = next(key for key, (data, _) in menu.actions.items() if data == "notify:quiet")
+    action = _wire("act", request_id="actionabcdefghijkl", menu_id=menu.id,
+                   revision=menu.revision, button_id=button,
+                   session_id=allowed["session_id"], context_generation=1)
+    result = await invoke(action, "enterprise:usr-allowed")
+    assert result["ok"], result
+    assert writes == ["quiet"]
+
+    # Exercise the real Backend route with actual governed sessions and the
+    # existing private Worker dispatch; request bodies cannot choose an owner.
+    from aiohttp.test_utils import TestClient, TestServer
+    from orchestrator.enterprise import EnterpriseRole
+    from orchestrator.admin_local_testing import try_execute_slash_command_text
+    from tests.test_session_api import _server
+
+    identity = IdentityService.from_path(tmp_path / "state" / "enterprise.sqlite")
+    project = identity.create_project(org_id="ORG-001", name="Research", project_id="project-1")
+    tokens = {}
+    for user_id in ("usr-allowed", "usr-denied", "usr-outsider"):
+        user = identity.create_user(org_id="ORG-001", email=f"{user_id}@example.invalid",
+                                    display_name=user_id, password="fixture-password", user_id=user_id)
+        if user_id != "usr-outsider":
+            identity.assign_project_role(user_id=user.id, project_id=project.id, role=EnterpriseRole.INDIVIDUAL_USER)
+        tokens[user_id] = identity.create_session(user_id=user.id).token
+
+    class WorkerProxy:
+        is_function_worker_proxy = True
+        async def execute_slash_command(self, text, *, source_channel, chat_id, session_metadata):
+            return await try_execute_slash_command_text(
+                runtime, text, source_channel=source_channel, chat_id=chat_id,
+                session_metadata=session_metadata,
+            )
+
+    api_dir = tmp_path / "api"
+    api_dir.mkdir()
+    api, _ = _server(api_dir)
+    api.global_config.deployment_profile = "enterprise"
+    api.identity_service = identity
+    api.config_path.write_text(json.dumps({"global": {}, "agents": [
+        {"name": "zelda", "project_id": project.id},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr(api, "_runtime_map", lambda: {"zelda": WorkerProxy()})
+    client = TestClient(TestServer(api.app))
+    await client.start_server()
+    try:
+        endpoint = "/api/agents/zelda/command"
+        request = {"command": _wire("open", command="/notify", session_id=allowed["session_id"],
+                                      context_generation=1, request_id="http-request-allowed"),
+                   "_hashi_owner_id": "enterprise:usr-denied"}
+        assert (await client.post(endpoint, json=request)).status == 401
+        assert (await client.post(endpoint, json=request, headers={"Authorization": f"Bearer {tokens['usr-outsider']}"})).status == 404
+        denied_request = {"command": _wire("open", command="/notify", session_id=denied["session_id"],
+                                             context_generation=1, request_id="http-request-denied")}
+        assert (await client.post(endpoint, json=denied_request, headers={"Authorization": f"Bearer {tokens['usr-denied']}"})).status == 400
+        response = await client.post(endpoint, json=request, headers={"Authorization": f"Bearer {tokens['usr-allowed']}"})
+        assert response.status == 200, await response.text()
+        assert (await response.json())["ok"]
+        # The old admin endpoint unnecessarily rejects this same project member.
+        assert (await client.post("/api/admin/command", json=request,
+                                  headers={"Authorization": f"Bearer {tokens['usr-allowed']}"})).status == 403
+        assert writes == ["quiet"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_backend_switch_honors_enterprise_policy_deny(tmp_path):
     _init_org(tmp_path)
     evaluator = PolicyEvaluator.from_path(tmp_path / "state" / "enterprise.sqlite", org_id="ORG-001")

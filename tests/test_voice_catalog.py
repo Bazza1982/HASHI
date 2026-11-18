@@ -51,6 +51,21 @@ def _openai_compatible_catalog() -> dict:
     }
 
 
+def test_voice_catalog_accepts_configured_lan_hostname_without_a_dns_lookup(tmp_path):
+    path = tmp_path / "voice_catalog.json"
+    payload = _openai_compatible_catalog()
+    payload["services"][0]["base_url"] = "http://speaker.home.arpa:19446/v1"
+    _write_catalog(path, payload)
+    catalog = VoiceCatalog.load(instance_path=path, project_root=tmp_path)
+    assert catalog.service("lan-kokoro")["base_url"] == "http://speaker.home.arpa:19446/v1"
+
+    for host in ("8.8.8.8", "169.254.169.254", "100.100.100.200"):
+        payload["services"][0]["base_url"] = f"http://{host}/v1"
+        _write_catalog(path, payload)
+        with pytest.raises(VoiceCatalogError, match="location and base_url"):
+            VoiceCatalog.load(instance_path=path, project_root=tmp_path)
+
+
 def test_instance_catalog_adds_a_compatible_service_without_python_registration(
     tmp_path,
 ):
@@ -483,3 +498,4 @@ async def test_catalog_service_input_limit_bounds_the_actual_speech_request(tmp_
         await provider.synthesize("Hello world. " * 120, tmp_path, "limit",
                                   voice_name="af_amy", max_chars=1200)
     assert 0 < len(submitted["input"]) <= 20
+# HASHI-Fingerprint: hfp_9ca0c13b34d24e9ebbba6668e22b1d36

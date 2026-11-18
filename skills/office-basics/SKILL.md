@@ -1,15 +1,15 @@
 ---
 name: office-basics
-description: Use for Excel spreadsheets, Word documents, PowerPoint slides and PDF reading, conversion, formatting, analysis and delivery through the five HASHI Office tools.
-allowed-tools: office_inspect office_read office_create office_edit office_finish
+description: Use for Excel spreadsheets, Word documents, PowerPoint slides and PDF reading, conversion, formatting, analysis and delivery, preferring the HASHI Office tools.
 ---
 
 # Office Basics — small-model guide
 
-The shared Office Runtime must be qualified and available in this invocation.
-Only call a tool when its exact name is present in the current Tools catalogue.
-If unavailable, report that the Office toolkit is not yet active; do not invent
-a file_id, success receipt, runtime interpreter or package installation.
+Prefer the shared Office Runtime when it is qualified and available in this
+invocation. Only call a tool when its exact name is present in the current Tools
+catalogue. If the toolkit cannot meet the request, report its actual limitation
+and use an existing authorized tool/library or a task-scoped isolated environment
+when available. Never invent a file_id, receipt, runtime or installed package.
 
 ## Four-step path
 
@@ -52,7 +52,9 @@ To create a Word document:
   report the limitation instead of silently discarding objects.
 - Deliver only via the originating authorized HASHI conversation.
 - For named recipes and templates, read references/recipes.md on demand.
-- Content can be CSV, Markdown, or small JSON. Never install packages or use scripts.
+- The Office tools accept content such as CSV, Markdown, or small JSON. If their
+  surface cannot satisfy the task, an authorized script or isolated package
+  environment may be used; do not modify the running shared Core interpreter.
 - Conversion: office_edit action=office_convert, content=pdf (or xlsx/csv/docx/pptx).
 - Use returned next.arguments for bounded continuation; do not repeatedly read the full file.
 - Word Markdown pipe tables become native tables. JSON tables use sections:[{table:[[...],[...]]}]. Check data.tables before claiming a table exists.

@@ -25,7 +25,9 @@ from orchestrator.ingress_confirmation import (
     ConfirmationSupersededError,
     IngressConfirmationService,
 )
-from orchestrator.message_freshness import classify_freshness, parse_rfc3339_utc
+from orchestrator.message_freshness import (
+    classify_freshness, normalize_telegram_message_age_policy, parse_rfc3339_utc,
+)
 
 logger = logging.getLogger("HASHI.TelegramFreshnessGate")
 TELEGRAM_CONFIRM_CALLBACK_PREFIX = "ingress_confirm:"
@@ -96,6 +98,22 @@ def _source_message_id(runtime: Any, update: Any, message: Any) -> str:
         f"tg:{endpoint}:{_chat_id(update, message)}:"
         f"{getattr(message, 'message_id', None)}{suffix}"
     )
+
+
+def telegram_message_idempotency_key(runtime: Any, update: Any) -> str | None:
+    message = _message(update)
+    if message is None or _chat_id(update, message) is None:
+        return None
+    if getattr(update, "update_id", None) is None and getattr(message, "message_id", None) is None:
+        return None
+    return f"telegram-ingress:{_source_message_id(runtime, update, message)}"
+
+
+def telegram_message_age_metadata(update: Any) -> dict[str, Any]:
+    message = _message(update)
+    return classify_freshness(
+        ingress_type="telegram", originated_at=getattr(message, "date", None),
+    ).age_metadata()
 
 
 def _json_compatible_update(update: Any, message: Any) -> dict[str, Any]:
@@ -470,25 +488,67 @@ async def check_telegram_message_freshness(
         logger.warning("Telegram ingress without an effective message was blocked")
         return True
     source_message_id = _source_message_id(runtime, update, message)
+    stable_key = telegram_message_idempotency_key(runtime, update)
+    store = getattr(runtime, "session_store", None)
+    lookup = getattr(store, "find_run_by_agent_idempotency", None)
+    if stable_key and callable(lookup):
+        from orchestrator import runtime_session
+
+        prior = await asyncio.to_thread(
+            lookup, agent_id=runtime.name, owner_id=runtime_session.owner_id(runtime),
+            idempotency_key=stable_key,
+        )
+        if prior is not None:
+            if (handler_kind == "text"
+                    and str(prior.get("user_text") or "").strip()
+                    != str(getattr(message, "text", "") or "").strip()):
+                getattr(runtime, "logger", logger).warning(
+                    "Telegram message identity was reused with different content"
+                )
+            return True
     release = _CONFIRMED_RELEASE.get()
     if isinstance(release, dict) and release.get("source_message_id") == source_message_id:
         return False
 
-    now_dt = datetime.now(timezone.utc)
-    freshness = classify_freshness(
-        ingress_type="telegram",
-        originated_at=getattr(message, "date", None),
-        received_at=now_dt,
-    )
-    if freshness.is_fresh:
-        return False
     chat_id = _chat_id(update, message)
     user_id = _user_id(update)
+    owner_id = f"user:{user_id}" if user_id is not None else ""
+    stable_key = stable_key or f"telegram-ingress:{source_message_id}"
+    payload = {
+        "version": 1,
+        "raw_update": _json_compatible_update(update, message),
+        "handler_kind": str(handler_kind),
+        "source_message_id": source_message_id,
+        "endpoint_agent_id": str(runtime.name),
+    }
+    service = IngressConfirmationService(store) if store is not None else None
+    record = None
+    if service is not None and owner_id:
+        record = service.find_telegram_by_identity(
+            agent_id=str(runtime.name), owner_id=owner_id,
+            source_message_id=source_message_id, idempotency_key=stable_key,
+            payload_digest=_payload_digest(payload),
+        )
+    if record is not None and record.get("state") == "confirming":
+        schedule_telegram_confirmation_recovery(runtime, record)
+        return True
+    policy = normalize_telegram_message_age_policy(
+        getattr(getattr(runtime, "global_config", None), "telegram_message_age_policy", None)
+    )
+    if record is None and policy["mode"] == "observe":
+        return False
+
+    now_dt = datetime.now(timezone.utc)
+    freshness = classify_freshness(
+        ingress_type="telegram", originated_at=getattr(message, "date", None),
+        received_at=now_dt, threshold_seconds=policy["max_age_seconds"],
+    )
+    if record is None and freshness.is_fresh:
+        return False
     if chat_id is None or user_id is None:
         logger.warning("Telegram ingress without stable chat/user identity was blocked")
         return True
-    store = getattr(runtime, "session_store", None)
-    if store is None:
+    if service is None:
         logger.error("Telegram delayed message blocked because confirmation store is unavailable")
         bot = _bot(runtime)
         if bot is not None:
@@ -504,53 +564,46 @@ async def check_telegram_message_freshness(
                 pass
         return True
 
-    owner_id = f"user:{user_id}"
-    session = store.resolve_primary_session(
-        owner_id=owner_id, agent_id=runtime.name, establish=True
-    )
     locale = ui_language.preferred_locale(runtime, update)
-    payload = {
-        "version": 1,
-        "raw_update": _json_compatible_update(update, message),
-        "handler_kind": str(handler_kind),
-        "source_message_id": source_message_id,
-        "endpoint_agent_id": str(runtime.name),
-    }
-    service = IngressConfirmationService(store)
-    record = service.register_pending(
-        session_id=str(session["session_id"]),
-        owner_id=owner_id,
-        agent_id=str(runtime.name),
-        connector_id="telegram",
-        transport="telegram",
-        source_message_id=source_message_id,
-        idempotency_key=f"telegram-ingress:{source_message_id}",
-        payload_digest=_payload_digest(payload),
-        message_kind="frontend_message",
-        context_generation=int(session.get("context_generation", 1)),
-        originated_at=freshness.originated_at_iso,
-        received_at=freshness.received_at_iso,
-        threshold_seconds=freshness.threshold_seconds,
-        reason=freshness.reason,
-        delay_seconds=freshness.delay_seconds,
-        expires_at=freshness.expires_at,
-        payload=payload,
-        display_metadata={
-            "preview": _preview(
-                message,
-                handler_kind=handler_kind,
-                command_name=command_name,
-                args=args,
-                media_kind=media_kind,
-                filename=filename,
-            ),
-            "locale": locale,
-            "telegram_chat_id": chat_id,
-            "telegram_user_id": user_id,
-            "attachment_name": filename,
-            "media_kind": media_kind,
-        },
-    )
+    if record is None:
+        session = store.resolve_primary_session(
+            owner_id=owner_id, agent_id=runtime.name, establish=True
+        )
+        record = service.register_pending(
+            session_id=str(session["session_id"]),
+            owner_id=owner_id,
+            agent_id=str(runtime.name),
+            connector_id="telegram",
+            transport="telegram",
+            source_message_id=source_message_id,
+            idempotency_key=stable_key,
+            payload_digest=_payload_digest(payload),
+            message_kind="frontend_message",
+            context_generation=int(session.get("context_generation", 1)),
+            originated_at=freshness.originated_at_iso,
+            received_at=freshness.received_at_iso,
+            threshold_seconds=freshness.threshold_seconds,
+            reason=freshness.reason,
+            delay_seconds=freshness.delay_seconds,
+            expires_at=now_dt if policy["mode"] == "expire" else freshness.expires_at,
+            payload=payload,
+            display_metadata={
+                "preview": _preview(
+                    message,
+                    handler_kind=handler_kind,
+                    command_name=command_name,
+                    args=args,
+                    media_kind=media_kind,
+                    filename=filename,
+                ),
+                "locale": locale,
+                "telegram_chat_id": chat_id,
+                "telegram_user_id": user_id,
+                "attachment_name": filename,
+                "media_kind": media_kind,
+            },
+            initial_state="expired" if policy["mode"] == "expire" else "awaiting_confirmation",
+        )
 
     metadata = dict(record.get("display_metadata") or {})
     if metadata.get("telegram_card_message_id") is not None:

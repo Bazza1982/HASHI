@@ -16,6 +16,46 @@ configured external destination or physical device has passed live acceptance;
 the authoritative rollout evidence and remaining gates are tracked in
 [the standard-interface execution plan](HASHI_FC_STANDARD_INTERFACE_EXECUTION_PLAN_2026-09-25.md).
 
+### Telegram configuration isolation (source candidate, 2026-11-18)
+
+An invalid Telegram owner setting is reported and leaves Telegram ingress
+unavailable until the setting is repaired; it does not stop unrelated
+connectors from loading their configuration. Personal local data bindings are
+established from the existing lookup and do not change with a Telegram account.
+Changing the primary Telegram account or its grants fills the legacy local-owner
+projection only when it is missing; a pre-existing conflicting value is preserved.
+An older rollback generation may need separate compatibility verification.
+Unidentified historical data is not automatically adopted; its mapping must
+still be verified separately. Telegram ingress and credential readiness consult
+the actual configured grants, independently of
+the Telegram user-management capacity setting. These contracts are covered by
+isolated source tests; connector-specific runtime acceptance remains separate.
+
+### Session reads during a committed Functions handoff (source candidate)
+
+While the retiring committed generation is still serving, authenticated owners
+can read their Session list, existing Session, snapshot, messages, Run status
+and plain events. Listing does not perform placeholder-title maintenance during
+drain; normal listing can repair titles after handoff. Event-consumer polling
+is excluded because it updates a cursor; a candidate generation does not serve
+these reads. Responses are not cached and a client may still need to retry while
+the old process is being replaced.
+
+Normal Session listing, primary-session resolution, chat projection, frontend
+feed delivery and event-consumer polling can write. If such a request is already
+in flight when drain begins, it is counted by the existing handoff admission
+check rather than being mistaken for a read-only request.
+
+Until the retiring generation seals its handoff, an authenticated owner can
+request cancellation of the exact selected Run through the existing Session
+or request endpoint. The stop is routed only to the Worker bound to this
+shared handoff; unrelated cutovers and new work remain fenced. A pending or
+uncertain outcome is reported honestly, never as a confirmed stop. A stop in
+flight at the final handoff check prevents retirement of that generation;
+requests after sealing receive a temporary retry response. Source-level tests
+cover both supported operating systems and local IPC. A complete nonproduction
+handoff between separate real generations still requires validation.
+
 ### Bounded database work for Run questions (2026-11-14)
 
 Backend API question persistence and Worker incremental Telegram discovery,
@@ -58,6 +98,19 @@ Trusted Telegram media handlers and `/long` submission carry explicit Telegram
 ingress metadata into admission. Media kinds such as photo, document, sticker,
 and multimodal describe content; they do not identify a frontend connector.
 
+Telegram /long keeps its draft and pending voice approvals when idle by
+default. The owner can continue, submit confirmed items with /end (unconfirmed
+voice is reported and excluded), or discard with /long discard. Voice items
+reserve arrival order while transcription is in flight; a late result from a
+discarded batch cannot become a new standalone submission. The default idle
+reminder is 300 seconds since the latest activity. Set
+HASHI_LONG_BATCH_IDLE_SECONDS to a nonnegative number of seconds (0 disables
+the reminder) and optionally select HASHI_LONG_BATCH_IDLE_ACTION=submit for
+automatic submission; the default is remind. Invalid settings fall back to
+the reminder. The draft is process memory and is not durable across restart.
+The Functions capability describes supported behavior and defaults, not a
+claim about the configuration of a separately running worker.
+
 Telegram downloads and completed `/long` batches also pass through the
 Functions-owned `telegram_media_admission` adapter before Run admission. It
 commits validated bytes to PAO's Session attachment store, derives canonical
@@ -70,7 +123,14 @@ media. Supported native-media routing keeps its existing signature checks.
 Receipt size/hash and exact-path authority remain mandatory; reception does not
 extract archives or execute their contents.
 The visible-attachment download route also accepts zero-byte files; a zero size
-does not mean an absent attachment or a size-limit violation.
+does not mean an absent attachment or a size-limit violation. The current upload
+budget is not a retrieval limit. Attachments larger than 8 MiB are copied in
+bounded chunks to an ephemeral file, checked against their recorded size and
+digest when present, then streamed from that frozen copy. The response carries
+its byte length and SHA-256; when no earlier digest exists, the hash describes
+the frozen bytes rather than independently proving historical content. Inline
+previews retain their separate 25 MiB limit. Temporary snapshots are closed on
+completion or cancellation.
 The Session, owner and context generation stay frozen through queue admission.
 Download receipts or paths alone are not Run attachment authority; backend
 current-Run, content-integrity and exact-file fences remain unchanged. Native
@@ -190,6 +250,18 @@ tasks. Connector activation schedules network work but does not wait for a
 successful connection and does not participate in Worker `ACTIVE`, shared
 Functions commit, or Workbench local readiness.
 
+When both personal local and network credentials already exist, Functions
+startup does not resolve a Remote service account merely to read them. The
+optional Remote lifecycle reconciles its exact registered consumer's private
+file access asynchronously before starting or inspecting that connector; an
+unavailable consumer is reported as a Remote issue without closing local
+services. A manually disabled Remote skips startup reconciliation; `/remote on`
+reconciles access before reporting that it started or is already running.
+Explicit credential publication still resolves the actual consumer
+before writing and never substitutes a broader ACL. A first bootstrap that
+must create credentials can still fail if the required consumer cannot be
+resolved; this remaining case is not covered by the no-write startup path.
+
 Workbench health is observational. Reading health does not reconcile Remote,
 reload connector configuration, enumerate all Agent connectors, publish
 topology, register tasks or start a transport. Small monotonic counters expose
@@ -219,6 +291,15 @@ retried by this path. Rate-limit handling remains with the existing owner.
 This is a Functions change; offline validation and exact-Agent hot adoption
 are separate from live Telegram acceptance and production deployment.
 
+### Limited Agent control admission
+
+The limited-Agent default command preset leaves `/stop` and `/terminate`
+available, including when the preset uses an allowlist. An explicit command
+enable may override a preset denial; an explicit denial in the same policy wins.
+The existing authenticated ingress and selected enterprise policy still apply.
+The separate question of scoping an Agent-wide stop across different governed
+owners remains to be verified; this preset change does not alter stop semantics.
+
 ### Bounded Telegram catch-up (2026-11-12)
 
 FC owns the catch-up decision over the original canonical Event and its existing
@@ -230,6 +311,7 @@ Automatic recovery is deliberately conservative:
 | Final assistant replies, reports and files | 2 hours |
 | Genuine task failures and completed user-command results | 10 minutes |
 | Still-pending questions/confirmations | 10 minutes, capped by their original validity |
+| Required capacity retry/fallback notice | 10 minutes, only while its exact Run and Session context remain active |
 | Typing, queued/progress/start displays, background cleanup diagnostics | Never |
 | Normal user stop/steer/cancellation | Never replay as an error |
 
@@ -247,8 +329,19 @@ current state; answered/cancelled/ended questions are not resent. Existing
 shorter question lifetimes are unchanged. Explicit supersession cancels the
 old notification; no language model or text-similarity inference is used.
 
+Required capacity retry/fallback notices are presentation-only Messages with a
+distinct identity and the originating Run's frozen destination. Publication
+and its delivery tasks commit under the active Run fence, independently of the
+bounded optional telemetry queue. Silent requests do not publish them. The
+Telegram recovery path checks that the exact Run and Session context are still
+active before delivery; a transient database failure before transport can retry
+the same event, while an unknown transport outcome is never automatically
+resent. A Workbench Run feed can display these notifications without treating
+them as final answers or model-history content.
+
 Runtime notices persist the small `delivery_recovery.category` fact in their
-canonical Message context: `command_result` or `transient`. Untyped old notices
+canonical Message context: `command_result`, `transient`, or `active_run_notice`.
+Untyped old notices
 are not guessed into the whitelist. FC output keeps its original identity,
 body and time. Catch-up renditions add a localized “补发 / Re-delivered” label
 and the original full UTC timestamp, including media-only publications.
@@ -276,11 +369,18 @@ user IDs are saved independently in either order. A verified Token without an
 authorized user stays saved with `activation_status=user_required`; it neither
 activates a Worker nor grants Telegram access. Establishing the first authorized
 user completes pending exact-Agent activation for already saved Tokens.
-Native Worker command entry refreshes its compatibility actor from the current
-PAO-owned policy, retaining the stable owner scope and failing closed when that
-policy cannot be read. A shared FC command capture retains the actor already
-validated by its command binding; rendering must not reinterpret that identity
-through Telegram configuration or mutate the permission projection.
+Global and Agent-specific Telegram grants can be configured without a primary
+Telegram account. Such delegates retain their own actor-bound conversation
+identity; selecting the first delegate does not turn that actor into the owner.
+Worker protocol 3 declares support for this configuration; incompatible live
+Workers must not be advertised as having adopted it.
+Authenticated Backend/Session command entry carries its already established
+principal and exact Session binding through native and menu handlers. It does
+not require a Telegram actor or consult Telegram membership. Legacy command
+callers without a frontend binding retain their compatibility actor resolution;
+actual Telegram ingress continues to enforce the current Telegram grants.
+Command rendering must not reinterpret the frontend principal through Telegram
+configuration or mutate the permission projection.
 Clients report an access-policy denial rather
 than describing a supported command as unavailable in the interface.
 Saving a verified credential for a running Agent with an authorized user
@@ -389,7 +489,7 @@ queue. The continuation's internal source names its purpose; it is not a new
 frontend. A parked topic is marked loaded only after its continuation has been
 accepted by the queue, so an admission failure leaves the topic available.
 
-A connector may remove a parked topic only after explicit confirmation of the
+A management-authenticated connector may request removal of the exact
 Agent-bound record revision. PAO compares that revision with the current record
 and publishes the removal through its revision-checked atomic store. Slots can
 be reused, so a slot number alone is never sufficient. Concurrent changes are
@@ -582,10 +682,15 @@ binding. This fallback never guesses a group chat, chooses an authorization-list
 position, or selects a secondary actor. An unresolved or zero route is omitted
 from the frozen Run destinations and sends nothing.
 
-The PAO owner scope is also distinct from the replaceable Telegram actor. A
-runtime-proven direct Telegram account replacement retains the same explicit
-`owner_scope_id`, changes the canonical Telegram owner, and reduces every Agent
-allowlist to that one actor. If the new actor previously had a direct binding as
+The PAO owner scope is also distinct from the replaceable Telegram actor. An
+authenticated administrator may select the replacement account directly;
+optional observed proof is bound to the selected private account and has a
+configurable expiry. Replacement retains the same explicit `owner_scope_id`
+and changes the canonical Telegram owner. Unrelated global and
+Agent-specific grants are preserved by default; an explicit revoke-all option
+removes them across grant types. Finalizing the private legacy fallback checks
+the observed configuration revision and the staged transition while holding
+the configuration stable. If the new actor previously had a direct binding as
 `secondary`, PAO may promote only the binding whose actor ID and private chat ID
 both equal the newly configured owner. It never promotes a group or an
 actor-less legacy endpoint. Old actor bindings remain audit evidence but fail
@@ -718,36 +823,28 @@ declared sender into a uniquely authenticated Agent. PCM and external clients
 receive only sanitized verification results, never shared secrets or raw
 proofs.
 
-#### Network message freshness and confirmation (implemented 2026-10-16)
+#### Network message age and confirmation
 
-Every network Frontend Connector records `originated_at` when the user first
-submits a message and preserves it across local queueing, retry and reconnect.
-PAO records receipt time and owns the admission decision: an on-machine network
-frontend has a 30-second automatic window and a remote frontend has a 60-second
-window. A Session API request that omits the required `originated_at` field is a
-frontend protocol incompatibility, not evidence of delay: PAO rejects it with
-HTTP 409 and `frontend_message_protocol_incompatible`, without creating a Run
-or confirmation. Invalid, non-UTC, implausibly future or older timestamps do not
-enter a Run. They create one durable, owner- and Session-bound confirmation that
-expires after 15 minutes. Confirm releases the immutable saved payload once;
-discard, expiry and Session-context supersession never execute it. Attachments
-and voice remain bound to the same saved message identity.
+Ordinary Session API, Telegram and HChat request admission records the sender's
+timestamp and observed age when available; by default delay alone does not
+require a new decision. A configured action policy can explicitly request
+confirmation or expiry. Missing or invalid timestamps remain unknown rather
+than being invented, and legal RFC3339 offsets are normalized. Previously
+persisted confirmations and discard decisions remain binding when the policy
+changes. Transport authentication and idempotency are separate from age.
 
-The local TUI remains outside this network policy, but only Remote-sealed,
-prompt-bound connector evidence can establish that exemption. Caller-owned
-`surface`, client ID or idempotency strings never do so. Connectors discover the
-versioned freshness/confirmation capabilities and fail closed during mixed-
-version rollout rather than silently dropping the timestamp or confirmation
-receipt. Workbench renders pending and terminal states from the canonical API;
-terminal expiry remains visible with its reason.
+For an HChat draft sent from a current Run to a single local-network target,
+PAO records the exact source owner, Session, Run and conversation generation
+before sending. A verified correlated reply is published once into that
+original Session, even after the user selects another Session. A conflicting
+route, changed content, stale generation or unverifiable remote ingress cannot
+redirect the reply. Its first observed age remains attached to the publication.
+Existing unbound/legacy reply paths retain their prior confirmation behavior
+until their origin can be established; independent Exchange and long-batch
+voice recovery still require the remaining remediation work.
 
-An authenticated Remote Workbench gateway replaces any caller-owned ingress
-marker with prompt-bound connector evidence before its loopback relay. PAO keeps
-the remote 60-second window only when that evidence verifies; an unsigned or
-invalid loopback claim remains subject to the local 30-second window.
-
-This behavior is user-approved and qualified on non-production HASHI3 and
-Workbench. Production adoption remains a separate, not-yet-claimed step.
+These changes are non-production candidates. They require validation and
+release before they describe production behavior.
 
 ### 6.2 Standard multi-attachment message admission
 
@@ -794,6 +891,20 @@ remove the bound bytes and empty private directories. Agent homes and the
 `.attachments` subtree remain Git-ignored. Safe Voice audio retains its
 separately owned managed-audio lifecycle.
 
+### WSL target verification for local path directions (source candidate)
+
+When a HASHI Backend API runs in WSL, its version 2 storage capability identifies
+the Windows host and requires target-side verification of each selected Windows
+file or folder. The authenticated, read-only proof checks the matching DrvFS
+mount and Windows file identity for both the selected and WSL-resolved paths,
+then returns the target-accessible path before Run admission. A temporary host
+identity failure stays retryable. Older Workbench versions see the new capability
+as unsupported and can use upload; no extra user credential is introduced.
+
+These are live path directions: their contents can still change after admission.
+Isolated tests exercised real Windows selections and WSL Backend API targets
+with a synthetic Run recipient; actual Agent execution remains to be validated.
+
 ### 6.3 Standard assistant attachment output
 
 An Agent responding to a conforming external frontend binds generated or
@@ -828,7 +939,9 @@ that owner. An instance can select its limits in the ignored
 }
 ```
 
-The document accepts count 1–1024 and each byte budget 1–1073741824. Missing
+The document accepts positive counts and byte budgets representable by signed
+64-bit storage. This representation bound is not a promise that any connector,
+decoder or host can handle a selected value. Missing
 fields keep their process/default values. File fields take precedence over
 inherited `HASHI_SESSION_MAX_ATTACHMENTS_PER_MESSAGE`,
 `HASHI_SESSION_MAX_ATTACHMENT_BYTES` and
@@ -921,7 +1034,8 @@ The HASHI3 implementation decision and validation scope are recorded in
 A management-authorized Frontend may add or replace a slot using
 `PUT /api/agents/{agent}/workzones/{slot}`, or detach it using
 `POST /api/agents/{agent}/workzones/{slot}/delete-if-unchanged`. Both require
-the displayed PAO revision; detachment also requires explicit confirmation.
+the displayed PAO revision and the existing management authentication. A
+direct, authenticated detach request does not require a second magic string.
 Stale revisions and occupied or missing slots are rejected without overwriting.
 Directory contents remain intact. The overview advertises management only when
 the online Worker supports revisioned profiles; a pending-activation flag
@@ -1015,6 +1129,13 @@ canonical command invocation, not to fallback text or a transport message
 number. A replay of the same client/request returns the saved non-action result
 and requires a refresh; it never reissues stale legacy or standard actions. A
 new status request may safely render the same text with newly issued actions.
+The Workbench menu uses the authenticated Agent command endpoint. In governed
+deployments, the Backend API carries its verified user to the private Worker
+dispatch, where the existing per-user command policy and Session ownership are
+enforced. A user need not have an unrelated administrator role or Telegram
+identity merely to open an otherwise permitted menu. The transport credential
+and any user session stay in their existing headers; the menu payload cannot
+choose an actor or owner. Actual Telegram updates retain their connector checks.
 Native callback wrappers preserve the Connector-requested UI locale. Native
 Telegram text also retains `telegram` as its admission source so its automatic
 reply destination cannot be lost by generic text normalization.
@@ -1661,6 +1782,14 @@ owns renditions and endpoint receipts. These changes stay in Functions.
   reference, update the same canonical Message and cannot retarget a card to
   the newly selected Session. Old cards without a recorded reference retain
   their legacy transport path; this candidate does not backfill old history.
+- A command text field publishes its owning Function's `max_length`; menu
+  rendering and Session projection preserve that limit and the full value.
+  Frontends count Unicode characters, keep an over-limit draft editable and
+  display the actual and allowed counts rather than truncating the value.
+  The action remains bound to the issued button and is rechecked by its owner.
+  `/getfile` uses its existing 4096-character path limit, allowing two extra
+  characters for surrounding quotes; the operating system and workzone still
+  decide whether a particular path is valid and accessible.
 - Asynchronous reboot and transfer notices retain owner, Agent, Session,
   generation, origin endpoint, mirror policy and saved locale. The existing
   managers reconcile stable publication IDs into SessionStore. Endpoint
@@ -1814,3 +1943,32 @@ duplicate click can reread or resend. Session generation is fenced again at
 atomic message append. Telegram unknown acknowledgements keep the existing
 non-replay semantics. See [GETFILE_FUNCTION.md](GETFILE_FUNCTION.md) for the
 typed receipt, evidence grades, limits and unsupported forum-topic route.
+
+### Governed Scheduler delegation
+
+The ordinary tool gateway delegates only the permitted Scheduler/Superloop
+tools for a particular instance, Agent and active Run attempt. Governed
+instances use a separate internal signing key; that key is not a user or
+administrator credential and is never put in the model-facing gateway
+context. The Backend derives the user from the persisted Run and Session,
+checks the signed owner binding, current membership and existing tool policy,
+and rechecks the Run fence before effects. A Scheduler deletion credential may
+also read the job snapshot needed for conditional deletion. Other tool scopes
+cannot be substituted.
+
+Scheduler and Superloop delegation is a renewable, short-lived lease. When a
+fixed gateway context approaches expiry, the tool requests a new credential for
+the one tool it is about to invoke. The Backend verifies the existing signature,
+instance, audience, Agent and original tool scope, then rechecks the same live
+Run attempt and its current principal and policy before issuing the narrowed
+lease. An expired credential cannot execute an effect directly; it can only
+request renewal while that exact Run remains active. The effect itself is
+checked again at its owning boundary. Renewal is performed before the effect,
+does not replay an uncertain mutation, and never sends the signing key to the
+gateway or model.
+
+Current Sessions do not identify a single project when an Agent belongs to
+multiple projects. Until that association has an authenticated contract, the
+Backend evaluates each applicable project policy instead of choosing one.
+Managed execution-channel support and completion of policy approval handling
+remain separate work; this gateway contract alone does not establish either.

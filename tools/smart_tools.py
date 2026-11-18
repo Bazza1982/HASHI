@@ -51,6 +51,8 @@ SMART_TOOL_PROFILES = frozenset(
 _QUERY_TOOLS = frozenset(
     {
         "file_read",
+        "tool_output_read",
+        "tool_catalog",
         "log_query",
         "media_read",
         "vision_inspect",
@@ -240,7 +242,7 @@ class SmartToolOutcome:
 
 @dataclass(frozen=True)
 class SmartToolAdmission:
-    """Deterministic pre-execution result that asks HER to choose a safer tool."""
+    """Bounded observation that can accompany a completed tool result."""
 
     code: str
     message: str
@@ -276,10 +278,6 @@ _TEXT_SEARCH_PROGRAM_RE = re.compile(
 )
 _ONLY_MATCHING_RE = re.compile(
     r"(?i)(?<!\S)(?:-[A-Za-z]*o[A-Za-z]*|--only-matching)(?=\s|$)"
-)
-_BOUNDED_SEARCH_OUTPUT_RE = re.compile(
-    r"(?i)(?<!\S)(?:-[A-Za-z]*[qlc][A-Za-z]*|"
-    r"--(?:quiet|count|files-with-matches))(?=\s|$)"
 )
 _BRE_CONTEXT_RE = re.compile(r"\.\\\{\d*,\d+\\\}")
 _ERE_CONTEXT_RE = re.compile(r"\.\{\d*,\d+\}")
@@ -409,7 +407,6 @@ def _shell_text_search_admission(
         _ERE_CONTEXT_RE.findall(command)
     )
     dangerous_context = bool(only_matching and context_expansions)
-    bounded_output = _BOUNDED_SEARCH_OUTPUT_RE.search(command) is not None
     candidate_paths = _candidate_log_paths(
         command,
         workspace_dir=workspace_dir,
@@ -440,24 +437,21 @@ def _shell_text_search_admission(
             selected_probe = probe
             break
 
-    large_unbounded_record = bool(
-        selected_probe["record_over_limit"] and not bounded_output
-    )
-    if not dangerous_context and not large_unbounded_record:
+    if not selected_probe["record_over_limit"] and not (
+        dangerous_context and not selected_probe["file_probe_complete"]
+    ):
         return None
     if selected_probe["record_over_limit"]:
         message = (
             "The requested line-oriented search targets a record larger than "
-            f"{record_limit} bytes. Running it in foreground shell can consume "
-            "unbounded CPU or output before HER regains control."
+            f"{record_limit} bytes; line-oriented search can produce large output."
         )
     else:
         message = (
-            "Only-matching wildcard context expansion is unsafe for unknown or "
-            "long records and must not run in foreground shell."
+            "The size of records searched with wildcard context is not fully known."
         )
     return SmartToolAdmission(
-        code="unsafe_text_search",
+        code="large_text_record_risk",
         message=message,
         suggested_tool="log_query",
         data={
@@ -595,12 +589,16 @@ def _generic_outcome(
             ),
         )
 
-    data = _result_data(output)
+    # File reads carry exact content (including trailing whitespace); the
+    # generic result parser intentionally strips ordinary prose.
+    data = output if spec.name == "file_read" else _result_data(output)
     default_effect = (
         "observed" if spec.profile in {"query", "poll", "verify"} else "unknown"
     )
+    partial = (details.get("search_outcome") == "partial"
+               or (spec.name == "http_request" and details.get("response_complete") is False))
     return SmartToolOutcome(
-        status="partial" if details.get("search_outcome") == "partial" else "success",
+        status="partial" if partial else "success",
         effect=_effect_from_data(data, fallback=default_effect),
         data=data,
     )
@@ -914,14 +912,14 @@ class SmartToolRuntime:
     def new_call_id() -> str:
         return f"call-{uuid.uuid4().hex}"
 
-    def evaluate_admission(
+    def search_advisory(
         self,
         *,
         tool_name: str,
         arguments: Mapping[str, Any],
         access_roots: tuple[Path, ...],
     ) -> SmartToolAdmission | None:
-        """Return a deterministic safer-tool decision before process creation."""
+        """Observe large-record risk without making an authorization decision."""
 
         if (
             not self.enabled
@@ -957,6 +955,13 @@ class SmartToolRuntime:
             raw_is_error=raw_is_error,
             details=details,
         )
+        search_advisory = (details or {}).get("smart_search_advisory")
+        if isinstance(search_advisory, Mapping) and outcome.warning is None:
+            outcome = replace(outcome, warning=SmartToolWarning(
+                "large_text_record_risk",
+                str(search_advisory.get("message") or "A search may include large records."),
+                "For long records, consider log_query for bounded excerpts and continuation.",
+            ))
         context = dict(audit_context or {})
         task_id = str(
             context.get("task_id") or context.get("turn_id") or "unscoped"

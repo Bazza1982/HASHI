@@ -45,6 +45,103 @@ def test_translation_does_not_claim_conversational_capabilities():
     LiveVoiceManager._schedule_opening(fake, object())
 
 
+@pytest.mark.asyncio
+async def test_interpretation_streaming_pins_lan_dns_and_rejects_rebinding(monkeypatch):
+    import socket
+    from aiohttp import web
+    from orchestrator import lan_transport
+
+    calls, resolutions = [], []
+
+    async def create(request):
+        calls.append((request.host, request.path))
+        assert (await request.json())["session"]["model"] == "hy-simulmt-en-zh"
+        return web.json_response({"session": {"id": "session-1"},
+                                  "transport": {"sdp": "v=0\r\n"}})
+
+    async def websocket(request):
+        calls.append((request.host, request.path))
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    async def redirect(request):
+        calls.append((request.host, request.path))
+        raise web.HTTPFound("http://outside.invalid/ws")
+
+    app = web.Application()
+    app.router.add_post("/create", create)
+    app.router.add_get("/ws/session-1", websocket)
+    app.router.add_get("/redirect", redirect)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    class Delegate:
+        async def resolve(self, host, selected_port=0, family=socket.AF_UNSPEC):
+            resolutions.append(host)
+            address = "8.8.8.8" if len(resolutions) == 3 else "127.0.0.1"
+            return [{"hostname": host, "host": address, "port": selected_port,
+                     "family": socket.AF_INET, "proto": 0, "flags": 0}]
+        async def close(self):
+            pass
+
+    private = lan_transport.is_private_lan_address
+    monkeypatch.setattr(lan_transport, "is_private_lan_address",
+                        lambda host: host == "127.0.0.1" or private(host))
+    monkeypatch.setattr(lan_transport.aiohttp.resolver, "DefaultResolver", Delegate)
+    root = f"http://translate.test:{port}"
+    resolved = SimpleNamespace(
+        snapshot=SimpleNamespace(node=object()),
+        interface_url=lambda protocol, **kw: root + (
+            "/create" if protocol == "hashi.phone.webrtc" else "/ws/" + kw["session_id"]))
+    class Directory:
+        client = SimpleNamespace(request_headers=lambda node: {})
+        async def refresh(self):
+            return SimpleNamespace(errors={}, catalogue=SimpleNamespace(resolve=lambda *args: resolved))
+    provider = SimulMTProvider(directory=Directory(), node_id="node", service_id="service")
+    try:
+        async with provider.http_session() as http:
+            result = await provider.create(http, key="", sdp="v=0\r\n",
+                                           model="hy-simulmt-en-zh", voice="default")
+        assert result["provider_session_id"] == "session-1"
+        async with provider.http_session() as http:
+            ws = await provider.attach(http, key="", provider_session_id="session-1")
+            await ws.close()
+        with pytest.raises(lan_transport.LanDestinationError):
+            async with provider.http_session() as http:
+                await provider.attach(http, key="", provider_session_id="session-1")
+        with pytest.raises(lan_transport.LanDestinationError):
+            async with provider.http_session() as http:
+                await http.ws_connect(f"ws://translate.test:{port}/redirect")
+        assert calls == [(f"translate.test:{port}", "/create"),
+                         (f"translate.test:{port}", "/ws/session-1"),
+                         (f"translate.test:{port}", "/redirect")]
+        assert resolutions == ["translate.test"] * 4
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_localhost_streaming_resolves_only_to_loopback():
+    from orchestrator.lan_transport import PrivateLanResolver
+
+    class Delegate:
+        async def resolve(self, host, port=0, family=0):
+            return [{"host": "192.168.1.9"}, {"host": "8.8.8.8"},
+                    {"host": "127.0.0.1"}, {"host": "::1"}]
+        async def close(self):
+            pass
+
+    resolver = PrivateLanResolver(Delegate(), allow_localhost=True)
+    assert [row["host"] for row in await resolver.resolve("localhost")] == [
+        "127.0.0.1", "::1"]
+    await resolver.close()
+
+
 def test_translation_sideband_accepts_subtitles_and_rejects_delegation():
     adapter = SimulMTProvider()
     event = adapter.normalize_event(json.dumps({"type": "session.output_transcript.delta",

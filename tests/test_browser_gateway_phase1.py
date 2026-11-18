@@ -182,3 +182,80 @@ async def test_browser_gateway_file_upload_notifies_agent(tmp_path: Path):
     stored = project_root / "state" / attachments[0]["storage_relpath"]
     assert stored.exists()
     assert stored.read_bytes() == b"ciphertext-demo"
+
+
+
+@pytest.mark.asyncio
+async def test_gateway_device_rate_classes_and_recoverable_backpressure(tmp_path: Path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    store = BrowserGatewayStore(tmp_path / "browser_gateway.sqlite")
+    pair = store.create_pair_request("Rate test")
+    paired = store.complete_pair(pair.device_id, pair.pairing_code)
+    other = store.create_pair_request("Other device")
+    other_paired = store.complete_pair(other.device_id, other.pairing_code)
+    thread = store.create_thread(pair.device_id, "akane", title="Rate test")
+    server = BrowserGatewayServer(
+        project_root=tmp_path,
+        state_db=tmp_path / "browser_gateway.sqlite",
+        audit_log=tmp_path / "oll_gateway.audit.jsonl",
+        chat_requests_per_minute=2,
+        upload_requests_per_minute=10,
+        device_rate_limits={pair.device_id: {"upload": 40}},
+    )
+    now = [100.0]
+    server.chat_rate_limiter._clock = lambda: now[0]
+    server.upload_rate_limiter._clock = lambda: now[0]
+    async def fake_send(*, agent, text, source):
+        return {"ok": True, "request_id": "synthetic", "text": "done", "source": source}
+    server._send_to_workbench = fake_send
+    headers = {"Authorization": f"Bearer {paired['access_token']}"}
+    upload = {"thread_id": thread["thread_id"], "filename": "a.bin",
+              "ciphertext_b64": base64.b64encode(b"encrypted").decode("ascii"),
+              "notify_agent": False}
+    async with TestClient(TestServer(server.app, host="127.0.0.1")) as client:
+        unauthorized = await client.post("/browser/file/upload", json=upload)
+        assert unauthorized.status == 401
+        foreign = await client.post("/browser/file/upload", json=upload, headers={
+            "Authorization": f"Bearer {other_paired['access_token']}"})
+        assert foreign.status == 404
+        for _ in range(40):
+            response = await client.post("/browser/file/upload", json=upload, headers=headers)
+            assert response.status == 200
+        limited_upload = await client.post("/browser/file/upload", json=upload, headers=headers)
+        assert limited_upload.status == 429
+        assert limited_upload.headers["Retry-After"] == "60"
+        assert len(store.list_attachments(thread["thread_id"], pair.device_id)) == 40
+        invalid = await client.post("/browser/chat/send", json={
+            "thread_id": thread["thread_id"], "text": ""}, headers=headers)
+        assert invalid.status == 400
+        for _ in range(2):
+            response = await client.post("/browser/chat/send", json={
+                "thread_id": thread["thread_id"], "text": "hello"}, headers=headers)
+            assert response.status == 200
+        limited = await client.post("/browser/chat/send", json={
+            "thread_id": thread["thread_id"], "text": "hello again"}, headers=headers)
+        assert limited.status == 429
+        assert limited.headers["Retry-After"] == "60"
+        assert (await limited.json())["retry_after_seconds"] == 60
+        status = await client.get("/browser/device/status", headers=headers)
+        effective = (await status.json())["ingress_limits"]
+        assert effective["chat_requests"] == 2
+        assert effective["upload_requests"] == 40
+        assert effective["json_body_bytes"] == 32 * 1024 * 1024
+        now[0] += 60
+        retried = await client.post("/browser/chat/send", json={
+            "thread_id": thread["thread_id"], "text": "retry"}, headers=headers)
+        assert retried.status == 200
+
+
+def test_gateway_rates_are_optional_and_validate_selected_limits():
+    from browser_gateway.server import RateLimiter
+
+    limiter = RateLimiter()
+    assert all(limiter.admit("device") is None for _ in range(100))
+    assert limiter._events == {}
+    with pytest.raises(ValueError):
+        RateLimiter(-1)
+    with pytest.raises(ValueError):
+        RateLimiter(per_device={"device": True})

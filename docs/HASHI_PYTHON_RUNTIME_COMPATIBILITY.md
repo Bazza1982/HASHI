@@ -293,6 +293,37 @@ and a 16 MiB frame limit are validated at both ends. Paths are serialized as
 text. Python instances, exceptions, callables and arbitrary objects are
 rejected rather than pickled.
 
+The frame limit does not define the maximum logical request or capability
+result. When both peers implement the matching transport, oversized
+enqueue_request and enqueue_api_text parameters, and Worker requests to shared
+Functions, travel in ordered, digest-checked chunks over the same private
+pipe. Capability invocations use the existing broker and authority checks; an
+oversized result is stored under an unguessable reference scoped to that Worker
+connection and read in bounded chunks. No caller-supplied path or owner label
+grants access to these temporary objects. Small messages continue to use the
+existing envelopes.
+
+The default aggregate spool budget is 512 MiB per Worker and direction, with
+up to eight spooled transfers. Operators can set positive integer byte values
+in HASHI_FUNCTION_LARGE_REQUEST_MAX_BYTES and
+HASHI_FUNCTION_LARGE_RESULT_MAX_BYTES, and positive transfer counts in
+HASHI_FUNCTION_LARGE_REQUEST_MAX_TRANSFERS and
+HASHI_FUNCTION_LARGE_RESULT_MAX_TRANSFERS. Transfer and idle time budgets
+default to 180 and 120 seconds respectively and can be set with positive
+integer seconds in HASHI_FUNCTION_LARGE_TRANSFER_TIMEOUT_SECONDS and
+HASHI_FUNCTION_LARGE_TRANSFER_IDLE_SECONDS. Transfer time is separate from the
+operation's own timeout. Effective values are advertised in Worker metadata or
+shared topology. Spool budgets are not exact process-memory ceilings: JSON
+values are also materialized in memory.
+
+Incomplete temporary content is closed on abort, cancellation, idle expiry or
+peer shutdown; a completed or uncertain invocation is not automatically
+repeated. If a capability action has already run but its result cannot be
+received, its outcome must be treated as uncertain. An older Worker that has
+not implemented the large-request transport reports that limitation rather
+than partially admitting the request. A Worker communicating with older shared
+Functions uses the original capability invocation path.
+
 The Worker lifecycle is:
 
 ```text
