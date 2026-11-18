@@ -55,7 +55,7 @@ if [[ ! "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@:-]+\.service$ ]]; then
 fi
 SERVICE_PATH="$SYSTEMD_USER_DIR/$SERVICE_NAME"
 
-REMOTE_ARGS=(--hashi-root "$HASHI_ROOT" --supervised)
+REMOTE_ARGS=(--hashi-root "$HASHI_ROOT" --supervised --log-file "$LOG_PATH")
 
 if [[ "${HASHI_REMOTE_NO_TLS:-0}" == "1" ]]; then
     REMOTE_ARGS+=(--no-tls)
@@ -100,7 +100,7 @@ unit_directive_value() {
 
 write_service() {
     mkdir -p "$SYSTEMD_USER_DIR" "$LOG_DIR"
-    local temp_path working_directory instance_environment exec_start log_target arg
+    local temp_path working_directory instance_environment exec_start arg
     temp_path="$(mktemp "$SYSTEMD_USER_DIR/.${SERVICE_NAME}.XXXXXX")"
     working_directory="$(unit_directive_value "$HASHI_ROOT")"
     instance_environment="$(unit_quote "HASHI_INSTANCE_ID=$INSTANCE_ID")"
@@ -109,7 +109,6 @@ write_service() {
         [[ -z "$exec_start" ]] || exec_start+=" "
         exec_start+="$(unit_quote "$arg")"
     done
-    log_target="$(unit_directive_value "append:$LOG_PATH")"
     cat > "$temp_path" <<EOF
 [Unit]
 Description=Hashi Remote side program ($INSTANCE_SLUG)
@@ -127,8 +126,8 @@ Environment=PYTHONIOENCODING=utf-8
 ExecStart=$exec_start
 Restart=on-failure
 RestartSec=5
-StandardOutput=$log_target
-StandardError=$log_target
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

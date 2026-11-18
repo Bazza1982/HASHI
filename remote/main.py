@@ -25,6 +25,7 @@ import signal
 import socket
 import sys
 import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -72,6 +73,116 @@ from remote.terminal.executor import AuthLevel, TerminalExecutor
 logger = logging.getLogger(__name__)
 
 DISCOVERY_MAINTENANCE_SECONDS = 30.0
+REMOTE_LOG_MAX_BYTES = 16 * 1024 * 1024
+REMOTE_LOG_BACKUP_COUNT = 3
+REMOTE_LOG_MAX_RECORD_BYTES = 256 * 1024
+
+
+class _Utf8ByteBoundedFormatter(logging.Formatter):
+    """Keep one malformed or unexpectedly large record within the log budget."""
+
+    def __init__(self, fmt: str, *, max_record_bytes: int) -> None:
+        super().__init__(fmt)
+        self._max_record_bytes = max(1, int(max_record_bytes))
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        payload = rendered.encode("utf-8", errors="replace")
+        if len(payload) <= self._max_record_bytes:
+            return rendered
+        suffix = f" ... [truncated {len(payload) - self._max_record_bytes} bytes]"
+        suffix_bytes = suffix.encode("utf-8")
+        if len(suffix_bytes) >= self._max_record_bytes:
+            return suffix_bytes[: self._max_record_bytes].decode(
+                "utf-8", errors="ignore"
+            )
+        budget = self._max_record_bytes - len(suffix_bytes)
+        return payload[:budget].decode("utf-8", errors="ignore") + suffix
+
+
+class _Utf8RotatingFileHandler(RotatingFileHandler):
+    """Rotate on encoded bytes and use portable LF output on every platform."""
+
+    def _open(self):
+        return open(  # noqa: PTH123 - logging handlers require a live text stream
+            self.baseFilename,
+            self.mode,
+            encoding=self.encoding,
+            errors=self.errors,
+            newline="\n",
+        )
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        if self.stream is None:
+            self.stream = self._open()
+        if self.maxBytes <= 0:
+            return False
+        rendered = f"{self.format(record)}{self.terminator}"
+        encoded_size = len(rendered.encode("utf-8", errors="replace"))
+        self.stream.seek(0, os.SEEK_END)
+        return self.stream.tell() + encoded_size > self.maxBytes
+
+
+def _trim_oversized_log(path: Path, *, max_bytes: int) -> bool:
+    """Atomically retain only a bounded tail of a pre-policy supervisor log."""
+
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return False
+    if size <= max_bytes:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.bounded.tmp")
+    try:
+        with path.open("rb") as source:
+            source.seek(-max_bytes, os.SEEK_END)
+            tail = source.read(max_bytes)
+        # The retained tail is diagnostic evidence, not a protocol stream. Drop
+        # the first partial record when a line boundary is available.
+        boundary = tail.find(b"\n")
+        if 0 <= boundary < len(tail) - 1:
+            tail = tail[boundary + 1 :]
+        with temporary.open("xb") as target:
+            target.write(tail)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+def _remote_log_handler(
+    path: Path,
+    *,
+    max_bytes: int,
+    backup_count: int,
+    max_record_bytes: int = REMOTE_LOG_MAX_RECORD_BYTES,
+) -> tuple[RotatingFileHandler, list[Path]]:
+    """Create the process-owned bounded log sink and migrate legacy files."""
+
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    trimmed: list[Path] = []
+    for candidate in [path, *(Path(f"{path}.{index}") for index in range(1, backup_count + 1))]:
+        if _trim_oversized_log(candidate, max_bytes=max_bytes):
+            trimmed.append(candidate)
+    handler = _Utf8RotatingFileHandler(
+        path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(
+        _Utf8ByteBoundedFormatter(
+            "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+            max_record_bytes=min(max_record_bytes, max(1, max_bytes - 1)),
+        )
+    )
+    return handler, trimmed
 
 
 def _build_local_capabilities(*, rescue_start_enabled: bool) -> list[str]:
@@ -250,6 +361,9 @@ class HashiRemoteApplication:
         control_hashi_root: Optional[Path] = None,
         control_code_root: Optional[Path] = None,
         verbose: bool = False,
+        log_file: Optional[Path] = None,
+        log_max_bytes: int = REMOTE_LOG_MAX_BYTES,
+        log_backup_count: int = REMOTE_LOG_BACKUP_COUNT,
     ):
         self._hashi_root = hashi_root or Path(__file__).resolve().parent.parent
         self._control_hashi_root = control_hashi_root or self._hashi_root
@@ -273,6 +387,9 @@ class HashiRemoteApplication:
         self._display_name_override = display_name
         self._workbench_port_override = workbench_port
         self._verbose = verbose
+        self._log_file = log_file
+        self._log_max_bytes = max(1024, int(log_max_bytes))
+        self._log_backup_count = max(1, int(log_backup_count))
 
         self._shutdown_event = threading.Event()
         self._uvicorn_server: Optional[uvicorn.Server] = None
@@ -424,11 +541,41 @@ class HashiRemoteApplication:
 
     def _setup_logging(self) -> None:
         level = logging.DEBUG if self._verbose else logging.INFO
+        handlers: list[logging.Handler]
+        trimmed: list[Path] = []
+        log_error: OSError | None = None
+        if self._log_file is not None:
+            log_path = Path(self._log_file)
+            if not log_path.is_absolute():
+                log_path = self._hashi_root / log_path
+            try:
+                handler, trimmed = _remote_log_handler(
+                    log_path,
+                    max_bytes=self._log_max_bytes,
+                    backup_count=self._log_backup_count,
+                )
+                handlers = [handler]
+            except OSError as exc:
+                # A diagnostic sink must not take Remote offline. The Windows
+                # launcher and systemd journal bound this fallback stream.
+                log_error = exc
+                handlers = [logging.StreamHandler(sys.stderr)]
+        else:
+            handlers = [logging.StreamHandler(sys.stdout)]
         logging.basicConfig(
             level=level,
             format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-            handlers=[logging.StreamHandler(sys.stdout)],
+            handlers=handlers,
+            force=True,
         )
+        if log_error is not None:
+            logger.error("Could not activate bounded Remote log %s: %s", log_path, log_error)
+        for path in trimmed:
+            logger.warning(
+                "Trimmed oversized legacy Remote log to the configured %d-byte tail: %s",
+                self._log_max_bytes,
+                path,
+            )
 
     def _setup_signals(self) -> None:
         def handler(signum, frame):
@@ -631,6 +778,7 @@ class HashiRemoteApplication:
             ssl_keyfile=ssl_keyfile,
             log_level="info" if not self._verbose else "debug",
             access_log=self._verbose,
+            log_config=None,
         )
         self._uvicorn_server = uvicorn.Server(config)
 
@@ -835,6 +983,13 @@ class HashiRemoteApplication:
         remove_runtime_claim(self._hashi_root, pid=os.getpid())
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Hashi Remote — LAN peer communication for HASHI instances",
@@ -882,6 +1037,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--supervised", action="store_true",
                         help="Mark this Remote as OS-supervised side-program")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Write process logs to a bounded rotating UTF-8 file instead of stdout",
+    )
+    parser.add_argument(
+        "--log-max-bytes",
+        type=_positive_int,
+        default=REMOTE_LOG_MAX_BYTES,
+        help="Maximum bytes retained in each Remote process log file",
+    )
+    parser.add_argument(
+        "--log-backup-count",
+        type=_positive_int,
+        default=REMOTE_LOG_BACKUP_COUNT,
+        help="Number of rotated Remote process log files to retain",
+    )
     parser.add_argument(
         "--check-port-assignment",
         action="store_true",
@@ -985,6 +1158,9 @@ def main() -> int:
         control_hashi_root=args.control_hashi_root.expanduser().resolve() if args.control_hashi_root else None,
         control_code_root=args.control_code_root.expanduser().resolve() if args.control_code_root else None,
         verbose=args.verbose,
+        log_file=args.log_file,
+        log_max_bytes=args.log_max_bytes,
+        log_backup_count=args.log_backup_count,
     )
     return app.run()
 

@@ -171,7 +171,29 @@ def test_gateway_proxy_authenticates_exact_body_and_forwards_api_request(
         if record.levelno >= logging.INFO
         and record.getMessage().startswith("workbench gateway ")
     ]
-    assert info_names == ["asgi_response_completed"]
+    assert info_names == []
+
+
+def test_gateway_success_completion_skips_serialization_at_info(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=remote_server.logger.name)
+    calls = []
+
+    def unexpected_serialization(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "unexpected"
+
+    monkeypatch.setattr(remote_server.json, "dumps", unexpected_serialization)
+
+    remote_server._workbench_gateway_log(
+        "asgi_response_completed",
+        status=200,
+        method="GET",
+        api_path="health",
+        duration_ms=1,
+    )
+
+    assert calls == []
+    assert _gateway_events(caplog) == []
 
 
 def test_gateway_verbose_stage_keeps_failure_at_info(caplog):

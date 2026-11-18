@@ -58,6 +58,10 @@ included since the v4 Beta, migration steps and publication limits.
 
 ### Changed
 
+- Bound HASHI Remote supervisor logs with process-owned UTF-8 rotation, migrate
+  oversized legacy logs by retaining only a bounded tail, and keep successful
+  Workbench polling diagnostics at DEBUG without INFO-path serialization.
+
 - Retain the security floors for Functions HTTP/image dependencies and separate
   dependency qualification from Core code approval. Actual Core wire-contract
   changes still need matching owner or independent review; independent runtime

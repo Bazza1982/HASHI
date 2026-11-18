@@ -175,16 +175,22 @@ and otherwise sleeps up to 300 seconds. Protocol, discovery and registry expose
 small monotonic activity counters for idle acceptance; no additional watchdog
 or monitoring service is introduced.
 
-The authenticated Workbench gateway emits one INFO completion summary for a
-successful request. Successful intermediate receive, authenticate, forward and
-response stages are DEBUG diagnostics and are not serialized while normal INFO
-logging is active. Failure events, exceptions and intermediate HTTP 4xx/5xx
-statuses remain INFO evidence. This keeps request and authentication failures
-observable without multiplying normal proxy traffic into ten durable records.
-The Windows supervisor preserves the child's UTF-8 stream when appending these
-records; PowerShell's UTF-16 redirection default is not part of the log
-contract. Existing mixed-encoding incident evidence is retained rather than
-rewritten or deleted.
+The authenticated Workbench gateway keeps all successful request lifecycle
+events, including the final completion summary, at DEBUG. Normal INFO operation
+returns before serializing those records, so Workbench polling does not create
+durable per-request output. Failure events, exceptions and HTTP 4xx/5xx statuses
+remain INFO evidence.
+
+OS-supervised Remote processes own `logs/hashi-remote-supervisor.log` through a
+UTF-8 rotating handler. Each file is bounded to 16 MiB with three backups (64
+MiB total primary-log retention), and a single rendered record is capped at 256
+KiB. On first adoption, an oversized
+legacy current file is reduced with one tail seek to the configured bound; it is
+not scanned or copied in full. Windows captures only bootstrap/import failures
+in the separately rotated `hashi-remote-launcher.log`, while Linux sends those
+residual streams to the bounded system journal. This keeps rotation off the
+Workbench request path and prevents a supervisor parent from holding the primary
+file open during rollover.
 
 2026-09-27 HASHI1 repair record: the user requested this restart slowdown
 repair. The registry comparison fix is committed on local `main` as

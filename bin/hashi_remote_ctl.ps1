@@ -64,6 +64,7 @@ $ArgsList = @(
     "-B", "-m", "remote",
     "--hashi-root", [string]$HashiRoot,
     "--supervised",
+    "--log-file", [string]$LogPath,
     "--instance-id", [string]$SupervisorIdentity.instance_id
 )
 if ($SupervisorIdentity.display_name) {

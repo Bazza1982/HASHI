@@ -96,7 +96,11 @@ def test_linux_remote_supervisor_units_are_isolated_per_instance(tmp_path):
     assert 'WorkingDirectory="' not in hashi1_text
     assert 'StandardOutput="' not in hashi1_text
     assert "WorkingDirectory=" in hashi1_text
-    assert "StandardOutput=append:" in hashi1_text
+    assert "StandardOutput=journal" in hashi1_text
+    assert "StandardError=journal" in hashi1_text
+    assert "StandardOutput=append:" not in hashi1_text
+    assert "--log-file" in hashi1_text
+    assert str(tmp_path / "hashi one" / "logs" / "hashi-remote-supervisor.log") in hashi1_text
     assert "Restart=on-failure" in hashi1_text
     assert "KillMode=process" in hashi1_text
     assert "Instance HASHI1 (agents_json)" in hashi1_output
@@ -120,6 +124,7 @@ def test_linux_remote_identity_and_unit_launch_keep_python_readonly(tmp_path, mo
         command = shlex.split(next(line.removeprefix("ExecStart=")
                                   for line in text.splitlines()
                                   if line.startswith("ExecStart=")))
+        assert "--log-file" in command
         prefix = command[:command.index("-m")]
         if prefix[0] == "%PYTHON%":
             prefix[0] = sys.executable
