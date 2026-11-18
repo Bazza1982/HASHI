@@ -1078,3 +1078,91 @@ async def test_python_regex_search_memory_budget_can_be_configured_or_removed(tm
     )
     assert unlimited.details["matches"] == 1
     assert "needle-123" in unlimited.output
+
+
+@pytest.mark.asyncio
+async def test_git_snapshot_hashes_large_diff_without_holding_it_in_memory(tmp_path):
+    import gc
+    import hashlib
+    import shutil
+    import tracemalloc
+
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    _run_git(tmp_path, "init", "--quiet")
+    _run_git(tmp_path, "config", "user.email", "fixture@example.invalid")
+    _run_git(tmp_path, "config", "user.name", "Fixture")
+    tracked = tmp_path / "large.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    _run_git(tmp_path, "add", "large.txt")
+    _run_git(tmp_path, "commit", "--quiet", "-m", "fixture")
+    with tracked.open("w", encoding="utf-8", newline="\n") as stream:
+        for index in range(300000):
+            stream.write(f"{index:08d} " + "x" * 70 + "\n")
+    (tmp_path / "unsaved-数据.txt").write_text("untracked fixture", encoding="utf-8")
+
+    def git_bytes(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, check=True).stdout
+
+    head = git_bytes("rev-parse", "HEAD")
+    status = git_bytes("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    unstaged = git_bytes("diff", "--no-ext-diff", "--binary")
+    staged = git_bytes("diff", "--cached", "--no-ext-diff", "--binary")
+    diff_size = len(unstaged)
+    assert diff_size > 20_000_000
+    expected = hashlib.sha256()
+    for label, payload in ((b"head", head), (b"status", status),
+                           (b"unstaged", unstaged), (b"staged", staged)):
+        expected.update(label + b"\0" + payload + b"\0")
+    for raw_name in git_bytes("ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
+        if raw_name:
+            path = tmp_path / Path(raw_name.decode("utf-8", errors="surrogateescape"))
+            expected.update(b"untracked\0" + raw_name + b"\0")
+            expected.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))
+    expected_digest = expected.hexdigest()
+    del head, status, unstaged, staged, expected, payload
+    gc.collect()
+
+    tracemalloc.start()
+    try:
+        result = await her_verification.execute_workspace_inspect(
+            {"operation": "snapshot"}, workspace_dir=tmp_path,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.details["snapshot_sha256"] == expected_digest
+    assert peak < diff_size // 2, f"snapshot retained {peak} bytes while diff was {diff_size} bytes"
+
+
+@pytest.mark.asyncio
+async def test_git_snapshot_cancellation_stops_stream_hashing(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    _run_git(tmp_path, "init", "--quiet")
+    _run_git(tmp_path, "config", "user.email", "fixture@example.invalid")
+    _run_git(tmp_path, "config", "user.name", "Fixture")
+    (tmp_path / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+    _run_git(tmp_path, "add", "tracked.txt")
+    _run_git(tmp_path, "commit", "--quiet", "-m", "fixture")
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def blocking_hash(*_args, cancelled=None, **_kwargs):
+        started.set()
+        while cancelled is not None and not cancelled.is_set():
+            time.sleep(0.01)
+        stopped.set()
+        raise her_verification._WorkspaceInspectionCancelled()
+
+    monkeypatch.setattr(her_verification, "_hash_git_captures", blocking_hash)
+    task = asyncio.create_task(her_verification.execute_workspace_inspect(
+        {"operation": "snapshot"}, workspace_dir=tmp_path,
+    ))
+    assert await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stopped.is_set()

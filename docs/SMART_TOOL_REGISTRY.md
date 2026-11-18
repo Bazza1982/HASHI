@@ -90,7 +90,9 @@ Git status/diff and snapshots exclude the actual private result store and
 existing read-protected descendants.
 Snapshots also exclude the active tool audit receipt so recording a check
 does not itself invalidate the next one; the snapshot reports excluded paths
-and preserves Git staged and unstaged state.
+and preserves Git staged and unstaged state. Git snapshot output is spooled and
+hashed in blocks without materializing full diffs or untracked-file lists.
+This check does not freeze the filesystem during the full snapshot.
 On startup, the owner reconciles abandoned terminal Runs; a Run whose state
 cannot be proven is retained until it can be reconciled. A Registry without an
 Agent home uses a private temporary store for that Registry's lifetime.

@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import ExitStack
@@ -236,12 +237,24 @@ def _sha256_file(path: Path, *, cancelled: threading.Event | None = None) -> str
     return digest.hexdigest()
 
 
+def _null_delimited_names(stream, *, cancelled=None):
+    stream.seek(0)
+    pending = b""
+    while chunk := stream.read(64 * 1024):
+        _check_inspection_cancelled(cancelled)
+        parts = (pending + chunk).split(b"\0")
+        pending = parts.pop()
+        yield from parts
+    if pending:
+        raise ValueError("Git returned an incomplete untracked-file inventory")
+
+
 def _hash_git_untracked(
-    digest, names: bytes, git_root: Path, root: Path, *, cancelled=None,
+    digest, names, git_root: Path, root: Path, *, cancelled=None,
     protected_paths: tuple[Path, ...] = (),
 ) -> int:
     count = 0
-    for raw_name in names.split(b"\0"):
+    for raw_name in _null_delimited_names(names, cancelled=cancelled):
         _check_inspection_cancelled(cancelled)
         if not raw_name:
             continue
@@ -256,12 +269,39 @@ def _hash_git_untracked(
         count += 1
         digest.update(b"untracked\0" + raw_name + b"\0")
         if path.is_file():
+            before = path.stat()
             digest.update(_sha256_file(path, cancelled=cancelled).encode("ascii"))
+            after = path.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+            ):
+                raise ValueError(f"file changed during snapshot: {relative}")
     return count
 
 
+def _hash_git_captures(
+    captures, git_root: Path, root: Path, *, cancelled=None,
+    protected_paths: tuple[Path, ...] = (),
+):
+    digest = hashlib.sha256()
+    for label in ("head", "status", "unstaged", "staged"):
+        _check_inspection_cancelled(cancelled)
+        digest.update(label.encode("ascii") + b"\0")
+        stream = captures[label]
+        stream.seek(0)
+        while chunk := stream.read(1024 * 1024):
+            _check_inspection_cancelled(cancelled)
+            digest.update(chunk)
+        digest.update(b"\0")
+    count = _hash_git_untracked(
+        digest, captures["untracked"], git_root, root,
+        cancelled=cancelled, protected_paths=protected_paths,
+    )
+    return digest.hexdigest(), count
+
+
 async def _git_snapshot(
-    root: Path, *, protected_paths: tuple[Path, ...] = (),
+    root: Path, *, protected_paths: tuple[Path, ...] = (), capture_factory=None,
 ) -> tuple[str, dict[str, Any]] | None:
     try:
         top = await _run_read_only(["git", "rev-parse", "--show-toplevel"], cwd=root)
@@ -292,49 +332,50 @@ async def _git_snapshot(
                       for path in excluded]
     pathspec = (["--", relative_root_text, *excluded_specs]
                 if relative_root_text != "." or excluded_specs else [])
-    head = await _run_read_only(["git", "rev-parse", "HEAD"], cwd=git_root)
-    status = await _run_read_only(
-        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", *pathspec],
-        cwd=git_root,
-    )
-    unstaged = await _run_read_only(
-        ["git", "diff", "--no-ext-diff", "--binary", *pathspec], cwd=git_root
-    )
-    staged = await _run_read_only(
-        ["git", "diff", "--cached", "--no-ext-diff", "--binary", *pathspec],
-        cwd=git_root,
-    )
-    untracked = await _run_read_only(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z", *pathspec],
-        cwd=git_root,
-    )
-    commands = (head, status, unstaged, staged, untracked)
-    if any(item.returncode != 0 for item in commands):
-        return None
-
-    digest = hashlib.sha256()
-    for label, payload in (
-        (b"head", head.stdout),
-        (b"status", status.stdout),
-        (b"unstaged", unstaged.stdout),
-        (b"staged", staged.stdout),
-    ):
-        digest.update(label + b"\0" + payload + b"\0")
-    untracked_count = await _run_inspection_thread(
-        _hash_git_untracked, digest, untracked.stdout, git_root, root, protected_paths=protected_paths)
-    return digest.hexdigest(), {
-        "vcs": "git",
-        "head": head.stdout.decode("utf-8", errors="replace").strip(),
-        "dirty": bool(status.stdout),
-        "untracked_files": untracked_count,
-        "coverage_complete": False,
-        "coverage_scope": "git_tracked_and_nonignored",
-        "coverage_limitations": (["git_ignored_paths", "external_symlink_targets"]
-                                 + (["reported_excluded_paths"] if excluded else [])),
-        "excluded_count": len(excluded),
-        "excluded_paths": [path.relative_to(root).as_posix() for path in excluded],
-        "excluded_paths_truncated": False,
+    commands = {
+        "head": ["git", "rev-parse", "HEAD"],
+        "status": ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", *pathspec],
+        "unstaged": ["git", "diff", "--no-ext-diff", "--binary", *pathspec],
+        "staged": ["git", "diff", "--cached", "--no-ext-diff", "--binary", *pathspec],
+        "untracked": ["git", "ls-files", "--others", "--exclude-standard", "-z", *pathspec],
     }
+    make_capture = capture_factory or (lambda: tempfile.TemporaryFile(mode="w+b"))
+    with ExitStack() as files:
+        captures = {}
+        results = {}
+        sizes = {}
+        try:
+            for name, argv in commands.items():
+                captures[name] = files.enter_context(make_capture())
+                errors: dict[str, str] = {}
+                observed: dict[str, int] = {}
+                result = await _run_read_only(
+                    argv, cwd=git_root, capture={"stdout_bytes": captures[name]},
+                    capture_errors=errors, capture_sizes=observed,
+                )
+                if result.returncode != 0 or errors:
+                    return None
+                results[name] = result
+                sizes[name] = observed.get("stdout_bytes", 0)
+        except OSError:
+            return None
+
+        snapshot, untracked_count = await _run_inspection_thread(
+            _hash_git_captures, captures, git_root, root, protected_paths=protected_paths,
+        )
+        return snapshot, {
+            "vcs": "git",
+            "head": results["head"].stdout.decode("utf-8", errors="replace").strip(),
+            "dirty": sizes["status"] > 0,
+            "untracked_files": untracked_count,
+            "coverage_complete": False,
+            "coverage_scope": "git_tracked_and_nonignored",
+            "coverage_limitations": (["git_ignored_paths", "external_symlink_targets"]
+                                     + (["reported_excluded_paths"] if excluded else [])),
+            "excluded_count": len(excluded),
+            "excluded_paths": [path.relative_to(root).as_posix() for path in excluded],
+            "excluded_paths_truncated": False,
+        }
 
 
 def _filesystem_snapshot(
@@ -431,10 +472,12 @@ async def _run_inspection_thread(function, *args, **kwargs):
 
 async def _run_workspace_snapshot(
     root: Path, *, filesystem_only: bool = False, collect_all: bool = False,
-    protected_paths: tuple[Path, ...] = (),
+    protected_paths: tuple[Path, ...] = (), capture_factory=None,
 ):
     if not filesystem_only:
-        git_value = await _git_snapshot(root, protected_paths=protected_paths)
+        git_value = await _git_snapshot(
+            root, protected_paths=protected_paths, capture_factory=capture_factory,
+        )
         if git_value is not None:
             return git_value
     return await _run_inspection_thread(
@@ -966,8 +1009,11 @@ async def execute_workspace_inspect(
             snapshot_exclusions = protected_paths + tuple(
                 Path(path).resolve() for path in snapshot_excluded_paths
             )
+            capture_factory = retained_output[0].temporary_capture_file if retained_output is not None else None
             digest, metadata = await _run_workspace_snapshot(
-                root, collect_all=retain_coverage is not None, protected_paths=snapshot_exclusions)
+                root, collect_all=retain_coverage is not None, protected_paths=snapshot_exclusions,
+                capture_factory=capture_factory,
+            )
         except Exception as exc:
             return _result(
                 f"Error: workspace snapshot unavailable: {exc}",
