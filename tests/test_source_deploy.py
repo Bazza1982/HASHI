@@ -226,3 +226,94 @@ def test_stage_rejects_an_old_coordinator_without_a_staging_receipt(tmp_path, mo
             code_root=deployed, bridge_home=tmp_path / "home", instance_id="TEST",
             runtime_command=[sys.executable, "-B"],
         )
+
+
+async def test_hashideploy_cancellation_keeps_preparation_busy_until_receipt(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from orchestrator import ui_language
+    from orchestrator.commands import hashideploy
+
+    source, deployed = _source_repository(tmp_path)
+    gate = source / "scripts" / "check_protected_core_changes.py"
+    gate.parent.mkdir()
+    gate.write_text("pass\n", encoding="utf-8")
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "candidate")
+    target = _git(source, "rev-parse", "HEAD")
+    home = tmp_path / "home"
+    started = asyncio.Event()
+    finish = threading.Event()
+    loop = asyncio.get_running_loop()
+    calls = []
+    messages = asyncio.Queue()
+    real_run = release_update._run
+    real_prepare = hashideploy.run_staged_source_release
+
+    def run(argv, **kwargs):
+        if kwargs["phase"] != "stage_qualification":
+            return real_run(argv, **kwargs)
+        loop.call_soon_threadsafe(started.set)
+        if not finish.wait(15):
+            raise TimeoutError("test did not release source preparation")
+        result = release_update.prepare_staged_release(
+            code_root=deployed, bridge_home=home, instance_id="TEST", expected_commit=target,
+        )
+        return subprocess.CompletedProcess(argv, 0, json.dumps(result), "")
+
+    def prepare(**kwargs):
+        calls.append(kwargs)
+        return real_prepare(**kwargs)
+
+    async def reply(_update, text, **kwargs):
+        messages.put_nowait(text)
+
+    monkeypatch.setattr(release_update, "_run", run)
+    monkeypatch.setattr(
+        release_update, "_qualify_staged_functions",
+        lambda *_args: {"source_commit": target, "generation_id": "sha256:" + "a" * 64},
+    )
+    monkeypatch.setattr(hashideploy, "run_staged_source_release", prepare)
+    runtime = SimpleNamespace(
+        global_config=SimpleNamespace(project_root=deployed, bridge_home=home, instance_id="TEST"),
+        _is_authorized_user=lambda user_id: user_id == 1,
+        _reply_text=reply,
+    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+    context = SimpleNamespace(args=[])
+    command = asyncio.create_task(hashideploy.hashideploy_command(runtime, update, context))
+    retry = None
+    preparation = None
+    try:
+        await asyncio.wait_for(started.wait(), 10)
+        await messages.get()  # Initial preparation notice.
+        preparation = runtime._hashideploy_inflight
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        retry = asyncio.create_task(hashideploy.hashideploy_command(runtime, update, context))
+        assert await asyncio.wait_for(messages.get(), 5) == ui_language.tr("hashideploy.busy")
+        await retry
+        assert len(calls) == 1
+    finally:
+        finish.set()
+        pending = [command]
+        if retry is not None:
+            pending.append(retry)
+        if isinstance(preparation, asyncio.Task):
+            pending.append(preparation)
+        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 15)
+
+    # Cancellation dropped the notification, but real Git and durable readiness agree.
+    receipts = list((home / "state" / "source_deployments").glob("*/ready.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["target_commit"] == _git(deployed, "rev-parse", "HEAD") == target
+    assert receipt["state"] == "ready_to_reboot"
+    assert receipt["restarts_performed"] is False
+    assert receipt["running_verified"] is False
+    await hashideploy.hashideploy_command(runtime, update, context)
+    assert len(calls) == 2
+    messages.get_nowait()  # New preparation notice.
+    assert "ready to reboot" in messages.get_nowait().casefold()

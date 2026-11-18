@@ -51,6 +51,14 @@ shared-token credentials or a running API. Its isolated probes never activate
 providers or connectors. It never stops, starts, restarts, reloads or reboots
 Core, Functions, Workers, Remote, Workbench or the computer.
 
+The slash command retains its preparation task until the actual work finishes.
+Cancelling the command or interrupting a notification does not stop the source
+operation or admit a second preparation. Completion releases the busy state
+and records the final result in the log even without a reply recipient. To
+reconcile an interrupted reply, compare the checkout HEAD with the exact target
+in its persisted readiness receipt; cancellation alone does not establish
+success or failure, and absence of a matching receipt is not readiness.
+
 The user chooses when to adopt. Ordinary Function updates use the existing
 `/reboot` controls; shared Functions use `/reboot max`. Core and Remote retain
 their separate maintenance lifecycles. Check `/version full` after adoption.
