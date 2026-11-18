@@ -87,15 +87,19 @@ def _workspace_path(workspace_dir: Path, raw_path: Any = ".") -> Path:
 
 async def _run_read_only(
     argv: Sequence[str], *, cwd: Path, capture=None, capture_errors=None, capture_sizes=None,
+    environment=None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run one inspection child with cancellable process-tree cleanup."""
     from tools.builtins import _bash_process_group_id, _cleanup_bash_process, _shield_bash_cleanup
 
     arguments = [str(item) for item in argv]
+    process_options = process_group_kwargs()
+    if environment is not None:
+        process_options["env"] = environment
     proc = await asyncio.create_subprocess_exec(
         *arguments, cwd=str(cwd), stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        **process_group_kwargs(),
+        **process_options,
     )
     group = _bash_process_group_id(proc)
     if capture_sizes is None:
@@ -120,7 +124,7 @@ async def _run_read_only(
 
 async def _inspect_command_output(
     argv: Sequence[str], *, cwd: Path, retained_output, success_codes: set[int],
-    error_prefix: str, empty_text: str,
+    error_prefix: str, empty_text: str, environment=None,
 ) -> tuple[subprocess.CompletedProcess[bytes], str, dict[str, Any]]:
     """Keep fixed-command inspection previews small while retaining complete output."""
     with ExitStack() as files:
@@ -136,8 +140,9 @@ async def _inspect_command_output(
             except OSError as exc:
                 files.close()
                 errors["capture"] = type(exc).__name__
+        kwargs = {"environment": environment} if environment is not None else {}
         completed = await _run_read_only(
-            argv, cwd=cwd, capture=capture, capture_errors=errors, capture_sizes=sizes,
+            argv, cwd=cwd, capture=capture, capture_errors=errors, capture_sizes=sizes, **kwargs,
         )
         success = completed.returncode in success_codes
         selected = "stdout_bytes" if success else "stderr_bytes"

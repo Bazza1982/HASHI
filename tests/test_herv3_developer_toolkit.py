@@ -653,3 +653,148 @@ async def test_text_replace_detects_concurrent_change(tmp_path, monkeypatch):
     assert payload["error"]["code"] == "concurrent_change", payload
     assert target.read_text(encoding="utf-8") == "external edit\n"
 # HASHI-Fingerprint: hfp_c7cbfa1a3f474171ae633577f172a78d
+
+
+@pytest.mark.asyncio
+async def test_git_inspect_pages_complete_status_from_bound_run(tmp_path):
+    from tools.tool_output_store import run_binding
+
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    _git(tmp_path, "init", "--quiet")
+    for index in range(900):
+        (tmp_path / f"file-{index:04d}-{'x' * 80}.txt").touch()
+    (tmp_path / "zz-final-status-sentinel.txt").touch()
+    context = {
+        "instance_id": "HASHI3", "agent_name": "agent", "owner_id": "owner",
+        "hashi_session_id": "session", "hashi_run_id": "run", "request_id": "request",
+    }
+    registry = ToolRegistry(
+        ["git_inspect"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+        audit_context=context, search_scope={"agent_id": "agent", "agent_home": str(tmp_path)},
+    )
+    result = await _run(registry, "git_inspect", {"operation": "status"})
+    assert result["ok"]
+    assert result["partial"]
+    reference = result["output_continuation"]
+    assert reference
+    offset, pages = 0, []
+    while True:
+        page = json.loads(registry._tool_output_store.page(run_binding(context), reference, offset))
+        pages.append(page["text"])
+        if page["complete"]:
+            break
+        offset = page["next_offset"]
+    complete = "".join(pages)
+    assert "file-0000-" in complete and "file-0899-" in complete
+    assert "zz-final-status-sentinel.txt" in complete
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["status", "remote"])
+async def test_git_inspect_cancellation_reaps_its_process(tmp_path, monkeypatch, operation):
+    import sys
+
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    _git(tmp_path, "init", "--quiet")
+    registry = _registry(tmp_path, allowed=["git_inspect"])
+    spawned = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+    child = None
+
+    async def long_running(*args, **kwargs):
+        nonlocal child
+        if args and str(args[0]) == "git":
+            child = await original_spawn(
+                sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)",
+                **kwargs,
+            )
+            spawned.set()
+            return child
+        return await original_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", long_running)
+    task = asyncio.create_task(registry.execute("git_inspect", {"operation": operation}, "cancel"))
+    try:
+        await asyncio.wait_for(spawned.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert child is not None and child.returncode is not None
+    finally:
+        if child is not None and child.returncode is None:
+            child.kill()
+            await child.wait()
+
+
+@pytest.mark.asyncio
+async def test_git_inspect_pages_many_remotes_without_retaining_credentials(tmp_path):
+    from tools.tool_output_store import run_binding
+
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    _git(tmp_path, "init", "--quiet")
+    config = tmp_path / ".git" / "config"
+    with config.open("a", encoding="utf-8") as stream:
+        for index in range(600):
+            stream.write(
+                f'\n[remote "remote{index:04d}"]\n'
+                f'    url = https://user:secret-value@example.invalid/repo{index:04d}?token=private\n'
+                '    fetch = +refs/heads/*:refs/remotes/example/*\n'
+            )
+    context = {
+        "instance_id": "HASHI3", "agent_name": "agent", "owner_id": "owner",
+        "hashi_session_id": "session", "hashi_run_id": "run", "request_id": "request",
+    }
+    registry = ToolRegistry(
+        ["git_inspect"], access_root=tmp_path, workspace_dir=tmp_path, secrets={},
+        audit_context=context, search_scope={"agent_id": "agent", "agent_home": str(tmp_path)},
+    )
+    result = await _run(registry, "git_inspect", {"operation": "remote"})
+    assert result["ok"] and result["partial"]
+    reference = result["output_continuation"]
+    offset, pages = 0, []
+    while True:
+        page = json.loads(registry._tool_output_store.page(run_binding(context), reference, offset))
+        pages.append(page["text"])
+        if page["complete"]:
+            break
+        offset = page["next_offset"]
+    complete = "".join(pages)
+    assert "remote0000: example.invalid/repo0000" in complete
+    assert "remote0599: example.invalid/repo0599" in complete
+    assert complete.count("example.invalid/repo") == 600
+    assert "secret-value" not in complete and "token=private" not in complete
+    assert "secret-value" not in result["output"]
+    retained_files = list(tmp_path.rglob("*.data"))
+    assert retained_files
+    for stored in retained_files:
+        contents = stored.read_bytes().decode("utf-32-le", errors="surrogatepass")
+        assert "secret-value" not in contents and "token=private" not in contents
+
+
+@pytest.mark.asyncio
+async def test_git_inspect_log_honors_requested_count_above_one_hundred(tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("Git unavailable")
+    _git(tmp_path, "init", "--quiet")
+    branch = _git(tmp_path, "symbolic-ref", "HEAD").stdout.strip()
+    records = []
+    for index in range(110):
+        message = f"commit-{index:03d}"
+        record = (
+            f"commit {branch}\nmark :{index + 1}\n"
+            "committer Fixture <fixture@example.invalid> 1700000000 +0000\n"
+            f"data {len(message)}\n{message}\n"
+        )
+        if index:
+            record += f"from :{index}\n"
+        records.append(record + "\n")
+    subprocess.run(["git", "fast-import", "--quiet"], cwd=tmp_path,
+                   input="".join(records).encode("ascii"), capture_output=True, check=True)
+    registry = _registry(tmp_path, allowed=["git_inspect"])
+    result = await _run(registry, "git_inspect", {"operation": "log", "limit": 110})
+    assert result["ok"]
+    assert result["output"].count("commit-") == 110
+    assert "commit-000" in result["output"] and "commit-109" in result["output"]

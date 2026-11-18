@@ -74,8 +74,11 @@ Run remains active. Cancelling the Run closes its temporary spools.
 Workspace inspection spools full Git status, Git diff, and external-search output
 before projecting a preview; continuation pages recover the selected stream.
 Without a bound Run or available storage, omitted output is explicitly reported.
-The Python search fallback and separate developer-toolkit Git inspector still
-have their own output limits and are not covered by this continuation guarantee.
+The developer-toolkit Git inspector uses the same continuation for status,
+branches, log, diff and credential-redacted remote addresses. Its log limit
+follows the requested count without a fixed 100-entry ceiling.
+The Python search fallback retains its own output limit and is not covered by
+this continuation guarantee.
 On startup, the owner reconciles abandoned terminal Runs; a Run whose state
 cannot be proven is retained until it can be reconciled. A Registry without an
 Agent home uses a private temporary store for that Registry's lifetime.

@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import io
 import json
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
+from contextlib import ExitStack
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -441,21 +442,9 @@ def _literal_search_fallback(query: str, root: Path, roots: tuple[Path, ...],
 # git_inspect — Git metadata locations are authorised before Git runs
 # ---------------------------------------------------------------------------
 
-def _git_command(repo: Path, argv: list[str], *, timeout: float = 12) -> subprocess.CompletedProcess[str]:
-    environment = dict(os.environ)
-    environment["GIT_PAGER"] = "cat"
-    environment["GIT_OPTIONAL_LOCKS"] = "0"
-    environment["GIT_TERMINAL_PROMPT"] = "0"
-    return subprocess.run(
-        ["git", "-C", str(repo), "-c", "core.fsmonitor=false", "--no-pager", *argv],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, check=False, env=environment,
-    )
-
-
 def _safe_remote(text: str) -> str:
     lines = []
-    for line in text.splitlines()[:100]:
+    for line in text.splitlines():
         parts = line.split()
         if len(parts) < 2:
             continue
@@ -468,8 +457,83 @@ def _safe_remote(text: str) -> str:
             address = address.partition("@")[-1].replace(":", "/", 1)
         else:
             address = Path(address).name
+        address = address.partition("?")[0].partition("#")[0]
         lines.append(f"{name}: {address.rstrip('/')}")
     return "\n".join(dict.fromkeys(lines))
+
+
+async def _git_remote_inspect(registry: Any, repo: Path, command: list[str]) -> str:
+    """Capture private Git output to disk and retain only redacted remote addresses."""
+    from tools.her_verification import _run_read_only
+    from tools.tool_output_store import run_binding
+
+    binding = run_binding(registry._effective_audit_context())
+    retained = ((registry._tool_output_store, binding, "git_inspect")
+                if binding is not None else None)
+    environment = dict(os.environ)
+    environment.update(GIT_PAGER="cat", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    with ExitStack() as files:
+        capture = None
+        errors: dict[str, str] = {}
+        sizes: dict[str, int] = {}
+        if retained is not None:
+            try:
+                capture = {
+                    "stdout_bytes": files.enter_context(retained[0].temporary_capture_file()),
+                    "stderr_bytes": files.enter_context(retained[0].temporary_capture_file()),
+                }
+            except OSError as exc:
+                files.close()
+                errors["capture"] = type(exc).__name__
+        completed = await _run_read_only(
+            ["git", "-C", str(repo), "-c", "core.fsmonitor=false", "--no-pager", *command],
+            cwd=repo, capture=capture, capture_errors=errors, capture_sizes=sizes,
+            environment=environment,
+        )
+        if completed.returncode:
+            # stderr may repeat credential-bearing remote URLs.
+            return _error("git_failed", f"Git exit code {completed.returncode}")
+        preview = _safe_remote(completed.stdout.decode("utf-8", errors="replace"))
+        if sizes.get("stdout_bytes", 0) <= 20000:
+            return _json(ok=True, repository=str(repo), operation="remote",
+                         output=preview, partial=False, stop_reason="completed")
+        reference = None
+        if capture is not None and not errors:
+            def safe_chunks():
+                stream = capture["stdout_bytes"]
+                stream.seek(0)
+                reader = io.TextIOWrapper(stream, encoding="utf-8", errors="replace")
+                previous = None
+                try:
+                    for line in reader:
+                        safe = _safe_remote(line)
+                        if safe and safe != previous:
+                            yield ("\n" if previous is not None else "") + safe
+                            previous = safe
+                finally:
+                    reader.detach()
+            try:
+                reference = await asyncio.to_thread(retained[0].retain_text_chunks,
+                                                    retained[1], retained[2], safe_chunks())
+            except (OSError, ValueError, TimeoutError):
+                reference = None
+        low, high = 0, min(len(preview), 12000)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(json.dumps(preview[:middle], ensure_ascii=False)) <= 12000:
+                low = middle
+            else:
+                high = middle - 1
+        if reference:
+            preview = (preview[:low] + f"\n[truncated by HASHI; use tool_output_read "
+                       f"reference={reference} offset=0; retained while this Run is active]")
+        else:
+            preview = (preview[:low]
+                       + "\n[truncated by HASHI; complete-result retention is unavailable for this Run]")
+        return _json(ok=True, repository=str(repo), operation="remote", output=preview,
+                     partial=True, stop_reason="output_paged" if reference else "output_limit",
+                     complete_content=False, output_continuation=reference,
+                     output_retention=retained[0].retention if reference else "unavailable")
 
 
 def _find_repo_root(start: Path, read_roots: tuple[Path, ...],
@@ -494,8 +558,8 @@ def _find_repo_root(start: Path, read_roots: tuple[Path, ...],
         current = parent
 
 
-def _git_inspect(args: dict, read_roots: tuple[Path, ...],
-                 protected_read_paths: tuple[str, ...], cwd: Path) -> str:
+async def _git_inspect(registry: Any, args: dict, read_roots: tuple[Path, ...],
+                       protected_read_paths: tuple[str, ...], cwd: Path) -> str:
     operation = str(args.get("operation") or "").strip()
     if operation not in {"status", "branches", "log", "diff", "remote"}:
         return _error("invalid_operation", "Choose status, branches, log, diff or remote.")
@@ -525,7 +589,7 @@ def _git_inspect(args: dict, read_roots: tuple[Path, ...],
                 return _error("metadata_denied",
                               f"Git metadata {location.name} could not be authorised: {exc.code}.",
                               next_step="Choose a repository whose .git metadata is inside the authorised Workzone.")
-        limit = max(1, min(100, int(args.get("limit", 20))))
+        limit = max(1, int(args.get("limit", 20)))
         if operation == "status":
             command = ["status", "--short", "--branch", "--untracked-files=normal"]
         elif operation == "branches":
@@ -538,19 +602,32 @@ def _git_inspect(args: dict, read_roots: tuple[Path, ...],
                 command.append("--cached")
         else:
             command = ["remote", "-v"]
-        output = _git_command(repo, command)
+        if operation == "remote":
+            return await _git_remote_inspect(registry, repo, command)
+
+        from tools.her_verification import _inspect_command_output
+        from tools.tool_output_store import run_binding
+
+        binding = run_binding(registry._effective_audit_context())
+        retained = ((registry._tool_output_store, binding, "git_inspect")
+                    if binding is not None else None)
+        environment = dict(os.environ)
+        environment.update(GIT_PAGER="cat", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+        completed, raw, details = await _inspect_command_output(
+            ["git", "-C", str(repo), "-c", "core.fsmonitor=false", "--no-pager", *command],
+            cwd=repo, retained_output=retained, success_codes={0},
+            error_prefix="", empty_text="", environment=environment,
+        )
+        if completed.returncode:
+            return _error("git_failed", raw[:700] or f"Git exit code {completed.returncode}")
+        partial = details.get("complete_content") is False
+        return _json(ok=True, repository=str(repo), operation=operation,
+                     output=raw, partial=partial,
+                     stop_reason=("output_paged" if details.get("output_continuation")
+                                  else "output_limit" if partial else "completed"), **details)
     except FileNotFoundError:
         return _error("git_unavailable", "Git is not on PATH.",
                       next_step="Install Git or use shell in an environment where Git is available.")
-    except subprocess.TimeoutExpired:
-        return _error("tool_timeout", "This Git inspection exceeded its 12-second tool budget.",
-                      next_step="Inspect a narrower repository/path; the Agent Turn continues.")
-    if output.returncode:
-        return _error("git_failed", output.stderr[:700] or f"Git exit code {output.returncode}")
-    raw = _safe_remote(output.stdout) if operation == "remote" else output.stdout
-    truncated = len(raw) > 18000
-    return _json(ok=True, repository=str(repo), operation=operation,
-                 output=raw[:18000], partial=truncated, stop_reason="output_limit" if truncated else "completed")
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1113,7 @@ def _data_inspect(args: dict, read_roots: tuple[Path, ...], cwd: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _tool_find_selections(args: dict, available: tuple[str, ...]) -> list[str]:
-    from tools.registry import TOOL_TIERS, resolve_tiers
+    from tools.registry import resolve_tiers
     from tools.schemas import TOOL_SCHEMA_MAP
     accessible = set(available)
     limit = max(1, min(20, int(args.get("limit", 8))))
@@ -1144,6 +1221,8 @@ async def execute_toolkit(registry: Any, name: str, args: dict,
     try:
         if name == "code_search":
             return await _code_search(args, read_roots, protected_read_paths, cwd)
+        if name == "git_inspect":
+            return await _git_inspect(registry, args, read_roots, protected_read_paths, cwd)
         if name in {"file_manage", "text_replace"}:
             cancel = threading.Event()
             loop = asyncio.get_running_loop()
@@ -1183,7 +1262,6 @@ async def execute_toolkit(registry: Any, name: str, args: dict,
                 return settled
         dispatch = {
             "project_locate": lambda: _project_locate(args, read_roots, protected_read_paths, cwd),
-            "git_inspect": lambda: _git_inspect(args, read_roots, protected_read_paths, cwd),
             "data_inspect": lambda: _data_inspect(args, read_roots, cwd),
         }
         if name not in dispatch:

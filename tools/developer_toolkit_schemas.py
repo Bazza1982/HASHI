@@ -76,7 +76,7 @@ TOOLKIT_SCHEMAS = [
         {
             "operation": {"type": "string", "enum": ["status", "branches", "log", "diff", "remote"]},
             "path": _s("Repository path; defaults to current working directory."),
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            "limit": {"type": "integer", "minimum": 1, "default": 20},
             "cached": {"type": "boolean", "default": False, "description": "Use staged Git diff."},
         },
         ["operation"],
