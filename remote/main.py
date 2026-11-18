@@ -123,6 +123,32 @@ class _Utf8RotatingFileHandler(RotatingFileHandler):
         return self.stream.tell() + encoded_size > self.maxBytes
 
 
+def _verify_log_handler_writeable(handler: RotatingFileHandler) -> None:
+    """Prove the selected sink can write and restore it before acceptance."""
+
+    stream = handler.stream
+    if stream is None:
+        raise OSError("Remote log stream did not open")
+    stream.seek(0, os.SEEK_END)
+    original_size = stream.tell()
+    if handler.maxBytes > 0 and original_size >= handler.maxBytes:
+        handler.doRollover()
+        stream = handler.stream
+        if stream is None:
+            raise OSError("Remote log stream did not reopen after rotation")
+        stream.seek(0, os.SEEK_END)
+        original_size = stream.tell()
+    try:
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+        stream.truncate(original_size)
+        stream.flush()
+        os.fsync(stream.fileno())
+    finally:
+        stream.seek(0, os.SEEK_END)
+
+
 def _trim_oversized_log(path: Path, *, max_bytes: int) -> bool:
     """Atomically retain only a bounded tail of a pre-policy supervisor log."""
 
@@ -169,19 +195,27 @@ def _remote_log_handler(
     for candidate in [path, *(Path(f"{path}.{index}") for index in range(1, backup_count + 1))]:
         if _trim_oversized_log(candidate, max_bytes=max_bytes):
             trimmed.append(candidate)
-    handler = _Utf8RotatingFileHandler(
-        path,
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-        encoding="utf-8",
-        delay=True,
-    )
-    handler.setFormatter(
-        _Utf8ByteBoundedFormatter(
-            "%(asctime)s [%(name)s] %(levelname)s %(message)s",
-            max_record_bytes=min(max_record_bytes, max(1, max_bytes - 1)),
+    handler: _Utf8RotatingFileHandler | None = None
+    try:
+        handler = _Utf8RotatingFileHandler(
+            path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+            delay=False,
         )
-    )
+        handler.setFormatter(
+            _Utf8ByteBoundedFormatter(
+                "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+                max_record_bytes=min(max_record_bytes, max(1, max_bytes - 1)),
+            )
+        )
+        _verify_log_handler_writeable(handler)
+    except BaseException:
+        if handler is not None:
+            handler.close()
+        raise
+    assert handler is not None
     return handler, trimmed
 
 

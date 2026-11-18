@@ -61,6 +61,8 @@ included since the v4 Beta, migration steps and publication limits.
 - Bound HASHI Remote supervisor logs with process-owned UTF-8 rotation, migrate
   oversized legacy logs by retaining only a bounded tail, and keep successful
   Workbench polling diagnostics at DEBUG without INFO-path serialization.
+  Windows launcher capture now rotates continuously within one child execution,
+  and Remote verifies an initial file write before accepting its primary sink.
 
 - Retain the security floors for Functions HTTP/image dependencies and separate
   dependency qualification from Core code approval. Actual Core wire-contract

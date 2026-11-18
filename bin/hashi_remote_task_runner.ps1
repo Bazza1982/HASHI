@@ -40,32 +40,168 @@ if ($LogDir) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
 $LauncherLogPath = Join-Path $LogDir "hashi-remote-launcher.log"
+$CaptureMaxBytes = 1MB
+$CaptureBackupCount = 2
+$CaptureStream = $null
 
-function Rotate-LauncherLogIfNeeded {
+function Close-BoundedCapture {
+    if ($null -eq $script:CaptureStream) {
+        return
+    }
+    try {
+        $script:CaptureStream.Flush()
+    } finally {
+        $script:CaptureStream.Dispose()
+        $script:CaptureStream = $null
+    }
+}
+
+function Limit-CaptureFileTail {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
-        [long]$MaxBytes = 1MB,
-        [int]$BackupCount = 2
+        [Parameter(Mandatory = $true)]
+        [long]$MaxBytes
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return
     }
-    if ((Get-Item -LiteralPath $Path).Length -lt $MaxBytes) {
+    $Length = (Get-Item -LiteralPath $Path).Length
+    if ($Length -le $MaxBytes) {
         return
     }
-    $oldest = "$Path.$BackupCount"
-    if (Test-Path -LiteralPath $oldest) {
-        Remove-Item -LiteralPath $oldest -Force
+
+    $Buffer = New-Object byte[] ([int]$MaxBytes)
+    $Source = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite
+    )
+    try {
+        [void]$Source.Seek(-$MaxBytes, [System.IO.SeekOrigin]::End)
+        $Offset = 0
+        while ($Offset -lt $Buffer.Length) {
+            $Read = $Source.Read($Buffer, $Offset, $Buffer.Length - $Offset)
+            if ($Read -le 0) {
+                break
+            }
+            $Offset += $Read
+        }
+    } finally {
+        $Source.Dispose()
     }
-    for ($index = $BackupCount - 1; $index -ge 1; $index--) {
-        $source = "$Path.$index"
-        if (Test-Path -LiteralPath $source) {
-            Move-Item -LiteralPath $source -Destination "$Path.$($index + 1)" -Force
+
+    $Target = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Create,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $Start = 0
+        while (
+            $Start -lt $Offset -and
+            (($Buffer[$Start] -band 0xC0) -eq 0x80)
+        ) {
+            $Start++
+        }
+        $Target.Write($Buffer, $Start, $Offset - $Start)
+        $Target.Flush()
+    } finally {
+        $Target.Dispose()
+    }
+}
+
+function Rotate-BoundedCapture {
+    Close-BoundedCapture
+    $Oldest = "$script:CapturePath.$script:CaptureBackupCount"
+    if (Test-Path -LiteralPath $Oldest) {
+        Remove-Item -LiteralPath $Oldest -Force
+    }
+    for ($Index = $script:CaptureBackupCount - 1; $Index -ge 1; $Index--) {
+        $Source = "$script:CapturePath.$Index"
+        if (Test-Path -LiteralPath $Source) {
+            Move-Item -LiteralPath $Source -Destination "$script:CapturePath.$($Index + 1)" -Force
         }
     }
-    Move-Item -LiteralPath $Path -Destination "$Path.1" -Force
+    if (Test-Path -LiteralPath $script:CapturePath) {
+        Move-Item -LiteralPath $script:CapturePath -Destination "$script:CapturePath.1" -Force
+    }
+}
+
+function Open-BoundedCapture {
+    if ($null -ne $script:CaptureStream) {
+        return
+    }
+    $script:CaptureStream = [System.IO.File]::Open(
+        $script:CapturePath,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::Write,
+        ([System.IO.FileShare]::Read -bor [System.IO.FileShare]::Delete)
+    )
+    [void]$script:CaptureStream.Seek(0, [System.IO.SeekOrigin]::End)
+}
+
+function Initialize-BoundedCapture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $script:CapturePath = $Path
+    for ($Index = 0; $Index -le $script:CaptureBackupCount; $Index++) {
+        $Candidate = if ($Index -eq 0) { $Path } else { "$Path.$Index" }
+        Limit-CaptureFileTail -Path $Candidate -MaxBytes $script:CaptureMaxBytes
+    }
+    if (
+        (Test-Path -LiteralPath $Path -PathType Leaf) -and
+        (Get-Item -LiteralPath $Path).Length -ge $script:CaptureMaxBytes
+    ) {
+        Rotate-BoundedCapture
+    }
+    Open-BoundedCapture
+}
+
+function Write-BoundedCaptureRecord {
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [AllowEmptyString()]
+        [object]$Record
+    )
+
+    $Payload = $Utf8NoBom.GetBytes(([string]$Record) + [Environment]::NewLine)
+    $Offset = 0
+    while ($Offset -lt $Payload.Length) {
+        Open-BoundedCapture
+        $Remaining = $script:CaptureMaxBytes - $script:CaptureStream.Length
+        if ($Remaining -le 0) {
+            Rotate-BoundedCapture
+            continue
+        }
+
+        $Take = [int][Math]::Min([long]($Payload.Length - $Offset), $Remaining)
+        if (($Offset + $Take) -lt $Payload.Length) {
+            while (
+                $Take -gt 0 -and
+                (($Payload[$Offset + $Take] -band 0xC0) -eq 0x80)
+            ) {
+                $Take--
+            }
+        }
+        if ($Take -le 0) {
+            Rotate-BoundedCapture
+            continue
+        }
+
+        $script:CaptureStream.Write($Payload, $Offset, $Take)
+        $Offset += $Take
+        if ($Offset -lt $Payload.Length) {
+            Rotate-BoundedCapture
+        }
+    }
+    $script:CaptureStream.Flush()
 }
 
 Set-Location $HashiRoot
@@ -115,13 +251,20 @@ if ($ArgumentList -contains "--log-file") {
     # import and native-launch failures in a small separately rotated file so the
     # parent never holds the primary log open during rollover.
     $CapturePath = $LauncherLogPath
-    Rotate-LauncherLogIfNeeded -Path $CapturePath
 }
+Initialize-BoundedCapture -Path $CapturePath
 
 # Windows PowerShell turns native stderr (including normal server logs) into
 # error records. Keep it in the log without aborting a healthy child process.
 $ErrorActionPreference = "Continue"
 # Legacy registrations must also preserve the sealed interpreter file closure.
-& $Python -B @ArgumentList 2>&1 |
-    Out-File -LiteralPath $CapturePath -Append -Encoding utf8
-exit $LASTEXITCODE
+$ChildExitCode = 1
+try {
+    & $Python -B @ArgumentList 2>&1 | ForEach-Object {
+        Write-BoundedCaptureRecord -Record $_
+    }
+    $ChildExitCode = $LASTEXITCODE
+} finally {
+    Close-BoundedCapture
+}
+exit $ChildExitCode

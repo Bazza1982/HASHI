@@ -766,6 +766,57 @@ exit $LASTEXITCODE
     assert not (tmp_path / "__pycache__").exists()
 
 
+def test_task_runner_bounds_one_long_utf8_execution_and_preserves_exit_code(tmp_path):
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "__init__.py").write_text("", encoding="utf-8")
+    (remote / "__main__.py").write_text(
+        "import sys\n"
+        "for index in range(40):\n"
+        "    sys.stdout.write(f'chunk-{index:03d}-' + ('x' * 65520) + '\\n')\n"
+        "sys.stdout.write('oversized-' + ('🌸' * 300000) + '\\n')\n"
+        "sys.stdout.write('STDOUT_UTF8_🌸_测试\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('STDERR_UTF8_🌸_测试\\n')\n"
+        "sys.stderr.flush()\n"
+        "raise SystemExit(23)\n",
+        encoding="utf-8",
+    )
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    primary = logs / "hashi-remote-supervisor.log"
+    launcher = logs / "hashi-remote-launcher.log"
+    arguments = base64.b64encode(
+        json.dumps(
+            [
+                "-B",
+                "-m",
+                "remote",
+                "--hashi-root",
+                str(tmp_path),
+                "--supervised",
+                "--log-file",
+                str(primary),
+            ]
+        ).encode("utf-8")
+    ).decode("ascii")
+
+    result = _powershell(f"""
+& {_ps_string(ROOT / 'bin/hashi_remote_task_runner.ps1')} -Python {_ps_string(sys.executable)} -HashiRoot {_ps_string(tmp_path)} -CodeRoot {_ps_string(tmp_path)} -LogPath {_ps_string(primary)} -PythonArgsBase64 {_ps_string(arguments)}
+exit $LASTEXITCODE
+""")
+
+    assert result.returncode == 23, result.stderr
+    retained = [launcher, Path(f"{launcher}.1"), Path(f"{launcher}.2")]
+    assert all(path.exists() for path in retained)
+    assert all(0 < path.stat().st_size <= 1024 * 1024 for path in retained)
+    decoded = [path.read_bytes().decode("utf-8") for path in retained]
+    retained_text = "".join(decoded)
+    assert "STDOUT_UTF8_🌸_测试" in retained_text
+    assert "STDERR_UTF8_🌸_测试" in retained_text
+    assert not primary.exists()
+
+
 def test_legacy_remote_task_adopts_process_owned_bounded_log(tmp_path):
     remote = tmp_path / "remote"
     remote.mkdir()
@@ -804,7 +855,7 @@ exit $LASTEXITCODE
     received = json.loads((tmp_path / "received.json").read_text(encoding="utf-8"))
     assert received[-2:] == ["--log-file", str(primary)]
     assert "LEGACY_REMOTE_LAUNCHED" in launcher.read_text(encoding="utf-8-sig")
-    assert (logs / "hashi-remote-launcher.log.1").stat().st_size == 1024 * 1024 + 1
+    assert (logs / "hashi-remote-launcher.log.1").stat().st_size == 1024 * 1024
     assert not primary.exists()
 
 

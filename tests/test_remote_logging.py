@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
 import logging
 from pathlib import Path
 
+import pytest
+
+from remote import main as remote_main
 from remote.main import _remote_log_handler, _trim_oversized_log
 
 
@@ -51,3 +55,57 @@ def test_remote_log_handler_bounds_files_backups_and_single_records(tmp_path: Pa
     assert len(files) == 3
     assert all(candidate.stat().st_size <= 512 for candidate in files)
     assert "[truncated " in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("failure_mode", ["open", "write"])
+def test_unavailable_remote_log_uses_stable_supervisor_fallback(
+    tmp_path: Path, monkeypatch, failure_mode: str
+):
+    class _WriteFailureStream:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def write(self, value):
+            raise OSError("simulated initial write failure")
+
+        def __getattr__(self, name):
+            return getattr(self._stream, name)
+
+    fallback = io.StringIO()
+    monkeypatch.setattr(remote_main.sys, "stderr", fallback)
+    log_file = tmp_path / "remote.log"
+    if failure_mode == "open":
+        blocked_parent = tmp_path / "not-a-directory"
+        blocked_parent.write_text("blocked", encoding="utf-8")
+        log_file = blocked_parent / "remote.log"
+    else:
+        original_open = remote_main._Utf8RotatingFileHandler._open
+
+        def open_unwriteable(handler):
+            return _WriteFailureStream(original_open(handler))
+
+        monkeypatch.setattr(
+            remote_main._Utf8RotatingFileHandler, "_open", open_unwriteable
+        )
+    app = remote_main.HashiRemoteApplication(
+        hashi_root=tmp_path,
+        use_tls=False,
+        log_file=log_file,
+    )
+
+    try:
+        app._setup_logging()
+        remote_main.logger.error("fallback-record-one")
+        remote_main.logger.error("fallback-record-two")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+    finally:
+        logging.basicConfig(handlers=[logging.NullHandler()], force=True)
+
+    output = fallback.getvalue()
+    assert output.count("Could not activate bounded Remote log") == 1
+    if failure_mode == "write":
+        assert "simulated initial write failure" in output
+    assert "fallback-record-one" in output
+    assert "fallback-record-two" in output
+    assert "--- Logging error ---" not in output

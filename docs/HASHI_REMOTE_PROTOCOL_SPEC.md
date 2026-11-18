@@ -186,9 +186,17 @@ UTF-8 rotating handler. Each file is bounded to 16 MiB with three backups (64
 MiB total primary-log retention), and a single rendered record is capped at 256
 KiB. On first adoption, an oversized
 legacy current file is reduced with one tail seek to the configured bound; it is
-not scanned or copied in full. Windows captures only bootstrap/import failures
-in the separately rotated `hashi-remote-launcher.log`, while Linux sends those
-residual streams to the bounded system journal. This keeps rotation off the
+not scanned or copied in full. The file handler is accepted only after its
+target has opened and passed a reversible write, flush and durability probe. A
+failed initial sink falls back once to supervisor-captured stderr instead of
+installing a handler that emits a traceback for every later record.
+
+Windows captures bootstrap/import failures in
+`hashi-remote-launcher.log`, bounded continuously to one 1 MiB current file and
+two backups. Its PowerShell 5.1-compatible streaming writer preserves merged
+stdout/stderr and the child exit code, rotates during one long-running process,
+and splits an oversized record only at UTF-8 character boundaries. Linux sends
+the residual stream to the bounded system journal. This keeps rotation off the
 Workbench request path and prevents a supervisor parent from holding the primary
 file open during rollover.
 
