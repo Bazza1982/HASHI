@@ -321,6 +321,50 @@ async def test_code_search_guard_inventory_excludes_links_and_protected(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_code_search_user_glob_cannot_reinclude_protected_paths(tmp_path, monkeypatch):
+    """A user-supplied positive glob must never override the mandatory
+    protected/link exclusions (ripgrep last-match-wins). Covers content and
+    files modes with a protected descendant and a symlink to a protected
+    file, including when ripgrep is configured to follow symlinks."""
+    if not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "notes.txt").write_text("needle-public", encoding="utf-8")
+    (tmp_path / "open.txt").write_text("needle-public in the open file", encoding="utf-8")
+    link = tmp_path / "linked.txt"
+    linked = False
+    try:
+        link.symlink_to(secret / "notes.txt")
+        linked = True
+    except (OSError, NotImplementedError):
+        pass
+    # Make ripgrep follow symlinks via its config file so the link exclusion
+    # is exercised for real instead of being skipped by rg's default no-follow.
+    rg_conf = tmp_path / "rg.conf"
+    rg_conf.write_text("--follow\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(rg_conf))
+    registry = _with_protected(_registry(tmp_path), secret)
+
+    content = await _run(registry, "code_search", {
+        "query": "needle-public", "mode": "content", "glob": "*.txt"})
+    assert content["ok"] and content["engine"] == "ripgrep"
+    hits = content["matches"]
+    assert any("open.txt" in line for line in hits), hits
+    assert not any("secret" in line for line in hits), hits
+    if linked:
+        assert not any("linked.txt" in line for line in hits), hits
+
+    files = await _run(registry, "code_search", {
+        "query": "txt", "mode": "files", "glob": "*.txt"})
+    assert files["ok"]
+    assert any("open.txt" in line for line in files["matches"]), files
+    assert not any("secret" in line for line in files["matches"]), files
+    if linked:
+        assert not any("linked.txt" in line for line in files["matches"]), files
+
+
+@pytest.mark.asyncio
 async def test_project_locate_skips_protected_repositories(tmp_path):
     """P1A: a protected tree containing a matching .git/config must never be
     reported; an authorised sibling repository is still found."""
@@ -417,11 +461,30 @@ async def test_file_manage_directory_copy_works_when_clean(tmp_path):
 
 @pytest.mark.asyncio
 async def test_cancelled_recursive_copy_makes_no_further_writes(tmp_path, monkeypatch):
-    """P1C: cancelling a large recursive copy must settle the worker thread
-    and leave no partial files or staging artifacts behind."""
+    """P1C: cancelling an in-progress recursive copy must settle the worker
+    thread deterministically: cancellation is acknowledged as stopped, no new
+    files appear after confirmed settlement, staging artifacts are removed,
+    and ordinary completed file operations keep working afterwards."""
+    import threading
     import time as _time
     from tools import developer_toolkit as toolkit
     monkeypatch.setattr(toolkit, "_COPY_CHUNK_BYTES", 512)
+
+    # Deterministic barrier: pause the real copy inside copystat — after the
+    # first file is atomically placed and before the next one begins. The gate
+    # is released only after cancellation has been requested, so the worker's
+    # very next action is its cooperative cancel check.
+    gate = threading.Event()
+    entered = threading.Event()
+    real_copystat = toolkit.shutil.copystat
+
+    def blocking_copystat(source_file, dest_file, **kwargs):
+        entered.set()
+        gate.wait(timeout=30)
+        return real_copystat(source_file, dest_file, **kwargs)
+
+    monkeypatch.setattr(toolkit.shutil, "copystat", blocking_copystat)
+
     src = tmp_path / "big"
     src.mkdir()
     for index in range(8):
@@ -430,19 +493,35 @@ async def test_cancelled_recursive_copy_makes_no_further_writes(tmp_path, monkey
     task = asyncio.create_task(registry.execute("file_manage", {
         "operation": "copy", "source": "big", "destination": "out", "recursive": True
     }, "cancel-me"))
-    while not (tmp_path / "out").exists():
-        await asyncio.sleep(0.01)
-    _time.sleep(0.02)
+    # Wait until the copy is genuinely in progress and paused at the barrier.
+    await asyncio.wait_for(asyncio.to_thread(entered.wait, 10), timeout=15)
+    assert (tmp_path / "out" / "f0.bin").exists()
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    # Give the loop a moment to deliver cancellation so the worker's cancel
+    # Event is set before the gate opens; the worker then aborts at its
+    # next check and the settle window closes promptly.
+    await asyncio.sleep(0.05)
+    gate.set()
+    started = _time.monotonic()
+    with pytest.raises(asyncio.CancelledError) as excinfo:
         await task
-    # Files already atomically placed before the stop may remain; the
-    # contract is that nothing NEW is written after cancellation settles.
+    elapsed = _time.monotonic() - started
+    details = getattr(excinfo.value, "hashi_tool_details", None) or {}
+    mutation = details.get("toolkit_mutation") or {}
+    assert mutation.get("status") == "stopped", details
+    assert elapsed < 5.0, f"settle took {elapsed:.2f}s; /stop responsiveness broken"
+    # Nothing NEW may be written after confirmed settlement; staging gone.
     settled = sorted(p.name for p in (tmp_path / "out").iterdir())
     await asyncio.sleep(0.2)
     after = sorted(p.name for p in (tmp_path / "out").iterdir())
     assert settled == after, (settled, after)
     assert not any(name.startswith(".hashi-copy-") for name in after), after
+    # Ordinary completed file operations must keep working after cancellation.
+    (tmp_path / "small.txt").write_text("still works", encoding="utf-8")
+    ok = await _run(registry, "file_manage", {
+        "operation": "copy", "source": "small.txt", "destination": "done.txt"
+    })
+    assert ok["ok"] and (tmp_path / "done.txt").read_text() == "still works"
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-﻿"""
+"""
 ToolRegistry — permission-checked tool dispatcher for HASHI.
 
 HERV3 consumes it directly inside its Function Worker. Isolated CLI Engines

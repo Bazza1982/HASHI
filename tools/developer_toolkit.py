@@ -263,16 +263,18 @@ async def _code_search(args: dict, read_roots: tuple[Path, ...],
                 mode, glob, max_results, timeout
             )
         command = [binary, "--color", "never", "--no-messages"]
+        if glob:
+            # User filters must come FIRST: ripgrep's glob matching is
+            # last-match-wins, and every exclusion below is appended after the
+            # user's filters so a broad positive glob (e.g. *.txt) can never
+            # re-include a protected or out-of-scope path.
+            command.extend(["--glob", glob])
         # Guard globs are literal exclusion patterns (e.g. !secret, !secret/**);
         # each one needs its own --glob option so ripgrep cannot treat it as
-        # a positional path argument.
+        # a positional path argument. They are appended AFTER user filters so
+        # the protected/link exclusions are always the final word.
         for excluded in guard_globs:
             command.extend(["--glob", excluded])
-        if glob:
-            # User filters must come before the guard exclusions: ripgrep's
-            # glob matching is last-match-wins, and the protected/link
-            # exclusions must always be the final word.
-            command.extend(["--glob", glob])
         if mode == "files":
             command.extend(["--files", "--hidden", "--glob", "!.git/**"])
         else:
