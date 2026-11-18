@@ -6,7 +6,6 @@ import base64
 import hmac
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -23,7 +22,24 @@ class DesktopSession:
     client: str
     binding: dict
     expires: float
+    last_touch: float
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+def _is_loopback(request) -> bool:
+    return (getattr(request, "remote", None) or "") in {"127.0.0.1", "::1", "localhost"}
+
+
+def _admit_and_resolve_owner(api, request) -> str:
+    """Local Workbench desktop is a pure local capability: HASHI must not gate it."""
+    if not _is_loopback(request) and (not api.admin_token or not api._check_admin_auth(request)):
+        raise DesktopError("desktop_auth_required", 403)
+    owner = api._v1_owner_id(request)
+    if owner:
+        return owner
+    if _is_loopback(request):
+        return "workbench-local"
+    raise DesktopError("desktop_auth_required", 403)
 
 
 class DesktopSessionService:
@@ -37,6 +53,31 @@ class DesktopSessionService:
         if broker is None: raise DesktopError("desktop_worker_unavailable", 503)
         return broker
 
+    async def _evict_for_capacity(self):
+        """Never refuse the current user: drop the least recently touched session."""
+        while len(self.sessions) >= 8:
+            sid = min(self.sessions, key=lambda key: self.sessions[key].last_touch)
+            record = self.sessions.pop(sid)
+            try:
+                await self.broker().invoke_desktop(record.binding, actor_id=record.owner,
+                                                   session_id=sid, operation="desktop_close", args={})
+            except Exception:
+                pass  # Worker-side expiry remains authoritative on lost links.
+
+    @staticmethod
+    def _refresh_target(requested, targets):
+        """A restarted worker or changed generation must not kill the entry."""
+        if not targets:
+            raise DesktopError("desktop_worker_unavailable", 503)
+        if isinstance(requested, dict):
+            for field in ("capability_id", "device_id"):
+                value = requested.get(field)
+                if value:
+                    for target in targets:
+                        if target.get(field) == value:
+                            return target
+        return targets[0]
+
     async def run(self, owner, body):
         b = fields(body, {"operation", "client_id", "session_id", "target", "options", "after_frame", "refresh_profile", "mode", "lease_id", "event"}, {"operation", "client_id"})
         client = identifier(b["client_id"], "client")
@@ -47,15 +88,15 @@ class DesktopSessionService:
             return {"targets": self.broker().desktop_targets(), "protocol_version": 1}
         if op == "open":
             async with self.open_lock:
-                if len(self.sessions) >= 8: raise DesktopError("desktop_session_limit", 429)
-                target = b.get("target")
+                await self._evict_for_capacity()
+                requested = b.get("target")
                 targets = self.broker().desktop_targets()
-                if not isinstance(target, dict) or target not in targets:
-                    raise DesktopError("desktop_target_changed", 409)
+                target = requested if isinstance(requested, dict) and requested in targets else self._refresh_target(requested, targets)
                 sid = "desktop-"+uuid4().hex
                 info = await self.broker().invoke_desktop(target, actor_id=owner, session_id=sid,
                                                          operation="desktop_info", args={})
-                record = DesktopSession(owner, client, dict(target), self.clock()+SESSION_TTL)
+                now = self.clock()
+                record = DesktopSession(owner, client, dict(target), now+SESSION_TTL, now)
                 self.sessions[sid] = record
                 return {"session_id": sid, "binding": target, **info}
         sid = identifier(b.get("session_id"), "session")
@@ -63,7 +104,9 @@ class DesktopSessionService:
         if record is None: raise DesktopError("desktop_session_expired", 410)
         if not hmac.compare_digest(owner, record.owner) or not hmac.compare_digest(client, record.client):
             raise DesktopError("desktop_session_forbidden", 403)
-        record.expires = self.clock()+SESSION_TTL
+        now = self.clock()
+        record.expires = now+SESSION_TTL
+        record.last_touch = now
         mapping = {"previews": "desktop_previews", "frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
         if op not in mapping: raise DesktopError("desktop_invalid_operation")
         if op == "frame":
@@ -126,16 +169,7 @@ def register_desktop_api(api):
         headers = {"Cache-Control": "no-store, private", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"}
         authenticated, dispatched, readonly, phase = False, False, False, "scope"
         try:
-            if not getattr(getattr(api, "global_config", None), "desktop_enabled", True) and os.environ.get("HASHI_DESKTOP_ENABLED") != "1":
-                raise DesktopError("desktop_disabled", 404)
-            # The personal local API must have its EXISTING admin token configured.
-            # HASHI Remote injects it on the authenticated loopback hop.
-            if api._is_governed_profile():
-                raise DesktopError("desktop_profile_unsupported", 501)
-            if not api.admin_token or not api._check_admin_auth(request):
-                raise DesktopError("desktop_auth_required", 403)
-            owner = api._v1_owner_id(request)
-            if not owner: raise DesktopError("desktop_auth_required", 403)
+            owner = _admit_and_resolve_owner(api, request)
             authenticated, phase = True, "parse"
             if request.content_type != "application/json": raise DesktopError("desktop_json_required", 415)
             raw = bytearray()

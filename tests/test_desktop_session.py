@@ -238,7 +238,7 @@ def test_human_control_holds_real_cross_process_lock(desktop,tmp_path):
     other=_DeviceLock(tmp_path/'input.lock')
     with pytest.raises(Exception,match='lock'): other.acquire()
     with pytest.raises(DesktopError,match='busy'): control(c,'session-b','owner-b','lease-b')
-    t[0]+=9; c.expire()
+    t[0]+=31; c.expire()
     assert c.owner is None and n.resets==1
     other.acquire(); other.release()
 
@@ -403,7 +403,7 @@ async def test_pinned_worker_generation_never_reroutes(desktop,tmp_path):
     assert n.captures==0
 
 
-async def test_concurrent_opens_cannot_exceed_session_limit():
+async def test_concurrent_opens_evict_least_recently_used_instead_of_refusing():
     class SlowBroker:
         def desktop_targets(self): return [{'capability_id': 'cap-a'}]
         async def invoke_desktop(self, *_args, **_kwargs):
@@ -412,12 +412,11 @@ async def test_concurrent_opens_cannot_exceed_session_limit():
     service = DesktopSessionService(SlowBroker)
     target = service.broker().desktop_targets()[0]
     results = await asyncio.gather(*(service.run('owner-a', {'operation': 'open', 'client_id': f'client-{n}', 'target': target}) for n in range(9)), return_exceptions=True)
-    assert sum(isinstance(r, dict) for r in results) == 8
-    assert sum(isinstance(r, DesktopError) and r.code == 'desktop_session_limit' for r in results) == 1
+    assert all(isinstance(r, dict) for r in results)
     assert len(service.sessions) == 8
 
 
-async def test_http_api_defaults_ready_and_keeps_existing_auth(desktop,tmp_path,monkeypatch):
+async def test_http_api_local_loopback_needs_no_admin_token_or_global_switch(desktop,tmp_path,monkeypatch):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
     from orchestrator.config import GlobalConfig
@@ -426,24 +425,38 @@ async def test_http_api_defaults_ready_and_keeps_existing_auth(desktop,tmp_path,
     config=GlobalConfig(authorized_id=0)
     api=SimpleNamespace(app=web.Application(),orchestrator=SimpleNamespace(capability_broker=broker),
                         global_config=config,admin_token='',_is_governed_profile=lambda:False,
-                        _check_admin_auth=lambda r:r.headers.get('X-Workbench-Token')=='existing-token',
+                        _check_admin_auth=lambda r:False,
                         _v1_owner_id=lambda r:'owner-a')
     register_desktop_api(api)
     async with TestClient(TestServer(api.app)) as client:
         payload={'operation':'targets','client_id':'client-a'}
         monkeypatch.delenv('HASHI_DESKTOP_ENABLED',raising=False)
         r=await client.post('/api/v1/desktop/operation',json=payload)
-        assert r.status==403
-        api.admin_token='existing-token'
-        r=await client.post('/api/v1/desktop/operation',json=payload)
-        assert r.status==403
-        assert 'no-store' in r.headers['Cache-Control']
-        r=await client.post('/api/v1/desktop/operation',json=payload,headers={'X-Workbench-Token':'existing-token'})
         assert r.status==200
+        assert 'no-store' in r.headers['Cache-Control']
         assert (await r.json())['targets']
+        # A HASHI global switch must never remove the local entry point.
         config.desktop_enabled=False
-        r=await client.post('/api/v1/desktop/operation',json=payload,headers={'X-Workbench-Token':'existing-token'})
-        assert r.status==404
+        r=await client.post('/api/v1/desktop/operation',json=payload)
+        assert r.status==200
+
+
+def test_admission_gates_remote_but_never_local():
+    from orchestrator.desktop_api import _admit_and_resolve_owner, _is_loopback
+    api = SimpleNamespace(admin_token='tok', _check_admin_auth=lambda r: r.headers.get('x-a')=='ok',
+                          _v1_owner_id=lambda r: 'owner-a')
+    local = SimpleNamespace(remote='127.0.0.1', headers={})
+    remote_ok = SimpleNamespace(remote='10.1.2.3', headers={'x-a':'ok'})
+    remote_bad = SimpleNamespace(remote='10.1.2.3', headers={})
+    assert _is_loopback(local) and not _is_loopback(remote_ok)
+    assert _admit_and_resolve_owner(api, local) == 'owner-a'
+    assert _admit_and_resolve_owner(api, remote_ok) == 'owner-a'
+    with pytest.raises(DesktopError, match='desktop_auth_required'):
+        _admit_and_resolve_owner(api, remote_bad)
+    fallback = SimpleNamespace(admin_token='', _check_admin_auth=lambda r: False, _v1_owner_id=lambda r: None)
+    assert _admit_and_resolve_owner(fallback, local) == 'workbench-local'
+    with pytest.raises(DesktopError, match='desktop_auth_required'):
+        _admit_and_resolve_owner(fallback, remote_bad)
 
 
 async def test_real_http_route_relays_frame_and_input_receipt(desktop,tmp_path,monkeypatch):
@@ -531,7 +544,7 @@ def test_abandoned_view_sessions_release_cached_frames(desktop):
         session_id = f'session-{index}'
         c.handle('desktop_view', {'display_id': 'monitor-1'}, 'owner-a', session_id)
         c.handle('desktop_frame', {}, 'owner-a', session_id)
-        now[0] += 61
+        now[0] += 601
         c.expire()
         assert len(c.sessions) == 0
     assert native.captures == 12

@@ -5,7 +5,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from uuid import uuid4
 
-from orchestrator.desktop_contract import ACTIONS, SUPPORTED_ACTIONS, CONTROL_TTL, PIN_FIELDS, DesktopError
+from orchestrator.desktop_contract import SUPPORTED_ACTIONS, CONTROL_TTL, PIN_FIELDS, DesktopError
 
 
 @dataclass(frozen=True)
@@ -43,15 +43,16 @@ class ManualDesktopBroker:
         status = self.status()
         return [{**{k: item[k] for k in PIN_FIELDS},
                  **({"physical_host_id": item["physical_host_id"], "interactive_session_id": item["interactive_session_id"]}
-                    if item.get("physical_host_id") and item.get("interactive_session_id") else {})}
+                    if item.get("physical_host_id") and item.get("interactive_session_id") else {}),
+                 "supported_actions": sorted(item["supported_actions"])}
                 for item in status["capabilities"]
                 if item["capability_kind"] == "computer_control" and item["platform"].lower() == "windows"
-                and ACTIONS.issubset(item["supported_actions"])]
+                and "desktop_view" in item["supported_actions"]]
 
     def _desktop_record(self, pin):
         registration, token = self._record(pin.get("capability_id", ""))
         actual = registration.to_dict()
-        if any(pin.get(k) != actual.get(k) for k in PIN_FIELDS) or registration.capability_kind != "computer_control" or not ACTIONS.issubset(registration.supported_actions):
+        if any(pin.get(k) != actual.get(k) for k in PIN_FIELDS) or registration.capability_kind != "computer_control" or "desktop_view" not in registration.supported_actions:
             raise DesktopError("desktop_target_changed", 409)
         return registration, token
 

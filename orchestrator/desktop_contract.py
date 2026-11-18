@@ -18,8 +18,9 @@ MAX_FRAME_BYTES = 512 * 1024
 ULTRA_FRAME_BYTES = 256 * 1024
 ULTRA_BYTES_PER_SECOND = 4 * 1024 * 1024
 MAX_TEXT = 4096
-CONTROL_TTL = 8.0
-SESSION_TTL = 60.0
+CONTROL_TTL = 30.0
+SESSION_TTL = 600.0
+IDLE_RESET_SECONDS = 30.0
 FRAME_INTERVAL_SECONDS = {"standard": (0.5, 2.0), "smooth": (1 / 20, 0.5), "ultra_smooth": (1 / 30, 0.5)}
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 
@@ -30,12 +31,24 @@ class DesktopError(ValueError):
         self.code, self.status = code, status
 
     def projection(self):
-        windows = {"desktop_locked", "desktop_input_failed", "desktop_displays_unavailable", "desktop_platform_unsupported"}
-        transport = {"desktop_outcome_unknown", "desktop_worker_unavailable"}
-        return {"error_code": self.code, "reason": self.code,
-                "layer": "windows" if self.code in windows else "transport" if self.code in transport else "hashi",
-                "retryable": self.code in {"desktop_locked", "desktop_worker_unavailable", "desktop_capture_busy",
-                                           "desktop_session_expired", "desktop_display_changed", "desktop_target_changed"}}
+        windows = {"desktop_locked", "desktop_input_failed", "desktop_displays_unavailable", "desktop_platform_unsupported",
+                   "desktop_capture_unavailable", "desktop_capture_failed", "desktop_capture_busy",
+                   "desktop_frame_too_large", "desktop_invalid_frame", "desktop_invalid_size", "desktop_stale_frame",
+                   "desktop_display_changed", "desktop_control_busy", "desktop_session_expired"}
+        transport = {"desktop_outcome_unknown"}
+        worker = {"desktop_worker_failed", "desktop_worker_unavailable", "desktop_secure_host_unavailable",
+                  "desktop_session_limit"}
+        retryable = {
+            "desktop_locked", "desktop_worker_unavailable", "desktop_capture_busy",
+            "desktop_session_expired", "desktop_display_changed", "desktop_target_changed",
+            "desktop_capture_unavailable", "desktop_capture_failed", "desktop_frame_too_large",
+            "desktop_invalid_frame", "desktop_invalid_size", "desktop_stale_frame",
+            "desktop_control_busy", "desktop_worker_failed", "desktop_secure_host_unavailable",
+            "desktop_session_limit", "desktop_outcome_unknown",
+        }
+        layer = ("windows" if self.code in windows else "transport" if self.code in transport
+                 else "worker" if self.code in worker else "hashi")
+        return {"error_code": self.code, "reason": self.code, "layer": layer, "retryable": self.code in retryable}
 
 
 def identifier(value, field="id") -> str:

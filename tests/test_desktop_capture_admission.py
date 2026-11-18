@@ -70,4 +70,33 @@ def test_actual_native_capture_failure_is_not_converted_to_success():
         assert controller.sessions["session"].frame_cache is None
     finally:
         controller.close()
+
+
+def test_bare_windows_capture_failures_become_typed_recoverable_errors():
+    locked = SimpleNamespace(win32=SimpleNamespace(get_desktop_state=lambda: {"locked": True}))
+    access_denied = PermissionError(13, "Access is denied")
+    access_denied.winerror = 5
+    error = NativeDesktop._native_capture_failure(locked, access_denied)
+    assert isinstance(error, DesktopError)
+    assert error.code == "desktop_locked" and error.status == 423
+    assert error.projection()["layer"] == "windows"
+    assert error.projection()["retryable"] is True
+
+    unlocked = SimpleNamespace(win32=SimpleNamespace(get_desktop_state=lambda: {"locked": False}))
+    invalid_handle = OSError(6, "invalid handle")
+    invalid_handle.winerror = 6
+    error = NativeDesktop._native_capture_failure(unlocked, invalid_handle)
+    assert error.code == "desktop_capture_unavailable" and error.status == 503
+    assert error.winerror == 6
+    assert error.projection()["layer"] == "windows"
+    assert error.projection()["retryable"] is True
+
+
+def test_worker_failure_fallback_is_retryable_worker_layer():
+    assert DesktopError("desktop_worker_failed", 503).projection() == {
+        "error_code": "desktop_worker_failed",
+        "reason": "desktop_worker_failed",
+        "layer": "worker",
+        "retryable": True,
+    }
 # HASHI-Fingerprint: hfp_cc9510091c9149cbbcc06f365daafc2b

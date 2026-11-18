@@ -106,7 +106,7 @@ async def test_desktop_input_exception_after_dispatch_is_unknown_and_never_repea
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("authenticated", [True, False])
-async def test_desktop_validation_and_auth_rejection_keep_the_original_contract(
+async def test_desktop_local_loopback_validation_never_hits_admin_auth(
     tmp_path, authenticated
 ):
     api = _api(tmp_path)
@@ -121,8 +121,6 @@ async def test_desktop_validation_and_auth_rejection_keep_the_original_contract(
             headers={"Content-Type": "application/json"},
         )
         data = await response.json()
-    assert response.status == (400 if authenticated else 403)
-    assert data["error_code"] == (
-        "desktop_invalid_request" if authenticated else "desktop_auth_required"
-    )
+    assert response.status == 400
+    assert data["error_code"] == "desktop_invalid_request"
     assert "diagnostic_ref" not in data and broker.calls == []

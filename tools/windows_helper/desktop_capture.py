@@ -170,11 +170,31 @@ class NativeDesktop:
                 self.g.GdiFlush()
                 raw = ctypes.string_at(bits, width * height * 4)
                 return Image.frombytes("RGB", (width, height), raw, "raw", "BGRX")
+            except OSError as exc:
+                raise self._native_capture_failure(exc) from exc
             finally:
                 if old and memory: self.g.SelectObject(memory, old)
                 if bitmap: self.g.DeleteObject(bitmap)
                 if memory: self.g.DeleteDC(memory)
                 if screen: self.u.ReleaseDC(None, screen)
+
+    def _native_capture_failure(self, exc):
+        """Translate a raw Win32 capture failure into a typed, recoverable error.
+
+        A locked or secure desktop rejects screen reads with WinError 5. Any
+        other failure keeps its native error for diagnostics and still becomes
+        a retryable windows-layer error instead of a generic worker failure.
+        """
+        winerror = getattr(exc, "winerror", None)
+        if winerror == 5:
+            try:
+                if self.win32.get_desktop_state().get("locked"):
+                    return DesktopError("desktop_locked", 423)
+            except Exception:
+                pass  # An unreadable lock label must not mask the real failure.
+        error = DesktopError("desktop_capture_unavailable", 503)
+        error.winerror = winerror
+        return error
 
     def inject(self, event):
         """Input is called under the controller lock; only its keys are released."""
