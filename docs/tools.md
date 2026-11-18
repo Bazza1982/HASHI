@@ -247,6 +247,13 @@ context. Do not replace a `needs_replan` result with differently quoted
 commands and HASHI Background Jobs for genuinely long processes. An instance
 may configure a generous process-local foreground safety fuse.
 
+## HERV3 Small-Model Daily and Development Toolkit (experimental)
+
+See [HERV3 Small-Model Toolkit](HERV3_SMALL_MODEL_TOOLKIT.md) for the
+opt-in on-demand tool catalogue, seven structured daily/development functions,
+and tool-local search deadlines (not Agent timeouts). Production use requires
+independent local verification; no new permissions are introduced.
+
 ## Skills System
 - Skills live under `skills/` as `skills/<kebab-case-name>/SKILL.md` packages.
 - Frontmatter requires standard `name` and `description`; Agent Skills optional metadata fields are accepted, while the Markdown body supplies request instructions.

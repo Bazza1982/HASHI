@@ -4952,6 +4952,22 @@ class HashiStageProvider(StageProvider):
                     bound_plan_id=str(request.plan_id or ""),
                     enforce_plan_binding=request.role.startswith("sub_agent:"),
                 )
+            # Opt-in compact schema presentation is request-local; tool_find
+            # reveals additional already-authorised tools on the next model call.
+            # Tool execution and admission still pass through the same PAO Registry.
+            if request.context.get("her_v3") is True:
+                from tools.tool_presentation import OnDemandToolView, on_demand_requested
+                if (
+                    on_demand_requested(
+                        getattr(self.tool_registry, "tool_options", None),
+                        model=profile.model,
+                        is_herv3=True,
+                    )
+                    and bool(getattr(selected_registry, "is_allowed")("tool_find"))
+                ):
+                    selected_registry = OnDemandToolView(
+                        selected_registry, goal=request.goal,
+                    )
             cognitive_registry = _CognitiveControlToolRegistry(
                 selected_registry,
                 request,

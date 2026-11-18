@@ -19,6 +19,7 @@ from orchestrator.workzone import (
 )
 from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
+from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES
 
 
 def test_workzone_off_has_no_prompt(tmp_path: Path):
@@ -351,4 +352,34 @@ def test_tool_registry_wildcard_excludes_explicit_opt_in_tools(tmp_path: Path):
     assert set(registry._allowed) == set(ALL_TOOL_NAMES) - {
         "media_read",
         "vision_inspect",
+        *TOOLKIT_TOOL_NAMES,
     }
+
+
+def test_tool_registry_wildcard_adopts_toolkit_tools_only_when_listed(tmp_path: Path):
+    """Explicitly listed toolkit tools are adopted by a wildcard instance;
+    unlisted toolkit tools remain opt-in so a wildcard never silently broadens
+    an instance's capabilities."""
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.current_backend = SimpleNamespace(tool_registry=None)
+    manager.secrets = {}
+    manager.global_config = SimpleNamespace(authorized_id=123)
+    manager.config = SimpleNamespace(name="agent", telegram_token_key="agent")
+    manager.logger = SimpleNamespace(error=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None)
+    adapter_cfg = SimpleNamespace(
+        name="agent",
+        extra={},
+        workspace_dir=tmp_path,
+        resolve_access_root=lambda: tmp_path,
+    )
+
+    manager._attach_tool_registry(
+        {"allowed": ["*", "code_search", "data_inspect"]}, adapter_cfg
+    )
+
+    registry = manager.current_backend.tool_registry
+    assert "code_search" in registry._allowed
+    assert "data_inspect" in registry._allowed
+    assert "file_manage" not in registry._allowed
+    assert "text_replace" not in registry._allowed
+    assert "media_read" not in registry._allowed
