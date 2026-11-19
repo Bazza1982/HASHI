@@ -334,8 +334,13 @@ def normalize_query(args: dict, *, defaults: list[dict], read_roots, cwd: Path,
 
 async def run_worker(config):
     request = json.dumps(config, ensure_ascii=False).encode('utf-8') + b'\n'
-    if len(request) > 4 * 1024 * 1024:
-        raise ValueError('Search request exceeds the worker transport capacity')
+    state_capacity = config.get('state_capacity_bytes', 3 * 1024 * 1024)
+    if type(state_capacity) is not int or state_capacity < 0:
+        raise ValueError('Search continuation capacity must be a nonnegative integer')
+    # Result records contain the selected state plus a small coverage envelope.
+    # A configured zero deliberately removes that capacity bound.
+    record_limit = state_capacity + 2 * 1024 * 1024 if state_capacity else None
+    stream_limit = max(4 * 1024 * 1024, record_limit) if record_limit else sys.maxsize
     from tools.builtins import (_bash_process_kwargs, _bash_process_group_id,
                                 _cleanup_bash_process, _shield_bash_cleanup)
     activity = CURRENT_ACTIVITY.get()
@@ -350,7 +355,7 @@ async def run_worker(config):
         proc = await asyncio.create_subprocess_exec(
             sys.executable, '-B', str(Path(__file__).with_name('search_worker.py')),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, limit=4 * 1024 * 1024,
+            stderr=asyncio.subprocess.PIPE, limit=stream_limit,
             **_bash_process_kwargs())
         group = _bash_process_group_id(proc)
         if activity:
@@ -364,7 +369,7 @@ async def run_worker(config):
         async def read_out():
             nonlocal result, partial
             while line := await proc.stdout.readline():
-                if len(line) > 4 * 1024 * 1024:
+                if record_limit and len(line) > record_limit:
                     raise ValueError('search worker record exceeds transport budget')
                 event = json.loads(line)
                 if event.get('kind') == 'progress':
@@ -474,9 +479,12 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
         return failed(str(exc), status='unavailable', code='regex_unavailable')
     except (ValueError, OSError) as exc:
         return failed(str(exc))
+    state_caps = [continuations.policy[key] for key in ('max_state_bytes', 'max_bytes')
+                  if continuations.policy[key]]
     config.update(authorized_roots=[str(root) for root in read_roots],
                   protected_read_paths=list(map(str, protected_read_paths)),
-                  match_budget=8000)
+                  match_budget=8000,
+                  state_capacity_bytes=min(state_caps) if state_caps else 0)
     scope_size = len(json.dumps({'query': config['query'], 'roots': config['selected_roots'],
         'filters': {key: config[key] for key in ('include', 'exclude')}}, ensure_ascii=False))
     compact_scope = operation == 'file_search' and scope_size > 4000

@@ -81,10 +81,11 @@ file_search.continuations max_entries, max_bytes, max_state_bytes and ttl_second
 settings apply per Run; zero disables the selected bound. Byte limits count the
 serialized UTF-8 state, while the private disk representation and metadata use
 additional space. Expired checkpoints are inaccessible but remain on disk until
-terminal Run cleanup. The effective settings appear in the search result.
-Changing these settings does not remove the worker's separate serialization
-limit. Storage failure or an explicit capacity limit is reported as incomplete,
-not as a complete search.
+terminal Run cleanup. The effective settings appear in the search result. The
+scanner uses the smaller nonzero state/aggregate setting rather than a second
+fixed transport ceiling. Larger or unlimited settings allow larger transient
+worker state and may use more memory. Storage failure or an explicit capacity
+limit is reported as incomplete, not as a complete search.
 
 Calls without a complete trusted Run binding or persistent private root continue
 to use Function-local memory: by default 64 entries, 8 MiB total and 3 MiB per entry,

@@ -462,7 +462,8 @@ class Scanner:
         if self.stop_reason == 'completed' and self.count['errors']:
             self.stop_reason = 'io_error'
         state = None if exhausted or stale else self.state
-        if state and len(json.dumps(state, ensure_ascii=False).encode('utf-8')) > 2500000:
+        capacity = self.cfg.get('state_capacity_bytes', 3 * 1024 * 1024)
+        if state and capacity and len(json.dumps(state, ensure_ascii=False).encode('utf-8')) > capacity:
             state = None
             warning = 'Continuation capacity exceeded; no scan continues after return'
             self.state['warnings'].append(warning)
@@ -492,7 +493,7 @@ def main():
     # or inherited PYTHONIOENCODING. Do not reconfigure the importing parent.
     sys.stdout.reconfigure(encoding='utf-8', errors='strict')
     sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
-    config = json.loads(sys.stdin.buffer.readline(4 * 1024 * 1024))
+    config = json.loads(sys.stdin.buffer.readline())
     result = Scanner(config).run()
     print(json.dumps({'kind': 'result', 'data': result}, ensure_ascii=False), flush=True)
 
