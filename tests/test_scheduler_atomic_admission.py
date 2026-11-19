@@ -409,3 +409,81 @@ async def test_legacy_worker_cannot_ignore_scoped_admission():
             operation_admission={"approval_id": "fixture"},
         )
     assert effects == []
+
+
+@pytest.mark.asyncio
+async def test_http_retry_returns_the_same_real_worker_child(tmp_path):
+    server, fixture = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, fixture)
+    parent = active_run(server)
+    runtime = runtime_at(tmp_path, False, instance_id=server.session_store.instance_id, agent="momo")
+    runtime.session_store = server.session_store
+    runtime.skill_manager = fixture.skill_manager
+    runtime._primary_chat_id = lambda: 123
+    runtime._run_job_now = MethodType(FlexibleAgentRuntime._run_job_now, runtime)
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.runtime, host.phase, host.accepting = runtime, "ACTIVE", True
+
+    async def responder(method, params):
+        return await host.handle_request(method, json.loads(json.dumps(params)))
+
+    kernel = _Kernel()
+    kernel.skill_manager, kernel.global_cfg = fixture.skill_manager, server.global_config
+    handle = _handle(kernel, _Client("momo", 101, responder=responder))
+    server.orchestrator.runtimes = [handle]
+    async with TestServer(server.app) as upstream, aiohttp.ClientSession() as client:
+        base = str(upstream.make_url("")).rstrip("/")
+        url = base + "/api/agents/momo/jobs/run"
+        token = credential(server, base, parent, tools=["hashi_scheduler_rerun"])
+        headers = {"X-Hashi-Scheduler-Token": token}
+        payload = {"kind": "cron", "job_id": "daily-report"}
+        async with client.post(url, json=payload, headers=headers) as pending:
+            assert pending.status == 403, await pending.text()
+            approval_id = (await pending.json())["approval"]["approval_id"]
+        await owner_decision(client, base, server, approval_id)
+        for _ in range(2):
+            async with client.post(url, json=payload, headers=headers) as response:
+                assert response.status == 200, await response.text()
+        assert runtime.queue.qsize() == 1
+        child = runtime.queue.get_nowait()
+        assert server.session_store.get_run(child.run_id)["parent_run_id"] == parent["run_id"]
+        server.session_store.cancel_run(child.run_id, owner_id=parent["owner_id"])
+        async with client.post(url, json=payload, headers=headers) as child_stopped:
+            assert child_stopped.status == 409, await child_stopped.text()
+            assert "stopped" in (await child_stopped.json())["message"]
+        assert runtime.queue.empty()
+        server.session_store.cancel_run(parent["run_id"], owner_id=parent["owner_id"])
+        async with client.post(url, json=payload, headers=headers) as stopped:
+            assert stopped.status in {401, 403}, await stopped.text()
+        assert runtime.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_consumed_legacy_decision_without_receipt_does_not_rerun(tmp_path):
+    server, fixture = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, fixture)
+    binding = active_run(server)
+    job = fixture.skill_manager.get_job("cron", "daily-report")
+    scope = {"operation": "activity.scheduler.run", "agent_id": "momo", "kind": "cron",
+             "job_id": job["id"], "expected_revision": scheduler_job_deletion_revision(job)}
+    with server.session_store.hold_operation_approval(
+        binding=binding, scope=scope, consume=False
+    ) as pending:
+        approval_id = pending["approval_id"]
+    server.session_store.decide_approval(
+        approval_id=approval_id, owner_id=binding["owner_id"], decision="approved"
+    )
+    # Model a prior unknown legacy dispatch which consumed its decision without
+    # atomically admitting a canonical child receipt.
+    with server.session_store.hold_operation_approval(binding=binding, scope=scope) as used:
+        assert used["authorized"]
+    runtime = runtime_at(tmp_path, False, instance_id=server.session_store.instance_id, agent="momo")
+    runtime.session_store = server.session_store
+    runtime.skill_manager = fixture.skill_manager
+    runtime._primary_chat_id = lambda: 123
+    ok, message = await FlexibleAgentRuntime._run_job_now(
+        runtime, job, kind="cron",
+        operation_admission={"binding": binding, "scope": scope, "approval_id": approval_id},
+    )
+    assert not ok and "no matching task receipt" in message
+    assert runtime.queue.empty()

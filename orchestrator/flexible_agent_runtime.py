@@ -7855,7 +7855,7 @@ class FlexibleAgentRuntime:
                 "idempotency_key": f"pao-scheduler:{operation_admission['approval_id']}",
                 "operation_admission": operation_admission,
             }
-        from orchestrator.session_store import StaleFencingToken
+        from orchestrator.session_store import SessionConflict, SessionNotFound, StaleFencingToken
         from orchestrator.skill_manager import SchedulerJobChanged
 
         try:
@@ -7871,8 +7871,26 @@ class FlexibleAgentRuntime:
             return False, "The requesting Run stopped before the task was admitted."
         except SchedulerJobChanged:
             return False, "The scheduler task changed before it could be admitted."
+        except SessionConflict as exc:
+            if operation_admission is not None and str(exc) == "scheduler approval has already been consumed":
+                return False, "The approval was used but no matching task receipt exists."
+            raise
         if not request_id:
             return False, f"Could not queue {summary_prefix.lower()} [{job.get('id')}]"
+        if operation_admission is not None:
+            try:
+                receipt = await asyncio.to_thread(
+                    self.session_store.get_run_by_request, request_id,
+                    owner_id=binding["owner_id"], agent_id=self.name,
+                )
+            except SessionNotFound:
+                return False, "The scheduler task receipt is unavailable; its outcome is unknown."
+            state = str(receipt.get("state") or "unknown")
+            if state in {"failed", "stopped", "superseded", "interrupted"}:
+                return False, f"The previously admitted scheduler task is {state}; no new task was queued."
+            if state == "completed":
+                return True, "The previously admitted scheduler task has completed."
+            return True, f"The scheduler task is {state}."
         return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"
 
     async def _handle_job_command(self, update: Update, kind: str, args: list[str]):

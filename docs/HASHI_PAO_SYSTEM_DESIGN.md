@@ -817,9 +817,11 @@ decision and Run binding through the Worker. PAO rechecks the active parent and
 consumes the decision in the same transaction that accepts the child under that
 parent's owner. The Worker checks the complete approved job definition against
 the current managed task while its writers are held until admission commits.
-An exact retry returns the same child, and a failed transaction consumes neither
-the approval nor a child. A parent stopped before admission cannot start it;
-an already accepted child has its own lifecycle. No SQLite transaction is held
+An exact retry returns the same child and reports its actual state. A failed
+transaction consumes neither the approval nor a child. A consumed legacy decision
+without an exact child receipt has an unknown outcome and cannot start a replacement.
+A parent stopped before admission cannot start it; an accepted child has its own lifecycle.
+No SQLite transaction is held
 across Worker RPC or an await. Scoped admission uses a distinct Worker method:
 an older Worker cannot silently ignore the new binding and execute the task.
 

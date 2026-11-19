@@ -736,5 +736,5 @@ async def test_scoped_scheduler_operation_uses_pao_decision_not_a_magic_string(t
         else:
             assert len(runtime.reruns) == 1
             repeated = await registry.execute(tool, args)
-            assert repeated.is_error
+            assert not repeated.is_error, repeated.output
             assert len(runtime.reruns) == 1

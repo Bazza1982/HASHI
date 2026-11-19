@@ -57,7 +57,10 @@ def prepare_operation_admission(server, binding, scope):
         with server.session_store.hold_operation_approval(
             binding=binding, scope=scope, consume=False
         ) as approval:
-            if not approval["authorized"]:
+            # A consumed decision can only replay an existing exact receipt;
+            # SessionStore rejects it when no matching child exists.
+            replay = approval["state"] == "consumed" and approval["decision"] == "approved"
+            if not approval["authorized"] and not replay:
                 _reject(403, error_code="approval_required", approval=approval,
                         decision_path=f"/api/v1/approvals/{approval['approval_id']}",
                         message="The exact operation requires a trusted PAO owner decision.")

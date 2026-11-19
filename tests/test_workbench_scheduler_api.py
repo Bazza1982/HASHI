@@ -190,7 +190,7 @@ class _FakeRuntime:
                 owner_id=binding["owner_id"], agent_id=self.name,
             )
             approval_id = operation_admission["approval_id"]
-            self.session_store.accept_run(
+            accepted = self.session_store.accept_run(
                 session_id=session["session_id"], owner_id=binding["owner_id"],
                 agent_id=self.name, request_id=f"child-{approval_id}",
                 text=job["prompt"], source="scheduler",
@@ -201,6 +201,8 @@ class _FakeRuntime:
                     expected_revision=operation_admission["scope"]["expected_revision"],
                 ),
             )
+            if accepted.replayed:
+                return True, f"Previously queued cron task [{job['id']}]"
         self.reruns.append((kind, dict(job)))
         return True, f"Queued cron task [{job['id']}]"
 
