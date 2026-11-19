@@ -226,6 +226,12 @@ def check_hchat_freshness_and_register(
 
     if freshness.is_fresh:
         return True, None
+    if not is_reply and freshness.reason in {"timestamp_missing", "timestamp_invalid"}:
+        # A request without a usable optional timestamp carries no evidence
+        # of staleness. Demanding a confirmation would create an extra
+        # time-authority requirement that otherwise-valid requests cannot
+        # satisfy; proceed like an observed (fresh) request.
+        return True, None
     if selected_policy["mode"] == "expire":
         raise HChatMessageExpired(f"HChat message age policy rejected: {freshness.reason}")
 

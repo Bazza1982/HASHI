@@ -61,7 +61,7 @@ def _runtime(tmp_path):
             instance_id="TEST",
             ui_language="en",
         ),
-        _is_authorized_user=lambda actor: actor == 42,
+        _is_authorized_user=lambda actor: actor == 42 or str(actor) == "user:42",
         _is_command_allowed=lambda command: command == "reboot",
     )
     runtime.workspace_dir.mkdir(parents=True)

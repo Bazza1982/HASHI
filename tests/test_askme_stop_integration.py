@@ -39,7 +39,7 @@ async def test_question_stop_runs_real_stop_path_and_rejects_late_card(tmp_path,
     runtime._notify_request_listeners = MethodType(FlexibleAgentRuntime._notify_request_listeners, runtime)
     runtime._remote_backend_block_reason = lambda _source: None
     runtime._notify_right_brain_interrupted = lambda *args, **kwargs: None
-    runtime._is_authorized_user = lambda user: user == 7
+    runtime._is_authorized_user = lambda user: user == 7 or str(user) == "user:7"  # backend commands carry the authenticated owner principal
     runtime._reply_text = AsyncMock()
     runtime.error_logger.exception = lambda _message: None
     server._runtime_map = lambda: {"zelda": runtime}

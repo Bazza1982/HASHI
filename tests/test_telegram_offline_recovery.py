@@ -134,7 +134,11 @@ def test_current_schema_reopen_skips_ddl_but_keeps_recovery(tmp_path,monkeypatch
         lambda _:pytest.fail("current schema must not migrate again"))
     repair=[]
     monkeypatch.setattr(SessionStore,"_repair_pending_audio_projections",lambda _:repair.append(True))
-    SessionStore(path,instance_id="test")
+    reopened=SessionStore(path,instance_id="test")
+    # Reopening at the current schema version must skip DDL entirely.
+    assert repair==[]
+    # Required recovery still runs through deferred maintenance.
+    reopened.run_deferred_maintenance()
     assert repair==[True]
 
 

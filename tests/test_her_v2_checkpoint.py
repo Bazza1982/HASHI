@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -13,7 +14,7 @@ from orchestrator.her_v2.checkpoint import (
     ReplanCompletionInterruption,
     ReplanDirective,
 )
-from orchestrator.her_v2.config import HERv2Config, HERv2ConfigurationError
+from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.interfaces import StructuredOutputError
 from orchestrator.her_v2.models import (
     ReplanningOutcome,
@@ -171,11 +172,14 @@ def test_replanning_three_question_contract_is_strict_and_commentary_can_fallbac
             parse_replanning(StageResponse(data=_valid_replan_data(**override)))
 
 
-def test_legacy_replan_count_limits_are_rejected_configuration():
+def test_legacy_replan_count_limits_are_ignored_with_diagnostic_warning(caplog):
     raw = _runtime_mapping()
     raw["replan_limits"] = {"high": 1}
-    with pytest.raises(HERv2ConfigurationError, match="replan_limits"):
-        HERv2Config.from_mapping(raw)
+    with caplog.at_level(logging.WARNING, logger="orchestrator.her_v2.config"):
+        config = HERv2Config.from_mapping(raw)
+    assert isinstance(config, HERv2Config)
+    assert any("replan_limits" in record.getMessage() for record in caplog.records)
+    assert "replan_limits" not in config.__dict__
 
 
 @pytest.mark.asyncio

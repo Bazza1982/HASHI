@@ -754,7 +754,7 @@ async def test_tool_registry_request_scope_filters_catalogue_and_admission(tmp_p
 
     assert {
         item["function"]["name"] for item in registry.get_tool_definitions()
-    } == {"web_search"}
+    } == {"web_search", "tool_catalog"}
     denial = registry.evaluate_admission("file_read", {"path": "x"}, "call-1")
     assert denial is not None and denial.is_error is True
     assert "current request" in denial.output
