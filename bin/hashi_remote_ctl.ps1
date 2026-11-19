@@ -491,6 +491,29 @@ function Test-RemotePortSpecCovers {
     return $false
 }
 
+function Test-RemotePortSpecExact {
+    param([string]$PortSpec, [int]$EffectivePort)
+    # Exact-configuration check for HASHI-owned Allow rules only. A range or
+    # "Any" may legitimately COVER the port for Block-rule evidence, but the
+    # narrow HASHI template requires the exact single port. An Allow rule
+    # exposing "Any" or a whole range is never reported as correctly
+    # configured merely because it happens to include the Remote port.
+    if ([string]::IsNullOrWhiteSpace($PortSpec)) { return $false }
+    $Parts = @($PortSpec -split "[, ]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($Parts.Count -eq 0) { return $false }
+    foreach ($Part in $Parts) {
+        if ($Part -match '^\d+\s*-\s*\d+$') {
+            # A port range is never the narrow single-port configuration.
+            return $false
+        }
+        if ($Part -ne "$EffectivePort") {
+            # "Any", a wrong port, or an unrelated value are all non-compliant.
+            return $false
+        }
+    }
+    return $true
+}
+
 function Test-RemoteGpoTrue {
     param($Value)
     # Windows PowerShell 5.1 NetSecurity cmdlets expose Enabled / AllowLocalFirewallRules
@@ -570,7 +593,9 @@ function Get-RemoteFirewallDiagnostics {
         }
         if ($null -ne $PortFilter) {
             if ([string]$PortFilter.Protocol -ne "TCP") { $TcpIssues += "protocol_not_tcp" }
-            if (-not (Test-RemotePortSpecCovers -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort $EffectivePort)) {
+            # Owned Allow rules must match the exact narrow template; a range
+            # or "Any" that merely covers the port is not compliant here.
+            if (-not (Test-RemotePortSpecExact -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort $EffectivePort)) {
                 $TcpIssues += "port_mismatch"
             }
         } else {
@@ -619,17 +644,48 @@ function Get-RemoteFirewallDiagnostics {
     if ($MdnsRule.Count -eq 1) {
         $Rule = $MdnsRule[0]
         $PortFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule -ErrorAction SilentlyContinue
+        $AddressFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $Rule -ErrorAction SilentlyContinue
+        $Annotation = $null
+        $Description = [string]$Rule.Description
+        if ($Description) {
+            try { $Annotation = $Description | ConvertFrom-Json } catch { }
+        }
         if (-not (Test-RemoteGpoTrue $Rule.Enabled)) { $MdnsIssues += "rule_disabled" }
         if ([string]$Rule.Action -ne "Allow") { $MdnsIssues += "action_not_allow" }
-        if ($null -ne $PortFilter -and [string]$PortFilter.Protocol -ne "UDP") { $MdnsIssues += "protocol_not_udp" }
-        if ($null -ne $PortFilter -and -not (Test-RemotePortSpecCovers -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort 5353)) {
-            $MdnsIssues += "port_mismatch"
+        if ([string]$Rule.Direction -ne "Inbound") { $MdnsIssues += "direction_not_inbound" }
+        if (@(Convert-RemoteGpoStringList $Rule.Profile | Where-Object { $_ -notin @("Domain", "Private") }).Count -gt 0) {
+            $MdnsIssues += "profile_includes_public_or_any"
+        }
+        if ($null -ne $PortFilter) {
+            if ([string]$PortFilter.Protocol -ne "UDP") { $MdnsIssues += "protocol_not_udp" }
+            # Same exact-template rule as the TCP Allow rule: UDP and exactly
+            # port 5353. "Any" or a covering range is not compliant.
+            if (-not (Test-RemotePortSpecExact -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort 5353)) {
+                $MdnsIssues += "port_mismatch"
+            }
+        } else {
+            $MdnsIssues += "port_filter_unreadable"
+        }
+        if ($null -ne $AddressFilter) {
+            if ([string]$AddressFilter.RemoteAddress -notin @("LocalSubnet", "LocalSubnet4", "LocalSubnet6")) {
+                $MdnsIssues += "remote_address_not_local_subnet"
+            }
+        } else {
+            $MdnsIssues += "address_filter_unreadable"
+        }
+        if ($Annotation) {
+            if ([string]$Annotation.purpose -ne "hashi-remote-mdns-udp-5353") { $MdnsIssues += "ownership_annotation_unexpected" }
+        } else {
+            $MdnsIssues += "ownership_annotation_missing"
         }
         $Diagnostics.mdns_rule = [ordered]@{
             name = $Names.Mdns
             present = $true
             enabled = (Test-RemoteGpoTrue $Rule.Enabled)
+            action = [string]$Rule.Action
+            profile = @(Convert-RemoteGpoStringList $Rule.Profile)
             local_port = if ($null -ne $PortFilter) { [string]$PortFilter.LocalPort } else { "" }
+            remote_address = if ($null -ne $AddressFilter) { [string]$AddressFilter.RemoteAddress } else { "" }
             issues = @($MdnsIssues)
         }
     } else {
@@ -638,7 +694,10 @@ function Get-RemoteFirewallDiagnostics {
             name = $Names.Mdns
             present = $false
             enabled = $false
+            action = ""
+            profile = @()
             local_port = ""
+            remote_address = ""
             issues = @($MdnsIssues)
         }
     }

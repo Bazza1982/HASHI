@@ -507,7 +507,7 @@ def _run_repair_body_file(tmp_path: Path, stub: Path) -> subprocess.CompletedPro
         "param([string]$StubFile)\n. ([System.IO.Path]::GetFullPath($StubFile))\n$HashiRoot = $global:OwnedRoot\n"
         + functions
         + f"\n$Outcome = Repair-HashiRemoteFirewallRules -EffectivePort 8767 -InstanceId 'DOCTOR-CONTRACT'\n"
-        + "[pscustomobject]@{ Outcome=$Outcome; NewRuleCalls=@($global:NewRuleCalls) } | "
+        + "[pscustomobject]@{ Outcome=$Outcome; NewRuleCalls=@($global:NewRuleCalls); Rules=@($global:FirewallRules | ForEach-Object { [pscustomobject]@{ Name=[string]$_.Name; Description=[string]$_.Description } }) } | "
         + f"ConvertTo-Json -Depth 8 | Set-Content -LiteralPath {_ps_string(tmp_path / 'repair-result.json')} -Encoding UTF8\n",
         encoding="utf-8",
     )
@@ -597,4 +597,130 @@ def test_repair_elevated_child_success_is_relayed(tmp_path):
     assert parsed["repair"]["repaired"] is True
     assert parsed["repair"]["elevated"] is True
     assert "tcp_rule_created" in parsed["repair"]["changes"]
+
+# ── Strict Allow-rule exact-template verification ────────────────────────────────
+
+def test_doctor_owned_tcp_rule_any_port_is_not_exact(tmp_path):
+    scenario = _owned_rule_scenario('"Domain","Private"', "Any", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_rule_port_mismatch"
+    assert "port_mismatch" in parsed["firewall"]["tcp_rule_issues"]
+
+
+def test_doctor_owned_tcp_rule_range_covering_port_is_not_exact(tmp_path):
+    scenario = _owned_rule_scenario('"Domain","Private"', "8760-8770", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_rule_port_mismatch"
+    assert "port_mismatch" in parsed["firewall"]["tcp_rule_issues"]
+
+
+def test_doctor_owned_tcp_rule_exact_port_stays_compliant(tmp_path):
+    scenario = _owned_rule_scenario('"Domain","Private"', "8767", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["state"] == "ok"
+    assert "port_mismatch" not in parsed["firewall"]["tcp_rule_issues"]
+
+
+def test_doctor_block_rule_range_covering_port_is_still_evidence(tmp_path):
+    # Coverage semantics are preserved for Block-rule diagnosis: a broad
+    # range may legitimately affect the target port and must still register.
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="range-block"; DisplayName="range-block"; '
+        'Direction="Inbound"; Action="Block"; Enabled=$true; Profile=@("Any") }); '
+        '$global:PortFilters["range-block"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="8000-9000" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_explicitly_blocked"
+    assert len(parsed["firewall"]["explicit_block_evidence"]) == 1
+
+
+def _owned_mdns_rule_scenario(protocol="UDP", local_port="5353", remote_address="LocalSubnet",
+                              profile='"Domain","Private"', direction="Inbound", action="Allow",
+                              enabled=True, purpose="hashi-remote-mdns-udp-5353"):
+    description = json.dumps({"purpose": purpose})
+    return (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="HashiRemote_mDNS_UDP_5353"; '
+        "DisplayName='HASHI Remote mDNS UDP 5353'; "
+        f"Description='{description}'; "
+        f'Direction="{direction}"; Action="{action}"; Enabled=${str(enabled).lower()}; '
+        f'Profile=@({profile}) }}); '
+        f'$global:PortFilters["HashiRemote_mDNS_UDP_5353"] = [pscustomobject]@{{ Protocol="{protocol}"; LocalPort="{local_port}" }}; '
+        f'$global:AddressFilters["HashiRemote_mDNS_UDP_5353"] = [pscustomobject]@{{ RemoteAddress="{remote_address}" }}'
+    )
+
+
+def test_doctor_owned_mdns_rule_exact_template_is_compliant(tmp_path):
+    scenario = _owned_mdns_rule_scenario()
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["mdns_rule"]["present"] is True
+    assert parsed["firewall"]["mdns_rule"]["issues"] == []
+    assert "mdns_rule_missing" not in parsed["lan_readiness"]["reason_codes"]
+
+
+def test_doctor_owned_mdns_rule_udp_any_is_not_exact(tmp_path):
+    scenario = _owned_mdns_rule_scenario(local_port="Any")
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "port_mismatch" in parsed["firewall"]["mdns_rule"]["issues"]
+    assert "mdns_rule_missing" in parsed["lan_readiness"]["reason_codes"]
+
+
+def test_doctor_owned_mdns_rule_wrong_port_is_not_exact(tmp_path):
+    scenario = _owned_mdns_rule_scenario(local_port="5354")
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "port_mismatch" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_doctor_owned_mdns_rule_wrong_protocol(tmp_path):
+    scenario = _owned_mdns_rule_scenario(protocol="TCP")
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "protocol_not_udp" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_doctor_owned_mdns_rule_public_profile(tmp_path):
+    scenario = _owned_mdns_rule_scenario(profile='"Public"')
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "profile_includes_public_or_any" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_doctor_owned_mdns_rule_remote_address_any(tmp_path):
+    scenario = _owned_mdns_rule_scenario(remote_address="Any")
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "remote_address_not_local_subnet" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_doctor_owned_mdns_rule_disabled(tmp_path):
+    scenario = _owned_mdns_rule_scenario(enabled=False)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "rule_disabled" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_doctor_owned_mdns_rule_wrong_annotation(tmp_path):
+    scenario = _owned_mdns_rule_scenario(purpose="someone-elses-rule")
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "ownership_annotation_unexpected" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_doctor_owned_mdns_rule_wrong_direction(tmp_path):
+    scenario = _owned_mdns_rule_scenario(direction="Outbound")
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert "direction_not_inbound" in parsed["firewall"]["mdns_rule"]["issues"]
+
+
+def test_repair_leaves_unrelated_rules_unchanged(tmp_path):
+    root = _prepare_root(tmp_path)
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="other-app-rule"; '
+        "DisplayName='Other App'; Description='keep-me'; "
+        'Direction="Inbound"; Action="Allow"; Enabled=$true; Profile=@("Private") })'
+    )
+    stub = tmp_path / "stubs.ps1"
+    stub.write_text(STUB_TEMPLATE + f"\n$global:OwnedRoot = {_ps_string(root)}\n" + scenario + "\n", encoding="utf-8")
+    result = _run_repair_body_file(tmp_path, stub)
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads((tmp_path / "repair-result.json").read_text(encoding="utf-8-sig"))
+    others = [rule for rule in outcome["Rules"] if rule["Name"] == "other-app-rule"]
+    assert len(others) == 1
+    assert others[0]["Description"] == "keep-me"
+    assert "tcp_rule_created" in outcome["Outcome"]["changes"]
+
 # HASHI-Fingerprint: hfp_f1f79ab5af79464d832ec1716f44a388
