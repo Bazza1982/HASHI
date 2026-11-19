@@ -112,9 +112,14 @@ Agent home uses a private temporary store for that Registry's lifetime.
 A context without a Run identity cannot use this path. Retained text is read
 in pages; legacy screenshot continuations read indexed frames rather than
 reloading the full result. Store or integrity failures are reported, not
-treated as successful retrieval. Concurrent retention waits for the shared
-store lock by default; operators may set `HASHI_TOOL_OUTPUT_LOCK_TIMEOUT_SECONDS`
-to a nonnegative total wait budget when needed.
+treated as successful retrieval. Streaming retention stages private files
+without holding the shared store lock, so a slow writer does not block another
+Run's result pages. Publication rechecks the Run and shared continuation limits
+under that lock; a stopped Run cannot publish a delayed result. A replacement
+worker reclaims recognized abandoned stages after confirming their liveness
+lock is free. Stages with unrecognized contents are preserved for inspection.
+Operators may set `HASHI_TOOL_OUTPUT_LOCK_TIMEOUT_SECONDS` to a nonnegative
+total wait budget for shared-store operations when needed.
 
 ## Browser and desktop deadlines
 

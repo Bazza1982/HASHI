@@ -384,26 +384,110 @@ class ToolOutputStore:
             return None
         if len(binding) != 6:
             raise ValueError("invalid result retention input")
-        with self._locked(create=True) as root:
-            assert root is not None
-            if self._terminal(binding):
-                return None
-            run_dir = self._run_dir(root, binding)
-            if not run_dir.exists():
-                run_dir.mkdir(mode=0o700)
-            if not (run_dir / ".run.json").exists():
-                if run_dir.is_symlink() or any(entry.name != "..run.json.lock" for entry in run_dir.iterdir()):
-                    raise OSError("incomplete Run retention directory has unknown contents")
+        stage = None
+        stage_lock = ExitStack()
+        try:
+            # Seal the staging directory and hold its liveness lock before
+            # releasing the shared store lock. A replacement worker can then
+            # identify abandoned stages without touching an active writer.
+            with self._locked(create=True) as root:
+                assert root is not None
+                if self._terminal(binding):
+                    return None
+                run_dir = self._run_dir(root, binding)
+                if not run_dir.exists():
+                    run_dir.mkdir(mode=0o700)
+                if not (run_dir / ".run.json").exists():
+                    if run_dir.is_symlink() or any(entry.name != "..run.json.lock" for entry in run_dir.iterdir()):
+                        raise OSError("incomplete Run retention directory has unknown contents")
+                    from tools.private_files import protect_private_file
+
+                    protect_private_file(run_dir)
+                    write_config_json(run_dir / ".run.json", {"binding": list(binding)}, expected_revision=None)
+                self._verify_run(run_dir, binding)
+                stage = Path(tempfile.mkdtemp(prefix=".staging-", dir=root))
                 from tools.private_files import protect_private_file
 
-                protect_private_file(run_dir)
-                write_config_json(run_dir / ".run.json", {"binding": list(binding)}, expected_revision=None)
-            self._verify_run(run_dir, binding)
-            existing_bytes = 0
-            if continuation_limits is not None:
-                max_entries, max_bytes, max_state_bytes, expires_at = continuation_limits
+                protect_private_file(stage)
+                stage_lock.enter_context(file_write_lock(stage / "inflight", timeout=0))
+                write_config_json(stage / ".staging.json", {"type": "hashi.tool-output-stage", "version": 1},
+                                  expected_revision=None)
+
+            max_entries, max_bytes, max_state_bytes, expires_at = continuation_limits or (0, 0, 0, 0)
+            digest = hashlib.sha256()
+            characters = 0
+            logical_bytes = 0
+            staged_data, staged_index, staged_frames = stage / "output.data", stage / "output.index", stage / "output.frames"
+            with _private_file(staged_data) as data, _private_file(staged_index) as index:
+                pending = ""
+                for piece in chunks:
+                    if not isinstance(piece, str):
+                        raise ValueError("invalid result retention input")
+                    position = 0
+                    while position < len(piece):
+                        size = min(_CHUNK_CHARS - len(pending), len(piece) - position)
+                        pending += piece[position:position + size]
+                        position += size
+                        if len(pending) == _CHUNK_CHARS:
+                            utf8 = pending.encode("utf-8", errors="surrogatepass")
+                            logical_bytes += len(utf8)
+                            if continuation_limits is not None and (
+                                (max_state_bytes and logical_bytes > max_state_bytes)
+                                or (max_bytes and logical_bytes > max_bytes)
+                            ):
+                                raise ValueError("search continuation capacity exceeded")
+                            digest.update(utf8)
+                            encoded = pending.encode("utf-32-le", errors="surrogatepass")
+                            data.write(encoded)
+                            index.write(hashlib.sha256(encoded).digest())
+                            characters += len(pending)
+                            pending = ""
+                if pending:
+                    utf8 = pending.encode("utf-8", errors="surrogatepass")
+                    logical_bytes += len(utf8)
+                    if continuation_limits is not None and (
+                        (max_state_bytes and logical_bytes > max_state_bytes)
+                        or (max_bytes and logical_bytes > max_bytes)
+                    ):
+                        raise ValueError("search continuation capacity exceeded")
+                    digest.update(utf8)
+                    encoded = pending.encode("utf-32-le", errors="surrogatepass")
+                    data.write(encoded)
+                    index.write(hashlib.sha256(encoded).digest())
+                    characters += len(pending)
+                data.flush()
+                index.flush()
+                os.fsync(data.fileno())
+                os.fsync(index.fileno())
+            frame_count = 0
+            if kind == "legacy_screenshot":
+                if screenshot_source is None:
+                    raise ValueError("invalid screenshot source")
+                from tools.legacy_screenshot import LEGACY_SCREENSHOT_PATTERN
+
+                with _private_file(staged_frames) as frames:
+                    for match in LEGACY_SCREENSHOT_PATTERN.finditer(screenshot_source):
+                        payload = ("data_payload" if match.group("data_url") is not None
+                                   else "label_payload")
+                        packed = _FRAME_RECORD.pack(*match.span(), *match.span(payload), *match.span("mime"))
+                        frames.write(packed)
+                        frames.write(hashlib.sha256(packed).digest())
+                        frame_count += 1
+                    frames.flush()
+                    os.fsync(frames.fileno())
+            outcomes = dict(image_outcomes or {})
+            if any(type(i) is not int or i < 0 or type(v) is not bool for i, v in outcomes.items()):
+                raise ValueError("invalid screenshot outcome")
+
+            # Publish only while the Run is still live and after rechecking
+            # aggregate continuation quotas under the existing shared lock.
+            with self._locked() as locked_root:
+                if locked_root != root or self._terminal(binding):
+                    return None
+                self._verify_run(run_dir, binding)
+                existing_bytes = 0
                 count = 0
-                if max_entries or max_bytes:
+                if continuation_limits is not None and (max_entries or max_bytes):
                     for metadata in run_dir.glob("*.json"):
                         if metadata.name.startswith("."):
                             continue
@@ -422,97 +506,44 @@ class ToolOutputStore:
                         existing_bytes += size
                 if max_entries and count >= max_entries:
                     return None
-            while True:
-                reference = secrets.token_urlsafe(32)
-                data_path, index_path = run_dir / f"{reference}.data", run_dir / f"{reference}.index"
-                metadata_path = run_dir / f"{reference}.json"
-                frames_path = run_dir / f"{reference}.frames"
-                if not any(path.exists() or path.is_symlink()
-                           for path in (data_path, index_path, metadata_path, frames_path)):
-                    break
-            digest = hashlib.sha256()
-            characters = 0
-            logical_bytes = 0
-            try:
-                with _private_file(data_path) as data, _private_file(index_path) as index:
-                    pending = ""
-                    for piece in chunks:
-                        if not isinstance(piece, str):
-                            raise ValueError("invalid result retention input")
-                        position = 0
-                        while position < len(piece):
-                            size = min(_CHUNK_CHARS - len(pending), len(piece) - position)
-                            pending += piece[position:position + size]
-                            position += size
-                            if len(pending) == _CHUNK_CHARS:
-                                utf8 = pending.encode("utf-8", errors="surrogatepass")
-                                logical_bytes += len(utf8)
-                                if continuation_limits is not None and (
-                                    (max_state_bytes and logical_bytes > max_state_bytes)
-                                    or (max_bytes and existing_bytes + logical_bytes > max_bytes)
-                                ):
-                                    raise ValueError("search continuation capacity exceeded")
-                                digest.update(utf8)
-                                encoded = pending.encode("utf-32-le", errors="surrogatepass")
-                                data.write(encoded)
-                                index.write(hashlib.sha256(encoded).digest())
-                                characters += len(pending)
-                                pending = ""
-                    if pending:
-                        utf8 = pending.encode("utf-8", errors="surrogatepass")
-                        logical_bytes += len(utf8)
-                        if continuation_limits is not None and (
-                            (max_state_bytes and logical_bytes > max_state_bytes)
-                            or (max_bytes and existing_bytes + logical_bytes > max_bytes)
-                        ):
-                            raise ValueError("search continuation capacity exceeded")
-                        digest.update(utf8)
-                        encoded = pending.encode("utf-32-le", errors="surrogatepass")
-                        data.write(encoded)
-                        index.write(hashlib.sha256(encoded).digest())
-                        characters += len(pending)
-                    data.flush()
-                    index.flush()
-                    os.fsync(data.fileno())
-                    os.fsync(index.fileno())
-                frame_count = 0
-                if kind == "legacy_screenshot":
-                    if screenshot_source is None:
-                        raise ValueError("invalid screenshot source")
-                    from tools.legacy_screenshot import LEGACY_SCREENSHOT_PATTERN
-
-                    with _private_file(frames_path) as frames:
-                        for match in LEGACY_SCREENSHOT_PATTERN.finditer(screenshot_source):
-                            payload = ("data_payload" if match.group("data_url") is not None
-                                       else "label_payload")
-                            packed = _FRAME_RECORD.pack(*match.span(), *match.span(payload), *match.span("mime"))
-                            frames.write(packed)
-                            frames.write(hashlib.sha256(packed).digest())
-                            frame_count += 1
-                        frames.flush()
-                        os.fsync(frames.fileno())
-                outcomes = dict(image_outcomes or {})
-                if any(type(i) is not int or i < 0 or type(v) is not bool for i, v in outcomes.items()):
-                    raise ValueError("invalid screenshot outcome")
-                write_config_json(metadata_path, {
-                    "binding": list(binding), "source_tool": str(source_tool), "kind": str(kind),
-                    "characters": characters, "digest": digest.hexdigest(),
-                    "frame_count": frame_count,
-                    "image_outcomes": {str(i): value for i, value in outcomes.items()},
-                    **({"logical_bytes": logical_bytes, "expires_at": expires_at}
-                       if continuation_limits is not None else {}),
-                }, expected_revision=None)
-            except ConfigDurabilityError:
-                # Publication may already have committed; retain its data for
-                # later reconciliation rather than undoing an uncertain write.
-                raise
-            except BaseException:
-                data_path.unlink(missing_ok=True)
-                index_path.unlink(missing_ok=True)
-                frames_path.unlink(missing_ok=True)
-                metadata_path.unlink(missing_ok=True)
-                raise
-            return reference
+                if max_bytes and existing_bytes + logical_bytes > max_bytes:
+                    raise ValueError("search continuation capacity exceeded")
+                while True:
+                    reference = secrets.token_urlsafe(32)
+                    data_path, index_path = run_dir / f"{reference}.data", run_dir / f"{reference}.index"
+                    metadata_path = run_dir / f"{reference}.json"
+                    frames_path = run_dir / f"{reference}.frames"
+                    if not any(path.exists() or path.is_symlink()
+                               for path in (data_path, index_path, metadata_path, frames_path)):
+                        break
+                try:
+                    os.replace(staged_data, data_path)
+                    os.replace(staged_index, index_path)
+                    if kind == "legacy_screenshot":
+                        os.replace(staged_frames, frames_path)
+                    write_config_json(metadata_path, {
+                        "binding": list(binding), "source_tool": str(source_tool), "kind": str(kind),
+                        "characters": characters, "digest": digest.hexdigest(),
+                        "frame_count": frame_count,
+                        "image_outcomes": {str(i): value for i, value in outcomes.items()},
+                        **({"logical_bytes": logical_bytes, "expires_at": expires_at}
+                           if continuation_limits is not None else {}),
+                    }, expected_revision=None)
+                except ConfigDurabilityError:
+                    # Publication may have committed; retain its data for later
+                    # reconciliation instead of undoing an uncertain write.
+                    raise
+                except BaseException:
+                    data_path.unlink(missing_ok=True)
+                    index_path.unlink(missing_ok=True)
+                    frames_path.unlink(missing_ok=True)
+                    metadata_path.unlink(missing_ok=True)
+                    raise
+                return reference
+        finally:
+            stage_lock.close()
+            if stage is not None:
+                shutil.rmtree(stage, ignore_errors=True)
 
     def lookup(self, binding: tuple[str, ...] | None, reference: Any) -> RetainedOutput:
         if binding is None:
@@ -667,12 +698,38 @@ class ToolOutputStore:
             return True
 
     def reconcile_terminal(self) -> int:
-        if self._state_resolver is None:
-            return 0
         removed = 0
         with self._locked() as root:
             if root is None:
                 return 0
+            # A crashed writer cannot publish a stage. Only remove a sealed
+            # HASHI stage (or an empty, never-sealed one), after proving its
+            # per-stage liveness lock is free. Unknown contents are retained.
+            allowed = {".staging.json", "..staging.json.lock", ".inflight.lock",
+                       "output.data", "output.index", "output.frames"}
+            for stage in root.glob(".staging-*"):
+                try:
+                    if stage.is_symlink() or not stage.is_dir():
+                        continue
+                    entries = list(stage.iterdir())
+                    if any(item.name not in allowed or item.is_symlink() or not item.is_file() for item in entries):
+                        continue
+                    marker = stage / ".staging.json"
+                    if marker.exists():
+                        if dict(read_config_json(marker)) != {"type": "hashi.tool-output-stage", "version": 1}:
+                            continue
+                    elif any(item.name not in {".inflight.lock", "..staging.json.lock"} for item in entries):
+                        continue
+                    with file_write_lock(stage / "inflight", timeout=0):
+                        pass
+                    # The shared lock excludes new stages, and stage names are
+                    # never reused; no writer can acquire this abandoned one.
+                    shutil.rmtree(stage)
+                    removed += 1
+                except (OSError, ValueError, TypeError, TimeoutError):
+                    continue
+            if self._state_resolver is None:
+                return removed
             for run_dir in root.iterdir():
                 if not run_dir.is_dir() or run_dir.is_symlink() or _HEX.fullmatch(run_dir.name) is None:
                     continue
