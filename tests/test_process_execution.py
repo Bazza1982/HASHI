@@ -79,7 +79,7 @@ def test_registry_exposes_shell_but_accepts_persisted_bash_calls(tmp_path):
     assert registry.is_allowed("bash") is True
     assert [
         definition["function"]["name"] for definition in registry.get_tool_definitions()
-    ] == ["shell"]
+    ] == ["shell", "tool_catalog"]
 
 
 def test_process_liveness_probe_does_not_signal_the_current_process():
@@ -473,3 +473,4 @@ async def test_native_windows_background_cancel_reaps_descendant_tree(tmp_path):
         assert not _windows_pid_alive(child_pid)
     finally:
         await manager.stop()
+# HASHI-Fingerprint: hfp_d3227a6973764642aea73abb1234f769
