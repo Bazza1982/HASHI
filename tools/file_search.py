@@ -173,6 +173,63 @@ class Continuations:
         return row[2], row[3]
 
 
+class RunContinuations:
+    """Private Run-scoped scanner checkpoints, retained until the Run ends.
+
+    Checkpoints are immutable so a lost response or cancelled scan can retry the
+    same cursor. The existing Run output store owns authorization and cleanup.
+    """
+    def __init__(self, store, run_binding):
+        self.store = store
+        self.run_binding = run_binding
+        self.retention = store.retention
+        self.policy = {}
+
+    def configure(self, options):
+        probe = Continuations()
+        probe.configure(options)
+        selected = options.get('continuations', {})
+        self.policy = dict(probe.policy)
+        # Disk replaces the process-wide memory LRU. Keep all active cursors by
+        # default; deployments may select explicit per-Run disk budgets.
+        for key in ('max_entries', 'max_bytes'):
+            if key not in selected:
+                self.policy[key] = 0
+
+    def put(self, binding, state, operation_id):
+        expires = time.time() + self.policy['ttl_seconds'] if self.policy['ttl_seconds'] else 0
+        payload = {'binding': binding, 'state': state, 'operation_id': operation_id, 'expires_at': expires}
+        chunks = json.JSONEncoder(ensure_ascii=False, separators=(',', ':')).iterencode(payload)
+        try:
+            return self.store.retain_search_continuation(
+                self.run_binding, chunks, max_entries=self.policy['max_entries'],
+                max_bytes=self.policy['max_bytes'], max_state_bytes=self.policy['max_state_bytes'],
+                expires_at=expires,
+            )
+        except (OSError, TimeoutError, ValueError):
+            return None
+
+    def get(self, key, binding):
+        try:
+            value = json.loads(self.store.read_search_continuation(
+                self.run_binding, key, max_state_bytes=self.policy['max_state_bytes']))
+            if (not isinstance(value, dict) or value.get('binding') != binding
+                    or not isinstance(value.get('state'), dict)
+                    or not isinstance(value.get('operation_id'), str)
+                    or type(value.get('expires_at')) not in (int, float)):
+                raise ValueError('invalid checkpoint')
+            if value['expires_at'] and value['expires_at'] <= time.time():
+                raise ValueError('expired checkpoint')
+            return value['state'], value['operation_id']
+        except (OSError, TimeoutError, TypeError, ValueError):
+            raise ValueError('Cursor is unavailable for this query/Run/Agent or no longer retained') from None
+
+    def drop(self, key):
+        # Preserve the exact checkpoint through response loss and cancellation;
+        # the existing store removes all Run checkpoints after terminal state.
+        pass
+
+
 def outcome(status, data=None, error=None, warning=None):
     return json.dumps({'status': status, 'effect': 'observed' if data else 'no_change',
                        'data': data, 'error': error, 'warning': warning},
@@ -430,13 +487,14 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                       code='scope_output_budget')
     if args.get('_terms'):
         config['terms'] = args['_terms']
-    # Bound to trusted identity, frozen scope, query and this Function generation.
+    # Bind query and scope to the Run; only process-local cursors also depend on Worker generation.
     binding = hashlib.sha256(json.dumps({
-        'query': config, 'owner': search_scope.get('owner_id'),
+        'query': config, 'owner': search_scope.get('owner_id'), 'operation': operation,
         'agent': audit_context.get('agent_name'),
         'request': audit_context.get('request_id') or audit_context.get('task_id'),
         'scope_revision': search_scope.get('workzone_revision'),
-        'generation': audit_context.get('function_generation'),
+        'generation': (None if isinstance(continuations, RunContinuations)
+                       else audit_context.get('function_generation')),
     }, sort_keys=True).encode()).hexdigest()
     activity = CURRENT_ACTIVITY.get()
     operation_id = activity.operation_id if activity else secrets.token_hex(16)
@@ -510,7 +568,7 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
             'tools, or stop when you have enough evidence. A deadline is not a '
             'command to abandon the task.')
     result['effective_policy']['continuations'] = {
-        **continuations.policy, 'retention': 'registry_lifetime'}
+        **continuations.policy, 'retention': getattr(continuations, 'retention', 'registry_lifetime')}
     if config.get('regex_content'):
         result['effective_policy']['regex_engine'] = result.pop('regex_engine', None)
         result['coverage']['regex_matching_scope'] = 'single_lf_delimited_lines'
@@ -617,7 +675,7 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
     next_cursor = continuations.put(binding, state, operation_id) if state else None
     result.update(can_continue=next_cursor is not None, next_cursor=next_cursor)
     if state and next_cursor is None:
-        result['warnings'].append('Continuation capacity exceeded; no automatic restart')
+        result['warnings'].append('Continuation storage unavailable or configured capacity reached; no automatic restart')
     if (result['stop_reason'] == 'cursor_stale' or
             status == 'partial' and not next_cursor and not result['scope_exhausted']):
         result['recovery'] = restart_guidance()
@@ -628,3 +686,4 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                                           'coverage_complete': complete,
                                           'selected_roots': result['selected_roots'],
                                           'coverage': result['coverage']})
+# HASHI-Fingerprint: hfp_e14485052c6c4e49bbc76050da7e245f

@@ -528,6 +528,18 @@ class ToolRegistry:
                 options["timeout_seconds"] = timeout
         return options
 
+    def _continuations_for_context(self, context):
+        from tools.file_search import RunContinuations
+        from tools.tool_output_store import run_binding
+
+        binding = run_binding(context)
+        if (binding is not None and all(binding)
+                and self._tool_output_store.retention == "run_lifetime"):
+            return RunContinuations(self._tool_output_store, binding)
+        # Without a complete Run identity or persistent private root, retain
+        # the process-local contract; do not invent an owner or durable store.
+        return self.search_continuations
+
     async def execute_with_audit_context(
         self,
         tool_name: str,
@@ -2369,7 +2381,7 @@ class ToolRegistry:
             policy = self._live_runtime_policy_cache
             return await execute_file_search(arguments, read_roots=roots,
                 cwd=read_cwd, search_scope=search_scope, audit_context=context,
-                continuations=self.search_continuations, options=self._search_options(),
+                continuations=self._continuations_for_context(context), options=self._search_options(),
                 protected_read_paths=getattr(policy, "protected_read_paths", ()),
                 retain_scope=lambda value: self._tool_output_store.retain(
                     run_binding(context), "file_search", value))
@@ -2408,8 +2420,8 @@ class ToolRegistry:
                 arguments,
                 access_root=read_roots,
                 workspace_dir=read_cwd,
-                continuations=self.search_continuations, search_scope=search_scope,
-                audit_context=self._effective_audit_context(), options=self._search_options(),
+                continuations=self._continuations_for_context(context), search_scope=search_scope,
+                audit_context=context, options=self._search_options(),
                 protected_read_paths=getattr(self._live_runtime_policy_cache, "protected_read_paths", ()),
             )
 
@@ -2467,8 +2479,8 @@ class ToolRegistry:
                 arguments,
                 access_root=read_roots,
                 workspace_dir=read_cwd,
-                continuations=self.search_continuations, search_scope=search_scope,
-                audit_context=self._effective_audit_context(), options=self._search_options(),
+                continuations=self._continuations_for_context(context), search_scope=search_scope,
+                audit_context=context, options=self._search_options(),
                 protected_read_paths=getattr(self._live_runtime_policy_cache, "protected_read_paths", ()),
             )
 

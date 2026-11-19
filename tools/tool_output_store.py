@@ -349,10 +349,36 @@ class ToolOutputStore:
         """Retain a text stream without materializing the complete result."""
         return self._retain_chunks(binding, source_tool, chunks)
 
+    def retain_search_continuation(
+        self, binding: tuple[str, ...], chunks: Iterator[str], *,
+        max_entries: int, max_bytes: int, max_state_bytes: int, expires_at: float,
+    ) -> str | None:
+        """Retain scanner state alongside other private Run-owned artifacts."""
+        return self._retain_chunks(
+            binding, "search_continuation", chunks, kind="search_continuation",
+            continuation_limits=(max_entries, max_bytes, max_state_bytes, expires_at),
+        )
+
+    def read_search_continuation(self, binding: tuple[str, ...], reference: str, *,
+                                 max_state_bytes: int) -> str:
+        with self._locked() as root:
+            if root is None:
+                raise ValueError("search continuation is unavailable")
+            item = self._read_item(root, binding, reference)
+            if item.kind != "search_continuation" or item.source_tool != "search_continuation":
+                raise ValueError("search continuation is unavailable")
+            if max_state_bytes and item.characters > max_state_bytes:
+                raise ValueError("search continuation exceeds the configured capacity")
+            value = self._read_range(root, item, 0, item.characters)
+            if max_state_bytes and len(value.encode("utf-8", errors="surrogatepass")) > max_state_bytes:
+                raise ValueError("search continuation exceeds the configured capacity")
+            return value
+
     def _retain_chunks(
         self, binding: tuple[str, ...] | None, source_tool: str, chunks: Iterator[str], *,
         kind: str = "text", image_outcomes: Mapping[int, bool] | None = None,
         screenshot_source: str | None = None,
+        continuation_limits: tuple[int, int, int, float] | None = None,
     ) -> str | None:
         if binding is None:
             return None
@@ -373,6 +399,29 @@ class ToolOutputStore:
                 protect_private_file(run_dir)
                 write_config_json(run_dir / ".run.json", {"binding": list(binding)}, expected_revision=None)
             self._verify_run(run_dir, binding)
+            existing_bytes = 0
+            if continuation_limits is not None:
+                max_entries, max_bytes, max_state_bytes, expires_at = continuation_limits
+                count = 0
+                if max_entries or max_bytes:
+                    for metadata in run_dir.glob("*.json"):
+                        if metadata.name.startswith("."):
+                            continue
+                        if metadata.is_symlink():
+                            raise ValueError("invalid retained output metadata")
+                        row = read_config_json(metadata)
+                        if row.get("kind") != "search_continuation":
+                            continue
+                        expiry = row.get("expires_at", 0)
+                        size = row.get("logical_bytes")
+                        if type(expiry) not in (int, float) or type(size) is not int or size < 0:
+                            raise ValueError("invalid search continuation metadata")
+                        if expiry and expiry <= time.time():
+                            continue
+                        count += 1
+                        existing_bytes += size
+                if max_entries and count >= max_entries:
+                    return None
             while True:
                 reference = secrets.token_urlsafe(32)
                 data_path, index_path = run_dir / f"{reference}.data", run_dir / f"{reference}.index"
@@ -383,6 +432,7 @@ class ToolOutputStore:
                     break
             digest = hashlib.sha256()
             characters = 0
+            logical_bytes = 0
             try:
                 with _private_file(data_path) as data, _private_file(index_path) as index:
                     pending = ""
@@ -395,14 +445,28 @@ class ToolOutputStore:
                             pending += piece[position:position + size]
                             position += size
                             if len(pending) == _CHUNK_CHARS:
-                                digest.update(pending.encode("utf-8", errors="surrogatepass"))
+                                utf8 = pending.encode("utf-8", errors="surrogatepass")
+                                logical_bytes += len(utf8)
+                                if continuation_limits is not None and (
+                                    (max_state_bytes and logical_bytes > max_state_bytes)
+                                    or (max_bytes and existing_bytes + logical_bytes > max_bytes)
+                                ):
+                                    raise ValueError("search continuation capacity exceeded")
+                                digest.update(utf8)
                                 encoded = pending.encode("utf-32-le", errors="surrogatepass")
                                 data.write(encoded)
                                 index.write(hashlib.sha256(encoded).digest())
                                 characters += len(pending)
                                 pending = ""
                     if pending:
-                        digest.update(pending.encode("utf-8", errors="surrogatepass"))
+                        utf8 = pending.encode("utf-8", errors="surrogatepass")
+                        logical_bytes += len(utf8)
+                        if continuation_limits is not None and (
+                            (max_state_bytes and logical_bytes > max_state_bytes)
+                            or (max_bytes and existing_bytes + logical_bytes > max_bytes)
+                        ):
+                            raise ValueError("search continuation capacity exceeded")
+                        digest.update(utf8)
                         encoded = pending.encode("utf-32-le", errors="surrogatepass")
                         data.write(encoded)
                         index.write(hashlib.sha256(encoded).digest())
@@ -435,6 +499,8 @@ class ToolOutputStore:
                     "characters": characters, "digest": digest.hexdigest(),
                     "frame_count": frame_count,
                     "image_outcomes": {str(i): value for i, value in outcomes.items()},
+                    **({"logical_bytes": logical_bytes, "expires_at": expires_at}
+                       if continuation_limits is not None else {}),
                 }, expected_revision=None)
             except ConfigDurabilityError:
                 # Publication may already have committed; retain its data for
@@ -560,6 +626,8 @@ class ToolOutputStore:
             if root is None:
                 raise ValueError("result reference is invalid or belongs to another Run")
             item = self._read_item(root, binding, reference)
+            if item.kind == "search_continuation":
+                raise ValueError("search continuation is not a tool output")
             if type(offset) is not int or offset < 0 or offset > item.characters:
                 raise ValueError("invalid result offset")
             if limit is not None and (type(limit) is not int or limit < 1):

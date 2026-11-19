@@ -65,17 +65,32 @@ required to retrieve that large metadata; without it the search reports the
 retention limitation. For long match terms the response refers back to the query
 and labels shortened excerpts; the original file and character offset remain
 available. Worker transport and continuation serialization have separate limits.
-Path regex compilation runs inside the cancellable worker. Continuations
-are opaque references to Function-local memory. The default holds at most 64
-entries, 8 MiB total and 3 MiB per entry, without a time-based expiry. The tool
-configuration can set file_search.continuations max_entries, max_bytes,
-max_state_bytes and ttl_seconds; zero disables that particular bound. The
-effective values appear in the result. A larger cache does not remove the
-worker's separate state-serialization limit. Cursors bind query, roots, policy,
-Agent, owner, Run, revision and Function generation, are consumed on use and
-never deserialize model state. File/directory signature changes invalidate a
-cursor without a rescan. Function replacement clears this derived cache. No scan
-survives a page return.
+Path regex compilation runs inside the cancellable worker. With a complete
+trusted instance, Agent, owner, Session, Run and request binding and a
+configured persistent instance or Agent home, continuations are opaque
+references in the existing private Run output store. They survive
+Worker replacement, response loss and interrupted page reads; the same cursor
+may be retried while the Run is active. Only terminal Run cleanup removes these
+checkpoints. They bind the query, roots, policy, owner and scope revision; a
+changed file or directory signature invalidates a cursor. No scan process
+survives a page return, and this is not an immutable filesystem snapshot.
+
+For these Run-bound checkpoints, there is no entry or aggregate-byte limit by
+default, and the default per-checkpoint serialized state limit is 3 MiB. The optional
+file_search.continuations max_entries, max_bytes, max_state_bytes and ttl_seconds
+settings apply per Run; zero disables the selected bound. Byte limits count the
+serialized UTF-8 state, while the private disk representation and metadata use
+additional space. Expired checkpoints are inaccessible but remain on disk until
+terminal Run cleanup. The effective settings appear in the search result.
+Changing these settings does not remove the worker's separate serialization
+limit. Storage failure or an explicit capacity limit is reported as incomplete,
+not as a complete search.
+
+Calls without a complete trusted Run binding or persistent private root continue
+to use Function-local memory: by default 64 entries, 8 MiB total and 3 MiB per entry,
+without time expiry. Those cursors also bind the Function generation, are
+consumed on use and disappear on Worker replacement. The same settings can
+adjust that cache.
 There is no fixed directory-depth cutoff: platform path, handle and continuation
 limits can still stop a scan, and coverage reports errors rather than claiming
 absence. If a cursor expires, is evicted, no longer matches the Run/query or
