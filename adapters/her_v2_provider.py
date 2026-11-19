@@ -3316,8 +3316,26 @@ class HashiStageProvider(StageProvider):
         )
         raw_messages = context.get("messages")
         if not matches or not isinstance(raw_messages, list) or not raw_messages:
-            if context.get("boundary") in {"pending_tool_batch", "ready_provider_request"}:
-                raise ProviderContextObserverError("pending Tool continuation cannot change provider, model, or stage")
+            if (
+                self._provider_context_resume_pending
+                and context.get("boundary")
+                in {"pending_tool_batch", "ready_provider_request"}
+            ):
+                # Ordinary crash recovery resumes the exact pending Tool
+                # batch or provider request, so a changed provider, model or
+                # stage must fail closed instead of silently re-driving the
+                # old work under a different backend.
+                raise ProviderContextObserverError(
+                    "pending Tool continuation cannot change provider, "
+                    "model, or stage"
+                )
+            # A /steer successor never replays the interrupted pending batch
+            # or provider request. An incompatible private checkpoint is
+            # therefore discarded and the successor continues with the new
+            # provider request and its new steering instruction. The
+            # interrupted Tool's unknown-side-effect evidence stays on the
+            # session-store ledger and is not affected by this discard.
+            self._provider_context_recovery_consumed = True
             return None
         if any(not isinstance(item, Mapping) for item in raw_messages):
             raise ProviderContextObserverError(

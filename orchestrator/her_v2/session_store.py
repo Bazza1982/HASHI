@@ -1799,16 +1799,29 @@ class HerSessionStore:
                 and str(recorded_claim.get("request_id") or "")
                 == str(canonical_run.get("request_id") or "")
             ):
-                # The recorded claim names the same Run/request but no longer
-                # verifies against it: the source attempt or fence has moved
-                # on and the receipt chain is stale. Reject it.
-                return None
+                stored_digest = str(
+                    state.get("provider_context_producer_claim_digest") or ""
+                )
+                if stored_digest and _digest(recorded_claim) == stored_digest:
+                    # The recorded claim names the same Run/request and its
+                    # own digest checks out, yet it still fails verification:
+                    # the source attempt or fence has genuinely moved on and
+                    # the receipt chain is stale. Reject it.
+                    return None
+                # The stored claim names the same Run/request but its digest
+                # is missing or mismatched: the private checkpoint's
+                # integrity is insufficient. That must not be confused with
+                # a stale authoritative Run. The canonical PAO source Run
+                # chain is still valid, so fall through to the degraded
+                # continuation below; never relabel the checkpoint as
+                # verified.
             # Case A: no private provider checkpoint exists. Case B: a
-            # checkpoint exists whose producer provenance is missing or
-            # conflicting. In both cases bind the evidence to the canonical
-            # PAO source Run identity so the successor can adopt the steered
-            # Turn and continue without private provider context. An
-            # unverified checkpoint is never claimed as verified.
+            # checkpoint exists whose producer provenance is missing,
+            # conflicting, or whose claim digest is broken. In every case
+            # bind the evidence to the canonical PAO source Run identity so
+            # the successor can adopt the steered Turn and continue without
+            # private provider context. An unverified checkpoint is never
+            # claimed as verified.
             run_identity = dict(canonical_run)
             provider_context = self._provider_context_metadata(None, digest="")
         elif (

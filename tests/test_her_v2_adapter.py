@@ -3496,6 +3496,184 @@ async def test_stage_provider_still_resumes_pending_batch_for_crash_recovery():
         "assistant",
     ]
     assert backend.resume_pending_tools is True
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary, incompatible",
+    [
+        ("pending_tool_batch", {"provider": "other-engine"}),
+        ("pending_tool_batch", {"model": "other/model"}),
+        ("pending_tool_batch", {"stage": "direct"}),
+        ("ready_provider_request", {"provider": "other-engine"}),
+    ],
+)
+async def test_stage_provider_steer_successor_discards_incompatible_checkpoint(
+    boundary, incompatible
+):
+    """A /steer successor owns its provider/model/stage selection. When the
+    interrupted private checkpoint is incompatible with that selection the
+    checkpoint is discarded instead of raising: the interrupted pending
+    batch is not replayed and the new instruction drives a fresh provider
+    request."""
+
+    class ContinuationBackend(_FakeBackend):
+        def __init__(self, system_md=None):
+            super().__init__(system_md)
+            self.continuation_messages = None
+            self.resume_pending_tools = False
+
+        def set_provider_context_observer(self, observer):
+            self.context_observer = observer
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+            continuation_messages=None,
+            resume_pending_tools=False,
+            provider_call_limit=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.provider_call_limit = provider_call_limit
+            self.continuation_messages = continuation_messages
+            self.resume_pending_tools = resume_pending_tools
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"continued"}',
+                duration_ms=1,
+            )
+
+    class ContinuationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            backend = ContinuationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    private_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "original work"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-edit",
+                    "type": "function",
+                    "function": {"name": "file_write", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+    recovery = {
+        "format": "herv3-provider-context-v1",
+        "provider": "openrouter-api",
+        "model": "configured/model",
+        "stage": "execution",
+        "boundary": boundary,
+        "message_count": len(private_messages),
+        "messages": private_messages,
+        "reasoning_count": 0,
+        "reasoning": [],
+    }
+    recovery.update(incompatible)
+    manager = ContinuationManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    provider.bind_provider_context(
+        observer=lambda checkpoint: None,
+        recovery=recovery,
+        resume_pending_tools=False,
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    await provider.invoke(
+        ProviderProfile("execution", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[0]
+    assert backend.continuation_messages is None
+    assert backend.resume_pending_tools is False
+    assert "Do the requested work" in backend.prompt
+
+
+@pytest.mark.asyncio
+async def test_stage_provider_crash_recovery_still_rejects_incompatible_checkpoint():
+    """Ordinary crash recovery resumes the exact pending batch or provider
+    request, so a changed provider/model/stage must keep failing closed
+    instead of silently dropping the interrupted work."""
+
+    class ContinuationBackend(_FakeBackend):
+        def __init__(self, system_md=None):
+            super().__init__(system_md)
+            self.continuation_messages = None
+
+        def set_provider_context_observer(self, observer):
+            self.context_observer = observer
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+            continuation_messages=None,
+            resume_pending_tools=False,
+            provider_call_limit=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.provider_call_limit = provider_call_limit
+            self.continuation_messages = continuation_messages
+            self.resume_pending_tools = resume_pending_tools
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"continued"}',
+                duration_ms=1,
+            )
+
+    class ContinuationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            backend = ContinuationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    manager = ContinuationManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    provider.bind_provider_context(
+        observer=lambda checkpoint: None,
+        recovery={
+            "format": "herv3-provider-context-v1",
+            "provider": "openrouter-api",
+            "model": "configured/model",
+            "stage": "execution",
+            "boundary": "pending_tool_batch",
+            "message_count": 2,
+            "messages": [
+                {"role": "system", "content": "execution contract"},
+                {"role": "user", "content": "original work"},
+            ],
+            "reasoning_count": 0,
+            "reasoning": [],
+        },
+    )
+    request = _stage_request(
+        Stage.EXECUTION,
+        allow_tools=False,
+        allow_side_effects=False,
+    )
+    with pytest.raises(StageInvocationError) as caught:
+        await provider.invoke(
+            ProviderProfile("execution", "other-engine", "configured/model"),
+            request,
+        )
+    assert caught.value.code == ProviderFailureCode.AUDIT_PERSISTENCE_FAILURE
+
 @pytest.mark.asyncio
 async def test_stage_provider_passes_only_the_typed_her_stream_guard():
     manager = _FakeManager()
