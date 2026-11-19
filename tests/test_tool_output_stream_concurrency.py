@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 
@@ -160,3 +161,36 @@ def test_reconciliation_preserves_unrecognized_stage_contents(tmp_path):
     note.write_text("preserve", encoding="utf-8")
     store.reconcile_terminal()
     assert note.read_text(encoding="utf-8") == "preserve"
+
+
+def test_foreign_lock_family_is_preserved_until_the_run_is_terminal(tmp_path):
+    current = binding("other-platform")
+    state = {current: "running"}
+    store = ToolOutputStore(agent_home=tmp_path, state_resolver=state.get)
+    root = store.prepare_private_root()
+    stage = root / ".staging-foreign"
+    stage.mkdir()
+    (stage / ".staging.json").write_text(json.dumps({
+        "type": "hashi.tool-output-stage", "version": 2,
+        "lock_family": "posix" if os.name == "nt" else "nt", "binding": list(current),
+    }), encoding="utf-8")
+    (stage / "output.data").write_bytes(b"data")
+    store.reconcile_terminal()
+    assert stage.exists()
+    state[current] = "stopped"
+    store.reconcile_terminal()
+    assert not stage.exists()
+
+
+def test_unsealed_and_legacy_stages_are_not_guessed_abandoned(tmp_path):
+    store = ToolOutputStore(agent_home=tmp_path)
+    root = store.prepare_private_root()
+    unsealed = root / ".staging-unsealed"
+    legacy = root / ".staging-legacy"
+    unsealed.mkdir()
+    legacy.mkdir()
+    (legacy / ".staging.json").write_text(json.dumps({
+        "type": "hashi.tool-output-stage", "version": 1,
+    }), encoding="utf-8")
+    store.reconcile_terminal()
+    assert unsealed.is_dir() and legacy.is_dir()

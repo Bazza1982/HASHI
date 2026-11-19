@@ -116,10 +116,15 @@ treated as successful retrieval. Streaming retention stages private files
 without holding the shared store lock, so a slow writer does not block another
 Run's result pages. Publication rechecks the Run and shared continuation limits
 under that lock; a stopped Run cannot publish a delayed result. A replacement
-worker reclaims recognized abandoned stages after confirming their liveness
-lock is free. Stages with unrecognized contents are preserved for inspection.
-Operators may set `HASHI_TOOL_OUTPUT_LOCK_TIMEOUT_SECONDS` to a nonnegative
-total wait budget for shared-store operations when needed.
+worker reclaims recognized stages from the same lock family after confirming
+their liveness lock is free. Windows and WSL locks are not mutually visible:
+a stage from the other family is retained while its Run may still be active,
+and is reclaimed only when its Run is known to be terminal. Unsealed, older,
+or unrecognized stages are preserved for inspection. Operators may set
+`HASHI_TOOL_OUTPUT_LOCK_TIMEOUT_SECONDS` to a nonnegative total wait budget for
+shared-store operations when needed. Concurrent cross-platform writers to the
+same store still need a shared lock primitive; the current store-wide locks do
+not provide that guarantee.
 
 ## Browser and desktop deadlines
 

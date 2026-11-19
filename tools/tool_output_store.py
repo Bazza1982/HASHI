@@ -410,8 +410,10 @@ class ToolOutputStore:
 
                 protect_private_file(stage)
                 stage_lock.enter_context(file_write_lock(stage / "inflight", timeout=0))
-                write_config_json(stage / ".staging.json", {"type": "hashi.tool-output-stage", "version": 1},
-                                  expected_revision=None)
+                write_config_json(stage / ".staging.json", {
+                    "type": "hashi.tool-output-stage", "version": 2,
+                    "lock_family": os.name, "binding": list(binding),
+                }, expected_revision=None)
 
             max_entries, max_bytes, max_state_bytes, expires_at = continuation_limits or (0, 0, 0, 0)
             digest = hashlib.sha256()
@@ -702,9 +704,11 @@ class ToolOutputStore:
         with self._locked() as root:
             if root is None:
                 return 0
-            # A crashed writer cannot publish a stage. Only remove a sealed
-            # HASHI stage (or an empty, never-sealed one), after proving its
-            # per-stage liveness lock is free. Unknown contents are retained.
+            # Windows byte locks and WSL flock locks are not mutually visible.
+            # An active stage from another lock family is therefore retained,
+            # even if its lock appears free. Its canonical terminal Run can be
+            # reclaimed without treating that foreign lock as liveness proof.
+            # Unsealed, legacy, or unknown stages are retained for inspection.
             allowed = {".staging.json", "..staging.json.lock", ".inflight.lock",
                        "output.data", "output.index", "output.frames"}
             for stage in root.glob(".staging-*"):
@@ -715,13 +719,21 @@ class ToolOutputStore:
                     if any(item.name not in allowed or item.is_symlink() or not item.is_file() for item in entries):
                         continue
                     marker = stage / ".staging.json"
-                    if marker.exists():
-                        if dict(read_config_json(marker)) != {"type": "hashi.tool-output-stage", "version": 1}:
-                            continue
-                    elif any(item.name not in {".inflight.lock", "..staging.json.lock"} for item in entries):
+                    if not marker.exists():
                         continue
-                    with file_write_lock(stage / "inflight", timeout=0):
-                        pass
+                    row = read_config_json(marker)
+                    value = row.get("binding")
+                    if (row.get("type") != "hashi.tool-output-stage" or row.get("version") != 2
+                        or row.get("lock_family") not in {"nt", "posix"}
+                        or not isinstance(value, list) or len(value) != 6
+                        or not all(isinstance(part, str) for part in value)):
+                        continue
+                    if row["lock_family"] != os.name:
+                        if not self._terminal(tuple(value)):
+                            continue
+                    else:
+                        with file_write_lock(stage / "inflight", timeout=0):
+                            pass
                     # The shared lock excludes new stages, and stage names are
                     # never reused; no writer can acquire this abandoned one.
                     shutil.rmtree(stage)
