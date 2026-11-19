@@ -88,7 +88,7 @@ def terminal_events_page(store, *, owner_id: str, after: int, limit: int = 50) -
 async def handle_automation_events(server, request):
     """Authenticated, bounded long poll over committed Session event evidence."""
     owner_id = server._v1_owner_id(request)
-    if owner_id is None:
+    if owner_id is None or not server._check_admin_auth(request):
         return web.json_response(
             {"ok": False, "error_code": "auth_required"}, status=401,
         )
