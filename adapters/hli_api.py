@@ -112,6 +112,29 @@ class HLIAdapter(OpenAICompatibleAdapter):
         # Per-request payload digests already Compacted: prevents repeatedly
         # compacting the same unchanged payload. Bounded, FIFO-evicted.
         self._hli_compacted_requests: dict[str, str] = {}
+        self._hli_on_demand_view_installed = False
+
+    def _install_on_demand_tool_view(self) -> None:
+        """Small-model default: schemas start compact and grow by tool_find.
+
+        The HLI provider serves local small models; every stage (including
+        non-her_v3 preparation stages) must present the compact starter set
+        instead of the full core-tier schemas. Tool execution and admission
+        still pass through the same PAO registry; this only changes schemas.
+        """
+        if self._hli_on_demand_view_installed:
+            return
+        registry = getattr(self, "tool_registry", None)
+        is_allowed = getattr(registry, "is_allowed", None)
+        if not callable(is_allowed) or not is_allowed("tool_find"):
+            return
+        try:
+            from tools.tool_presentation import OnDemandToolView
+
+            self.tool_registry = OnDemandToolView(registry, goal="")
+            self._hli_on_demand_view_installed = True
+        except Exception as exc:
+            self.logger.debug("HLI on-demand tool view unavailable: %s", exc)
 
     def _request_headers(self) -> dict[str, str]:
         return {"Content-Type": "application/json"}
@@ -132,6 +155,7 @@ class HLIAdapter(OpenAICompatibleAdapter):
         return self._endpoint
 
     def _build_payload(self, *args, **kwargs) -> dict:
+        self._install_on_demand_tool_view()
         payload = super()._build_payload(*args, **kwargs)
         extra = dict(getattr(self.config, "extra", None) or {})
         requested = extra.get("provider_reasoning", extra.get("reasoning_effort"))
@@ -408,6 +432,7 @@ class HLIAdapter(OpenAICompatibleAdapter):
     async def initialize(self) -> bool:
         initialized = await super().initialize()
         if initialized:
+            self._install_on_demand_tool_view()
             await self._observe_model_context()
         return initialized
 

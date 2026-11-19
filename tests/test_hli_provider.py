@@ -122,6 +122,61 @@ class HLIProviderTests(unittest.TestCase):
         self.assertLess(budget.low_input_tokens, budget.high_projected_tokens)
 
 
+class HLIOnDemandToolViewTests(unittest.TestCase):
+    """Small-model default: compact starter schemas, not full core tier."""
+
+    def _backend_with_registry(self, allowed):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = AgentConfig(
+                name="herv3-hli", engine="hli-api", workspace_dir=root,
+                system_md=root / "agent.md", model="qwen-local", is_active=True,
+                extra={},
+            )
+            backend = HLIAdapter(agent, GlobalConfig(authorized_id=1), api_key=None)
+
+            class FakeRegistry:
+                def __init__(self, names):
+                    self._allowed = set(names)
+
+                def is_allowed(self, name):
+                    return name in self._allowed
+
+                def get_tool_definitions(self, tiers=None):
+                    return [
+                        {"type": "function",
+                         "function": {"name": name, "description": f"tool {name}"}}
+                        for name in sorted(self._allowed)
+                    ]
+
+            backend.tool_registry = FakeRegistry(allowed)
+            return backend
+
+    def test_full_core_tier_without_tool_find_is_preserved(self):
+        backend = self._backend_with_registry(
+            ["file_read", "file_list", "file_write"])
+        payload = backend._build_payload(
+            [{"role": "user", "content": "hi"}], use_streaming=True)
+        names = {item["function"]["name"] for item in payload.get("tools", [])}
+        self.assertEqual(names, {"file_read", "file_list", "file_write"})
+
+    def test_tool_find_enables_compact_starter_view(self):
+        backend = self._backend_with_registry(
+            ["tool_find", "file_read", "file_list", "file_write", "shell",
+             "ask_user", "get_user_answer", "file_search", "log_query",
+             "documentation_read", "repo_discover"])
+        payload = backend._build_payload(
+            [{"role": "user", "content": "hi"}], use_streaming=True)
+        names = {item["function"]["name"] for item in payload.get("tools", [])}
+        # Compact starter set only; further schemas are revealed by tool_find.
+        self.assertIn("tool_find", names)
+        self.assertNotIn("file_write", names)
+        self.assertNotIn("file_search", names)
+        self.assertNotIn("log_query", names)
+        self.assertNotIn("repo_discover", names)
+        self.assertLessEqual(len(payload["tools"]), 6)
+
+
 class KeylessInitializationTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_without_api_key_and_without_network_probe(self):
         with TemporaryDirectory() as directory:
