@@ -3264,15 +3264,35 @@ def create_app(
                 status_code=401,
                 content={"ok": False, "error": "authentication_required"},
             )
+        # Enforce the 32 KiB bound BEFORE accumulating an unbounded body.
+        # A declared Content-Length rejects early; chunked uploads are read
+        # through a bounded stream so a hostile client cannot force a large
+        # in-memory buffer past the limit.
+        content_length = request.headers.get("content-length")
         try:
-            raw = await request.body()
-        except Exception:
-            raw = b""
-        if len(raw) > MAX_REPORT_BYTES:
+            declared_length = int(content_length) if content_length is not None else -1
+        except ValueError:
+            declared_length = -1
+        if declared_length > MAX_REPORT_BYTES:
             return JSONResponse(
                 status_code=413,
                 content={"ok": False, "error": "lan_readiness_report_too_large"},
             )
+        raw_chunks: list[bytes] = []
+        raw_size = 0
+        try:
+            async for chunk in request.stream():
+                raw_chunks.append(chunk)
+                raw_size += len(chunk)
+                if raw_size > MAX_REPORT_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"ok": False, "error": "lan_readiness_report_too_large"},
+                    )
+        except Exception:
+            # A client abort or transport error is an empty report, not a crash.
+            raw_chunks = []
+        raw = b"".join(raw_chunks)
         try:
             payload = json.loads(raw.decode("utf-8-sig"))
         except (UnicodeError, json.JSONDecodeError):

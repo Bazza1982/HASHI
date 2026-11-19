@@ -491,6 +491,23 @@ function Test-RemotePortSpecCovers {
     return $false
 }
 
+function Test-RemoteGpoTrue {
+    param($Value)
+    # Windows PowerShell 5.1 NetSecurity cmdlets expose Enabled / AllowLocalFirewallRules
+    # as GpoBoolean enums (True/False/NotConfigured). A bare [bool] cast treats
+    # NotConfigured as $true and would misreport unconfigured policy as enforced.
+    # Compare the canonical string form instead; plain booleans and strings from
+    # test stubs follow the same rule ('True' is the only true value).
+    return ([string]$Value).Trim() -eq 'True'
+}
+
+function Convert-RemoteGpoStringList {
+    param($Value)
+    # Profile/Direction/Action are enum-valued in PS 5.1 (GpoProfile/GpoDirection/
+    # GpoAction) and plain strings in later shells and stubs. Render canonical
+    # names so every downstream -eq / -notin comparison is type-stable.
+    return @(@($Value) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+}
 function Get-RemoteFirewallDiagnostics {
     param([int]$EffectivePort, [string]$InstanceId, [string]$ListenerProcessPath = "")
 
@@ -547,8 +564,8 @@ function Get-RemoteFirewallDiagnostics {
         }
         if ([string]$Rule.Direction -ne "Inbound") { $TcpIssues += "direction_not_inbound" }
         if ([string]$Rule.Action -ne "Allow") { $TcpIssues += "action_not_allow" }
-        if (-not [bool]$Rule.Enabled) { $TcpIssues += "rule_disabled" }
-        if (@([string[]]$Rule.Profile | Where-Object { $_ -notin @("Domain", "Private") }).Count -gt 0) {
+        if (-not (Test-RemoteGpoTrue $Rule.Enabled)) { $TcpIssues += "rule_disabled" }
+        if (@(Convert-RemoteGpoStringList $Rule.Profile | Where-Object { $_ -notin @("Domain", "Private") }).Count -gt 0) {
             $TcpIssues += "profile_includes_public_or_any"
         }
         if ($null -ne $PortFilter) {
@@ -574,9 +591,9 @@ function Get-RemoteFirewallDiagnostics {
         $Diagnostics.tcp_rule = [ordered]@{
             name = $Names.Tcp
             present = $true
-            enabled = [bool]$Rule.Enabled
+            enabled = (Test-RemoteGpoTrue $Rule.Enabled)
             action = [string]$Rule.Action
-            profile = @([string[]]$Rule.Profile)
+            profile = @(Convert-RemoteGpoStringList $Rule.Profile)
             local_port = if ($null -ne $PortFilter) { [string]$PortFilter.LocalPort } else { "" }
             remote_address = if ($null -ne $AddressFilter) { [string]$AddressFilter.RemoteAddress } else { "" }
             issues = @($TcpIssues)
@@ -602,7 +619,7 @@ function Get-RemoteFirewallDiagnostics {
     if ($MdnsRule.Count -eq 1) {
         $Rule = $MdnsRule[0]
         $PortFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule -ErrorAction SilentlyContinue
-        if (-not [bool]$Rule.Enabled) { $MdnsIssues += "rule_disabled" }
+        if (-not (Test-RemoteGpoTrue $Rule.Enabled)) { $MdnsIssues += "rule_disabled" }
         if ([string]$Rule.Action -ne "Allow") { $MdnsIssues += "action_not_allow" }
         if ($null -ne $PortFilter -and [string]$PortFilter.Protocol -ne "UDP") { $MdnsIssues += "protocol_not_udp" }
         if ($null -ne $PortFilter -and -not (Test-RemotePortSpecCovers -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort 5353)) {
@@ -611,7 +628,7 @@ function Get-RemoteFirewallDiagnostics {
         $Diagnostics.mdns_rule = [ordered]@{
             name = $Names.Mdns
             present = $true
-            enabled = [bool]$Rule.Enabled
+            enabled = (Test-RemoteGpoTrue $Rule.Enabled)
             local_port = if ($null -ne $PortFilter) { [string]$PortFilter.LocalPort } else { "" }
             issues = @($MdnsIssues)
         }
@@ -629,13 +646,20 @@ function Get-RemoteFirewallDiagnostics {
 
     # ── Effective profile policy (ActiveStore) ─────────────────────
     foreach ($Profile in $Profiles) {
+        $AllowLocal = $null
+        if ($null -ne $Profile.AllowLocalFirewallRules -and
+            [string]$Profile.AllowLocalFirewallRules -ne 'NotConfigured') {
+            # An explicitly configured value is authoritative; NotConfigured is
+            # deliberately reported as null, never as an invented true/false.
+            $AllowLocal = (Test-RemoteGpoTrue $Profile.AllowLocalFirewallRules)
+        }
         $Diagnostics.profiles += [ordered]@{
             name = [string]$Profile.Name
-            enabled = [bool]$Profile.Enabled
+            enabled = (Test-RemoteGpoTrue $Profile.Enabled)
             default_inbound_action = [string]$Profile.DefaultInboundAction
-            allow_local_firewall_rules = if ($null -ne $Profile.AllowLocalFirewallRules) { [bool]$Profile.AllowLocalFirewallRules } else { $null }
+            allow_local_firewall_rules = $AllowLocal
         }
-        if ([bool]$Profile.Enabled -and $null -ne $Profile.AllowLocalFirewallRules -and -not [bool]$Profile.AllowLocalFirewallRules) {
+        if ((Test-RemoteGpoTrue $Profile.Enabled) -and $AllowLocal -eq $false) {
             $Diagnostics.local_rules_ignored_by_policy = $true
         }
     }
@@ -643,7 +667,7 @@ function Get-RemoteFirewallDiagnostics {
     # ── Explicit Block evidence (only with matching effective policy) ─
     # A per-program Block rule only counts when it targets the actual listener
     # executable; port rules without a program restriction cover every owner.
-    foreach ($Rule in @($Rules | Where-Object { $_.Direction -eq "Inbound" -and $_.Enabled -and $_.Action -eq "Block" })) {
+    foreach ($Rule in @($Rules | Where-Object { [string]$_.Direction -eq "Inbound" -and (Test-RemoteGpoTrue $_.Enabled) -and [string]$_.Action -eq "Block" })) {
         $PortFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule -ErrorAction SilentlyContinue
         if ($null -eq $PortFilter -or -not (Test-RemotePortSpecCovers -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort $EffectivePort)) {
             continue
@@ -672,7 +696,7 @@ function Get-RemoteFirewallDiagnostics {
             display_name = [string]$Rule.DisplayName
             local_port = [string]$PortFilter.LocalPort
             program = $Program
-            profile = @([string[]]$Rule.Profile)
+            profile = @(Convert-RemoteGpoStringList $Rule.Profile)
         }
     }
 

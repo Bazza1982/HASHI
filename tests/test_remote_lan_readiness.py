@@ -5,6 +5,13 @@ import time
 
 import pytest
 
+import starlette.requests as starlette_requests
+from fastapi.testclient import TestClient
+
+from remote.api.server import create_app
+from remote.security.pairing import PairingManager
+from remote.security.shared_token import build_auth_headers, canonical_request_target
+from remote.terminal.executor import TerminalExecutor
 from remote.api.lan_readiness import (
     CHECKPOINT_MIN_SECONDS,
     LanReadinessCache,
@@ -164,6 +171,108 @@ def test_persisted_checkpoint_is_bounded(tmp_path):
     assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["instance_id"] == "LANLAB1"
 
+
+class _ProtocolStub:
+    def get_protocol_status(self):
+        return {"capabilities": []}
+
+
+def _report_client(tmp_path):
+    token = "shared-secret"
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": token}),
+        encoding="utf-8",
+    )
+    app = create_app(
+        {
+            "instance_id": "HASHI1",
+            "display_name": "HASHI One",
+            "remote_port": 8766,
+            "workbench_port": 18800,
+        },
+        PairingManager(storage_dir=tmp_path / "pairing"),
+        TerminalExecutor(),
+        protocol_manager=_ProtocolStub(),
+        hashi_root=str(tmp_path),
+        workbench_port=18800,
+        lan_readiness_cache=LanReadinessCache(tmp_path, "HASHI1"),
+    )
+    return TestClient(app), token
+
+
+def _report_headers(token):
+    # The endpoint authenticates against an empty-body contract before it
+    # enforces the size bound; signing the payload bytes would never match.
+    target = canonical_request_target("/lan-readiness/report", "")
+    return build_auth_headers(
+        shared_token=token,
+        method="POST",
+        path=target,
+        from_instance="WORKBENCH",
+        body_bytes=b"",
+        timestamp=int(time.time()),
+    )
+
+def _signed_report_body(extra_blob=None):
+    report = _valid_report(instance_id="HASHI1")
+    if extra_blob:
+        report["process"] = {"blob": extra_blob}
+    return json.dumps(report).encode("utf-8")
+
+
+def test_report_endpoint_accepts_valid_signed_report(tmp_path):
+    client, token = _report_client(tmp_path)
+    body = _signed_report_body()
+    response = client.post(
+        "/lan-readiness/report",
+        headers=_report_headers(token),
+        content=body,
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["lan_readiness"]["state"] == "degraded"
+
+
+def test_report_endpoint_rejects_oversized_report_before_parse(tmp_path):
+    client, token = _report_client(tmp_path)
+    # A 40 KiB report exceeds the 32 KiB contract and must be refused with
+    # 413; the payload is still valid JSON so the failure is the size bound,
+    # not parsing.
+    body = _signed_report_body("x" * (MAX_REPORT_BYTES + 8192))
+    assert len(body) > MAX_REPORT_BYTES
+    response = client.post(
+        "/lan-readiness/report",
+        headers=_report_headers(token),
+        content=body,
+    )
+    assert response.status_code == 413
+    assert response.json() == {"ok": False, "error": "lan_readiness_report_too_large"}
+
+
+def test_report_endpoint_never_calls_unbounded_request_body(tmp_path, monkeypatch):
+    # The endpoint must enforce the bound from the declared Content-Length or
+    # a bounded stream read. Any direct call to the unbounded request.body()
+    # (the previous implementation) must fail this guard.
+    client, token = _report_client(tmp_path)
+
+    def boom(_self):
+        raise AssertionError("unbounded request.body() was called")
+
+    monkeypatch.setattr(starlette_requests.Request, "body", boom)
+    body = _signed_report_body()
+    response = client.post(
+        "/lan-readiness/report",
+        headers=_report_headers(token),
+        content=body,
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_report_endpoint_requires_authentication(tmp_path):
+    client, _token = _report_client(tmp_path)
+    response = client.post("/lan-readiness/report", content=_signed_report_body())
+    assert response.status_code == 401
 
 def test_checkpoint_min_seconds_is_sane():
     assert CHECKPOINT_MIN_SECONDS >= 60

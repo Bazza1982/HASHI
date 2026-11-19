@@ -34,6 +34,10 @@ HEALTH_PAYLOAD = {
 
 # Platform cmdlets shadowed by these stubs; state defaults are scenario-safe.
 STUB_TEMPLATE = r"""
+# Load the real NetSecurity module so the Cmdletization-generated 5.1 enums
+# (GpoBoolean/GpoProfile/GpoAction) exist for realistic ActiveStore fixtures.
+# Stub functions are defined afterwards and shadow the real cmdlets.
+Import-Module NetSecurity -ErrorAction SilentlyContinue
 $global:FirewallRules = @()
 $global:PortFilters = @{}
 $global:AddressFilters = @{}
@@ -341,6 +345,91 @@ def test_doctor_gpo_local_merge_disabled(tmp_path):
     assert parsed["firewall"]["reason_code"] == "firewall_local_rules_ignored_by_policy"
     assert parsed["firewall"]["local_rules_ignored_by_policy"] is True
 
+
+def test_doctor_ps51_rule_enabled_enum_true_is_ok(tmp_path):
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="HashiRemote_DOCTOR-CONTRACT_TCP_8767"; '
+        "DisplayName='HASHI Remote MSI TCP 8767'; Description='{\"purpose\":\"hashi-remote-msi-tcp\"}'; "
+        'Direction=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Direction]::Inbound; '
+        'Action=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Action]::Allow; '
+        'Enabled=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True; '
+        'Profile=@([Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Profile]::Domain, '
+        '[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Profile]::Private) }); '
+        '$global:PortFilters["HashiRemote_DOCTOR-CONTRACT_TCP_8767"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="8767" }; '
+        '$global:AddressFilters["HashiRemote_DOCTOR-CONTRACT_TCP_8767"] = [pscustomobject]@{ RemoteAddress="LocalSubnet" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert result.returncode == 0, result.stderr
+    assert parsed["firewall"]["state"] == "ok"
+    assert parsed["firewall"]["reason_code"] == ""
+    assert parsed["firewall"]["tcp_rule"]["enabled"] is True
+    assert sorted(parsed["firewall"]["tcp_rule"]["profile"]) == ["Domain", "Private"]
+
+
+def test_doctor_ps51_rule_enabled_enum_false_is_disabled(tmp_path):
+    # PS 5.1 exposes rule Enabled as an enum (True=1/False=2). A bare [bool]
+    # cast misreads False(2) as $true, so a disabled rule would previously look
+    # enabled. The canonical string comparison must report it disabled.
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="HashiRemote_DOCTOR-CONTRACT_TCP_8767"; '
+        "DisplayName='HASHI Remote MSI TCP 8767'; Description='{\"purpose\":\"hashi-remote-msi-tcp\"}'; "
+        'Direction=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Direction]::Inbound; '
+        'Action=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Action]::Allow; '
+        'Enabled=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::False; '
+        'Profile=@([Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Profile]::Domain, '
+        '[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Profile]::Private) }); '
+        '$global:PortFilters["HashiRemote_DOCTOR-CONTRACT_TCP_8767"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="8767" }; '
+        '$global:AddressFilters["HashiRemote_DOCTOR-CONTRACT_TCP_8767"] = [pscustomobject]@{ RemoteAddress="LocalSubnet" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["tcp_rule"]["enabled"] is False
+    assert parsed["firewall"]["reason_code"] == "firewall_rule_disabled"
+
+
+def test_doctor_ps51_profile_gpoboolean_notconfigured_is_not_gpo_block(tmp_path):
+    scenario = (
+        '$global:Profiles = @('
+        '  [pscustomobject]@{ Name="Domain"; Enabled=$true; DefaultInboundAction="Allow"; '
+        'AllowLocalFirewallRules=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.GpoBoolean]::NotConfigured },'
+        '  [pscustomobject]@{ Name="Private"; Enabled=$true; DefaultInboundAction="Allow"; '
+        'AllowLocalFirewallRules=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.GpoBoolean]::NotConfigured },'
+        '  [pscustomobject]@{ Name="Public"; Enabled=$true; DefaultInboundAction="Allow"; '
+        'AllowLocalFirewallRules=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.GpoBoolean]::NotConfigured })'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["local_rules_ignored_by_policy"] is False
+    assert parsed["firewall"]["reason_code"] == "firewall_rule_missing"
+    for profile in parsed["firewall"]["profiles"]:
+        assert profile["allow_local_firewall_rules"] is None
+
+
+def test_doctor_ps51_profile_gpoboolean_false_flags_gpo(tmp_path):
+    scenario = (
+        '$global:Profiles = @('
+        '  [pscustomobject]@{ Name="Domain"; Enabled=$true; DefaultInboundAction="Allow"; '
+        'AllowLocalFirewallRules=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.GpoBoolean]::False },'
+        '  [pscustomobject]@{ Name="Private"; Enabled=$true; DefaultInboundAction="Allow"; '
+        'AllowLocalFirewallRules=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.GpoBoolean]::False },'
+        '  [pscustomobject]@{ Name="Public"; Enabled=$true; DefaultInboundAction="Allow"; '
+        'AllowLocalFirewallRules=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.GpoBoolean]::False })'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["local_rules_ignored_by_policy"] is True
+    assert parsed["firewall"]["reason_code"] == "firewall_local_rules_ignored_by_policy"
+
+
+def test_doctor_ps51_block_rule_enum_direction_action_is_evidence(tmp_path):
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="enum-block"; DisplayName="enum-block"; '
+        'Direction=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Direction]::Inbound; '
+        'Action=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Action]::Block; '
+        'Enabled=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Enabled]::True; '
+        'Profile=@([Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Profile]::Any) }); '
+        '$global:PortFilters["enum-block"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="8767" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_explicitly_blocked"
+    assert len(parsed["firewall"]["explicit_block_evidence"]) == 1
 
 def test_doctor_loopback_only_bind_is_not_lan_ready(tmp_path):
     scenario = (
