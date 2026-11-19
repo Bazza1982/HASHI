@@ -232,6 +232,10 @@ class HERv2Adapter(BaseBackend):
         self._audit_log: DurableAuditLog | None = None
         self._wip_journal: WIPJournal | None = None
         self._wip_active_journals: dict[str, WIPJournal] = {}
+        # Requests whose fixed-session binding was adopted from a /steer
+        # continuation receipt. Their interrupted pending Tool batch is closed
+        # with synthetic results instead of being resumed.
+        self._steer_continuation_requests: set[str] = set()
         self._wip_journal_cache: dict[str, WIPJournal] = {}
         self._learning: HERv2Learning | None = None
         self._active_runtimes: dict[str, HERv2Runtime] = {}
@@ -1292,6 +1296,9 @@ class HERv2Adapter(BaseBackend):
     ) -> None:
         """Restore the interrupted HER Session before opening a successor Turn."""
 
+        self._steer_continuation_requests.discard(
+            str(request_meta.get("request_id") or "")
+        )
         request_metadata = request_meta.get("request_metadata")
         if not isinstance(request_metadata, Mapping):
             return
@@ -1369,9 +1376,13 @@ class HERv2Adapter(BaseBackend):
         if not session_id:
             raise HerFixedProtocolError(
                 "invalid_steer_continuation",
-                "The /steer continuation receipt is invalid or no longer resumable.",
+                "The /steer continuation receipt does not resolve to a "
+                "steerable terminated HERV3 Turn under this binding.",
             )
         self._session_id = session_id
+        self._steer_continuation_requests.add(
+            str(request_meta.get("request_id") or "")
+        )
 
     def can_resume_fixed_session(self) -> bool:
         """Confirm that an outer HASHI binding has durable HER state behind it."""
@@ -2253,6 +2264,10 @@ class HERv2Adapter(BaseBackend):
                     "request=%s; continuation evidence will remain unavailable",
                     str(request_id or ""),
                 )
+            steer_adopted = (
+                str(request_id or "") in self._steer_continuation_requests
+            )
+            self._steer_continuation_requests.discard(str(request_id or ""))
             provider.bind_provider_context(
                 observer=lambda checkpoint: (
                     self._session_coordinator.record_provider_context_checkpoint(
@@ -2265,6 +2280,7 @@ class HERv2Adapter(BaseBackend):
                     )
                 ),
                 recovery=private_provider_context,
+                resume_pending_tools=not steer_adopted,
             )
         if permission_execution is not None:
             permission_execution.bind_provider(provider)

@@ -1721,7 +1721,12 @@ class HerSessionStore:
         *,
         run_claim: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Return a privacy-safe receipt for one interrupted provider Turn."""
+        """Return a privacy-safe receipt for one interrupted provider Turn.
+
+        The receipt always binds the canonical PAO source Run identity. When
+        the Turn has no private provider checkpoint the adoption still works
+        and the successor continues without private provider context.
+        """
 
         canonical_run = self._normalise_run_claim(
             run_claim,
@@ -1757,47 +1762,72 @@ class HerSessionStore:
         producer_claim_digest = str(
             state.get("provider_context_producer_claim_digest") or ""
         )
-        if (
-            producer_claim is None
-            or producer_claim.get("state") != "running"
-            or not producer_claim_digest
-            or _digest(producer_claim) != producer_claim_digest
-        ):
-            return None
-        for key in (
-            "run_id",
-            "request_id",
-            "attempt",
-            "attempt_id",
-            "state_revision",
-            "input_digest",
-            "parent_run_id",
-        ):
-            if producer_claim.get(key) != canonical_run.get(key):
+        if producer_claim is None:
+            if producer_claim_digest:
+                # A recorded producer claim that no longer normalises is a
+                # fencing conflict, not a missing checkpoint.
                 return None
+            # No private provider checkpoint exists for this Turn (for
+            # example it was steered during planning or before the first
+            # completed provider boundary). Bind the evidence to the
+            # canonical PAO source Run identity directly so the successor
+            # can still adopt the steered Turn and continue without private
+            # provider context.
+            run_identity = dict(canonical_run)
+        else:
+            if (
+                producer_claim.get("state") != "running"
+                or not producer_claim_digest
+                or _digest(producer_claim) != producer_claim_digest
+            ):
+                return None
+            for key in (
+                "run_id",
+                "request_id",
+                "attempt",
+                "attempt_id",
+                "state_revision",
+                "input_digest",
+                "parent_run_id",
+            ):
+                if producer_claim.get(key) != canonical_run.get(key):
+                    return None
+            run_identity = dict(producer_claim)
         provider_context = self._provider_context_metadata(
             state.get("provider_context")
             if isinstance(state.get("provider_context"), Mapping)
             else None,
             digest=str(state.get("provider_context_digest") or ""),
         )
-        provider = str(provider_context.get("provider") or "")
-        model = str(provider_context.get("model") or "")
-        effort = str(provider_context.get("effort") or "")
-        if not bool(provider_context.get("available")) or not all(
-            (provider, model, effort)
-        ):
-            return None
+        provider_context_available = bool(
+            provider_context.get("available")
+        )
+        provider = (
+            str(provider_context.get("provider") or "")
+            if provider_context_available
+            else ""
+        )
+        model = (
+            str(provider_context.get("model") or "")
+            if provider_context_available
+            else ""
+        )
+        effort = (
+            str(provider_context.get("effort") or "")
+            if provider_context_available
+            else ""
+        )
         evidence = {
             "kind": "herv3_active_turn_recovery",
             "source_request_id": source_request_id,
-            "run_id": producer_claim["run_id"],
-            "attempt_id": producer_claim["attempt_id"],
-            "state_revision": producer_claim["state_revision"],
-            "input_digest": producer_claim["input_digest"],
+            "run_id": run_identity["run_id"],
+            "attempt_id": run_identity["attempt_id"],
+            "state_revision": run_identity["state_revision"],
+            "input_digest": run_identity["input_digest"],
             "provider": provider,
             "model": model,
             "effort": effort,
+            "provider_context_available": provider_context_available,
             "turn_id": str(state.get("turn_id") or ""),
             "turn_status": str(state.get("turn_status") or ""),
             "recovery_status": str(state.get("status") or ""),
@@ -1856,12 +1886,14 @@ class HerSessionStore:
         )
         if canonical is None:
             return None
+        # /steer adoption needs the authoritative steer terminal state. It
+        # deliberately does not gate on safe_to_resume or the recovery
+        # disposition: a hard stop of a busy non-read-only Tool IS an
+        # unresolved side effect, and those fields protect crash-recovery
+        # replay of the source Turn, never the opening of the successor.
         if (
             str(canonical.get("turn_status") or "") != "steered"
             or str(canonical.get("recovery_status") or "") != "terminated"
-            or str(canonical.get("recovery_disposition") or "")
-            not in {"steered", "stopped"}
-            or not bool(canonical.get("safe_to_resume"))
         ):
             return None
         for key in (
@@ -1876,8 +1908,11 @@ class HerSessionStore:
             "model",
             "effort",
         ):
+            # provider/model/effort are empty in the degraded no-checkpoint
+            # path; canonical always carries non-empty identity and digest
+            # fields, so equality alone cannot weaken those bindings.
             supplied = str(candidate.get(key) or "")
-            if not supplied or supplied != str(canonical.get(key) or ""):
+            if supplied != str(canonical.get(key) or ""):
                 return None
         reference = str(canonical.get("evidence_ref") or "")
         prefix = "herv3:"

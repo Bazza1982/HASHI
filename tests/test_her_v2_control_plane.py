@@ -537,6 +537,180 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
     ) is None
 
 
+
+
+def test_steer_adoption_survives_an_unresolved_side_effect(tmp_path):
+    """A hard /steer stop on a busy non-read-only Tool leaves an unresolved
+    side effect (safe_to_resume=0, UNKNOWN_SIDE_EFFECT). The successor must
+    still adopt the steered Turn; replay safety stays on the source ledger."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-unsafe", "Run a non-read-only command")
+    coordinator.store.record_runtime_event(
+        session_id=turn.session_id,
+        turn_id=turn.turn_id,
+        record=_runtime_event(
+            turn.turn_id,
+            "turn-unsafe:tool:shell:intent",
+            "tool_intent",
+            operation_id="turn-unsafe:shell:1",
+            tool_call_id="shell",
+            tool_name="shell",
+            arguments_sha256="sha256:shell",
+            read_only=False,
+        ),
+    )
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Run a non-read-only command"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "read",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"target.txt"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "read", "content": "old content"},
+    ]
+    coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "messages": provider_messages,
+            "reasoning": [],
+            "provider_request_id": "provider-read",
+            "invocation_id": "turn-unsafe:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-unsafe",
+                "turn-unsafe",
+                input_digest="sha256:unsafe-input",
+            ),
+        },
+    )
+    closed = coordinator.steer(turn, reason="The user supplied a new direction.")
+    assert closed["status"] == "steered"
+    recovery = coordinator.store.active_turn_recovery(
+        turn.session_id, turn.turn_id
+    )
+    assert recovery["status"] == "terminated"
+    assert recovery["recovery_disposition"] == "UNKNOWN_SIDE_EFFECT"
+    assert recovery["safe_to_resume"] is False
+
+    source_claim = _run_claim(
+        "run-unsafe",
+        "turn-unsafe",
+        state="superseded",
+        input_digest="sha256:unsafe-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-unsafe",
+        run_claim=source_claim,
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["recovery_disposition"] == "UNKNOWN_SIDE_EFFECT"
+    assert evidence["safe_to_resume"] is False
+    assert evidence["provider_context"]["available"] is True
+
+    successor_claim = _run_claim(
+        "run-unsafe-successor",
+        "turn-unsafe-successor",
+        state="running",
+        parent_run_id="run-unsafe",
+        input_digest="sha256:unsafe-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+
+def test_steer_evidence_degrades_without_private_provider_checkpoint(tmp_path):
+    """A Turn steered before any private provider checkpoint still yields
+    adoption evidence bound to the canonical PAO source Run. The successor
+    continues without private provider context instead of being refused."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-noprovider", "Start a plan")
+    closed = coordinator.steer(turn, reason="The user supplied a new direction.")
+    assert closed["status"] == "steered"
+
+    source_claim = _run_claim(
+        "run-noprovider",
+        "turn-noprovider",
+        state="superseded",
+        input_digest="sha256:noprovider-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-noprovider",
+        run_claim=source_claim,
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["provider_context_available"] is False
+    assert evidence["provider"] == ""
+    assert evidence["model"] == ""
+    assert evidence["effort"] == ""
+    assert evidence["run_id"] == "run-noprovider"
+    assert evidence["attempt_id"] == "run-noprovider:attempt:1"
+    assert evidence["input_digest"] == "sha256:noprovider-input"
+
+    successor_claim = _run_claim(
+        "run-noprovider-successor",
+        "turn-noprovider-successor",
+        state="running",
+        parent_run_id="run-noprovider",
+        input_digest="sha256:noprovider-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    # A later source attempt keeps the old receipt diagnostic-only even in
+    # the degraded path.
+    stale_source_claim = {
+        **source_claim,
+        "attempt": 2,
+        "attempt_id": "run-noprovider:attempt:2",
+        "state_revision": 2,
+    }
+    reopened = HerSessionStore(coordinator.store.path)
+    assert reopened.verified_steer_session_id(
+        evidence,
+        source_run_claim=stale_source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) is None
 def test_provider_context_checkpoint_is_segmented_without_count_or_size_ceiling(
     tmp_path,
 ):

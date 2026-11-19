@@ -178,3 +178,34 @@ without a mid-task wrapper.
   The configured optional Telegram mirrors for these Workbench-only Agents
   failed truthfully because their Telegram connectors were disconnected; this
   is not a steer recovery or primary-delivery success claim.
+## 2026-11-19 steer continuation correction record
+
+- Approval: the user authorised implementing the /steer hard-stop/continue
+  repair in the isolated D non-production environment; this PR is review-only
+  and does not merge or deploy.
+- Problem: adopting a steered Turn was gated on safe_to_resume == 1 and a
+  ecovery_disposition whitelist. A hard stop of a busy non-read-only Tool
+  IS an unresolved side effect, so steering a busy run always ended with
+  "The /steer continuation receipt is invalid or no longer resumable." A
+  Turn steered before any private provider checkpoint had no adoption
+  evidence at all, and an interrupted pending Tool batch was handed back to
+  the provider to resume (replay) instead of being closed.
+- Implementation: HERV3 adoption now requires only the authoritative steer
+  terminal state (Turn steered, recovery 	erminated) plus the existing
+  PAO Run-chain, digest, session and binding verification. safe_to_resume
+  keeps its crash-recovery meaning. A steered Turn without a private
+  provider checkpoint still yields adoption evidence bound to the canonical
+  PAO source Run; the successor continues without private provider context.
+  For a /steer successor, an interrupted pending Tool batch is closed with
+  synthetic "/steer interrupted" Tool results instead of
+  esume_pending_tools; crash recovery keeps its resume-pending behavior.
+- Safety: attempt/fence/digest binding, the open-session check and the full
+  instance/Agent/owner/conversation/generation/Workzone binding are
+  unchanged. Unresolved side effects stay on the source Turn ledger and are
+  surfaced in the successor's recovery context for investigation.
+- Validation: six new focused tests with red/green evidence; the owning
+  control-plane, adapter, steer-command, session-store and permission-park
+  suites passed (242 tests); the deterministic Core gate passes with one
+  conditional skip.
+- Runtime adoption and live frontend acceptance remain separate from this
+  source/offline correction and are not claimed here.

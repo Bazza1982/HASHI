@@ -3248,12 +3248,19 @@ class HashiStageProvider(StageProvider):
         *,
         observer: Callable[[Mapping[str, Any]], Any] | None,
         recovery: Mapping[str, Any] | None,
+        resume_pending_tools: bool = True,
     ) -> None:
-        """Bind private complete-boundary persistence and one-shot replay."""
+        """Bind private complete-boundary persistence and one-shot replay.
+
+        ``resume_pending_tools=False`` closes an interrupted pending Tool
+        batch with synthetic cancellation results for a /steer successor
+        instead of handing the batch back to the backend for completion.
+        """
 
         self._provider_context_observer = observer
         self._provider_context_recovery = dict(recovery or {})
         self._provider_context_recovery_consumed = False
+        self._provider_context_resume_pending = bool(resume_pending_tools)
 
     def _bind_provider_context_observer(
         self,
@@ -3320,7 +3327,24 @@ class HashiStageProvider(StageProvider):
         if context.get("boundary") == "pending_tool_batch":
             from orchestrator.her_v2.provider_continuation import pending_tool_calls
 
-            pending_tool_calls(continuation)
+            pending = pending_tool_calls(continuation)
+            if not self._provider_context_resume_pending:
+                for call in pending:
+                    continuation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": str(call.get("id") or ""),
+                            "content": (
+                                "This Tool call was interrupted by /steer "
+                                "before it returned a result. Do not assume "
+                                "it ran; verify any affected state before "
+                                "acting and never replay it automatically."
+                            ),
+                        }
+                    )
+                continuation.append(
+                    {"role": "user", "content": stage_prompt}
+                )
         elif context.get("boundary") != "ready_provider_request":
             continuation.append({"role": "user", "content": stage_prompt})
         self._provider_context_recovery_consumed = True
@@ -5973,7 +5997,11 @@ class HashiStageProvider(StageProvider):
                     generation_kwargs["continuation_messages"] = (
                         continuation_messages
                     )
-                    if self._provider_context_recovery.get("boundary") == "pending_tool_batch":
+                    if (
+                        self._provider_context_recovery.get("boundary")
+                        == "pending_tool_batch"
+                        and self._provider_context_resume_pending
+                    ):
                         if "resume_pending_tools" not in parameters and not accepts_extra_keywords:
                             raise ProviderContextObserverError("selected provider cannot resume a pending Tool batch")
                         generation_kwargs["resume_pending_tools"] = True
