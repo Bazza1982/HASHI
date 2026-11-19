@@ -28,37 +28,63 @@ async def test_pcm_direct_and_proxy_http_share_declared_codec_and_reject_mismatc
     raw = b"\x01\x02\x03\x04" * 3200
     seen = []
     app = web.Application()
+
     async def speech(request):
         seen.append(request.path)
         body = await request.json()
         assert body["response_format"] == "pcm"
         rate = "24000" if request.path.startswith("/bad") else "16000"
-        return web.Response(body=raw, headers={
-            "Content-Type": f"audio/pcm; rate={rate}; channels=2; bits=16; encoding=s16le",
-        })
+        return web.Response(
+            body=raw,
+            headers={
+                "Content-Type": f"audio/pcm; rate={rate}; channels=2; bits=16; encoding=s16le",
+            },
+        )
+
     app.router.add_post("/{route}/v1/audio/speech", speech)
     runner, root = await serve(app)
     adapter = MediaAdapters()
     try:
         results = []
         for route in ("direct", "proxy"):
-            target = validate_target({
-                "id": route, "kind": "tts", "adapter": "openai_compatible",
-                "location": "local", "base_url": root + f"/{route}/v1",
-                "model": "fixture/model", "voices": ["warm"], "audio_format": "pcm",
-                "pcm_sample_rate_hz": 16000, "pcm_sample_width_bytes": 2,
-                "pcm_channels": 2, "pcm_encoding": "s16le",
-            })
-            result = await adapter.synthesize(target, {"voice_id": "warm", "options": {}}, "Hello")
+            target = validate_target(
+                {
+                    "id": route,
+                    "kind": "tts",
+                    "adapter": "openai_compatible",
+                    "location": "local",
+                    "base_url": root + f"/{route}/v1",
+                    "model": "fixture/model",
+                    "voices": ["warm"],
+                    "audio_format": "pcm",
+                    "pcm_sample_rate_hz": 16000,
+                    "pcm_sample_width_bytes": 2,
+                    "pcm_channels": 2,
+                    "pcm_encoding": "s16le",
+                }
+            )
+            result = await adapter.synthesize(
+                target, {"voice_id": "warm", "options": {}}, "Hello"
+            )
             results.append(base64.b64decode(result["content_b64"]))
         assert results[0] == results[1]
         with wave.open(io.BytesIO(results[0]), "rb") as audio:
-            assert (audio.getframerate(), audio.getsampwidth(), audio.getnchannels()) == (16000, 2, 2)
+            assert (
+                audio.getframerate(),
+                audio.getsampwidth(),
+                audio.getnchannels(),
+            ) == (16000, 2, 2)
             assert audio.readframes(audio.getnframes()) == raw
         target["base_url"] = root + "/bad/v1"
         with pytest.raises(CallError, match="call_speech_format_invalid"):
-            await adapter.synthesize(target, {"voice_id": "warm", "options": {}}, "Hello")
-        assert seen == ["/direct/v1/audio/speech", "/proxy/v1/audio/speech", "/bad/v1/audio/speech"]
+            await adapter.synthesize(
+                target, {"voice_id": "warm", "options": {}}, "Hello"
+            )
+        assert seen == [
+            "/direct/v1/audio/speech",
+            "/proxy/v1/audio/speech",
+            "/bad/v1/audio/speech",
+        ]
     finally:
         await runner.cleanup()
 
@@ -276,7 +302,9 @@ async def test_route_auth_json_and_disable_fail_closed(tmp_path):
         await runner.cleanup()
 
 
-async def test_http_queue_reports_selected_capacity_and_preserves_retry_identity(tmp_path, monkeypatch):
+async def test_http_queue_reports_selected_capacity_and_preserves_retry_identity(
+    tmp_path, monkeypatch
+):
     import asyncio
     from test_call_service import setup
 
@@ -285,35 +313,65 @@ async def test_http_queue_reports_selected_capacity_and_preserves_retry_identity
     monkeypatch.setenv("HASHI_CALL_LEASE_SECONDS", "120")
     monkeypatch.setenv("HASHI_CALL_MAX_DURATION_SECONDS", "0")
     api = SimpleNamespace(
-        app=web.Application(), config_path=tmp_path / "agents.json",
-        admin_token="test-token", live_voice_manager=SimpleNamespace(),
+        app=web.Application(),
+        config_path=tmp_path / "agents.json",
+        admin_token="test-token",
+        live_voice_manager=SimpleNamespace(),
         _is_governed_profile=lambda: False,
-        _check_admin_auth=lambda request: request.headers.get("X-Workbench-Token") == "test-token",
+        _check_admin_auth=lambda request: (
+            request.headers.get("X-Workbench-Token") == "test-token"
+        ),
         _v1_owner_id=lambda request: "owner",
     )
     registered = register_call_api(api)
     fixture, ports, adapters, base, _ = setup(tmp_path)
-    registered.config, registered.ports, registered.adapters = fixture.config, ports, adapters
+    registered.config, registered.ports, registered.adapters = (
+        fixture.config,
+        ports,
+        adapters,
+    )
     adapters.wait = asyncio.Event()
     runner, url = await serve(api.app)
     headers = {"X-Workbench-Token": "test-token"}
 
     async def send(session, payload):
-        async with session.post(url + "/api/v1/call/operation", json=payload, headers=headers) as response:
+        async with session.post(
+            url + "/api/v1/call/operation", json=payload, headers=headers
+        ) as response:
             return response.status, await response.json()
 
     try:
         async with ClientSession() as session:
             status, context = await send(session, {**base, "operation": "context"})
             assert status == 200 and context["turn_capacity"]["max_pending_turns"] == 2
-            assert context["lease_policy"] == {"lease_seconds": 120, "max_duration_seconds": None}
-            start = {**base, "operation": "start", "call_id": "http-queue",
-                     "generation": context["generation"], "revision": context["revision"]}
+            assert context["lease_policy"] == {
+                "lease_seconds": 120,
+                "max_duration_seconds": None,
+            }
+            start = {
+                **base,
+                "operation": "start",
+                "call_id": "http-queue",
+                "generation": context["generation"],
+                "revision": context["revision"],
+            }
             status, started = await send(session, start)
             assert status == 200 and started["lease_policy"] == context["lease_policy"]
-            binding = {**base, "call_id": "http-queue", "generation": context["generation"]}
-            bodies = [{**binding, "operation": "turn", "turn_id": f"http-{i}",
-                       "sequence": i, "audio_b64": wav()} for i in range(1, 4)]
+            binding = {
+                **base,
+                "call_id": "http-queue",
+                "generation": context["generation"],
+            }
+            bodies = [
+                {
+                    **binding,
+                    "operation": "turn",
+                    "turn_id": f"http-{i}",
+                    "sequence": i,
+                    "audio_b64": wav(),
+                }
+                for i in range(1, 4)
+            ]
             assert (await send(session, bodies[0]))[0] == 200
             status, queued = await send(session, bodies[1])
             assert status == 200 and queued["turn"]["phase"] == "queued"
@@ -321,7 +379,8 @@ async def test_http_queue_reports_selected_capacity_and_preserves_retry_identity
             assert (await send(session, bodies[1]))[0] == 200
             status, full = await send(session, bodies[2])
             assert status == 429 and full == {
-                "ok": False, "error_code": "call_turn_capacity",
+                "ok": False,
+                "error_code": "call_turn_capacity",
                 "turn_queue": {"pending": 2, "limit": 2, "retryable": True},
             }
             tasks = list(registered.calls["http-queue"].turn_tasks.values())

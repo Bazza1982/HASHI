@@ -111,7 +111,12 @@ def options_for(target, value):
 
 def pcm_settings_for(target):
     """Validate the exact raw PCM codec; recognize existing built-in Gemini defaults."""
-    keys = ("pcm_sample_rate_hz", "pcm_sample_width_bytes", "pcm_channels", "pcm_encoding")
+    keys = (
+        "pcm_sample_rate_hz",
+        "pcm_sample_width_bytes",
+        "pcm_channels",
+        "pcm_encoding",
+    )
     legacy = (
         target.get("kind") == "tts"
         and target.get("model") in OPENROUTER_GEMINI_TTS_MODELS
@@ -119,18 +124,26 @@ def pcm_settings_for(target):
         and not any(key in target for key in keys)
     )
     settings = (
-        {"pcm_sample_rate_hz": 24000, "pcm_sample_width_bytes": 2,
-         "pcm_channels": 1, "pcm_encoding": "s16le"}
-        if legacy else {key: target.get(key) for key in keys}
+        {
+            "pcm_sample_rate_hz": 24000,
+            "pcm_sample_width_bytes": 2,
+            "pcm_channels": 1,
+            "pcm_encoding": "s16le",
+        }
+        if legacy
+        else {key: target.get(key) for key in keys}
     )
     rate = settings["pcm_sample_rate_hz"]
     width = settings["pcm_sample_width_bytes"]
     channels = settings["pcm_channels"]
     if (
         target.get("kind") != "tts"
-        or type(rate) is not int or not 8000 <= rate <= 96000
-        or type(width) is not int or width != 2
-        or type(channels) is not int or channels not in (1, 2)
+        or type(rate) is not int
+        or not 8000 <= rate <= 96000
+        or type(width) is not int
+        or width != 2
+        or type(channels) is not int
+        or channels not in (1, 2)
         or settings["pcm_encoding"] != "s16le"
     ):
         raise CallError("call_audio_format_unsupported", 503)
@@ -198,8 +211,7 @@ def validate_target(target):
     ):
         raise CallError("call_credential_reference_invalid", 503)
     if target["kind"] == "tts" and (
-        not isinstance(target.get("voices"), list)
-        or not target["voices"]
+        not isinstance(target.get("voices"), list) or not target["voices"]
     ):
         raise CallError("call_voices_required", 503)
     voices = target.get("voices", [])
@@ -230,16 +242,24 @@ def validate_target(target):
         raise CallError("call_option_schema_invalid", 503)
     enforce_capacity("options", len(schema), "call_option_schema_limit", 503)
     for key, spec in schema.items():
-        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,50}", key) or not isinstance(spec, dict):
+        if (
+            not isinstance(key, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,50}", key)
+            or not isinstance(spec, dict)
+        ):
             raise CallError("call_option_schema_invalid", 503)
         if set(spec) - {"type", "min", "max", "max_length", "enum"} or spec.get(
             "type"
         ) not in ("string", "number", "boolean"):
             raise CallError("call_option_schema_invalid", 503)
-        if "max_length" in spec and (type(spec["max_length"]) is not int or spec["max_length"] < 0):
+        if "max_length" in spec and (
+            type(spec["max_length"]) is not int or spec["max_length"] < 0
+        ):
             raise CallError("call_option_schema_invalid", 503)
         for bound in ("min", "max"):
-            if bound in spec and (type(spec[bound]) not in (int, float) or not math.isfinite(spec[bound])):
+            if bound in spec and (
+                type(spec[bound]) not in (int, float) or not math.isfinite(spec[bound])
+            ):
                 raise CallError("call_option_schema_invalid", 503)
         if spec.get("min", -math.inf) > spec.get("max", math.inf):
             raise CallError("call_option_schema_invalid", 503)
@@ -249,10 +269,17 @@ def validate_target(target):
             kind = spec["type"]
             for item in spec["enum"]:
                 if kind == "string":
-                    valid = isinstance(item, str) and len(item) <= spec.get("max_length", 300)
+                    valid = isinstance(item, str) and len(item) <= spec.get(
+                        "max_length", 300
+                    )
                 elif kind == "number":
-                    valid = (type(item) in (int, float) and math.isfinite(item)
-                             and spec.get("min", -math.inf) <= item <= spec.get("max", math.inf))
+                    valid = (
+                        type(item) in (int, float)
+                        and math.isfinite(item)
+                        and spec.get("min", -math.inf)
+                        <= item
+                        <= spec.get("max", math.inf)
+                    )
                 else:
                     valid = type(item) is bool
                 if not valid:
@@ -477,11 +504,16 @@ class CallConfig:
         # These are selected resource budgets, not universal eligibility
         # rules. Keep integer validation while allowing the instance's chosen
         # slower device and freshness policy to reach every Call consumer.
-        if any(type(value) is not int or not 1 <= value <= 2**31 - 1
-               for key, value in policy.items() if key != "max_buffer_bytes"):
+        if any(
+            type(value) is not int or not 1 <= value <= 2**31 - 1
+            for key, value in policy.items()
+            if key != "max_buffer_bytes"
+        ):
             raise CallError("call_video_policy_invalid", 503)
-        if (type(policy["max_buffer_bytes"]) is not int
-            or not 0 <= policy["max_buffer_bytes"] <= 2**53 - 1):
+        if (
+            type(policy["max_buffer_bytes"]) is not int
+            or not 0 <= policy["max_buffer_bytes"] <= 2**53 - 1
+        ):
             raise CallError("call_video_policy_invalid", 503)
         # Older configurations may omit a responsive window.
         if "responsive_seconds" not in supplied:
@@ -650,4 +682,6 @@ class CallConfig:
         profiles[key] = profile
         self._write(doc)
         return self.context(owner, agent)
+
+
 # HASHI-Fingerprint: hfp_e30d01328e8349c7b2bc8973641ce276

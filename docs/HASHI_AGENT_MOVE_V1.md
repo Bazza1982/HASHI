@@ -865,10 +865,13 @@ The following operational constraints were relocated intact from the prior boots
 
 ### FYI v1 017 Move confirmation and Clone retry boundaries
 
-- Move: staging checks and forward-only confirmation, with the separately
-  documented authenticated staged-only policy-change recovery. Clone: PAO-owner
+- Move: staging checks, forward-only confirmation, no rollback. Clone: PAO-owner
   snapshots, resumable retries; no Move-only gates/source lifecycle writes.
   [Move/Clone](HASHI_AGENT_MOVE_V1.md).
+- Subsequent change (2026-11): governed history import and backfill add an
+  authenticated staged-only policy-change recovery; the current transaction
+  and rollback behaviour is documented in the governed mapping and
+  transaction sections below.
 
 ### Archive member capacity (source changes, 2026-11-18)
 

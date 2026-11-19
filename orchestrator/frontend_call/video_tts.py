@@ -143,7 +143,11 @@ class VideoTTSSelection:
                 number = float(value) if type(value) in (int, float) else float("nan")
             except OverflowError:
                 number = float("nan")
-            if not math.isfinite(number) or number < 0 or (not allow_zero and number == 0):
+            if (
+                not math.isfinite(number)
+                or number < 0
+                or (not allow_zero and number == 0)
+            ):
                 raise CallError("call_video_configuration_invalid", 503)
         try:
             speed_value = float(speed) if type(speed) in (int, float) else float("nan")
@@ -260,7 +264,10 @@ def _validated_job_id(result):
     values = [result[key] for key in ("id", "job_id") if key in result]
     if (
         not values
-        or any(not isinstance(value, str) or not _JOB_ID.fullmatch(value) for value in values)
+        or any(
+            not isinstance(value, str) or not _JOB_ID.fullmatch(value)
+            for value in values
+        )
         or any(value != values[0] for value in values)
     ):
         raise CallError("call_video_job_invalid", 502)
@@ -289,7 +296,8 @@ class VideoSpeechClient(ComputeServiceClient):
             headers["Idempotency-Key"] = hashlib.sha256(request_id.encode()).hexdigest()
         try:
             async with configured_media_session(
-                self.session_factory, {"location": node.location, "base_url": node.base_url},
+                self.session_factory,
+                {"location": node.location, "base_url": node.base_url},
                 timeout=aiohttp.ClientTimeout(total=timeout or node.timeout_seconds),
             ) as session:
                 async with session.request(
@@ -403,7 +411,9 @@ class CallVideoTTS:
             raise CallError("call_video_reference_invalid", 502)
         width, height = struct.unpack(">II", reference[16:24])
         image = offering.image
-        reference_limit = video_transport_limit("MAX_REFERENCE_BYTES", MAX_REFERENCE_BYTES)
+        reference_limit = video_transport_limit(
+            "MAX_REFERENCE_BYTES", MAX_REFERENCE_BYTES
+        )
         media_limit = video_transport_limit("MAX_MEDIA_BYTES", MAX_VIDEO_BYTES)
         pixel_limit = video_transport_limit("MAX_REFERENCE_PIXELS", 8_000_000)
         if (
@@ -463,7 +473,11 @@ class CallVideoTTS:
                 # Only an explicitly advertised lookup may settle an unknown POST.
                 # A missing, failed or mismatched lookup remains unknown: no replay.
                 lookup = next(
-                    (item for item in offering.interfaces if item.protocol == LOOKUP_PROTOCOL),
+                    (
+                        item
+                        for item in offering.interfaces
+                        if item.protocol == LOOKUP_PROTOCOL
+                    ),
                     None,
                 )
                 if lookup is None or lookup.method != "GET":

@@ -25,14 +25,20 @@ def _request_key(value: object) -> str:
 def normalize_capture_clock(value: object) -> dict[str, Any]:
     """Validate timing metadata; it conveys no identity or authorization."""
     if not isinstance(value, Mapping) or set(value) != {
-        "basis", "client_captured_at", "uncertainty_ms"
+        "basis",
+        "client_captured_at",
+        "uncertainty_ms",
     }:
         raise ValueError("invalid camera capture clock")
     original = value.get("client_captured_at")
     uncertainty = value.get("uncertainty_ms")
-    if (value.get("basis") != "server_roundtrip_lower_bound"
-        or not isinstance(original, str) or len(original) > 40
-        or type(uncertainty) is not int or not 0 <= uncertainty <= 2**53 - 1):
+    if (
+        value.get("basis") != "server_roundtrip_lower_bound"
+        or not isinstance(original, str)
+        or len(original) > 40
+        or type(uncertainty) is not int
+        or not 0 <= uncertainty <= 2**53 - 1
+    ):
         raise ValueError("invalid camera capture clock")
     try:
         stamp = datetime.fromisoformat(original.replace("Z", "+00:00"))
@@ -79,8 +85,11 @@ def encode_live_frames(
                 + base64.b64encode(image).decode("ascii"),
                 "frame_sequence": sequence,
                 "captured_at": captured_at,
-                **({"capture_clock": normalize_capture_clock(frame["capture_clock"])}
-                   if frame.get("capture_clock") is not None else {}),
+                **(
+                    {"capture_clock": normalize_capture_clock(frame["capture_clock"])}
+                    if frame.get("capture_clock") is not None
+                    else {}
+                ),
             }
         )
     return {
@@ -137,8 +146,11 @@ def pop_live_frames_metadata(
                 "data_url": data_url,
                 "frame_sequence": sequence,
                 "captured_at": captured_at,
-                **({"capture_clock": normalize_capture_clock(row["capture_clock"])}
-                   if row.get("capture_clock") is not None else {}),
+                **(
+                    {"capture_clock": normalize_capture_clock(row["capture_clock"])}
+                    if row.get("capture_clock") is not None
+                    else {}
+                ),
             }
         )
         previous_sequence = sequence
@@ -180,7 +192,9 @@ class _TimedLiveFrame(dict):
 class _TransientLivePart(dict):
     """Mark only camera-origin content, leaving ordinary attachments untouched."""
 
-    def __init__(self, value: Mapping[str, Any], frame: Mapping[str, Any], *, image: bool):
+    def __init__(
+        self, value: Mapping[str, Any], frame: Mapping[str, Any], *, image: bool
+    ):
         super().__init__(value)
         self.captured = getattr(frame, "captured", None)
         self.freshness = getattr(frame, "freshness", None)
@@ -236,7 +250,8 @@ def redact_transient_camera_evidence(value: Any) -> tuple[Any, int]:
 
 
 def project_live_frame_messages(
-    messages: Sequence[Mapping[str, Any]], *,
+    messages: Sequence[Mapping[str, Any]],
+    *,
     for_checkpoint: bool = False,
     retain_tags: bool = False,
     now: datetime | None = None,
@@ -264,20 +279,25 @@ def project_live_frame_messages(
             if omitted:
                 text_type = (
                     "input_text"
-                    if any(isinstance(part, Mapping) and part.get("type") in {"input_text", "input_image"}
-                           for part in content)
+                    if any(
+                        isinstance(part, Mapping)
+                        and part.get("type") in {"input_text", "input_image"}
+                        for part in content
+                    )
                     else "text"
                 )
-                parts.append({
-                    "type": text_type,
-                    "text": (
-                        "Live camera snapshots were transient and are unavailable "
-                        "in this saved continuation."
-                        if for_checkpoint else
-                        "Some live camera snapshots expired before this provider "
-                        "request and are no longer included."
-                    ),
-                })
+                parts.append(
+                    {
+                        "type": text_type,
+                        "text": (
+                            "Live camera snapshots were transient and are unavailable "
+                            "in this saved continuation."
+                            if for_checkpoint
+                            else "Some live camera snapshots expired before this provider "
+                            "request and are no longer included."
+                        ),
+                    }
+                )
                 total_omitted += omitted
             message["content"] = parts
         result.append(message)
@@ -320,7 +340,9 @@ def live_frames_for(
     result = []
     for frame in frames:
         try:
-            captured = datetime.fromisoformat(str(frame["captured_at"]).replace("Z", "+00:00"))
+            captured = datetime.fromisoformat(
+                str(frame["captured_at"]).replace("Z", "+00:00")
+            )
             if captured.tzinfo is None:
                 continue
             age = (current - captured).total_seconds()
@@ -344,7 +366,9 @@ def clear_live_frames(runtime: Any) -> None:
 
 
 def live_frame_facts(
-    frames: Sequence[Mapping[str, Any]], *, window_seconds: float = LIVE_FRAME_WINDOW_SECONDS
+    frames: Sequence[Mapping[str, Any]],
+    *,
+    window_seconds: float = LIVE_FRAME_WINDOW_SECONDS,
 ) -> dict[str, Any]:
     if not frames:
         return {"count": 0, "window_seconds": window_seconds}

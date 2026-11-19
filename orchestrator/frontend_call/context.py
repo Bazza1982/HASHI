@@ -72,9 +72,7 @@ def project_call_context(value):
         if type(freshness) is not int or not 1 <= freshness <= 2**31 - 1:
             return None
         usable = (
-            state in ("fresh", "delayed")
-            and age is not None
-            and -3 <= age <= freshness
+            state in ("fresh", "delayed") and age is not None and -3 <= age <= freshness
         )
         return {
             "type": "hashi.call-context",
@@ -91,8 +89,11 @@ def project_call_context(value):
                 else "unavailable",
                 "source": "user_shared_camera",
                 "captured_at": captured_at,
-                **({"capture_clock": normalize_capture_clock(camera["capture_clock"])}
-                   if camera.get("capture_clock") is not None else {}),
+                **(
+                    {"capture_clock": normalize_capture_clock(camera["capture_clock"])}
+                    if camera.get("capture_clock") is not None
+                    else {}
+                ),
                 "observation": observation if usable else None,
                 "observation_authority": "untrusted_data",
                 "freshness_seconds": value.get("freshness_seconds", 20),

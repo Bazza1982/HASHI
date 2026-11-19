@@ -208,7 +208,14 @@ OPERATIONS = {
     },
     "snapshot": {"generation", "call_id"},
     "camera": {"generation", "call_id", "enabled"},
-    "observe": {"generation", "call_id", "frame_sequence", "image_b64", "captured_at", "capture_clock"},
+    "observe": {
+        "generation",
+        "call_id",
+        "frame_sequence",
+        "image_b64",
+        "captured_at",
+        "capture_clock",
+    },
     "speech": {"generation", "call_id", "turn_id", "segment", "retry"},
     "speech_advance": {"generation", "call_id", "turn_id", "segment"},
     "speech_commit": {"generation", "call_id", "turn_id", "segment", "output_protocol"},
@@ -260,7 +267,11 @@ def validate_body(body):
     integer(body.get("context_generation"))
     if body["operation"] == "start":
         call_locale(body.get("locale"))
-    if body["operation"] == "turn" and "read_structured" in body and type(body["read_structured"]) is not bool:
+    if (
+        body["operation"] == "turn"
+        and "read_structured" in body
+        and type(body["read_structured"]) is not bool
+    ):
         raise CallError("call_read_structured_invalid")
     return body
 
@@ -308,8 +319,7 @@ def video_transport_limit(name, default):
 def call_lease_policy():
     """Instance-selected ownership lease and optional maximum Call duration."""
     values = {}
-    for key, default in (("lease_seconds", LEASE_SECONDS),
-                         ("max_duration_seconds", 0)):
+    for key, default in (("lease_seconds", LEASE_SECONDS), ("max_duration_seconds", 0)):
         raw = os.environ.get("HASHI_CALL_" + key.upper())
         if raw is None or raw == "":
             raw = str(default)
@@ -388,9 +398,17 @@ def decode_wav(value):
     try:
         with wave.open(io.BytesIO(data), "rb") as audio:
             channels, width, rate, compression = (
-                audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()
+                audio.getnchannels(),
+                audio.getsampwidth(),
+                audio.getframerate(),
+                audio.getcomptype(),
             )
-            if channels not in (1, 2) or width != 2 or not 8000 <= rate <= 96000 or compression != "NONE":
+            if (
+                channels not in (1, 2)
+                or width != 2
+                or not 8000 <= rate <= 96000
+                or compression != "NONE"
+            ):
                 raise CallError("call_wav_format_required")
             frames = audio.getnframes()
             decoded_size = frames * channels * width
@@ -476,9 +494,11 @@ def decode_jpeg(value):
                 break
             height = int.from_bytes(data[offset + 3 : offset + 5], "big")
             width = int.from_bytes(data[offset + 5 : offset + 7], "big")
-            if not (1 <= width <= capacity["max_image_dimension"]
-                    and 1 <= height <= capacity["max_image_dimension"]
-                    and width * height <= capacity["max_image_pixels"]):
+            if not (
+                1 <= width <= capacity["max_image_dimension"]
+                and 1 <= height <= capacity["max_image_dimension"]
+                and width * height <= capacity["max_image_pixels"]
+            ):
                 raise CallError("call_image_dimensions_invalid")
             return data
         if marker == 0xDA:
@@ -536,11 +556,16 @@ def structured_speech_text(text: str) -> str:
         if fence is None:
             if in_table and re.fullmatch(separator, line):
                 continue
-            if (index + 1 < len(source_lines) and "|" in line
-                    and re.fullmatch(separator, source_lines[index + 1])):
+            if (
+                index + 1 < len(source_lines)
+                and "|" in line
+                and re.fullmatch(separator, source_lines[index + 1])
+            ):
                 in_table = True
             if in_table and "|" in line:
-                line = ", ".join(part.strip() for part in line.strip().strip("|").split("|"))
+                line = ", ".join(
+                    part.strip() for part in line.strip().strip("|").split("|")
+                )
             elif in_table:
                 in_table = False
             line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1. \2", line)
@@ -655,7 +680,10 @@ def _group_speech_parts(
 
 
 def _sentence_parts(
-    text: str, *, include_tail: bool, maximum_duration_units: int | None = None,
+    text: str,
+    *,
+    include_tail: bool,
+    maximum_duration_units: int | None = None,
     already_clean: bool = False,
 ) -> tuple[list[str], str]:
     clean = str(text or "") if already_clean else clean_speech_text(str(text or ""))
@@ -716,7 +744,10 @@ def _video_group_size(value: int, name: str) -> int:
 
 
 def _video_sentence_units(
-    text: str, *, include_tail: bool, maximum_chars: int | None,
+    text: str,
+    *,
+    include_tail: bool,
+    maximum_chars: int | None,
     already_clean: bool = False,
 ) -> tuple[list[str], str]:
     """Keep natural sentences intact unless one exceeds the renderer hard limit."""
@@ -850,7 +881,10 @@ def video_speech_segments(
     )
     group_sentences = _video_group_size(group_sentences, "group_sentences")
     units, _remainder = _video_sentence_units(
-        text, include_tail=True, maximum_chars=maximum_chars, already_clean=already_clean
+        text,
+        include_tail=True,
+        maximum_chars=maximum_chars,
+        already_clean=already_clean,
     )
     parts, _pending = _group_video_units(
         units,
@@ -867,7 +901,9 @@ def video_speech_segments(
 
 
 def speech_segments(
-    text: str, *, maximum_duration_units: int | None = None,
+    text: str,
+    *,
+    maximum_duration_units: int | None = None,
     max_segments: int | None = MAX_SPEECH_SEGMENTS,
     already_clean: bool = False,
 ):

@@ -236,7 +236,9 @@ class HashiPorts:
                 "observation": observation,
                 "recent_frames": live_frame_facts(
                     current_frames,
-                    window_seconds=binding.get("call_context", {}).get("sample_window_seconds", 10),
+                    window_seconds=binding.get("call_context", {}).get(
+                        "sample_window_seconds", 10
+                    ),
                 ),
             }
             evidence = seal_connector_evidence(
@@ -254,13 +256,19 @@ class HashiPorts:
                 "session_message_text": execution_text,
                 "session_message_display_text": text,
                 "session_message_content": [{"type": "text", "text": execution_text}],
-                "frontend_client": {"kind": "session_api", "client_id": binding["client_id"]},
+                "frontend_client": {
+                    "kind": "session_api",
+                    "client_id": binding["client_id"],
+                },
                 "session_context_generation": binding["context_generation"],
                 CONNECTOR_EVIDENCE_METADATA_KEY: evidence,
             }
             if current_frames:
-                request_metadata[TRANSIENT_LIVE_FRAMES_METADATA_KEY] = encode_live_frames(
-                    () if empty_frame_envelope else current_frames, max_frames=frame_limit
+                request_metadata[TRANSIENT_LIVE_FRAMES_METADATA_KEY] = (
+                    encode_live_frames(
+                        () if empty_frame_envelope else current_frames,
+                        max_frames=frame_limit,
+                    )
                 )
             return request_metadata
 
@@ -275,21 +283,34 @@ class HashiPorts:
             # Keep this in step with AgentRuntimeHandle.enqueue_request. The
             # real protocol uses a 32-character UUID hex request identifier.
             params = {
-                "chat_id": int(chat_id), "prompt": str(execution_text), "source": "session-api",
-                "summary": str(text[:160]), "silent": False, "is_retry": False,
-                "deliver_to_telegram": True, "skip_memory_injection": False,
-                "habit_learning_eligible": True, "skill_id": None, "scheduler_context": {},
-                "request_metadata": metadata, "request_content": None,
-                "idempotency_key": idempotency_key, "replay_only": False,
+                "chat_id": int(chat_id),
+                "prompt": str(execution_text),
+                "source": "session-api",
+                "summary": str(text[:160]),
+                "silent": False,
+                "is_retry": False,
+                "deliver_to_telegram": True,
+                "skip_memory_injection": False,
+                "habit_learning_eligible": True,
+                "skill_id": None,
+                "scheduler_context": {},
+                "request_metadata": metadata,
+                "request_content": None,
+                "idempotency_key": idempotency_key,
+                "replay_only": False,
             }
             return {
-                "version": ipc.FUNCTION_WORKER_PROTOCOL_VERSION, "kind": ipc.REQUEST,
-                "id": "0" * 32, "method": "runtime.enqueue_request", "params": params,
+                "version": ipc.FUNCTION_WORKER_PROTOCOL_VERSION,
+                "kind": ipc.REQUEST,
+                "id": "0" * 32,
+                "method": "runtime.enqueue_request",
+                "params": params,
             }
 
         advertised = (
             runtime.metadata.get("worker_large_request")
-            if isinstance(runtime, AgentRuntimeHandle) else None
+            if isinstance(runtime, AgentRuntimeHandle)
+            else None
         )
         supports_large = (
             isinstance(advertised, dict)
@@ -297,11 +318,17 @@ class HashiPorts:
             and advertised["version"] == LARGE_REQUEST_VERSION
         )
         if isinstance(runtime, AgentRuntimeHandle) and not supports_large:
+
             def row_wire_size(frame):
                 placeholder = {**frame, "image": b"x"}
-                row = encode_live_frames((placeholder,), max_frames=frame_limit)["frames"][0]
-                base = len(json.dumps(row, ensure_ascii=False, sort_keys=True,
-                                      separators=(",", ":")).encode("utf-8"))
+                row = encode_live_frames((placeholder,), max_frames=frame_limit)[
+                    "frames"
+                ][0]
+                base = len(
+                    json.dumps(
+                        row, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                )
                 return base - 4 + 4 * ((len(frame["image"]) + 2) // 3)
 
             wire_costs = {id(frame): row_wire_size(frame) for frame in selected_frames}
@@ -323,7 +350,10 @@ class HashiPorts:
                         ipc.encode_envelope(worker_envelope(request_metadata))
                         break
                     except ipc.FunctionWorkerProtocolError as exc:
-                        if not str(exc).startswith("IPC frame exceeds") or not selected_frames:
+                        if (
+                            not str(exc).startswith("IPC frame exceeds")
+                            or not selected_frames
+                        ):
                             raise
                         # The complete serialized check remains authoritative.
                         frame_bytes = ipc.MAX_FRAME_BYTES - base_size + 1
@@ -332,9 +362,14 @@ class HashiPorts:
                 # Batch removals avoid quadratic work for explicitly selected
                 # larger sample counts. For equal sizes, retain wider coverage.
                 middle = (len(selected_frames) - 1) / 2
-                ranked = sorted(range(len(selected_frames)), key=lambda index: (
-                    wire_costs[id(selected_frames[index])], -abs(index - middle)
-                ), reverse=True)
+                ranked = sorted(
+                    range(len(selected_frames)),
+                    key=lambda index: (
+                        wire_costs[id(selected_frames[index])],
+                        -abs(index - middle),
+                    ),
+                    reverse=True,
+                )
                 removed = set()
                 remaining_count = len(selected_frames)
                 for index in ranked:
@@ -346,7 +381,9 @@ class HashiPorts:
                     remaining_count -= 1
                     removed.add(index)
                 selected_frames = [
-                    frame for index, frame in enumerate(selected_frames) if index not in removed
+                    frame
+                    for index, frame in enumerate(selected_frames)
+                    if index not in removed
                 ]
         else:
             request_metadata = metadata_for(selected_frames)
@@ -376,7 +413,9 @@ class HashiPorts:
             "request_id": str(request_id),
             "run_id": run["run_id"],
             "message_id": run["user_message_id"],
-            "_admitted_frame_sequences": [frame["frame_sequence"] for frame in selected_frames],
+            "_admitted_frame_sequences": [
+                frame["frame_sequence"] for frame in selected_frames
+            ],
             "_omitted_frames_for_transport": len(frames) - len(selected_frames),
         }
 

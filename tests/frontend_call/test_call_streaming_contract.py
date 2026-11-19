@@ -207,7 +207,6 @@ def test_speech_preserves_meaningful_leading_parentheses():
     assert parts == ["(Q3 revenue) increased by 12%."]
 
 
-
 def test_incomplete_fenced_code_is_not_spoken_during_streaming():
     fence = chr(96) * 3
     prefix = "Here is the result. " + fence + "python\nPRIVATE_CODE"
@@ -215,7 +214,6 @@ def test_incomplete_fenced_code_is_not_spoken_during_streaming():
     finished, _ = speech_segments(prefix + "\n" + fence + "\nDone.")
     assert all("PRIVATE_CODE" not in part for part in streamed + finished)
     assert "Done." in "".join(finished)
-
 
 
 def test_speech_preserves_markdown_link_label_without_reading_raw_url():

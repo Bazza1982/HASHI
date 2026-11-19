@@ -763,10 +763,15 @@ class CallService:
             turn["speech_segments"] = segments[offset : offset + MAX_SPEECH_SEGMENTS]
             turn["speech_offset"] = offset
             turn["speech_more"] = offset + MAX_SPEECH_SEGMENTS < len(segments)
-            turn["speech_truncated"] = bool(turn.get("speech_truncated") or turn["speech_more"])
+            turn["speech_truncated"] = bool(
+                turn.get("speech_truncated") or turn["speech_more"]
+            )
         pending = sorted(
-            (item for item in call.active_turns.values()
-             if not item.get("_admission_finished")),
+            (
+                item
+                for item in call.active_turns.values()
+                if not item.get("_admission_finished")
+            ),
             key=lambda item: item["sequence"],
         )
         return {
@@ -777,8 +782,14 @@ class CallService:
                 "pending": len(pending),
                 "limit": call.queue_limits.get("max_pending_turns"),
                 "concurrent": call.queue_limits.get("concurrent_turns"),
-                "turns": [{"turn_id": item["turn_id"], "sequence": item["sequence"],
-                           "phase": item["phase"]} for item in pending],
+                "turns": [
+                    {
+                        "turn_id": item["turn_id"],
+                        "sequence": item["sequence"],
+                        "phase": item["phase"],
+                    }
+                    for item in pending
+                ],
             },
             "call_id": call.binding["call_id"],
             "binding": call.binding,
@@ -925,8 +936,11 @@ class CallService:
             "frame_sequence": call.frame_sequence,
             "observed_sequence": fresh.get("frame_sequence"),
             "captured_at": fresh.get("captured_at"),
-            **({"capture_clock": dict(fresh["capture_clock"])}
-               if fresh.get("capture_clock") is not None else {}),
+            **(
+                {"capture_clock": dict(fresh["capture_clock"])}
+                if fresh.get("capture_clock") is not None
+                else {}
+            ),
             "error": call.vision_error or None,
             "reason": call.camera_reason or None,
         }
@@ -1333,13 +1347,24 @@ class CallService:
             context = await self._project_readiness(owner, body["agent_id"], context)
             media_input = call_media_capacity()
             stt_slot = (context.get("profile") or {}).get("stt") or {}
-            stt_target = next((target for target in context.get("targets", [])
-                               if target.get("id") == stt_slot.get("target_id")), {})
+            stt_target = next(
+                (
+                    target
+                    for target in context.get("targets", [])
+                    if target.get("id") == stt_slot.get("target_id")
+                ),
+                {},
+            )
             media_input["stt_segment_seconds"] = stt_target.get(
                 "stt_segment_seconds", media_input["stt_segment_seconds"]
             )
-            media_input.update(audio_format="pcm_s16le_wav", sample_rate_min=8000,
-                               sample_rate_max=96000, audio_channels=[1, 2], image_format="jpeg")
+            media_input.update(
+                audio_format="pcm_s16le_wav",
+                sample_rate_min=8000,
+                sample_rate_max=96000,
+                audio_channels=[1, 2],
+                image_format="jpeg",
+            )
             return {
                 "ok": True,
                 "protocol": PROTOCOL,
@@ -1503,7 +1528,9 @@ class CallService:
         if call.phase != "active":
             raise CallError("call_ended", 410)
         self.ports.validate(owner, call.binding)
-        call.expires = self.clock() + call.lease_policy.get("lease_seconds", LEASE_SECONDS)
+        call.expires = self.clock() + call.lease_policy.get(
+            "lease_seconds", LEASE_SECONDS
+        )
         if op == "snapshot":
             if call.output is not None and call.output.video_enabled:
                 try:
@@ -1570,7 +1597,11 @@ class CallService:
                 "frame_sequence": sequence,
                 "captured_at": body["captured_at"],
                 "captured_unix": captured,
-                **({"capture_clock": capture_clock} if capture_clock is not None else {}),
+                **(
+                    {"capture_clock": capture_clock}
+                    if capture_clock is not None
+                    else {}
+                ),
             }
             cutoff = time.time()
             call.frame_buffer.append(dict(frame))
@@ -1578,7 +1609,8 @@ class CallService:
                 (
                     item
                     for item in call.frame_buffer
-                    if cutoff - min(
+                    if cutoff
+                    - min(
                         call.video_policy["sample_window_seconds"],
                         call.video_policy["freshness_seconds"],
                     )
@@ -1589,7 +1621,7 @@ class CallService:
                     float(item.get("captured_unix") or 0),
                     int(item.get("frame_sequence") or 0),
                 ),
-            )[-call.video_policy["max_buffer_frames"]:]
+            )[-call.video_policy["max_buffer_frames"] :]
             buffer_budget = call.video_policy["max_buffer_bytes"]
             if buffer_budget:
                 retained = []
@@ -1650,7 +1682,9 @@ class CallService:
                     or len(body["captured_at"]) > 40
                 ):
                     raise CallError("call_capture_time_invalid")
-            turn_frames, buffered_candidates = self._sample_turn_frames(call, time.time())
+            turn_frames, buffered_candidates = self._sample_turn_frames(
+                call, time.time()
+            )
             sample_window = min(
                 call.video_policy["sample_window_seconds"],
                 call.video_policy["freshness_seconds"],
@@ -1663,7 +1697,8 @@ class CallService:
                     "selected_count": len(turn_frames),
                     "maximum_frames": call.video_policy["max_frames_per_turn"],
                 }
-                if call.camera_enabled else None
+                if call.camera_enabled
+                else None
             )
             if call.output is not None and call.output.video_enabled:
                 call.output.fence(call.turn)
@@ -1699,7 +1734,8 @@ class CallService:
                 "sequence": sequence,
                 "digest": fingerprint,
                 "phase": (
-                    "queued" if pending_admissions >= call.queue_limits["concurrent_turns"]
+                    "queued"
+                    if pending_admissions >= call.queue_limits["concurrent_turns"]
                     else "transcribing"
                 ),
                 "speech_segments": [],
@@ -1730,7 +1766,9 @@ class CallService:
             admission_done = asyncio.Event()
             call.admission_tail = admission_done
             task = asyncio.create_task(
-                self._run(call, turn, audio, image, turn_frames, predecessor, admission_done)
+                self._run(
+                    call, turn, audio, image, turn_frames, predecessor, admission_done
+                )
             )
             call.task = task
             call.turn_tasks[turn_id] = task
@@ -1825,7 +1863,10 @@ class CallService:
             return {"ok": True, "ready": True, "filler": slot, "text": text, **cached}
         if op == "speech_advance":
             identifier(body.get("turn_id"))
-            if call.turn.get("turn_id") != body.get("turn_id") or call.turn.get("phase") != "complete":
+            if (
+                call.turn.get("turn_id") != body.get("turn_id")
+                or call.turn.get("phase") != "complete"
+            ):
                 raise CallError("call_speech_not_ready", 409)
             if call.turn.get("_speech_interrupted"):
                 raise CallError("call_speech_interrupted", 409)
@@ -1843,8 +1884,11 @@ class CallService:
             return self._view(call)
         if op == "speech":
             if call.turn.get("_speech_interrupted"):
-                code = ("call_video_interrupted" if call.output is not None
-                        and call.output.video_enabled else "call_speech_interrupted")
+                code = (
+                    "call_video_interrupted"
+                    if call.output is not None and call.output.video_enabled
+                    else "call_speech_interrupted"
+                )
                 raise CallError(code, 409)
             index = integer(body.get("segment"), 0)
             if call.turn.get("turn_id") != body.get("turn_id") or call.turn.get(
@@ -2341,7 +2385,11 @@ class CallService:
                 # so token boundaries do not collapse into a different word.
                 preview = (str(turn.get("_answer_preview") or "") + raw_content)[:64000]
                 turn["_answer_preview"] = preview
-                presented_preview = preview if turn.get("_read_structured") else clean_speech_text(preview)
+                presented_preview = (
+                    preview
+                    if turn.get("_read_structured")
+                    else clean_speech_text(preview)
+                )
                 # Explicit structured reading waits for the complete result;
                 # partial code fences or links cannot be spoken out of order.
                 if not turn.get("_read_structured"):
@@ -2402,7 +2450,10 @@ class CallService:
 
     def _finalize_speech(self, call, turn, answer):
         final_parts, truncated = _final_call_speech_segments(
-            call, answer, all_segments=True, already_clean=bool(turn.get("_read_structured"))
+            call,
+            answer,
+            all_segments=True,
+            already_clean=bool(turn.get("_read_structured")),
         )
         known = list(turn.get("_answer_parts") or ())
         if final_parts[: len(known)] == known:
@@ -2426,10 +2477,7 @@ class CallService:
         for part in remaining:
             self._queue_speech(call, turn, part, "answer")
         turn["_answer_parts"] = final_parts
-        turn["speech_truncated"] = bool(
-            truncated
-            or turn.get("speech_truncated")
-        )
+        turn["speech_truncated"] = bool(truncated or turn.get("speech_truncated"))
 
     async def _opening_visual_context(self, call):
         if not call.camera_enabled:
@@ -2556,7 +2604,9 @@ class CallService:
                 **error_facts(exc, "call_opening_failed"),
             )
 
-    async def _run(self, call, turn, audio, image, turn_frames, predecessor, admission_done):
+    async def _run(
+        self, call, turn, audio, image, turn_frames, predecessor, admission_done
+    ):
         start = self.clock()
         stage, stage_started = "queue", start
         acquired = settled = False
@@ -2575,15 +2625,21 @@ class CallService:
                 stage=stage,
             )
             target = call.targets["stt"]
-            segment_seconds = target.get("stt_segment_seconds", call_media_capacity()["stt_segment_seconds"])
+            segment_seconds = target.get(
+                "stt_segment_seconds", call_media_capacity()["stt_segment_seconds"]
+            )
             transcripts, ignored, receipts = [], [], []
             for part in split_wav(audio, segment_seconds):
                 self._privacy(call, "stt")
                 with diagnostic_context(**self._facts(call, turn), stage=stage):
-                    transcription = await self.adapters.transcribe(target, call.profile["stt"], part)
+                    transcription = await self.adapters.transcribe(
+                        target, call.profile["stt"], part
+                    )
                 # A cloud result started under an earlier mode must not enter a new turn.
                 self._privacy(call, "stt")
-                call.billing.record_stt(target, wav_seconds(part), transcription.pop("_billing_usage", None))
+                call.billing.record_stt(
+                    target, wav_seconds(part), transcription.pop("_billing_usage", None)
+                )
                 spoken, reason = spoken_transcription(transcription)
                 if spoken:
                     transcripts.append(spoken)
@@ -2715,7 +2771,8 @@ class CallService:
                 now = time.time()
                 freshness = call.video_policy["freshness_seconds"]
                 turn_frames = tuple(
-                    frame for frame in turn_frames
+                    frame
+                    for frame in turn_frames
                     if -3 <= now - float(frame["captured_unix"]) <= freshness
                 )
                 turn["live_frame_count"] = len(turn_frames)
@@ -2749,7 +2806,9 @@ class CallService:
                                 call.video_policy["sample_window_seconds"],
                                 call.video_policy["freshness_seconds"],
                             ),
-                            "max_frames_per_turn": call.video_policy["max_frames_per_turn"],
+                            "max_frames_per_turn": call.video_policy[
+                                "max_frames_per_turn"
+                            ],
                         },
                     },
                     turn["turn_id"],
@@ -2764,20 +2823,30 @@ class CallService:
             if admitted_sequences is not None:
                 sequence_set = set(admitted_sequences)
                 admitted_frames = tuple(
-                    frame for frame in turn_frames if frame["frame_sequence"] in sequence_set
+                    frame
+                    for frame in turn_frames
+                    if frame["frame_sequence"] in sequence_set
                 )
             turn.update(result)
             sample_candidate = turn.get("_camera_sample_candidate")
             if sample_candidate is not None:
                 span = (
-                    round(max(0.0, float(admitted_frames[-1]["captured_unix"])
-                              - float(admitted_frames[0]["captured_unix"])), 3)
-                    if admitted_frames else None
+                    round(
+                        max(
+                            0.0,
+                            float(admitted_frames[-1]["captured_unix"])
+                            - float(admitted_frames[0]["captured_unix"]),
+                        ),
+                        3,
+                    )
+                    if admitted_frames
+                    else None
                 )
                 turn["camera_sample"] = {
                     **sample_candidate,
                     "submitted_count": len(admitted_frames),
-                    "discarded_as_stale": sample_candidate["selected_count"] - len(turn_frames),
+                    "discarded_as_stale": sample_candidate["selected_count"]
+                    - len(turn_frames),
                     "omitted_for_transport": omitted_for_transport,
                     "span_seconds": span,
                 }
@@ -3036,8 +3105,11 @@ class CallService:
                 **receipt_facts(result.get("provider_receipt")),
             )
             self.expire()
-            if (call.phase == "active" and call.turn is turn
-                    and not turn.get("_speech_interrupted")):
+            if (
+                call.phase == "active"
+                and call.turn is turn
+                and not turn.get("_speech_interrupted")
+            ):
                 self.ports.validate(call.owner, call.binding)
                 self._privacy(call, "tts", route)
                 if result.get("provider_receipt"):

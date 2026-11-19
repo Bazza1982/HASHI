@@ -4,6 +4,7 @@ The operating-system deployment boundary is authoritative.  This module adds
 an early, actionable denial for Agent tools without widening protection to the
 Agent's workzone or to independent development environments.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,9 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from orchestrator.runtime_contract import CORE_SOURCE_PATHS, RuntimeContractError
 from orchestrator.runtime_protection_targets import (
-    admitted_protection_targets, bound_protection_targets, protection_context_key,
+    admitted_protection_targets,
+    bound_protection_targets,
+    protection_context_key,
 )
 
 
@@ -23,7 +26,16 @@ POLICY_SCHEMA = 1
 POLICY_RELATIVE_PATH = Path("state") / "platform" / "live-runtime-protection.json"
 
 _PATH_WRITE_TOOLS = frozenset({"file_write", "apply_patch"})
-_PATH_READ_TOOLS = frozenset({"file_read", "log_query", "file_list", "media_read", "vision_inspect", "workspace_inspect"})
+_PATH_READ_TOOLS = frozenset(
+    {
+        "file_read",
+        "log_query",
+        "file_list",
+        "media_read",
+        "vision_inspect",
+        "workspace_inspect",
+    }
+)
 _COMMAND_TOOLS = frozenset(
     {"bash", "shell", "background_job_start", "verification_run"}
 )
@@ -101,7 +113,7 @@ _PROCESS_MUTATION_RE = re.compile(
     r"(?:\bkill\b|\bpkill\b|\btaskkill(?:\.exe)?\b|\bstop-process\b)",
     re.IGNORECASE,
 )
-_TOKEN_RE = re.compile(r'''"[^"]*"|'[^']*'|[^\s;&|]+''')
+_TOKEN_RE = re.compile(r""""[^"]*"|'[^']*'|[^\s;&|]+""")
 
 
 @dataclass(frozen=True)
@@ -133,8 +145,11 @@ class ProtectionDecision:
             "target": self.target,
             "retryable": False,
             "tool_executed": False,
-            **({"error_code": "runtime_integrity_failed"}
-               if self.operation == "runtime_qualification_unavailable" else {}),
+            **(
+                {"error_code": "runtime_integrity_failed"}
+                if self.operation == "runtime_qualification_unavailable"
+                else {}
+            ),
         }
 
 
@@ -145,7 +160,9 @@ def policy_path_for(global_config: Any) -> Path | None:
     return bridge_home / POLICY_RELATIVE_PATH
 
 
-def policy_cache_key(global_config: Any, runtime_prefix: str | Path | None, *, core_runtime=None) -> tuple:
+def policy_cache_key(
+    global_config: Any, runtime_prefix: str | Path | None, *, core_runtime=None
+) -> tuple:
     """Return a cheap cache key that notices an atomically replaced policy."""
 
     policy_path = policy_path_for(global_config)
@@ -195,26 +212,35 @@ def load_live_runtime_policy(
     protection_complete = True
     try:
         admitted_roots, admitted_files = admitted_protection_targets(
-            code_root, core_runtime=core_runtime)
+            code_root, core_runtime=core_runtime
+        )
     except (OSError, ValueError, RuntimeContractError) as exc:
         qualification_error = type(exc).__name__
         protection_complete = False
         try:
-            admitted_roots, admitted_files, protection_complete = bound_protection_targets(
-                code_root, core_runtime=core_runtime)
+            admitted_roots, admitted_files, protection_complete = (
+                bound_protection_targets(code_root, core_runtime=core_runtime)
+            )
         except (OSError, ValueError, RuntimeContractError):
             admitted_roots, admitted_files = (), ()
     from orchestrator.runtime_contract import current_process_runtime
+
     if current_process_runtime() is not None and core_runtime is None:
         protection_complete = False
         qualification_error = qualification_error or "missing_core_receipt"
     runtime_roots.extend(admitted_roots)
     protected_write.extend(admitted_files)
-    # Run-bound tool outputs are private PAO state, not Agent workspace files.
-    # They are read only through the existing exact-Run continuation.
+    # Run-bound tool outputs and the instance scheduler-delegation key are
+    # lazily created private PAO state. The native ACL deployment script
+    # requires every declared target to exist, so each joins the policy only
+    # once it exists; the tool registry still guards the output store through
+    # its dynamic private root, and both paths join the policy on the next
+    # load after creation.
     output_store_path = bridge_home / "state" / ".hashi-tool-output-v1"
-    protected_read: list[Path] = [output_store_path]
-    protected_write.append(output_store_path)
+    protected_read: list[Path] = []
+    if output_store_path.exists():
+        protected_read.append(output_store_path)
+        protected_write.append(output_store_path)
     secrets_path = _config_path(global_config, "secrets_path")
     if secrets_path is not None:
         protected_write.append(secrets_path)
@@ -222,8 +248,9 @@ def load_live_runtime_policy(
     from orchestrator.workbench_auth import scheduler_delegation_path
 
     delegation_path = scheduler_delegation_path(bridge_home)
-    protected_write.append(delegation_path)
-    protected_read.append(delegation_path)
+    if delegation_path.exists():
+        protected_write.append(delegation_path)
+        protected_read.append(delegation_path)
     instance_id = str(getattr(global_config, "instance_id", "") or "").strip()
     service_targets = [instance_id] if instance_id else []
     configuration_error: str | None = None
@@ -241,8 +268,11 @@ def load_live_runtime_policy(
             service_targets.extend(extension["service_targets"])
 
     # Retain the running Worker's verified boundary across drift and handoff.
-    if (previous_policy is not None and previous_policy.code_root == code_root
-            and previous_policy.bridge_home == bridge_home):
+    if (
+        previous_policy is not None
+        and previous_policy.code_root == code_root
+        and previous_policy.bridge_home == bridge_home
+    ):
         runtime_roots.extend(previous_policy.runtime_roots)
         protected_write.extend(previous_policy.protected_write_paths)
         protected_read.extend(previous_policy.protected_read_paths)
@@ -280,11 +310,13 @@ def evaluate_live_runtime_request(
     if policy is None:
         return None
     args = dict(arguments or {})
-    if (not policy.protection_complete
-            and tool_name in (_PATH_WRITE_TOOLS | _COMMAND_TOOLS | {"process_kill"})):
+    if not policy.protection_complete and tool_name in (
+        _PATH_WRITE_TOOLS | _COMMAND_TOOLS | {"process_kill"}
+    ):
         return ProtectionDecision(
-            "runtime_qualification_unavailable", "runtime",
-            "Runtime protection facts are incomplete; use controlled recovery."
+            "runtime_qualification_unavailable",
+            "runtime",
+            "Runtime protection facts are incomplete; use controlled recovery.",
         )
     if tool_name in _PATH_WRITE_TOOLS:
         candidate = _argument_path(args.get("path"), workspace_dir)
@@ -458,7 +490,9 @@ def _read_core_pid(path: Path) -> int | None:
     return value if value > 0 else None
 
 
-def _command_and_tokens(tool_name: str, arguments: Mapping[str, Any]) -> tuple[str, list[str]]:
+def _command_and_tokens(
+    tool_name: str, arguments: Mapping[str, Any]
+) -> tuple[str, list[str]]:
     if tool_name == "verification_run":
         argv = arguments.get("argv")
         if not isinstance(argv, list):
@@ -494,10 +528,7 @@ def _safe_inspection(command: str) -> bool:
         return False
     if re.search(r"(?<![<])>(?![>])|>>", command):
         return False
-    tokens = {
-        token.strip("\"'(),;").casefold()
-        for token in _TOKEN_RE.findall(command)
-    }
+    tokens = {token.strip("\"'(),;").casefold() for token in _TOKEN_RE.findall(command)}
     if tokens & _MUTATION_MARKERS:
         return False
     git_mutation = any(
@@ -539,7 +570,16 @@ def _live_package_mutation_target(
     for index, token in enumerate(tokens):
         clean = token.strip("\"'")
         name = Path(clean).name.casefold()
-        if name in {"python", "python.exe", "python3", "python3.exe", "pip", "pip.exe", "pip3", "pip3.exe"}:
+        if name in {
+            "python",
+            "python.exe",
+            "python3",
+            "python3.exe",
+            "pip",
+            "pip.exe",
+            "pip3",
+            "pip3.exe",
+        }:
             if Path(clean).is_absolute() or "/" in clean or "\\" in clean:
                 candidate = _argument_path(clean, workspace_dir)
                 if candidate is not None:
@@ -561,9 +601,9 @@ def _contains_term(text: str, term: str) -> bool:
     value = str(term or "").strip().casefold()
     if not value:
         return False
-    return re.search(
-        rf"(?<![a-z0-9_]){re.escape(value)}(?![a-z0-9_])", text
-    ) is not None
+    return (
+        re.search(rf"(?<![a-z0-9_]){re.escape(value)}(?![a-z0-9_])", text) is not None
+    )
 
 
 def _decision(operation: str, target: str | Path) -> ProtectionDecision:
@@ -577,4 +617,6 @@ def _decision(operation: str, target: str | Path) -> ProtectionDecision:
             "workzone/development environment or the supported HASHI lifecycle command."
         ),
     )
+
+
 # HASHI-Fingerprint: hfp_ec079b7bb5294247902dd0fe66f6fd22

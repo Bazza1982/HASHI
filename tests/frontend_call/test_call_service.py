@@ -598,16 +598,21 @@ def test_config_allows_lan_hostnames_and_private_literals_without_network_lookup
 
     assert validate_target(target)["base_url"] == "http://10.23.45.67:48254/v1"
     for base_url in (
-        "http://vision.local:48254/v1", "https://gpu.home.arpa/v1",
-        "http://100.64.1.5/v1", "http://[fd12:3456::1]/v1",
+        "http://vision.local:48254/v1",
+        "https://gpu.home.arpa/v1",
+        "http://100.64.1.5/v1",
+        "http://[fd12:3456::1]/v1",
     ):
         assert validate_target({**target, "base_url": base_url})["base_url"] == base_url
 
     for base_url in (
         "http://127.0.0.1:48254/v1",
-        "http://169.254.169.254/v1", "http://100.100.100.200/v1",
-        "http://[fd00:ec2::254]/v1", "http://8.8.8.8/v1",
-        "http://invalid..local/v1", "ftp://10.23.45.67:48254/v1",
+        "http://169.254.169.254/v1",
+        "http://100.100.100.200/v1",
+        "http://[fd00:ec2::254]/v1",
+        "http://8.8.8.8/v1",
+        "http://invalid..local/v1",
+        "ftp://10.23.45.67:48254/v1",
     ):
         with pytest.raises(CallError, match="call_lan_target_not_private"):
             validate_target({**target, "base_url": base_url})
@@ -1491,8 +1496,9 @@ async def test_call_emits_connector_neutral_frontend_events_fail_open(tmp_path):
     assert ports.frontend_events[-1]["kind"] == "call.ended"
     assert ports.frontend_events[-1]["payload"]["reason"] == "explicit_end"
     await service.close()
-# HASHI-Fingerprint: hfp_767fb4023b614e84bc5f692dbd0c29c5
 
+
+# HASHI-Fingerprint: hfp_767fb4023b614e84bc5f692dbd0c29c5
 
 
 async def test_cloud_stt_privacy_change_discards_late_result(tmp_path):
@@ -1507,14 +1513,25 @@ async def test_cloud_stt_privacy_change_discards_late_result(tmp_path):
     adapters.transcribe = transcribe
     binding, _, _ = await start(service, base, True)
     try:
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "late-stt", "sequence": 1, "audio_b64": wav()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "late-stt",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await asyncio.wait_for(started.wait(), 1)
         ports.level = 2
         release.set()
         await finish_task(service)
         assert ports.accepted == []
-        assert service.calls["call-1"].turn.get("error") == "call_cloud_privacy_unqualified"
+        assert (
+            service.calls["call-1"].turn.get("error")
+            == "call_cloud_privacy_unqualified"
+        )
     finally:
         release.set()
         await service.close()
@@ -1526,7 +1543,9 @@ async def test_cloud_vision_privacy_change_discards_observation(tmp_path, moment
     service, ports, adapters, base, _ = setup(tmp_path, "cloud")
     context = service.config.context("owner", base["agent_id"])
     context["profile"]["vision"] = {"target_id": "eyes", "options": {}}
-    service.config.save("owner", base["agent_id"], context["revision"], context["profile"])
+    service.config.save(
+        "owner", base["agent_id"], context["revision"], context["profile"]
+    )
     began, release = asyncio.Event(), asyncio.Event()
 
     async def observe(*_args):
@@ -1537,9 +1556,18 @@ async def test_cloud_vision_privacy_change_discards_observation(tmp_path, moment
     adapters.observe = observe
     try:
         binding, _, _ = await start(service, base, True, video_requested=True)
-        await service.invoke("owner", {**binding, "operation": "observe", "frame_sequence": 1,
-            "image_b64": base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode(),
-            "captured_at": datetime.now(timezone.utc).isoformat()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": 1,
+                "image_b64": base64.b64encode(
+                    bytes.fromhex("ffd8ffc00008080010001000ffd9")
+                ).decode(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
         await asyncio.wait_for(began.wait(), 1)
         call = service.calls["call-1"]
         if moment == "inflight":
@@ -1555,7 +1583,6 @@ async def test_cloud_vision_privacy_change_discards_observation(tmp_path, moment
     finally:
         release.set()
         await service.close()
-
 
 
 async def test_revoked_cloud_image_discards_result_but_local_speech_continues(tmp_path):
@@ -1574,10 +1601,20 @@ async def test_revoked_cloud_image_discards_result_but_local_speech_continues(tm
     adapters.observe = observe
     try:
         binding, _, _ = await start(service, base, True)
-        await service.invoke("owner", {**binding, "operation": "turn", "sequence": 1,
-            "turn_id": "local-stt", "audio_b64": wav(),
-            "image_b64": base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode(),
-            "captured_at": datetime.now(timezone.utc).isoformat()})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "sequence": 1,
+                "turn_id": "local-stt",
+                "audio_b64": wav(),
+                "image_b64": base64.b64encode(
+                    bytes.fromhex("ffd8ffc00008080010001000ffd9")
+                ).decode(),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
         await asyncio.wait_for(began.wait(), 1)
         ports.level = 2
         release.set()
@@ -1585,11 +1622,13 @@ async def test_revoked_cloud_image_discards_result_but_local_speech_continues(tm
         assert len(ports.accepted) == 1
         assert ports.accepted[0][1] == "Please check the task."
         assert "late cloud observation" not in ports.accepted[0][2]
-        assert service.calls["call-1"].turn.get("vision_error") == "call_cloud_privacy_unqualified"
+        assert (
+            service.calls["call-1"].turn.get("vision_error")
+            == "call_cloud_privacy_unqualified"
+        )
     finally:
         release.set()
         await service.close()
-
 
 
 async def test_long_wav_is_transcribed_in_order_then_admitted_once(tmp_path):
@@ -1605,14 +1644,25 @@ async def test_long_wav_is_transcribed_in_order_then_admitted_once(tmp_path):
     async def transcribe(_target, _slot, data):
         with wave.open(io.BytesIO(data), "rb") as audio:
             observed.append(audio.getnframes())
-        return {"text": "first" if len(observed) == 1 else "second", "segments": None,
-                "has_speech": True}
+        return {
+            "text": "first" if len(observed) == 1 else "second",
+            "segments": None,
+            "has_speech": True,
+        }
 
     adapters.transcribe = transcribe
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "long-wav", "sequence": 1, "audio_b64": wav(61)})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "long-wav",
+                "sequence": 1,
+                "audio_b64": wav(61),
+            },
+        )
         await finish_task(service)
         assert observed == [16000 * 60, 16000]
         assert len(ports.accepted) == 1
@@ -1622,8 +1672,9 @@ async def test_long_wav_is_transcribed_in_order_then_admitted_once(tmp_path):
         await service.close()
 
 
-
-async def test_call_context_reports_configured_provider_input_capacity(tmp_path, monkeypatch):
+async def test_call_context_reports_configured_provider_input_capacity(
+    tmp_path, monkeypatch
+):
     service, _ports, _adapters, base, _ = setup(tmp_path)
     doc = document()
     doc["targets"][0]["stt_segment_seconds"] = 30
@@ -1637,7 +1688,9 @@ async def test_call_context_reports_configured_provider_input_capacity(tmp_path,
     await service.close()
 
 
-async def test_failed_later_audio_segment_never_admits_partial_transcript_or_replays(tmp_path):
+async def test_failed_later_audio_segment_never_admits_partial_transcript_or_replays(
+    tmp_path,
+):
     service, ports, adapters, base, _ = setup(tmp_path)
     doc = document()
     doc["targets"][0]["stt_segment_seconds"] = 60
@@ -1653,8 +1706,13 @@ async def test_failed_later_audio_segment_never_admits_partial_transcript_or_rep
     adapters.transcribe = transcribe
     try:
         binding, _, _ = await start(service, base)
-        request = {**binding, "operation": "turn", "turn_id": "long-failure",
-                   "sequence": 1, "audio_b64": wav(61)}
+        request = {
+            **binding,
+            "operation": "turn",
+            "turn_id": "long-failure",
+            "sequence": 1,
+            "audio_b64": wav(61),
+        }
         await service.invoke("owner", request)
         await finish_task(service)
         assert ports.accepted == []
@@ -1663,7 +1721,6 @@ async def test_failed_later_audio_segment_never_admits_partial_transcript_or_rep
         assert len(calls) == 2
     finally:
         await service.close()
-
 
 
 async def test_selected_stt_segment_capacity_preserves_order(tmp_path):
@@ -1684,8 +1741,16 @@ async def test_selected_stt_segment_capacity_preserves_order(tmp_path):
     adapters.transcribe = transcribe
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "selected-segments", "sequence": 1, "audio_b64": wav(61)})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "selected-segments",
+                "sequence": 1,
+                "audio_b64": wav(61),
+            },
+        )
         await finish_task(service)
         assert frames == [480000, 480000, 16000]
         assert ports.accepted[0][1] == "part1 part2 part3"
@@ -1708,14 +1773,21 @@ async def test_privacy_change_between_stt_segments_stops_remaining_requests(tmp_
     adapters.transcribe = transcribe
     try:
         binding, _, _ = await start(service, base, True)
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "privacy-segments", "sequence": 1, "audio_b64": wav(61)})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "privacy-segments",
+                "sequence": 1,
+                "audio_b64": wav(61),
+            },
+        )
         await finish_task(service)
         assert calls == [True]
         assert ports.accepted == []
     finally:
         await service.close()
-
 
 
 async def test_long_wav_stays_whole_without_selected_provider_segment_limit(tmp_path):
@@ -1733,8 +1805,16 @@ async def test_long_wav_stays_whole_without_selected_provider_segment_limit(tmp_
     adapters.transcribe = transcribe
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {**binding, "operation": "turn",
-            "turn_id": "whole-wav", "sequence": 1, "audio_b64": wav(61)})
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "whole-wav",
+                "sequence": 1,
+                "audio_b64": wav(61),
+            },
+        )
         await finish_task(service)
         assert frames == [16000 * 61]
         assert ports.accepted[0][1] == "whole"
@@ -1742,16 +1822,24 @@ async def test_long_wav_stays_whole_without_selected_provider_segment_limit(tmp_
         await service.close()
 
 
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("answer", [
-    chr(96) * 3 + "python\nprint(42)\n" + chr(96) * 3,
-    "https://example.test/path",
-    "| key | value |\n| --- | --- |\n| item | 42 |",
-])
-async def test_structured_only_completed_answer_remains_visible_and_is_not_an_error(tmp_path, answer):
+@pytest.mark.parametrize(
+    "answer",
+    [
+        chr(96) * 3 + "python\nprint(42)\n" + chr(96) * 3,
+        "https://example.test/path",
+        "| key | value |\n| --- | --- |\n| item | 42 |",
+    ],
+)
+async def test_structured_only_completed_answer_remains_visible_and_is_not_an_error(
+    tmp_path, answer
+):
     service, ports, adapters, base, _ = setup(tmp_path)
-    ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": answer}
+    ports.result = lambda *_args: {
+        "terminal": True,
+        "state": "completed",
+        "text": answer,
+    }
     spoken = []
 
     async def synthesize(_target, _profile, text):
@@ -1761,9 +1849,16 @@ async def test_structured_only_completed_answer_remains_visible_and_is_not_an_er
     adapters.synthesize = synthesize
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         await call.speech_task
@@ -1778,15 +1873,28 @@ async def test_structured_only_completed_answer_remains_visible_and_is_not_an_er
         await service.close()
 
 
-async def test_long_call_result_reports_projection_truncation_and_preserves_raw_prefix(tmp_path):
+async def test_long_call_result_reports_projection_truncation_and_preserves_raw_prefix(
+    tmp_path,
+):
     service, ports, _adapters, base, _ = setup(tmp_path)
     answer = "a" * 64000 + "tail"
-    ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": answer}
+    ports.result = lambda *_args: {
+        "terminal": True,
+        "state": "completed",
+        "text": answer,
+    }
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         snapshot = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert snapshot["turn"]["phase"] == "complete"
@@ -1802,9 +1910,16 @@ async def test_truly_empty_call_answer_remains_an_error(tmp_path):
     ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": "  "}
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         snapshot = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert snapshot["turn"]["phase"] == "failed"
@@ -1813,12 +1928,17 @@ async def test_truly_empty_call_answer_remains_an_error(tmp_path):
         await service.close()
 
 
-
-async def test_long_call_speech_advances_in_acknowledged_windows_without_duplicate_synthesis(tmp_path):
+async def test_long_call_speech_advances_in_acknowledged_windows_without_duplicate_synthesis(
+    tmp_path,
+):
     service, ports, adapters, base, _ = setup(tmp_path)
     sentences = [f"Sentence {number:03d} " + "x" * 150 + "." for number in range(70)]
     answer = " ".join(sentences)
-    ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": answer}
+    ports.result = lambda *_args: {
+        "terminal": True,
+        "state": "completed",
+        "text": answer,
+    }
     synthesized = []
 
     async def synthesize(_target, _profile, text):
@@ -1828,15 +1948,27 @@ async def test_long_call_speech_advances_in_acknowledged_windows_without_duplica
     adapters.synthesize = synthesize
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         snapshot = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert snapshot["turn"]["speech_offset"] == 0
         assert len(snapshot["turn"]["speech_segments"]) == 32
         assert snapshot["turn"]["speech_more"] is True
-        advance = {**binding, "operation": "speech_advance", "turn_id": "turn-1", "segment": 31}
+        advance = {
+            **binding,
+            "operation": "speech_advance",
+            "turn_id": "turn-1",
+            "segment": 31,
+        }
         with pytest.raises(CallError, match="call_speech_not_ready"):
             await service.invoke("owner", advance)
         spoken = []
@@ -1847,7 +1979,12 @@ async def test_long_call_speech_advances_in_acknowledged_windows_without_duplica
             assert len(parts) <= 32
             for relative, text in enumerate(parts):
                 index = offset + relative
-                request = {**binding, "operation": "speech", "turn_id": "turn-1", "segment": index}
+                request = {
+                    **binding,
+                    "operation": "speech",
+                    "turn_id": "turn-1",
+                    "segment": index,
+                }
                 for _ in range(20):
                     asset = await service.invoke("owner", request)
                     if asset["ready"]:
@@ -1874,11 +2011,16 @@ async def test_long_call_speech_advances_in_acknowledged_windows_without_duplica
         await service.close()
 
 
-
 async def test_audio_interrupt_cancels_and_fences_late_synthesis(tmp_path):
     service, ports, adapters, base, _ = setup(tmp_path)
-    answer = " ".join(f"Sentence {number:03d} " + "x" * 150 + "." for number in range(70))
-    ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": answer}
+    answer = " ".join(
+        f"Sentence {number:03d} " + "x" * 150 + "." for number in range(70)
+    )
+    ports.result = lambda *_args: {
+        "terminal": True,
+        "state": "completed",
+        "text": answer,
+    }
     started, release = asyncio.Event(), asyncio.Event()
     calls = []
 
@@ -1894,9 +2036,16 @@ async def test_audio_interrupt_cancels_and_fences_late_synthesis(tmp_path):
     adapters.synthesize = synthesize
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         await started.wait()
@@ -1910,15 +2059,23 @@ async def test_audio_interrupt_cancels_and_fences_late_synthesis(tmp_path):
         assert len(calls) == 1
         assert call.speech_cache == {}
         with pytest.raises(CallError, match="call_speech_interrupted"):
-            await service.invoke("owner", {**binding, "operation": "speech",
-                                           "turn_id": "turn-1", "segment": 0})
+            await service.invoke(
+                "owner",
+                {**binding, "operation": "speech", "turn_id": "turn-1", "segment": 0},
+            )
         with pytest.raises(CallError, match="call_speech_interrupted"):
-            await service.invoke("owner", {**binding, "operation": "speech_advance",
-                                           "turn_id": "turn-1", "segment": 31})
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "speech_advance",
+                    "turn_id": "turn-1",
+                    "segment": 31,
+                },
+            )
     finally:
         release.set()
         await service.close()
-
 
 
 async def test_active_call_delivers_a_run_after_more_than_ten_minutes(tmp_path):
@@ -1926,9 +2083,16 @@ async def test_active_call_delivers_a_run_after_more_than_ten_minutes(tmp_path):
     ports.finished = False
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "long-run", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "long-run",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         for _ in range(100):
             if service.calls["call-1"].turn.get("phase") == "thinking":
                 break
@@ -1937,7 +2101,9 @@ async def test_active_call_delivers_a_run_after_more_than_ten_minutes(tmp_path):
             pytest.fail("run was not admitted")
         for _ in range(21):
             clock[0] += 30
-            snapshot = await service.invoke("owner", {**binding, "operation": "snapshot"})
+            snapshot = await service.invoke(
+                "owner", {**binding, "operation": "snapshot"}
+            )
             assert snapshot["phase"] == "active"
             await asyncio.sleep(0.001)
         assert clock[0] > 700
@@ -1954,17 +2120,28 @@ async def test_active_call_delivers_a_run_after_more_than_ten_minutes(tmp_path):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("ending", ["lease_expired", "max_duration", "service_shutdown"])
-async def test_nonuser_call_end_detaches_without_cancelling_an_admitted_run(tmp_path, ending, monkeypatch):
+@pytest.mark.parametrize(
+    "ending", ["lease_expired", "max_duration", "service_shutdown"]
+)
+async def test_nonuser_call_end_detaches_without_cancelling_an_admitted_run(
+    tmp_path, ending, monkeypatch
+):
     if ending == "max_duration":
         monkeypatch.setenv("HASHI_CALL_MAX_DURATION_SECONDS", str(8 * 3600))
     service, ports, _adapters, base, clock = setup(tmp_path)
     ports.finished = False
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "long-run", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "long-run",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         for _ in range(100):
             if service.calls["call-1"].turn.get("phase") == "thinking":
                 break
@@ -1981,14 +2158,18 @@ async def test_nonuser_call_end_detaches_without_cancelling_an_admitted_run(tmp_
                 clock[0] += 8 * 3600
                 call.expires = clock[0] + 45
             service.expire()
-            await asyncio.gather(*list(call.turn_tasks.values()), return_exceptions=True)
+            await asyncio.gather(
+                *list(call.turn_tasks.values()), return_exceptions=True
+            )
         assert ports.cancelled == []
         assert call.phase == "ended"
     finally:
         await service.close()
 
 
-async def test_expired_call_during_admission_does_not_cancel_the_later_accepted_run(tmp_path):
+async def test_expired_call_during_admission_does_not_cancel_the_later_accepted_run(
+    tmp_path,
+):
     service, ports, _adapters, base, clock = setup(tmp_path)
     admitted, release = asyncio.Event(), asyncio.Event()
     original_admit = ports.admit
@@ -2001,9 +2182,16 @@ async def test_expired_call_during_admission_does_not_cancel_the_later_accepted_
     ports.admit = delayed_admit
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "pending-run", "sequence": 1, "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "pending-run",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await admitted.wait()
         clock[0] = service.calls["call-1"].expires + 1
         service.expire()
@@ -2016,15 +2204,25 @@ async def test_expired_call_during_admission_does_not_cancel_the_later_accepted_
         release.set()
         await service.close()
 
+
 @pytest.mark.anyio
-@pytest.mark.parametrize("answer,expected", [
-    (chr(96) * 3 + "python\nprint(42)\n" + chr(96) * 3, "print(42)"),
-    ("https://example.test/path", "https://example.test/path"),
-    ("| key | value |\n| --- | --- |\n| item | 42 |", "item, 42"),
-])
-async def test_explicit_structured_reading_preserves_selected_result(tmp_path, answer, expected):
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (chr(96) * 3 + "python\nprint(42)\n" + chr(96) * 3, "print(42)"),
+        ("https://example.test/path", "https://example.test/path"),
+        ("| key | value |\n| --- | --- |\n| item | 42 |", "item, 42"),
+    ],
+)
+async def test_explicit_structured_reading_preserves_selected_result(
+    tmp_path, answer, expected
+):
     service, ports, adapters, base, _ = setup(tmp_path)
-    ports.result = lambda *_args: {"terminal": True, "state": "completed", "text": answer}
+    ports.result = lambda *_args: {
+        "terminal": True,
+        "state": "completed",
+        "text": answer,
+    }
     spoken = []
 
     async def synthesize(_target, _profile, text):
@@ -2036,10 +2234,17 @@ async def test_explicit_structured_reading_preserves_selected_result(tmp_path, a
         binding, _, _ = await start(service, base)
         context = await service.invoke("owner", {**base, "operation": "context"})
         assert context["structured_speech"] is True
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1,
-            "audio_b64": wav(), "read_structured": True,
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+                "read_structured": True,
+            },
+        )
         await finish_task(service)
         call = service.calls["call-1"]
         await call.speech_task
@@ -2063,10 +2268,18 @@ async def test_explicit_structured_read_waits_for_complete_preview(tmp_path):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return {"terminal": False, "state": "running", "activity_sequence": 1,
-                    "events": [{"delivery_class": "answer_preview",
-                                "presentation_channel": "answer",
-                                "summary": chr(96) * 3 + "python\nprint("}]}
+            return {
+                "terminal": False,
+                "state": "running",
+                "activity_sequence": 1,
+                "events": [
+                    {
+                        "delivery_class": "answer_preview",
+                        "presentation_channel": "answer",
+                        "summary": chr(96) * 3 + "python\nprint(",
+                    }
+                ],
+            }
         waiting.set()
         await release.wait()
         return {"terminal": True, "state": "completed", "text": answer}
@@ -2074,10 +2287,17 @@ async def test_explicit_structured_read_waits_for_complete_preview(tmp_path):
     ports.result = result
     try:
         binding, _, _ = await start(service, base)
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1,
-            "audio_b64": wav(), "read_structured": True,
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "turn-1",
+                "sequence": 1,
+                "audio_b64": wav(),
+                "read_structured": True,
+            },
+        )
         await asyncio.wait_for(waiting.wait(), timeout=2)
         assert service.calls["call-1"].turn["speech_segments"] == []
         release.set()
@@ -2093,29 +2313,51 @@ async def test_structured_read_option_must_be_boolean(tmp_path):
     try:
         binding, _, _ = await start(service, base)
         with pytest.raises(CallError, match="call_read_structured_invalid"):
-            await service.invoke("owner", {
-                **binding, "operation": "turn", "turn_id": "turn-1", "sequence": 1,
-                "audio_b64": wav(), "read_structured": "yes",
-            })
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "turn",
+                    "turn_id": "turn-1",
+                    "sequence": 1,
+                    "audio_b64": wav(),
+                    "read_structured": "yes",
+                },
+            )
         assert service.calls["call-1"].sequence == 0
     finally:
         await service.close()
 
+
 @pytest.mark.anyio
-async def test_completed_calls_do_not_consume_active_capacity_or_lose_retry_receipts(tmp_path):
+async def test_completed_calls_do_not_consume_active_capacity_or_lose_retry_receipts(
+    tmp_path,
+):
     service, _ports, _adapters, base, _clock = setup(tmp_path)
     info = await service.invoke("owner", {**base, "operation": "context"})
     first = None
     try:
         for number in range(18):
-            body = {**base, "operation": "start", "call_id": f"rapid-{number}",
-                    "generation": info["generation"], "revision": info["revision"]}
+            body = {
+                **base,
+                "operation": "start",
+                "call_id": f"rapid-{number}",
+                "generation": info["generation"],
+                "revision": info["revision"],
+            }
             if first is None:
                 first = body
             started = await service.invoke("owner", body)
             assert started["phase"] == "active"
-            await service.invoke("owner", {**base, "operation": "end",
-                                           "call_id": body["call_id"], "generation": info["generation"]})
+            await service.invoke(
+                "owner",
+                {
+                    **base,
+                    "operation": "end",
+                    "call_id": body["call_id"],
+                    "generation": info["generation"],
+                },
+            )
         assert service.active_call_count() == 0
         assert len(service.calls) == 18
         replay = await service.invoke("owner", first)
@@ -2132,21 +2374,36 @@ async def test_active_call_capacity_still_counts_active_resources(tmp_path):
     info = await service.invoke("owner-0", {**base, "operation": "context"})
     try:
         for number in range(16):
-            result = await service.invoke(f"owner-{number}", {
-                **base, "operation": "start", "call_id": f"active-{number}",
-                "generation": info["generation"], "revision": info["revision"],
-            })
+            result = await service.invoke(
+                f"owner-{number}",
+                {
+                    **base,
+                    "operation": "start",
+                    "call_id": f"active-{number}",
+                    "generation": info["generation"],
+                    "revision": info["revision"],
+                },
+            )
             assert result["phase"] == "active"
         with pytest.raises(CallError, match="call_capacity"):
-            await service.invoke("owner-over", {
-                **base, "operation": "start", "call_id": "active-over",
-                "generation": info["generation"], "revision": info["revision"],
-            })
+            await service.invoke(
+                "owner-over",
+                {
+                    **base,
+                    "operation": "start",
+                    "call_id": "active-over",
+                    "generation": info["generation"],
+                    "revision": info["revision"],
+                },
+            )
         assert service.active_call_count() == 16
     finally:
         await service.close()
 
-async def test_ordered_call_turn_queue_preserves_fifth_and_rejects_only_full_queue(tmp_path, monkeypatch):
+
+async def test_ordered_call_turn_queue_preserves_fifth_and_rejects_only_full_queue(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HASHI_CALL_CONCURRENT_TURNS", "2")
     monkeypatch.setenv("HASHI_CALL_MAX_PENDING_TURNS", "5")
     service, ports, adapters, base, _ = setup(tmp_path)
@@ -2162,8 +2419,16 @@ async def test_ordered_call_turn_queue_preserves_fifth_and_rejects_only_full_que
 
     adapters.transcribe = transcribe
     binding, _, _ = await start(service, base)
-    bodies = [{**binding, "operation": "turn", "turn_id": f"queued-{i}",
-               "sequence": i, "audio_b64": wav()} for i in range(1, 7)]
+    bodies = [
+        {
+            **binding,
+            "operation": "turn",
+            "turn_id": f"queued-{i}",
+            "sequence": i,
+            "audio_b64": wav(),
+        }
+        for i in range(1, 7)
+    ]
     try:
         first = await service.invoke("owner", bodies[0])
         assert first["turn_queue"]["limit"] == 5
@@ -2180,12 +2445,16 @@ async def test_ordered_call_turn_queue_preserves_fifth_and_rejects_only_full_que
         tasks = list(service.calls["call-1"].turn_tasks.values())
         release_first.set()
         await asyncio.wait_for(asyncio.gather(*tasks), 3)
-        assert [row[0] for row in ports.accepted] == [f"queued-{i}" for i in range(1, 6)]
+        assert [row[0] for row in ports.accepted] == [
+            f"queued-{i}" for i in range(1, 6)
+        ]
         assert len(ports.accepted) == 5
         sixth = await service.invoke("owner", bodies[5])
         assert sixth["sequence"] == 6
         await service.calls["call-1"].task
-        assert [row[0] for row in ports.accepted] == [f"queued-{i}" for i in range(1, 7)]
+        assert [row[0] for row in ports.accepted] == [
+            f"queued-{i}" for i in range(1, 7)
+        ]
     finally:
         release_first.set()
         await service.close()
@@ -2193,7 +2462,9 @@ async def test_ordered_call_turn_queue_preserves_fifth_and_rejects_only_full_que
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("first_outcome", ["ignored", "failed"])
-async def test_ordered_call_queue_advances_when_earlier_turn_has_no_effect(tmp_path, monkeypatch, first_outcome):
+async def test_ordered_call_queue_advances_when_earlier_turn_has_no_effect(
+    tmp_path, monkeypatch, first_outcome
+):
     monkeypatch.setenv("HASHI_CALL_CONCURRENT_TURNS", "2")
     monkeypatch.setenv("HASHI_CALL_MAX_PENDING_TURNS", "3")
     service, ports, adapters, base, _ = setup(tmp_path)
@@ -2214,8 +2485,16 @@ async def test_ordered_call_queue_advances_when_earlier_turn_has_no_effect(tmp_p
     binding, _, _ = await start(service, base)
     try:
         for i in range(1, 4):
-            await service.invoke("owner", {**binding, "operation": "turn",
-                "turn_id": f"skip-{i}", "sequence": i, "audio_b64": wav()})
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "turn",
+                    "turn_id": f"skip-{i}",
+                    "sequence": i,
+                    "audio_b64": wav(),
+                },
+            )
             if i == 1:
                 await asyncio.wait_for(first_started.wait(), 1)
         tasks = list(service.calls["call-1"].turn_tasks.values())
@@ -2229,7 +2508,9 @@ async def test_ordered_call_queue_advances_when_earlier_turn_has_no_effect(tmp_p
         await service.close()
 
 
-async def test_hangup_cancels_waiting_turns_without_submitting_them(tmp_path, monkeypatch):
+async def test_hangup_cancels_waiting_turns_without_submitting_them(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HASHI_CALL_CONCURRENT_TURNS", "1")
     monkeypatch.setenv("HASHI_CALL_MAX_PENDING_TURNS", "4")
     service, ports, adapters, base, _ = setup(tmp_path)
@@ -2237,8 +2518,16 @@ async def test_hangup_cancels_waiting_turns_without_submitting_them(tmp_path, mo
     binding, _, _ = await start(service, base)
     try:
         for i in range(1, 5):
-            await service.invoke("owner", {**binding, "operation": "turn",
-                "turn_id": f"cancel-{i}", "sequence": i, "audio_b64": wav()})
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "turn",
+                    "turn_id": f"cancel-{i}",
+                    "sequence": i,
+                    "audio_b64": wav(),
+                },
+            )
         tasks = list(service.calls["call-1"].turn_tasks.values())
         ended = await service.invoke("owner", {**binding, "operation": "end"})
         assert ended["turn"]["phase"] == "cancelled"
@@ -2249,7 +2538,9 @@ async def test_hangup_cancels_waiting_turns_without_submitting_them(tmp_path, mo
         await service.close()
 
 
-async def test_failing_later_transcription_cannot_let_third_overtake_first(tmp_path, monkeypatch):
+async def test_failing_later_transcription_cannot_let_third_overtake_first(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HASHI_CALL_CONCURRENT_TURNS", "2")
     monkeypatch.setenv("HASHI_CALL_MAX_PENDING_TURNS", "4")
     service, ports, adapters, base, _ = setup(tmp_path)
@@ -2270,8 +2561,16 @@ async def test_failing_later_transcription_cannot_let_third_overtake_first(tmp_p
     binding, _, _ = await start(service, base)
     try:
         for i in range(1, 4):
-            await service.invoke("owner", {**binding, "operation": "turn",
-                "turn_id": f"barrier-{i}", "sequence": i, "audio_b64": wav()})
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "turn",
+                    "turn_id": f"barrier-{i}",
+                    "sequence": i,
+                    "audio_b64": wav(),
+                },
+            )
             if i == 1:
                 await asyncio.wait_for(first_started.wait(), 1)
         tasks = list(service.calls["call-1"].turn_tasks.values())
@@ -2285,14 +2584,21 @@ async def test_failing_later_transcription_cannot_let_third_overtake_first(tmp_p
         await service.close()
 
 
-async def test_older_turn_replay_and_identifier_reuse_remain_fenced_for_the_call(tmp_path):
+async def test_older_turn_replay_and_identifier_reuse_remain_fenced_for_the_call(
+    tmp_path,
+):
     service, ports, _adapters, base, _ = setup(tmp_path)
     binding, _, _ = await start(service, base)
     first = None
     try:
         for i in range(1, 67):
-            body = {**binding, "operation": "turn", "turn_id": f"replay-{i}",
-                    "sequence": i, "audio_b64": wav()}
+            body = {
+                **binding,
+                "operation": "turn",
+                "turn_id": f"replay-{i}",
+                "sequence": i,
+                "audio_b64": wav(),
+            }
             if first is None:
                 first = body
             await service.invoke("owner", body)
@@ -2305,23 +2611,34 @@ async def test_older_turn_replay_and_identifier_reuse_remain_fenced_for_the_call
     finally:
         await service.close()
 
-async def test_configured_call_lease_renews_only_matching_device_and_releases_at_deadline(tmp_path, monkeypatch):
+
+async def test_configured_call_lease_renews_only_matching_device_and_releases_at_deadline(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HASHI_CALL_LEASE_SECONDS", "120")
     monkeypatch.setenv("HASHI_CALL_MAX_DURATION_SECONDS", "0")
     service, _ports, _adapters, base, clock = setup(tmp_path)
     try:
         context = await service.invoke("owner", {**base, "operation": "context"})
-        assert context["lease_policy"] == {"lease_seconds": 120, "max_duration_seconds": None}
+        assert context["lease_policy"] == {
+            "lease_seconds": 120,
+            "max_duration_seconds": None,
+        }
         binding, _, started = await start(service, base)
         assert started["lease_policy"] == context["lease_policy"]
         call = service.calls["call-1"]
         monkeypatch.setenv("HASHI_CALL_LEASE_SECONDS", "1")
         monkeypatch.setenv("HASHI_CALL_MAX_DURATION_SECONDS", "1")
         clock[0] += 46
-        assert (await service.invoke("owner", {**binding, "operation": "snapshot"}))["phase"] == "active"
+        assert (await service.invoke("owner", {**binding, "operation": "snapshot"}))[
+            "phase"
+        ] == "active"
         deadline = call.expires
         with pytest.raises(CallError, match="call_scope_changed"):
-            await service.invoke("owner", {**binding, "client_id": "other-device", "operation": "snapshot"})
+            await service.invoke(
+                "owner",
+                {**binding, "client_id": "other-device", "operation": "snapshot"},
+            )
         assert call.expires == deadline
         # Renew through the former eight-hour boundary using the policy frozen at start.
         for _ in range(288):
@@ -2340,7 +2657,9 @@ async def test_configured_call_lease_renews_only_matching_device_and_releases_at
         await service.close()
 
 
-async def test_configured_call_total_duration_is_enforced_independently_of_renewal(tmp_path, monkeypatch):
+async def test_configured_call_total_duration_is_enforced_independently_of_renewal(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("HASHI_CALL_LEASE_SECONDS", "120")
     monkeypatch.setenv("HASHI_CALL_MAX_DURATION_SECONDS", "180")
     service, _ports, _adapters, base, clock = setup(tmp_path)
@@ -2362,25 +2681,43 @@ async def test_profile_save_during_call_changes_next_call_not_active_call(tmp_pa
     await start(service, base)
     try:
         current = await service.invoke("owner", {**base, "operation": "context"})
-        next_profile = json.loads(json.dumps(service.config.context("owner", base["agent_id"])["profile"]))
+        next_profile = json.loads(
+            json.dumps(service.config.context("owner", base["agent_id"])["profile"])
+        )
         next_profile["tts"]["voice_id"] = "clear"
-        result = await service.invoke("owner", {
-            **base, "operation": "save_profile",
-            "revision": current["revision"], "profile": next_profile,
-        })
+        result = await service.invoke(
+            "owner",
+            {
+                **base,
+                "operation": "save_profile",
+                "revision": current["revision"],
+                "profile": next_profile,
+            },
+        )
         assert result["profile"]["tts"]["voice_id"] == "clear"
         assert service.calls["call-1"].profile["tts"]["voice_id"] == "warm"
         latest = service.config.context("owner", base["agent_id"])
         assert latest["profile"]["tts"]["voice_id"] == "clear"
         assert service.calls["call-1"].phase == "active"
-        await service.invoke("owner", {
-            **base, "operation": "end", "call_id": "call-1",
-            "generation": current["generation"],
-        })
-        next_call = await service.invoke("owner", {
-            **base, "operation": "start", "call_id": "call-2",
-            "generation": current["generation"], "revision": latest["revision"],
-        })
+        await service.invoke(
+            "owner",
+            {
+                **base,
+                "operation": "end",
+                "call_id": "call-1",
+                "generation": current["generation"],
+            },
+        )
+        next_call = await service.invoke(
+            "owner",
+            {
+                **base,
+                "operation": "start",
+                "call_id": "call-2",
+                "generation": current["generation"],
+                "revision": latest["revision"],
+            },
+        )
         assert next_call["phase"] == "active"
         assert service.calls["call-2"].profile["tts"]["voice_id"] == "clear"
     finally:
@@ -2409,19 +2746,29 @@ async def test_profile_save_during_output_negotiation_keeps_start_snapshot(tmp_p
 
     ports.call_output = delayed_output
     body = {
-        **base, "operation": "start", "call_id": "frozen-start",
-        "generation": current["generation"], "revision": current["revision"],
+        **base,
+        "operation": "start",
+        "call_id": "frozen-start",
+        "generation": current["generation"],
+        "revision": current["revision"],
         "output_protocol": OUTPUT_PROTOCOL,
     }
     pending = asyncio.create_task(service.invoke("owner", body))
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        next_profile = json.loads(json.dumps(service.config.context("owner", base["agent_id"])["profile"]))
+        next_profile = json.loads(
+            json.dumps(service.config.context("owner", base["agent_id"])["profile"])
+        )
         next_profile["tts"]["voice_id"] = "clear"
-        saved = await service.invoke("owner", {
-            **base, "operation": "save_profile",
-            "revision": current["revision"], "profile": next_profile,
-        })
+        saved = await service.invoke(
+            "owner",
+            {
+                **base,
+                "operation": "save_profile",
+                "revision": current["revision"],
+                "profile": next_profile,
+            },
+        )
         assert saved["profile"]["tts"]["voice_id"] == "clear"
     finally:
         release.set()

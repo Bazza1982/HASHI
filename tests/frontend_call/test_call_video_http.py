@@ -516,7 +516,6 @@ async def test_ap_reference_preload_commit_and_generation_race():
         await runner.cleanup()
 
 
-
 def test_video_configured_larger_capacity_and_timeout_policy():
     policy = selection(
         request_timeout_seconds=1200,
@@ -525,8 +524,12 @@ def test_video_configured_larger_capacity_and_timeout_policy():
         wait_max_seconds=3600,
         max_input_chars=5001,
     )
-    assert (policy.request_timeout_seconds, policy.job_timeout_seconds,
-            policy.queue_timeout_seconds, policy.max_input_chars) == (1200, 7200, 8000, 5001)
+    assert (
+        policy.request_timeout_seconds,
+        policy.job_timeout_seconds,
+        policy.queue_timeout_seconds,
+        policy.max_input_chars,
+    ) == (1200, 7200, 8000, 5001)
     for invalid in (0, -1, float("inf"), float("nan")):
         with pytest.raises(CallError, match="call_video_configuration_invalid"):
             selection(job_timeout_seconds=invalid)
@@ -534,16 +537,23 @@ def test_video_configured_larger_capacity_and_timeout_policy():
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ["recover", "wrong_key", "wrong_job", "no_lookup"])
-async def test_video_submission_reconciliation_never_reposts_or_crosses_job(tmp_path, mode):
+async def test_video_submission_reconciliation_never_reposts_or_crosses_job(
+    tmp_path, mode
+):
     events = []
     app = web.Application()
     payload = manifest()
     interfaces = payload["services"][0]["models"][0]["interfaces"]
     if mode != "no_lookup":
-        interfaces.append({
-            "id": "lookup", "protocol": "video.speech.lookup.v1", "method": "GET",
-            "path": "/avatar/by-key/{idempotency_key}", "streaming": ["none"],
-        })
+        interfaces.append(
+            {
+                "id": "lookup",
+                "protocol": "video.speech.lookup.v1",
+                "method": "GET",
+                "path": "/avatar/by-key/{idempotency_key}",
+                "streaming": ["none"],
+            }
+        )
     expected_key = hashlib.sha256(b"one").hexdigest()
 
     async def discovery(request):
@@ -560,17 +570,23 @@ async def test_video_submission_reconciliation_never_reposts_or_crosses_job(tmp_
     async def lookup(request):
         events.append("lookup")
         assert request.match_info["idempotency_key"] == expected_key
-        return web.json_response({
-            "id": "job-one", "status": "queued",
-            "idempotency_key": "wrong" if mode == "wrong_key" else expected_key,
-        })
+        return web.json_response(
+            {
+                "id": "job-one",
+                "status": "queued",
+                "idempotency_key": "wrong" if mode == "wrong_key" else expected_key,
+            }
+        )
 
     async def job(request):
         events.append("poll")
-        return web.json_response({
-            "id": "job-other" if mode == "wrong_job" else "job-one",
-            "status": "completed", "video_url": "/avatar/result",
-        })
+        return web.json_response(
+            {
+                "id": "job-other" if mode == "wrong_job" else "job-one",
+                "status": "completed",
+                "video_url": "/avatar/result",
+            }
+        )
 
     async def video(request):
         events.append("download")
@@ -583,19 +599,39 @@ async def test_video_submission_reconciliation_never_reposts_or_crosses_job(tmp_
     app.router.add_get("/avatar/result", video)
     runner, origin = await serve(app)
     config = tmp_path / "compute_services.json"
-    config.write_text(json.dumps({"version": 1, "nodes": [{
-        "id": "studio", "location": "local", "base_url": origin, "manifest_path": "/manifest",
-    }]}))
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "studio",
+                        "location": "local",
+                        "base_url": origin,
+                        "manifest_path": "/manifest",
+                    }
+                ],
+            }
+        )
+    )
     consumer = CallVideoTTS(config, poll_seconds=0)
     try:
         if mode == "recover":
-            result = await consumer.synthesize(selection(), PNG, "Hello.", privacy_level=1, request_id="one")
+            result = await consumer.synthesize(
+                selection(), PNG, "Hello.", privacy_level=1, request_id="one"
+            )
             assert result["media"] == MP4
             assert events == ["submit", "lookup", "poll", "download"]
         else:
-            code = "call_video_job_invalid" if mode == "wrong_job" else "call_video_outcome_unknown"
+            code = (
+                "call_video_job_invalid"
+                if mode == "wrong_job"
+                else "call_video_outcome_unknown"
+            )
             with pytest.raises(CallError, match=code):
-                await consumer.synthesize(selection(), PNG, "Hello.", privacy_level=1, request_id="one")
+                await consumer.synthesize(
+                    selection(), PNG, "Hello.", privacy_level=1, request_id="one"
+                )
             assert events.count("submit") == 1
             assert "download" not in events
             assert ("lookup" in events) is (mode == "wrong_key")
@@ -604,9 +640,15 @@ async def test_video_submission_reconciliation_never_reposts_or_crosses_job(tmp_
 
 
 @pytest.mark.anyio
-async def test_video_service_advertised_large_reference_and_configured_large_output(tmp_path, monkeypatch):
-    reference = (b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" +
-                 struct.pack(">II", 4000, 3000) + b"x" * (4 * 1024 * 1024))
+async def test_video_service_advertised_large_reference_and_configured_large_output(
+    tmp_path, monkeypatch
+):
+    reference = (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + struct.pack(">II", 4000, 3000)
+        + b"x" * (4 * 1024 * 1024)
+    )
     video_data = MP4 + b"x" * (64 * 1024 * 1024)
     image_cap = 6 * 1024 * 1024
     media_cap = len(video_data) + 1
@@ -630,7 +672,9 @@ async def test_video_service_advertised_large_reference_and_configured_large_out
         return web.json_response({"id": "job-one", "status": "queued"}, status=202)
 
     async def job(request):
-        return web.json_response({"id": "job-one", "status": "completed", "video_url": "/avatar/result"})
+        return web.json_response(
+            {"id": "job-one", "status": "completed", "video_url": "/avatar/result"}
+        )
 
     async def video(request):
         return web.Response(body=video_data, content_type="video/mp4")
@@ -641,19 +685,37 @@ async def test_video_service_advertised_large_reference_and_configured_large_out
     app.router.add_get("/avatar/result", video)
     runner, origin = await serve(app)
     config = tmp_path / "compute_services.json"
-    config.write_text(json.dumps({"version": 1, "nodes": [{
-        "id": "studio", "location": "local", "base_url": origin, "manifest_path": "/manifest",
-    }]}))
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "studio",
+                        "location": "local",
+                        "base_url": origin,
+                        "manifest_path": "/manifest",
+                    }
+                ],
+            }
+        )
+    )
     try:
         result = await CallVideoTTS(config, poll_seconds=0).synthesize(
-            selection(max_input_chars=5001, job_timeout_seconds=7200, queue_timeout_seconds=7200),
-            reference, "x" * 4001, privacy_level=1, request_id="one",
+            selection(
+                max_input_chars=5001,
+                job_timeout_seconds=7200,
+                queue_timeout_seconds=7200,
+            ),
+            reference,
+            "x" * 4001,
+            privacy_level=1,
+            request_id="one",
         )
         assert result["media"] == video_data
         assert events == ["submit"]
     finally:
         await runner.cleanup()
-
 
 
 @pytest.mark.anyio
@@ -663,10 +725,19 @@ async def test_ap_configured_larger_media_budgets(tmp_path, monkeypatch):
     monkeypatch.setenv("HASHI_CALL_VIDEO_MAX_REFERENCE_BYTES", str(len(reference) + 1))
     monkeypatch.setenv("HASHI_CALL_VIDEO_MAX_MEDIA_BYTES", str(len(media) + 1))
     state = {
-        "call_id": "call-one", "context_id": "a" * 32, "instance_id": "test-instance",
-        "generation": 0, "call_active": True, "audio_owner": "agentpresence",
-        "stage": "idle", "phase": "day", "replies": [],
-        "reference": {"mime": "image/png", "sha256": hashlib.sha256(reference).hexdigest()},
+        "call_id": "call-one",
+        "context_id": "a" * 32,
+        "instance_id": "test-instance",
+        "generation": 0,
+        "call_active": True,
+        "audio_owner": "agentpresence",
+        "stage": "idle",
+        "phase": "day",
+        "replies": [],
+        "reference": {
+            "mime": "image/png",
+            "sha256": hashlib.sha256(reference).hexdigest(),
+        },
     }
     events = []
     app = web.Application(client_max_size=70 * 1024 * 1024)
@@ -682,9 +753,13 @@ async def test_ap_configured_larger_media_budgets(tmp_path, monkeypatch):
             received = await request.read()
             assert received == media
             events.append("media")
-            state["replies"].append({
-                "utterance_id": request.query["utterance_id"], "state": "prepared", "generation": 0,
-            })
+            state["replies"].append(
+                {
+                    "utterance_id": request.query["utterance_id"],
+                    "state": "prepared",
+                    "generation": 0,
+                }
+            )
             return web.json_response(state["replies"][-1], status=202)
         if operation == "end":
             state["call_active"] = False
@@ -692,7 +767,9 @@ async def test_ap_configured_larger_media_budgets(tmp_path, monkeypatch):
 
     app.router.add_route("*", "/v1/call/video/{operation}", route)
     runner, origin = await serve(app)
-    port = AgentPresenceCallVideo(origin, "fixture-only", "test-instance", "call-one", poll_seconds=0)
+    port = AgentPresenceCallVideo(
+        origin, "fixture-only", "test-instance", "call-one", poll_seconds=0
+    )
     try:
         await port.start()
         assert port.reference == reference

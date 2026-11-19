@@ -291,7 +291,9 @@ async def test_agent_view_reports_delay_then_falls_back_when_frame_ingress_stops
     await service.close()
 
 
-async def test_selected_slow_camera_policy_survives_projection_and_stale_frames_are_rejected(tmp_path):
+async def test_selected_slow_camera_policy_survives_projection_and_stale_frames_are_rejected(
+    tmp_path,
+):
     from orchestrator.frontend_call.context import project_call_context
 
     service, _ports, _adapters, base, clock = setup(tmp_path)
@@ -321,41 +323,67 @@ async def test_selected_slow_camera_policy_survives_projection_and_stale_frames_
         assert pending["camera"]["state"] == "pending"
         captured = datetime.now(timezone.utc) - timedelta(seconds=45)
         frame = {
-            **binding, "operation": "observe", "frame_sequence": 1,
-            "image_b64": base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode(),
+            **binding,
+            "operation": "observe",
+            "frame_sequence": 1,
+            "image_b64": base64.b64encode(
+                bytes.fromhex("ffd8ffc00008080010001000ffd9")
+            ).decode(),
             "captured_at": captured.isoformat(),
         }
         await service.invoke("owner", frame)
         await call.vision_task
         view = await service.invoke("owner", {**binding, "operation": "snapshot"})
         assert view["camera"]["state"] == "delayed"
-        projected = project_call_context({
-            "version": 2, "call_id": binding["call_id"], "turn_id": "turn-1",
-            "mode": "video", "camera": view["camera"], "captured_at": captured.isoformat(),
-            "observation": call.observation["text"], "freshness_seconds": 60,
-        })
+        projected = project_call_context(
+            {
+                "version": 2,
+                "call_id": binding["call_id"],
+                "turn_id": "turn-1",
+                "mode": "video",
+                "camera": view["camera"],
+                "captured_at": captured.isoformat(),
+                "observation": call.observation["text"],
+                "freshness_seconds": 60,
+            }
+        )
         assert projected["camera"]["state"] == "delayed"
         assert projected["camera"]["observation"] == "A book is visible."
         assert projected["camera"]["captured_at"] == captured.isoformat()
 
         stale = (datetime.now(timezone.utc) - timedelta(seconds=61)).isoformat()
-        stale_projection = project_call_context({
-            "version": 2, "call_id": binding["call_id"], "turn_id": "turn-2",
-            "mode": "video", "camera": {"state": "delayed"}, "captured_at": stale,
-            "observation": "Old observation", "freshness_seconds": 60,
-        })
+        stale_projection = project_call_context(
+            {
+                "version": 2,
+                "call_id": binding["call_id"],
+                "turn_id": "turn-2",
+                "mode": "video",
+                "camera": {"state": "delayed"},
+                "captured_at": stale,
+                "observation": "Old observation",
+                "freshness_seconds": 60,
+            }
+        )
         assert stale_projection["camera"]["state"] == "unavailable"
         assert stale_projection["camera"]["observation"] is None
         with pytest.raises(CallError, match="call_frame_stale"):
-            await service.invoke("owner", {**frame, "frame_sequence": 2, "captured_at": stale})
-        assert (await service.invoke("owner", {**binding, "operation": "snapshot"}))["phase"] == "active"
+            await service.invoke(
+                "owner", {**frame, "frame_sequence": 2, "captured_at": stale}
+            )
+        assert (await service.invoke("owner", {**binding, "operation": "snapshot"}))[
+            "phase"
+        ] == "active"
         with pytest.raises(CallError, match="call_scope_changed"):
-            await service.invoke("owner", {**frame, "frame_sequence": 2, "client_id": "other-device"})
+            await service.invoke(
+                "owner", {**frame, "frame_sequence": 2, "client_id": "other-device"}
+            )
     finally:
         await service.close()
 
 
-async def test_turn_frames_respect_freshness_even_when_sampling_window_is_longer(tmp_path):
+async def test_turn_frames_respect_freshness_even_when_sampling_window_is_longer(
+    tmp_path,
+):
     service, _ports, _adapters, base, _clock = setup(tmp_path)
     try:
         binding, _, _ = await start(service, base)
@@ -373,7 +401,6 @@ async def test_turn_frames_respect_freshness_even_when_sampling_window_is_longer
         await service.close()
 
 
-
 @pytest.mark.parametrize("value", [0, -1, True, "60", 2**31])
 def test_video_policy_rejects_invalid_resource_values(tmp_path, value):
     service, *_ = setup(tmp_path)
@@ -381,7 +408,9 @@ def test_video_policy_rejects_invalid_resource_values(tmp_path, value):
         service.config.video_policy({"video_policy": {"freshness_seconds": value}})
 
 
-async def test_queued_turn_drops_frames_that_expire_before_admission(tmp_path, monkeypatch):
+async def test_queued_turn_drops_frames_that_expire_before_admission(
+    tmp_path, monkeypatch
+):
     from orchestrator.frontend_call import service as service_module
     from test_call_contract import wav
 
@@ -397,15 +426,28 @@ async def test_queued_turn_drops_frames_that_expire_before_admission(tmp_path, m
     try:
         binding, _, _ = await start(service, base, video_requested=True)
         captured = datetime.fromtimestamp(wall[0], timezone.utc).isoformat()
-        await service.invoke("owner", {
-            **binding, "operation": "observe", "frame_sequence": 1,
-            "image_b64": base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode(),
-            "captured_at": captured,
-        })
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "queued-frame", "sequence": 1,
-            "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "observe",
+                "frame_sequence": 1,
+                "image_b64": base64.b64encode(
+                    bytes.fromhex("ffd8ffc00008080010001000ffd9")
+                ).decode(),
+                "captured_at": captured,
+            },
+        )
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "queued-frame",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await asyncio.sleep(0)
         wall[0] += 4
         release.set()
@@ -413,7 +455,9 @@ async def test_queued_turn_drops_frames_that_expire_before_admission(tmp_path, m
         assert len(ports.accepted) == 1
         assert ports.accepted_frames == [()]
         assert service.calls["call-1"].turn["live_frame_count"] == 0
-        sample = (await service.invoke("owner", {**binding, "operation": "snapshot"}))["turn"]["camera_sample"]
+        sample = (await service.invoke("owner", {**binding, "operation": "snapshot"}))[
+            "turn"
+        ]["camera_sample"]
         assert sample["selected_count"] == 1 and sample["submitted_count"] == 0
         assert sample["discarded_as_stale"] == 1 and sample["span_seconds"] is None
     finally:
@@ -421,8 +465,9 @@ async def test_queued_turn_drops_frames_that_expire_before_admission(tmp_path, m
         await service.close()
 
 
-
-async def test_selected_camera_sample_window_reports_actual_admission_coverage(tmp_path):
+async def test_selected_camera_sample_window_reports_actual_admission_coverage(
+    tmp_path,
+):
     from test_call_contract import wav
 
     service, ports, _adapters, base, _clock = setup(tmp_path)
@@ -436,16 +481,27 @@ async def test_selected_camera_sample_window_reports_actual_admission_coverage(t
         now = datetime.now(timezone.utc)
         image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
         for sequence, age in enumerate((55, 25, 4), start=1):
-            await service.invoke("owner", {
-                **binding, "operation": "observe", "frame_sequence": sequence,
-                "captured_at": (now - timedelta(seconds=age)).isoformat(),
-                "image_b64": image,
-            })
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "observe",
+                    "frame_sequence": sequence,
+                    "captured_at": (now - timedelta(seconds=age)).isoformat(),
+                    "image_b64": image,
+                },
+            )
         assert [frame["frame_sequence"] for frame in call.frame_buffer] == [2, 3]
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "coverage", "sequence": 1,
-            "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "coverage",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await call.task
         view = await service.invoke("owner", {**binding, "operation": "snapshot"})
         sample = view["turn"]["camera_sample"]
@@ -462,8 +518,9 @@ async def test_selected_camera_sample_window_reports_actual_admission_coverage(t
         await service.close()
 
 
-
-async def test_camera_clock_information_survives_capture_and_server_time_is_available(tmp_path):
+async def test_camera_clock_information_survives_capture_and_server_time_is_available(
+    tmp_path,
+):
     service, _ports, _adapters, base, _clock = setup(tmp_path)
     doc = json.loads(service.config.path.read_text())
     doc["default_profile"]["vision"] = {"target_id": "eyes", "options": {}}
@@ -477,13 +534,20 @@ async def test_camera_clock_information_survives_capture_and_server_time_is_avai
         timestamp = datetime.now(timezone.utc).isoformat()
         clock = {
             "basis": "server_roundtrip_lower_bound",
-            "client_captured_at": (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+            "client_captured_at": (
+                datetime.now(timezone.utc) + timedelta(minutes=2)
+            ).isoformat(),
             "uncertainty_ms": 400,
         }
         frame = {
-            **binding, "operation": "observe", "frame_sequence": 1,
-            "image_b64": base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode(),
-            "captured_at": timestamp, "capture_clock": clock,
+            **binding,
+            "operation": "observe",
+            "frame_sequence": 1,
+            "image_b64": base64.b64encode(
+                bytes.fromhex("ffd8ffc00008080010001000ffd9")
+            ).decode(),
+            "captured_at": timestamp,
+            "capture_clock": clock,
         }
         await service.invoke("owner", frame)
         call = service.calls["call-1"]
@@ -494,22 +558,32 @@ async def test_camera_clock_information_survives_capture_and_server_time_is_avai
         assert view["camera"]["captured_at"] == timestamp
         from orchestrator.frontend_call.context import project_call_context
         from orchestrator.message_context import render_message_context_section
-        projected = project_call_context({
-            "version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "video",
-            "camera": view["camera"], "captured_at": timestamp,
-            "observation": call.observation["text"],
-        })
+
+        projected = project_call_context(
+            {
+                "version": 2,
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "mode": "video",
+                "camera": view["camera"],
+                "captured_at": timestamp,
+                "observation": call.observation["text"],
+            }
+        )
         assert projected["camera"]["capture_clock"] == clock
         rendered = render_message_context_section({"call": projected})
         assert '"uncertainty_ms": 400' in rendered
         with pytest.raises(CallError, match="call_capture_clock_invalid"):
-            await service.invoke("owner", {
-                **frame, "frame_sequence": 2,
-                "capture_clock": {**clock, "uncertainty_ms": -1},
-            })
+            await service.invoke(
+                "owner",
+                {
+                    **frame,
+                    "frame_sequence": 2,
+                    "capture_clock": {**clock, "uncertainty_ms": -1},
+                },
+            )
     finally:
         await service.close()
-
 
 
 async def test_camera_sample_coverage_reflects_transport_omission(tmp_path):
@@ -521,10 +595,17 @@ async def test_camera_sample_coverage_reflects_transport_omission(tmp_path):
     service.config.path.write_text(json.dumps(doc))
     original_admit = ports.admit
 
-    async def limited_admit(owner, binding, turn, text, observation, captured_at, frames):
-        result = await original_admit(owner, binding, turn, text, observation, captured_at, frames[-1:])
-        return {**result, "_admitted_frame_sequences": [frames[-1]["frame_sequence"]],
-                "_omitted_frames_for_transport": len(frames) - 1}
+    async def limited_admit(
+        owner, binding, turn, text, observation, captured_at, frames
+    ):
+        result = await original_admit(
+            owner, binding, turn, text, observation, captured_at, frames[-1:]
+        )
+        return {
+            **result,
+            "_admitted_frame_sequences": [frames[-1]["frame_sequence"]],
+            "_omitted_frames_for_transport": len(frames) - 1,
+        }
 
     ports.admit = limited_admit
     try:
@@ -532,15 +613,26 @@ async def test_camera_sample_coverage_reflects_transport_omission(tmp_path):
         now = datetime.now(timezone.utc)
         image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
         for index in (1, 2):
-            await service.invoke("owner", {
-                **binding, "operation": "observe", "frame_sequence": index,
-                "captured_at": (now - timedelta(seconds=3-index)).isoformat(),
-                "image_b64": image,
-            })
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "transport", "sequence": 1,
-            "audio_b64": wav(),
-        })
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "observe",
+                    "frame_sequence": index,
+                    "captured_at": (now - timedelta(seconds=3 - index)).isoformat(),
+                    "image_b64": image,
+                },
+            )
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "transport",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await service.calls["call-1"].task
         view = await service.invoke("owner", {**binding, "operation": "snapshot"})
         sample = view["turn"]["camera_sample"]
@@ -551,7 +643,6 @@ async def test_camera_sample_coverage_reflects_transport_omission(tmp_path):
         await service.close()
 
 
-
 async def test_selected_camera_frame_and_buffer_budgets_above_old_limits(tmp_path):
     from test_call_contract import wav
 
@@ -559,8 +650,10 @@ async def test_selected_camera_frame_and_buffer_budgets_above_old_limits(tmp_pat
     doc = json.loads(service.config.path.read_text())
     doc["default_profile"]["vision"] = {"target_id": "eyes", "options": {}}
     doc["video_policy"] = {
-        "freshness_seconds": 60, "sample_window_seconds": 45,
-        "max_frames_per_turn": 20, "max_buffer_frames": 40,
+        "freshness_seconds": 60,
+        "sample_window_seconds": 45,
+        "max_frames_per_turn": 20,
+        "max_buffer_frames": 40,
     }
     service.config.path.write_text(json.dumps(doc))
     try:
@@ -569,21 +662,34 @@ async def test_selected_camera_frame_and_buffer_budgets_above_old_limits(tmp_pat
         now = datetime.now(timezone.utc)
         image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
         for index in range(1, 36):
-            await service.invoke("owner", {
-                **binding, "operation": "observe", "frame_sequence": index,
-                "captured_at": (now - timedelta(seconds=36-index)).isoformat(),
-                "image_b64": image,
-            })
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "observe",
+                    "frame_sequence": index,
+                    "captured_at": (now - timedelta(seconds=36 - index)).isoformat(),
+                    "image_b64": image,
+                },
+            )
         assert len(call.frame_buffer) == 35
-        await service.invoke("owner", {
-            **binding, "operation": "turn", "turn_id": "larger-sample", "sequence": 1,
-            "audio_b64": wav(),
-        })
+        await service.invoke(
+            "owner",
+            {
+                **binding,
+                "operation": "turn",
+                "turn_id": "larger-sample",
+                "sequence": 1,
+                "audio_b64": wav(),
+            },
+        )
         await call.task
         frames = ports.accepted_frames[0]
         assert len(frames) == 20
         assert frames[0]["frame_sequence"] == 1 and frames[-1]["frame_sequence"] == 35
-        sample = (await service.invoke("owner", {**binding, "operation": "snapshot"}))["turn"]["camera_sample"]
+        sample = (await service.invoke("owner", {**binding, "operation": "snapshot"}))[
+            "turn"
+        ]["camera_sample"]
         assert sample["maximum_frames"] == 20 and sample["buffered_candidates"] == 35
         assert sample["submitted_count"] == 20
     finally:
@@ -601,11 +707,16 @@ async def test_selected_camera_buffer_byte_budget_keeps_fitting_recent_frames(tm
         now = datetime.now(timezone.utc)
         image = base64.b64encode(bytes.fromhex("ffd8ffc00008080010001000ffd9")).decode()
         for index in range(1, 5):
-            await service.invoke("owner", {
-                **binding, "operation": "observe", "frame_sequence": index,
-                "captured_at": (now - timedelta(seconds=5-index)).isoformat(),
-                "image_b64": image,
-            })
+            await service.invoke(
+                "owner",
+                {
+                    **binding,
+                    "operation": "observe",
+                    "frame_sequence": index,
+                    "captured_at": (now - timedelta(seconds=5 - index)).isoformat(),
+                    "image_b64": image,
+                },
+            )
         call = service.calls["call-1"]
         assert [frame["frame_sequence"] for frame in call.frame_buffer] == [3, 4]
         assert sum(len(frame["image"]) for frame in call.frame_buffer) == 28
@@ -614,11 +725,15 @@ async def test_selected_camera_buffer_byte_budget_keeps_fitting_recent_frames(tm
         await service.close()
 
 
-
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("max_frames_per_turn", 0), ("max_frames_per_turn", True),
-     ("max_buffer_frames", -1), ("max_buffer_bytes", -1), ("max_buffer_bytes", True)],
+    [
+        ("max_frames_per_turn", 0),
+        ("max_frames_per_turn", True),
+        ("max_buffer_frames", -1),
+        ("max_buffer_bytes", -1),
+        ("max_buffer_bytes", True),
+    ],
 )
 def test_camera_sample_budget_rejects_invalid_selected_values(tmp_path, key, value):
     service, *_ = setup(tmp_path)

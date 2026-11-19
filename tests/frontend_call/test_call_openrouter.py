@@ -78,10 +78,14 @@ async def test_lan_resolver_filters_public_and_metadata_addresses():
     from orchestrator.lan_transport import LanDestinationError, PrivateLanResolver
 
     class Delegate:
-        def __init__(self, rows): self.rows, self.closed = rows, False
+        def __init__(self, rows):
+            self.rows, self.closed = rows, False
+
         async def resolve(self, host, port=0, family=0):
             return [{"host": item} for item in self.rows]
-        async def close(self): self.closed = True
+
+        async def close(self):
+            self.closed = True
 
     delegate = Delegate(["8.8.8.8", "169.254.169.254", "fd00:ec2::254", "10.2.3.4"])
     resolver = PrivateLanResolver(delegate)
@@ -100,6 +104,7 @@ async def test_lan_hostname_uses_verified_addresses_for_the_actual_request(monke
     from orchestrator import lan_transport
 
     calls, resolved = [], []
+
     async def handler(request):
         calls.append({"host": request.host, "path": request.path})
         if request.path.endswith("/redirect"):
@@ -113,23 +118,44 @@ async def test_lan_hostname_uses_verified_addresses_for_the_actual_request(monke
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
+
     class Delegate:
         async def resolve(self, host, selected_port=0, family=socket.AF_UNSPEC):
             resolved.append(host)
             # A second DNS lookup would return a public address.
             address = "127.0.0.1" if len(resolved) == 1 else "8.8.8.8"
-            return [{"hostname": host, "host": address, "port": selected_port,
-                     "family": socket.AF_INET, "proto": 0, "flags": 0}]
-        async def close(self): pass
+            return [
+                {
+                    "hostname": host,
+                    "host": address,
+                    "port": selected_port,
+                    "family": socket.AF_INET,
+                    "proto": 0,
+                    "flags": 0,
+                }
+            ]
+
+        async def close(self):
+            pass
 
     # The fixture's only listener is loopback. Keep the real private-address
     # validation for production while allowing this single synthetic endpoint.
     private = lan_transport.is_private_lan_address
-    monkeypatch.setattr(lan_transport, "is_private_lan_address", lambda host: host == "127.0.0.1" or private(host))
+    monkeypatch.setattr(
+        lan_transport,
+        "is_private_lan_address",
+        lambda host: host == "127.0.0.1" or private(host),
+    )
     monkeypatch.setattr(lan_transport.aiohttp.resolver, "DefaultResolver", Delegate)
-    target = {"location": "lan", "base_url": f"http://vision.test:{port}/v1", "model": "fixture"}
+    target = {
+        "location": "lan",
+        "base_url": f"http://vision.test:{port}/v1",
+        "model": "fixture",
+    }
     try:
-        payload, mime, _ = await MediaAdapters()._request(target, "/complete", json_body={})
+        payload, mime, _ = await MediaAdapters()._request(
+            target, "/complete", json_body={}
+        )
         assert json.loads(payload) == {"ok": True}
         assert mime.split(";", 1)[0] == "application/json"
         assert resolved == ["vision.test"]
@@ -143,7 +169,9 @@ async def test_lan_hostname_uses_verified_addresses_for_the_actual_request(monke
         for address in ("8.8.8.8", "169.254.169.254", "100.100.100.200"):
             with pytest.raises(CallError, match="call_lan_target_not_private"):
                 await MediaAdapters()._request(
-                    {**target, "base_url": f"http://{address}/v1"}, "/complete", json_body={},
+                    {**target, "base_url": f"http://{address}/v1"},
+                    "/complete",
+                    json_body={},
                 )
         assert len(calls) == 1
         resolved.clear()
@@ -163,7 +191,10 @@ def test_openrouter_target_keeps_secret_reference_private_and_validates_voice_st
         validate_target({**target, "credential_ref": "file:///tmp/key"})
     with pytest.raises(CallError):
         options_for(target, {"provider": {"only": ["groq"]}})
-    assert validate_target({**target, "model": "other/tts-model"})["model"] == "other/tts-model"
+    assert (
+        validate_target({**target, "model": "other/tts-model"})["model"]
+        == "other/tts-model"
+    )
     with pytest.raises(CallError, match="call_audio_format_unsupported"):
         validate_target({**_target("tts", "other/tts-model")})
 
@@ -206,86 +237,151 @@ def test_gemini_style_is_provider_metadata_and_never_spoken():
     )
 
 
-@pytest.mark.parametrize("base_url", [
-    "https://compatible.example/v1", "https://proxy.example/v1",
-])
-def test_declared_pcm_codec_decodes_identically_for_direct_and_proxy_endpoints(base_url):
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://compatible.example/v1",
+        "https://proxy.example/v1",
+    ],
+)
+def test_declared_pcm_codec_decodes_identically_for_direct_and_proxy_endpoints(
+    base_url,
+):
     raw = b"\x01\x02\x03\x04" * 1600
-    target = validate_target({
-        **_target("tts", "compatible/tts"), "base_url": base_url,
-        "pcm_sample_rate_hz": 16000, "pcm_sample_width_bytes": 2,
-        "pcm_channels": 2, "pcm_encoding": "s16le",
-    })
+    target = validate_target(
+        {
+            **_target("tts", "compatible/tts"),
+            "base_url": base_url,
+            "pcm_sample_rate_hz": 16000,
+            "pcm_sample_width_bytes": 2,
+            "pcm_channels": 2,
+            "pcm_encoding": "s16le",
+        }
+    )
     calls = []
     adapter = MediaAdapters(
         session_factory=lambda **_kw: _Session(
-            calls, raw, "audio/pcm; rate=16000; channels=2; bits=16; encoding=s16le"),
-        secret_resolver=SimpleNamespace(resolve=lambda _ref: SimpleNamespace(value="test-key")),
+            calls, raw, "audio/pcm; rate=16000; channels=2; bits=16; encoding=s16le"
+        ),
+        secret_resolver=SimpleNamespace(
+            resolve=lambda _ref: SimpleNamespace(value="test-key")
+        ),
     )
-    result = asyncio.run(adapter.synthesize(
-        target, {"voice_id": "Achernar", "options": {}}, "Hello."))
+    result = asyncio.run(
+        adapter.synthesize(target, {"voice_id": "Achernar", "options": {}}, "Hello.")
+    )
     with wave.open(io.BytesIO(base64.b64decode(result["content_b64"])), "rb") as audio:
-        assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (2, 2, 16000)
+        assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (
+            2,
+            2,
+            16000,
+        )
         assert audio.readframes(audio.getnframes()) == raw
     assert result["_billing_usage"]["audio_seconds"] == pytest.approx(0.1)
     assert calls[0][0] == base_url + "/audio/speech"
 
 
-@pytest.mark.parametrize("change", [
-    {"pcm_sample_rate_hz": None}, {"pcm_sample_rate_hz": 0},
-    {"pcm_channels": 3}, {"pcm_sample_width_bytes": 4}, {"pcm_encoding": "f32le"},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"pcm_sample_rate_hz": None},
+        {"pcm_sample_rate_hz": 0},
+        {"pcm_channels": 3},
+        {"pcm_sample_width_bytes": 4},
+        {"pcm_encoding": "f32le"},
+    ],
+)
 def test_pcm_rejects_missing_or_unsupported_codec_before_request(change):
     target = {
-        **_target("tts", "compatible/tts"), "base_url": "https://proxy.example/v1",
-        "pcm_sample_rate_hz": 16000, "pcm_sample_width_bytes": 2,
-        "pcm_channels": 2, "pcm_encoding": "s16le", **change,
+        **_target("tts", "compatible/tts"),
+        "base_url": "https://proxy.example/v1",
+        "pcm_sample_rate_hz": 16000,
+        "pcm_sample_width_bytes": 2,
+        "pcm_channels": 2,
+        "pcm_encoding": "s16le",
+        **change,
     }
     with pytest.raises(CallError, match="call_audio_format_unsupported"):
         validate_target(target)
-    adapter = MediaAdapters(session_factory=lambda **_kw: pytest.fail("must not contact provider"))
+    adapter = MediaAdapters(
+        session_factory=lambda **_kw: pytest.fail("must not contact provider")
+    )
     with pytest.raises(CallError, match="call_audio_format_unsupported"):
-        asyncio.run(adapter.synthesize(target, {"voice_id": "Achernar", "options": {}}, "Hello."))
+        asyncio.run(
+            adapter.synthesize(
+                target, {"voice_id": "Achernar", "options": {}}, "Hello."
+            )
+        )
 
 
-@pytest.mark.parametrize("mime", [
-    "audio/pcm; rate=24000; channels=2", "audio/pcm; rate=16000; channels=1",
-    "audio/pcm; rate=16000; channels=2; bits=8",
-    "audio/pcm; rate=16000; channels=2; encoding=f32le",
-    "audio/pcm; rate=16000; rate=24000; channels=2",
-])
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "audio/pcm; rate=24000; channels=2",
+        "audio/pcm; rate=16000; channels=1",
+        "audio/pcm; rate=16000; channels=2; bits=8",
+        "audio/pcm; rate=16000; channels=2; encoding=f32le",
+        "audio/pcm; rate=16000; rate=24000; channels=2",
+    ],
+)
 def test_pcm_response_metadata_must_match_declared_codec(mime):
-    target = validate_target({
-        **_target("tts", "compatible/tts"), "base_url": "https://proxy.example/v1",
-        "pcm_sample_rate_hz": 16000, "pcm_sample_width_bytes": 2,
-        "pcm_channels": 2, "pcm_encoding": "s16le",
-    })
+    target = validate_target(
+        {
+            **_target("tts", "compatible/tts"),
+            "base_url": "https://proxy.example/v1",
+            "pcm_sample_rate_hz": 16000,
+            "pcm_sample_width_bytes": 2,
+            "pcm_channels": 2,
+            "pcm_encoding": "s16le",
+        }
+    )
     adapter = MediaAdapters(
         session_factory=lambda **_kw: _Session([], b"\x00" * 6400, mime),
-        secret_resolver=SimpleNamespace(resolve=lambda _ref: SimpleNamespace(value="test-key")),
+        secret_resolver=SimpleNamespace(
+            resolve=lambda _ref: SimpleNamespace(value="test-key")
+        ),
     )
     with pytest.raises(CallError, match="call_speech_format_invalid"):
-        asyncio.run(adapter.synthesize(target, {"voice_id": "Achernar", "options": {}}, "Hello."))
+        asyncio.run(
+            adapter.synthesize(
+                target, {"voice_id": "Achernar", "options": {}}, "Hello."
+            )
+        )
 
 
 def test_pcm_accepts_complete_short_audio_but_rejects_an_incomplete_stereo_frame():
-    target = validate_target({
-        **_target("tts", "compatible/tts"), "base_url": "https://proxy.example/v1",
-        "pcm_sample_rate_hz": 16000, "pcm_sample_width_bytes": 2,
-        "pcm_channels": 2, "pcm_encoding": "s16le",
-    })
+    target = validate_target(
+        {
+            **_target("tts", "compatible/tts"),
+            "base_url": "https://proxy.example/v1",
+            "pcm_sample_rate_hz": 16000,
+            "pcm_sample_width_bytes": 2,
+            "pcm_channels": 2,
+            "pcm_encoding": "s16le",
+        }
+    )
+
     def adapter(raw):
         return MediaAdapters(
             session_factory=lambda **_kw: _Session([], raw, "audio/pcm"),
-            secret_resolver=SimpleNamespace(resolve=lambda _ref: SimpleNamespace(value="test-key")),
+            secret_resolver=SimpleNamespace(
+                resolve=lambda _ref: SimpleNamespace(value="test-key")
+            ),
         )
-    result = asyncio.run(adapter(b"\x01\x02\x03\x04").synthesize(
-        target, {"voice_id": "Achernar", "options": {}}, "Hello."))
+
+    result = asyncio.run(
+        adapter(b"\x01\x02\x03\x04").synthesize(
+            target, {"voice_id": "Achernar", "options": {}}, "Hello."
+        )
+    )
     with wave.open(io.BytesIO(base64.b64decode(result["content_b64"])), "rb") as audio:
         assert audio.getnframes() == 1 and audio.readframes(1) == b"\x01\x02\x03\x04"
     with pytest.raises(CallError, match="call_speech_format_invalid"):
-        asyncio.run(adapter(b"\x01\x02").synthesize(
-            target, {"voice_id": "Achernar", "options": {}}, "Hello."))
+        asyncio.run(
+            adapter(b"\x01\x02").synthesize(
+                target, {"voice_id": "Achernar", "options": {}}, "Hello."
+            )
+        )
 
 
 def test_gemini_pcm_rejects_invalid_or_truncated_audio():
@@ -443,4 +539,6 @@ def test_speech_protocol_is_instance_owned_and_not_available_to_other_modalities
                 "stt_protocol": "audio_chat",
             }
         )
+
+
 # HASHI-Fingerprint: hfp_271598a1417547cda05126e340855584

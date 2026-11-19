@@ -67,28 +67,79 @@ def test_scheduler_delegation_key_is_protected_from_tool_read_and_write(tmp_path
     import asyncio
     from orchestrator.workbench_auth import scheduler_delegation_key
 
+    # The instance-private signing key is normally created at bootstrap.
+    # Create it before the registry loads the protection policy so the
+    # declared targets reflect a booted instance; lazily created paths join
+    # the policy on the next load after they exist.
+    bridge_home = tmp_path / "instance"
+    original = scheduler_delegation_key(bridge_home, create=True)
     registry, paths = _registry(tmp_path)
     registry._allowed.update({"file_search", "log_query"})
-    original = scheduler_delegation_key(paths["bridge_home"], create=True)
     key_path = paths["bridge_home"] / "state" / "scheduler_delegation.json"
 
     async def exercise():
         read = await registry.execute("file_read", {"path": str(key_path)}, "read-key")
         assert read.is_error and original not in read.output
-        log = await registry.execute("log_query", {"path": str(key_path), "terms": [original]}, "search-key")
+        log = await registry.execute(
+            "log_query", {"path": str(key_path), "terms": [original]}, "search-key"
+        )
         assert log.is_error and original not in log.output
-        search = await registry.execute("file_search", {"query": "key", "mode": "content",
-                                        "roots": [str(paths["bridge_home"] / "state")],
-                                        "profile": "expanded", "include_hidden": True}, "search-parent")
+        search = await registry.execute(
+            "file_search",
+            {
+                "query": "key",
+                "mode": "content",
+                "roots": [str(paths["bridge_home"] / "state")],
+                "profile": "expanded",
+                "include_hidden": True,
+            },
+            "search-parent",
+        )
         assert not search.is_error and original not in search.output
-        write = await registry.execute("file_write", {"path": str(key_path), "content": "changed"}, "write-key")
-        assert write.is_error and scheduler_delegation_key(paths["bridge_home"]) == original
+        write = await registry.execute(
+            "file_write", {"path": str(key_path), "content": "changed"}, "write-key"
+        )
+        assert (
+            write.is_error
+            and scheduler_delegation_key(paths["bridge_home"]) == original
+        )
 
     asyncio.run(exercise())
 
 
+def test_lazily_created_private_paths_join_policy_only_once_they_exist(tmp_path):
+    from orchestrator.workbench_auth import scheduler_delegation_key
+
+    registry, paths = _registry(tmp_path)
+    global_config = registry.audit_context["global_config"]
+    runtime_prefix = registry.audit_context["live_runtime_prefix"]
+    store = paths["bridge_home"] / "state" / ".hashi-tool-output-v1"
+    delegation = paths["bridge_home"] / "state" / "scheduler_delegation.json"
+
+    policy = load_live_runtime_policy(global_config, runtime_prefix=runtime_prefix)
+    assert policy is not None
+    read_paths = {str(path) for path in policy.protected_read_paths}
+    write_paths = {str(path) for path in policy.protected_write_paths}
+    assert str(store) not in read_paths
+    assert str(store) not in write_paths
+    assert str(delegation) not in read_paths
+    assert str(delegation) not in write_paths
+
+    store.mkdir(parents=True)
+    scheduler_delegation_key(paths["bridge_home"], create=True)
+    policy = load_live_runtime_policy(global_config, runtime_prefix=runtime_prefix)
+    assert policy is not None
+    read_paths = {str(path) for path in policy.protected_read_paths}
+    write_paths = {str(path) for path in policy.protected_write_paths}
+    assert str(store) in read_paths
+    assert str(store) in write_paths
+    assert str(delegation) in read_paths
+    assert str(delegation) in write_paths
+
+
 def test_runtime_protection_cache_key_notices_same_stat_selector_change(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     import orchestrator.runtime_protection_targets as targets
 
@@ -129,31 +180,43 @@ def test_runtime_protection_cache_key_notices_same_stat_selector_change(
     assert before[2][2] != after[2][2]
 
 
-def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundary(tmp_path, monkeypatch):
+def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundary(
+    tmp_path, monkeypatch
+):
     import asyncio
     import orchestrator.live_runtime_protection as protection
     from orchestrator.runtime_contract import RuntimeContractError
+
     registry, paths = _registry(tmp_path)
-    registry.audit_context.update({
-        "agent_name": "rika",
-        "instance_id": "HASHI6",
-        "request_id": "request-runtime-failure",
-        "hashi_session_id": "session-runtime-failure",
-        "hashi_run_id": "run-runtime-failure",
-    })
-    note = paths["workspace"]/"cold.txt"
+    registry.audit_context.update(
+        {
+            "agent_name": "rika",
+            "instance_id": "HASHI6",
+            "request_id": "request-runtime-failure",
+            "hashi_session_id": "session-runtime-failure",
+            "hashi_run_id": "run-runtime-failure",
+        }
+    )
+    note = paths["workspace"] / "cold.txt"
     note.write_text("cold-read-evidence", encoding="utf-8")
+
     def unavailable(*args, **kwargs):
         raise RuntimeContractError("fixture qualification failed")
+
     monkeypatch.setattr(protection, "admitted_protection_targets", unavailable)
+
     async def exercise():
-        result = await registry.execute("file_read", {"path":str(note)}, "cold-read")
+        result = await registry.execute("file_read", {"path": str(note)}, "cold-read")
         assert not result.is_error and "cold-read-evidence" in result.output
         assert result.details["runtime_protection"]["protection_complete"] is False
-        denied = await registry.execute("file_read", {"path":str(paths["secrets_path"])}, "secret")
+        denied = await registry.execute(
+            "file_read", {"path": str(paths["secrets_path"])}, "secret"
+        )
         assert denied.is_error
-        destination = paths["workspace"]/"unverified.txt"
-        denied = await registry.execute("file_write", {"path":str(destination), "content":"unsafe"}, "write")
+        destination = paths["workspace"] / "unverified.txt"
+        denied = await registry.execute(
+            "file_write", {"path": str(destination), "content": "unsafe"}, "write"
+        )
         assert denied.is_error
         assert denied.details["tool_executed"] is False
         diagnostic = denied.details["runtime_protection"]
@@ -166,13 +229,21 @@ def test_cold_runtime_failure_keeps_safe_reads_but_cannot_claim_complete_boundar
         assert diagnostic["run_id"] == "run-runtime-failure"
         assert diagnostic["recovery"] == "controlled_installation_maintenance"
         assert not destination.exists()
-        for path in (paths["runtime_root"]/"Lib/stdlib.py", paths["code_root"]/"main.py"):
-            denied = await registry.execute("file_write", {"path":str(path), "content":"unsafe"}, "protected")
+        for path in (
+            paths["runtime_root"] / "Lib/stdlib.py",
+            paths["code_root"] / "main.py",
+        ):
+            denied = await registry.execute(
+                "file_write", {"path": str(path), "content": "unsafe"}, "protected"
+            )
             assert denied.is_error and not path.exists()
+
     asyncio.run(exercise())
 
 
-def test_runtime_drift_keeps_workspace_access_and_prior_protection(tmp_path, monkeypatch):
+def test_runtime_drift_keeps_workspace_access_and_prior_protection(
+    tmp_path, monkeypatch
+):
     import asyncio
     import orchestrator.live_runtime_protection as protection
     from orchestrator.runtime_contract import RuntimeContractError
@@ -187,10 +258,14 @@ def test_runtime_drift_keeps_workspace_access_and_prior_protection(tmp_path, mon
         assert "business-evidence" in before.output
 
         def broken(*args, **kwargs):
-            raise RuntimeContractError("Runtime installation file closure changed: unlisted=['Lib/__pycache__/sample.pyc']")
+            raise RuntimeContractError(
+                "Runtime installation file closure changed: unlisted=['Lib/__pycache__/sample.pyc']"
+            )
 
         monkeypatch.setattr(protection, "admitted_protection_targets", broken)
-        policy_path = paths["bridge_home"] / "state/platform/live-runtime-protection.json"
+        policy_path = (
+            paths["bridge_home"] / "state/platform/live-runtime-protection.json"
+        )
         policy_path.parent.mkdir(parents=True, exist_ok=True)
         policy_path.write_text('{"schema":1}', encoding="utf-8")
         observed = await registry.execute("file_read", {"path": str(business)}, "after")
@@ -198,15 +273,20 @@ def test_runtime_drift_keeps_workspace_access_and_prior_protection(tmp_path, mon
         assert "business-evidence" in observed.output
 
         note = paths["workspace"] / "result.txt"
-        written = await registry.execute("file_write", {"path": str(note), "content": "permitted"}, "write")
+        written = await registry.execute(
+            "file_write", {"path": str(note), "content": "permitted"}, "write"
+        )
         assert not written.is_error, written.output
         assert note.read_text(encoding="utf-8") == "permitted"
         core = paths["code_root"] / "main.py"
-        denied = await registry.execute("file_write", {"path": str(core), "content": "unsafe"}, "core")
+        denied = await registry.execute(
+            "file_write", {"path": str(core), "content": "unsafe"}, "core"
+        )
         assert denied.is_error
         assert not core.exists()
 
     asyncio.run(exercise())
+
 
 def test_loader_failure_reuses_only_verified_unchanged_snapshot(tmp_path, monkeypatch):
     import asyncio
@@ -232,33 +312,58 @@ def test_loader_failure_reuses_only_verified_unchanged_snapshot(tmp_path, monkey
 
         monkeypatch.setattr(protection, "load_live_runtime_policy", unavailable)
         # Trigger a reload without changing the policy bytes or runtime binding.
-        os.utime(policy_path, ns=(saved_stat.st_atime_ns, saved_stat.st_mtime_ns + 1_000_000_000))
+        os.utime(
+            policy_path,
+            ns=(saved_stat.st_atime_ns, saved_stat.st_mtime_ns + 1_000_000_000),
+        )
         resumed = await registry.execute("file_read", {"path": str(note)}, "read")
         assert not resumed.is_error and "available" in resumed.output
         assert resumed.details["runtime_protection"]["protection_complete"] is False
-        assert resumed.details["runtime_protection"]["qualification"] == "previous_verified_snapshot"
+        assert (
+            resumed.details["runtime_protection"]["qualification"]
+            == "previous_verified_snapshot"
+        )
         target = paths["workspace"] / "report.txt"
-        written = await registry.execute("file_write", {"path": str(target), "content": "report"}, "write")
+        written = await registry.execute(
+            "file_write", {"path": str(target), "content": "report"}, "write"
+        )
         assert not written.is_error and target.read_text() == "report"
         assert written.details["runtime_protection"]["protection_complete"] is False
-        secret = await registry.execute("file_read", {"path": str(paths["secrets_path"])}, "secret")
+        secret = await registry.execute(
+            "file_read", {"path": str(paths["secrets_path"])}, "secret"
+        )
         assert secret.is_error
         core = paths["code_root"] / "main.py"
-        blocked = await registry.execute("file_write", {"path": str(core), "content": "change"}, "core")
+        blocked = await registry.execute(
+            "file_write", {"path": str(core), "content": "change"}, "core"
+        )
         assert blocked.is_error and not core.exists()
         alias = paths["workspace"] / "secret-alias.txt"
         os.link(paths["secrets_path"], alias)
         try:
-            hidden = await registry.execute("file_read", {"path": str(alias)}, "alias-read")
-            assert hidden.is_error and hidden.details["control_disposition"] == "unavailable"
-            denied = await registry.execute("file_write", {"path": str(alias), "content": "change"}, "alias-write")
+            hidden = await registry.execute(
+                "file_read", {"path": str(alias)}, "alias-read"
+            )
+            assert (
+                hidden.is_error
+                and hidden.details["control_disposition"] == "unavailable"
+            )
+            denied = await registry.execute(
+                "file_write", {"path": str(alias), "content": "change"}, "alias-write"
+            )
             assert denied.is_error and paths["secrets_path"].read_text() == "{}"
         finally:
             alias.unlink()
         old_prefix = registry.audit_context["live_runtime_prefix"]
-        registry.audit_context["live_runtime_prefix"] = str(paths["workspace"] / "different-runtime")
-        blocked = await registry.execute("file_read", {"path": str(note)}, "changed-runtime")
-        assert blocked.is_error and blocked.details["control_disposition"] == "unavailable"
+        registry.audit_context["live_runtime_prefix"] = str(
+            paths["workspace"] / "different-runtime"
+        )
+        blocked = await registry.execute(
+            "file_read", {"path": str(note)}, "changed-runtime"
+        )
+        assert (
+            blocked.is_error and blocked.details["control_disposition"] == "unavailable"
+        )
         registry.audit_context["live_runtime_prefix"] = old_prefix
 
         # Even equal length and timestamp cannot hide a changed protection policy.
@@ -274,24 +379,33 @@ def test_loader_failure_reuses_only_verified_unchanged_snapshot(tmp_path, monkey
 
         policy_path.write_text('{"schema":1}', encoding="utf-8")
         monkeypatch.setattr(protection, "load_live_runtime_policy", real_loader)
-        recovered = await registry.execute("file_read", {"path": str(note)}, "recovered")
+        recovered = await registry.execute(
+            "file_read", {"path": str(note)}, "recovered"
+        )
         assert not recovered.is_error and "available" in recovered.output
         assert "runtime_protection" not in (recovered.details or {})
 
     asyncio.run(exercise())
 
 
-def test_policy_bytes_changed_without_stat_change_invalidate_the_registry_cache(tmp_path):
+def test_policy_bytes_changed_without_stat_change_invalidate_the_registry_cache(
+    tmp_path,
+):
     import asyncio
 
     registry, paths = _registry(tmp_path)
     policy_path = paths["bridge_home"] / "state/platform/live-runtime-protection.json"
     policy_path.parent.mkdir(parents=True)
-    first, second = paths["workspace"] / "secret-a.txt", paths["workspace"] / "secret-b.txt"
+    first, second = (
+        paths["workspace"] / "secret-a.txt",
+        paths["workspace"] / "secret-b.txt",
+    )
     first.write_text("first")
     second.write_text("second")
+
     def content(path):
         return json.dumps({"schema": 1, "protected_read_paths": [str(path)]})
+
     policy_path.write_text(content(first), encoding="utf-8")
 
     async def exercise():
@@ -308,7 +422,9 @@ def test_policy_bytes_changed_without_stat_change_invalidate_the_registry_cache(
     asyncio.run(exercise())
 
 
-def test_loader_failure_without_previous_snapshot_keeps_unrelated_catalog_available(tmp_path, monkeypatch):
+def test_loader_failure_without_previous_snapshot_keeps_unrelated_catalog_available(
+    tmp_path, monkeypatch
+):
     import asyncio
     import orchestrator.live_runtime_protection as protection
     from orchestrator.runtime_contract import RuntimeContractError
@@ -317,19 +433,25 @@ def test_loader_failure_without_previous_snapshot_keeps_unrelated_catalog_availa
     registry._allowed.update({"tool_catalog", "web_fetch"})
     note = paths["workspace"] / "note.txt"
     note.write_text("private fixture", encoding="utf-8")
+
     def unavailable(*_args, **_kwargs):
         raise RuntimeContractError("fixture loader failure")
+
     monkeypatch.setattr(protection, "load_live_runtime_policy", unavailable)
 
     async def exercise():
         catalogue = await registry.execute("tool_catalog", {}, "catalogue")
         assert not catalogue.is_error
         assert catalogue.details["runtime_protection"]["protection_complete"] is False
+
         async def fake_fetch(name, _arguments, **_kwargs):
             assert name == "web_fetch"
             return "synthetic public result"
+
         monkeypatch.setattr(registry, "_dispatch_observed", fake_fetch)
-        fetched = await registry.execute("web_fetch", {"url": "https://example.test"}, "fetch")
+        fetched = await registry.execute(
+            "web_fetch", {"url": "https://example.test"}, "fetch"
+        )
         assert not fetched.is_error and fetched.output == "synthetic public result"
         assert fetched.details["runtime_protection"]["protection_complete"] is False
         read = await registry.execute("file_read", {"path": str(note)}, "unknown")
@@ -376,9 +498,7 @@ def test_live_runtime_gate_allows_read_only_core_inspection_but_denies_shell_wri
     core_path = paths["code_root"] / "main.py"
 
     assert (
-        registry.evaluate_admission(
-            "shell", {"command": f'git diff -- "{core_path}"'}
-        )
+        registry.evaluate_admission("shell", {"command": f'git diff -- "{core_path}"'})
         is None
     )
     denied = registry.evaluate_admission(
@@ -423,9 +543,7 @@ def test_live_runtime_gate_blocks_raw_current_instance_control_only(tmp_path):
     )
     assert _reason(denied) == "live_runtime_protection"
     assert (
-        registry.evaluate_admission(
-            "shell", {"command": "Get-Service -Name HASHI3"}
-        )
+        registry.evaluate_admission("shell", {"command": "Get-Service -Name HASHI3"})
         is None
     )
     assert (
@@ -443,10 +561,7 @@ def test_live_runtime_gate_blocks_raw_current_instance_control_only(tmp_path):
 def test_live_runtime_policy_extends_exact_paths_without_widening_workzone(tmp_path):
     registry, paths = _registry(tmp_path)
     policy_path = (
-        paths["bridge_home"]
-        / "state"
-        / "platform"
-        / "live-runtime-protection.json"
+        paths["bridge_home"] / "state" / "platform" / "live-runtime-protection.json"
     )
     service_config = paths["bridge_home"] / "platform" / "hashi3-service.xml"
     restart_key = paths["bridge_home"] / "private" / "restart.key"
@@ -467,9 +582,7 @@ def test_live_runtime_policy_extends_exact_paths_without_widening_workzone(tmp_p
         "file_write", {"path": str(service_config), "content": "changed"}
     )
     assert _reason(denied) == "live_runtime_protection"
-    denied = registry.evaluate_admission(
-        "file_read", {"path": str(restart_key)}
-    )
+    denied = registry.evaluate_admission("file_read", {"path": str(restart_key)})
     assert _reason(denied) == "live_runtime_protection"
     denied = registry.evaluate_admission(
         "shell", {"command": "sc.exe stop HASHI3-Lifeline"}
@@ -491,10 +604,7 @@ def test_live_runtime_policy_extends_exact_paths_without_widening_workzone(tmp_p
 def test_malformed_optional_policy_does_not_disable_derived_core_protection(tmp_path):
     registry, paths = _registry(tmp_path)
     policy_path = (
-        paths["bridge_home"]
-        / "state"
-        / "platform"
-        / "live-runtime-protection.json"
+        paths["bridge_home"] / "state" / "platform" / "live-runtime-protection.json"
     )
     policy_path.parent.mkdir(parents=True)
     policy_path.write_text(
@@ -520,39 +630,61 @@ def test_malformed_optional_policy_does_not_disable_derived_core_protection(tmp_
         )
         is None
     )
+
+
 # HASHI-Fingerprint: hfp_bd21f58119e14009837bbd0fcec8cc4f
+
 
 def test_run_output_storage_is_protected_from_generic_tools(tmp_path):
     import asyncio
     from tools.tool_output_store import run_binding
 
     registry, paths = _registry(tmp_path)
-    registry._allowed.update({"file_search", "log_query", "file_list", "workspace_inspect"})
+    registry._allowed.update(
+        {"file_search", "log_query", "file_list", "workspace_inspect"}
+    )
     context = {
-        "agent_name": "lily", "instance_id": "HASHI3", "owner_id": "user:one",
-        "hashi_session_id": "session-one", "hashi_run_id": "run-one", "request_id": "request-one",
+        "agent_name": "lily",
+        "instance_id": "HASHI3",
+        "owner_id": "user:one",
+        "hashi_session_id": "session-one",
+        "hashi_run_id": "run-one",
+        "request_id": "request-one",
     }
     registry.audit_context.update(context)
     secret = "run-private-output-" + "A" * 20_000
-    reference = registry._tool_output_store.retain(run_binding(registry.audit_context), "file_read", secret)
+    reference = registry._tool_output_store.retain(
+        run_binding(registry.audit_context), "file_read", secret
+    )
     store_root = paths["bridge_home"] / "state" / ".hashi-tool-output-v1"
     data_path = next(store_root.rglob("*.data"))
 
     async def exercise():
-        own = await registry.execute("tool_output_read", {"reference": reference, "offset": 0})
+        own = await registry.execute(
+            "tool_output_read", {"reference": reference, "offset": 0}
+        )
         assert not own.is_error and "run-private-output" in own.output
         other = await registry.execute_with_audit_context(
-            "tool_output_read", {"reference": reference, "offset": 0},
+            "tool_output_read",
+            {"reference": reference, "offset": 0},
             audit_context={"owner_id": "user:other"},
         )
         assert other.is_error
         direct = await registry.execute("file_read", {"path": str(data_path)})
         assert direct.is_error and secret not in direct.output
-        change = await registry.execute("file_write", {"path": str(data_path), "content": "changed"})
+        change = await registry.execute(
+            "file_write", {"path": str(data_path), "content": "changed"}
+        )
         assert change.is_error
         scan = await registry.execute(
-            "file_search", {"query": "run-private-output", "mode": "content",
-                            "roots": [str(store_root.parent)], "profile": "expanded", "include_hidden": True},
+            "file_search",
+            {
+                "query": "run-private-output",
+                "mode": "content",
+                "roots": [str(store_root.parent)],
+                "profile": "expanded",
+                "include_hidden": True,
+            },
         )
         assert not scan.is_error
         assert json.loads(scan.output)["data"]["matches"] == []

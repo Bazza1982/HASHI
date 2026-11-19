@@ -356,15 +356,21 @@ def test_retired_route_commands_and_callbacks_leave_configuration_untouched(tmp_
     assert settings.config.route(settings.owner, "arale")["route"] == "call"
 
 
-
-def test_large_call_catalogue_pages_selects_and_reloads_exact_identity(tmp_path, monkeypatch):
+def test_large_call_catalogue_pages_selects_and_reloads_exact_identity(
+    tmp_path, monkeypatch
+):
     from orchestrator.frontend_call.config import CallConfig, validate_target
     from orchestrator.frontend_call.contract import digest
 
-    for name in ("HASHI_CALL_MAX_TARGETS", "HASHI_CALL_MAX_ROUTES",
-                 "HASHI_CALL_MAX_PROFILES", "HASHI_CALL_MAX_AGENT_DEFAULTS",
-                 "HASHI_CALL_MAX_VOICES", "HASHI_CALL_MAX_OPTIONS",
-                 "HASHI_MEDIA_MAX_MODEL_CHARS"):
+    for name in (
+        "HASHI_CALL_MAX_TARGETS",
+        "HASHI_CALL_MAX_ROUTES",
+        "HASHI_CALL_MAX_PROFILES",
+        "HASHI_CALL_MAX_AGENT_DEFAULTS",
+        "HASHI_CALL_MAX_VOICES",
+        "HASHI_CALL_MAX_OPTIONS",
+        "HASHI_MEDIA_MAX_MODEL_CHARS",
+    ):
         monkeypatch.delenv(name, raising=False)
     doc = document()
     long_model = "synthetic-provider/" + "m" * 240
@@ -381,11 +387,18 @@ def test_large_call_catalogue_pages_selects_and_reloads_exact_identity(tmp_path,
         digest(["owner", f"prior_{index}"]): doc["default_profile"]
         for index in range(205)
     }
-    doc["routes"] = {digest(["owner", f"prior_{index}"]): "call" for index in range(205)}
-    doc["agent_defaults"] = {f"prior_{index}": doc["default_profile"] for index in range(205)}
+    doc["routes"] = {
+        digest(["owner", f"prior_{index}"]): "call" for index in range(205)
+    }
+    doc["agent_defaults"] = {
+        f"prior_{index}": doc["default_profile"] for index in range(205)
+    }
     path = tmp_path / "call_profiles.json"
     path.write_text(json.dumps(doc), encoding="utf-8")
-    runtime = SimpleNamespace(name="fresh", global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=7))
+    runtime = SimpleNamespace(
+        name="fresh",
+        global_config=SimpleNamespace(bridge_home=tmp_path, authorized_id=7),
+    )
     settings = CallSettings(runtime)
     ctx = settings.config.context(settings.owner, "fresh")
     assert ctx["capacity"]["profiles"] is None
@@ -393,19 +406,31 @@ def test_large_call_catalogue_pages_selects_and_reloads_exact_identity(tmp_path,
 
     _, keyboard = settings.render("stt.2")
     buttons = [button for row in keyboard.inline_keyboard for button in row]
-    chosen = next(button for button in buttons if button.callback_data.startswith("call:target:stt.35:"))
+    chosen = next(
+        button
+        for button in buttons
+        if button.callback_data.startswith("call:target:stt.35:")
+    )
     assert len(chosen.text) <= 84
     _, action, value, revision = chosen.callback_data.split(":")
     assert settings.apply(action, value, revision) == "stt.2"
 
     _, keyboard = settings.render("voice.17")
-    chosen = next(button for row in keyboard.inline_keyboard for button in row
-                  if button.callback_data.startswith("call:voice:205:"))
+    chosen = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("call:voice:205:")
+    )
     _, action, value, revision = chosen.callback_data.split(":")
     settings.apply(action, value, revision)
     _, keyboard = settings.render("options.tts.2")
-    chosen = next(button for row in keyboard.inline_keyboard for button in row
-                  if button.callback_data.startswith("call:option:tts.17.1:"))
+    chosen = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("call:option:tts.17.1:")
+    )
     _, action, value, revision = chosen.callback_data.split(":")
     settings.apply(action, value, revision)
 
@@ -413,17 +438,34 @@ def test_large_call_catalogue_pages_selects_and_reloads_exact_identity(tmp_path,
     assert reloaded["profile"]["stt"]["target_id"] == "ear_034"
     assert reloaded["profile"]["tts"]["voice_id"] == "voice_205"
     assert reloaded["profile"]["tts"]["options"]["option_17"] is False
-    frozen, targets = CallConfig(path).freeze(settings.owner, "fresh", reloaded["revision"])
+    frozen, targets = CallConfig(path).freeze(
+        settings.owner, "fresh", reloaded["revision"]
+    )
     assert frozen == reloaded["profile"]
     assert targets["stt"]["model"] == long_model
-    assert settings.config.select_route(settings.owner, "fresh", reloaded["revision"], "phone")["route"] == "phone"
+    assert (
+        settings.config.select_route(
+            settings.owner, "fresh", reloaded["revision"], "phone"
+        )["route"]
+        == "phone"
+    )
 
     with pytest.raises(CallError, match="call_voices_invalid"):
         validate_target({**doc["targets"][1], "voices": ["duplicate", "duplicate"]})
     with pytest.raises(CallError, match="call_option_schema_invalid"):
-        validate_target({**doc["targets"][1], "options": {"broken": {"type": "string", "enum": "bad"}}})
+        validate_target(
+            {
+                **doc["targets"][1],
+                "options": {"broken": {"type": "string", "enum": "bad"}},
+            }
+        )
     monkeypatch.setenv("HASHI_CALL_MAX_PROFILES", "200")
     ctx = settings.config.context(settings.owner, "fresh")
     with pytest.raises(CallError, match="call_profile_limit") as failure:
-        settings.config.save(settings.owner, "another_agent", ctx["revision"], ctx["profile"])
-    assert failure.value.capacity == {"setting": "HASHI_CALL_MAX_PROFILES", "limit": 200}
+        settings.config.save(
+            settings.owner, "another_agent", ctx["revision"], ctx["profile"]
+        )
+    assert failure.value.capacity == {
+        "setting": "HASHI_CALL_MAX_PROFILES",
+        "limit": 200,
+    }

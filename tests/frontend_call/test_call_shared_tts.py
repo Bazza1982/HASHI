@@ -297,8 +297,9 @@ def test_call_voice_menu_pages_every_shared_catalog_voice(tmp_path):
     assert all(len(value.encode()) <= 64 for value in callbacks)
 
 
-
-def test_shared_voice_catalogue_over_500_entries_preserves_last_selection(tmp_path, monkeypatch):
+def test_shared_voice_catalogue_over_500_entries_preserves_last_selection(
+    tmp_path, monkeypatch
+):
     from orchestrator.frontend_call.contract import CallError
 
     monkeypatch.delenv("HASHI_VOICE_CATALOG_MAX_ROWS", raising=False)
@@ -318,20 +319,33 @@ def test_shared_voice_catalogue_over_500_entries_preserves_last_selection(tmp_pa
     settings = CallSettings.__new__(CallSettings)
     settings.runtime = SimpleNamespace()
     settings.owner, settings.agent = "owner", "agent"
-    settings.config = CallConfig(tmp_path / "call_profiles.json",
-        voice_catalog_path=tmp_path / "voice_catalog.json", project_root=tmp_path, platform="win32")
+    settings.config = CallConfig(
+        tmp_path / "call_profiles.json",
+        voice_catalog_path=tmp_path / "voice_catalog.json",
+        project_root=tmp_path,
+        platform="win32",
+    )
     _, keyboard = settings.render("voice.41")
-    chosen = next(button for row in keyboard.inline_keyboard for button in row
-                  if button.callback_data.startswith("call:voice:500:"))
+    chosen = next(
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("call:voice:500:")
+    )
     _, action, value, revision = chosen.callback_data.split(":")
     settings.apply(action, value, revision)
     reloaded = settings.config.context("owner", "agent")
     assert reloaded["profile"]["tts"]["voice_id"] == "premium_500"
-    _, selected, catalog = settings.config.freeze_runtime("owner", "agent", reloaded["revision"])
+    _, selected, catalog = settings.config.freeze_runtime(
+        "owner", "agent", reloaded["revision"]
+    )
     assert selected["tts"]["model"] == long_model
     assert catalog.service("compute-premium")["model"] == long_model
 
     monkeypatch.setenv("HASHI_VOICE_CATALOG_MAX_ROWS", "500")
     with pytest.raises(CallError, match="call_tts_catalog_invalid") as failure:
         settings.config.context("owner", "agent")
-    assert failure.value.capacity == {"setting": "HASHI_VOICE_CATALOG_MAX_ROWS", "limit": 500}
+    assert failure.value.capacity == {
+        "setting": "HASHI_VOICE_CATALOG_MAX_ROWS",
+        "limit": 500,
+    }
