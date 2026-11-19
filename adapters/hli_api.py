@@ -113,6 +113,7 @@ class HLIAdapter(OpenAICompatibleAdapter):
         # compacting the same unchanged payload. Bounded, FIFO-evicted.
         self._hli_compacted_requests: dict[str, str] = {}
         self._hli_on_demand_view_installed = False
+        self._hli_on_demand_base = None
 
     def _install_on_demand_tool_view(self) -> None:
         """Small-model default: schemas start compact and grow by tool_find.
@@ -121,10 +122,28 @@ class HLIAdapter(OpenAICompatibleAdapter):
         non-her_v3 preparation stages) must present the compact starter set
         instead of the full core-tier schemas. Tool execution and admission
         still pass through the same PAO registry; this only changes schemas.
+
+        The HER stage bridge replaces ``tool_registry`` per stage; the check
+        runs at payload-build time and re-wraps any plain registry, while a
+        registry that is already an on-demand view (installed by the HER
+        bridge for her_v3 stages) is left untouched so tool_find reveals
+        survive across provider calls.
         """
-        if self._hli_on_demand_view_installed:
-            return
         registry = getattr(self, "tool_registry", None)
+        if registry is None:
+            return
+        try:
+            from tools.tool_presentation import OnDemandToolView
+
+            if isinstance(registry, OnDemandToolView):
+                self._hli_on_demand_view_installed = True
+                return
+        except Exception:
+            pass
+        if self._hli_on_demand_view_installed:
+            # Only re-wrap when the registry instance changed identity.
+            if registry is getattr(self, "_hli_on_demand_base", None):
+                return
         is_allowed = getattr(registry, "is_allowed", None)
         if not callable(is_allowed) or not is_allowed("tool_find"):
             return
@@ -132,6 +151,7 @@ class HLIAdapter(OpenAICompatibleAdapter):
             from tools.tool_presentation import OnDemandToolView
 
             self.tool_registry = OnDemandToolView(registry, goal="")
+            self._hli_on_demand_base = registry
             self._hli_on_demand_view_installed = True
         except Exception as exc:
             self.logger.debug("HLI on-demand tool view unavailable: %s", exc)
