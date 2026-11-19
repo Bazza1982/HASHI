@@ -756,7 +756,15 @@ def resolve_capacity_profile(
     *,
     profile_options: Mapping[str, Any] | None = None,
     response_headroom_tokens: int | None = None,
+    endpoint: str | None = None,
 ) -> CapacityProfile | None:
+    """Resolve one serving capacity profile.
+
+    Discovered adapter entries are identified by the actual serving
+    configuration (endpoint + model), so two Compute endpoints exposing the
+    same model ID never share capacity metadata. Explicit configuration
+    sources always take precedence over discovered entries.
+    """
     provider = canonical_backend_engine(provider)
     headroom = int(response_headroom_tokens or load_policy(runtime).response_headroom_tokens)
     sources: list[tuple[str, Mapping[str, Any]]] = []
@@ -778,8 +786,25 @@ def resolve_capacity_profile(
             if raw_engine == provider:
                 sources.append(("global_provider_profile", raw))
     model_capacities = _adapter_capacity_declarations(provider)
-    if isinstance(model_capacities.get(model), Mapping):
-        sources.append(("provider_adapter", model_capacities[model]))
+    if endpoint:
+        # Exact serving identity: the entry belongs to one Compute endpoint.
+        composite = model_capacities.get(f"{endpoint}|{model}")
+        if isinstance(composite, Mapping):
+            sources.append(("provider_adapter", composite))
+    else:
+        direct = model_capacities.get(model)
+        if isinstance(direct, Mapping):
+            sources.append(("provider_adapter", direct))
+        else:
+            # Legacy model-only entries stay usable when exactly one serving
+            # configuration is known; ambiguous entries are never guessed.
+            composite_rows = [
+                value for key, value in model_capacities.items()
+                if isinstance(key, str) and key.endswith(f"|{model}")
+                and isinstance(value, Mapping)
+            ]
+            if len(composite_rows) == 1:
+                sources.append(("provider_adapter", composite_rows[0]))
 
     for source_name, container in sources:
         candidate = _capacity_candidate(container, model)
@@ -805,6 +830,42 @@ def resolve_capacity_profile(
             response_headroom_tokens=candidate_headroom,
         )
     return None
+
+
+def invalidate_model_capacity(
+    provider: str,
+    model: str,
+    *,
+    endpoint: str | None = None,
+) -> bool:
+    """Drop discovered capacity metadata for one serving configuration.
+
+    Explicit configuration is never removed; only adapter-discovered entries
+    are invalidated. Used by callers that observe a configuration change or
+    want a fresh discovery pass without restarting HASHI.
+    """
+    provider = canonical_backend_engine(provider)
+    try:
+        from adapters.registry import get_backend_class
+
+        module = importlib.import_module(get_backend_class(provider).__module__)
+    except Exception:
+        return False
+    capacities = getattr(module, "HASHI_MODEL_CAPACITY_PROFILES", None)
+    if not isinstance(capacities, dict):
+        return False
+    removed = False
+    if endpoint:
+        if capacities.pop(f"{endpoint}|{model}", None) is not None:
+            removed = True
+    else:
+        if capacities.pop(model, None) is not None:
+            removed = True
+        for key in [key for key in capacities
+                    if isinstance(key, str) and key.endswith(f"|{model}")]:
+            capacities.pop(key, None)
+            removed = True
+    return removed
 
 
 def preflight_route_context_fit(
@@ -929,6 +990,17 @@ def resolve_trigger_budget(
         main_provider, main_model = "", ""
     if main_provider == "hli-api" and main_model:
         hli_capacity = resolve_capacity_profile(runtime, main_provider, main_model)
+        if hli_capacity is None:
+            # The live HLI adapter instance owns the discovered capacity of
+            # the exact Compute endpoint it serves; consult it before falling
+            # back to the generic 64k/128k trigger window.
+            backend = getattr(
+                getattr(runtime, "backend_manager", None), "current_backend", None
+            )
+            getter = getattr(backend, "capacity_profile_for", None)
+            if callable(getter):
+                with contextlib.suppress(Exception):
+                    hli_capacity = getter(main_model)
         if hli_capacity is not None:
             usable = hli_capacity.usable_input_tokens
             return CompactionTriggerBudget(
@@ -3619,6 +3691,7 @@ __all__ = [
     "estimate_effective_context_tokens",
     "estimate_tokens",
     "install_history_section",
+    "invalidate_model_capacity",
     "load_policy",
     "load_route_config",
     "managed_history_present",

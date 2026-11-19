@@ -1873,8 +1873,14 @@ class OpenRouterAdapter(BaseBackend):
         *,
         request_id: str,
         provider_calls: list[dict],
-    ) -> None:
-        """Optional provider-native check of the final, privacy-filtered payload."""
+    ) -> Mapping[str, Any] | None:
+        """Optional provider-native check of the final, privacy-filtered payload.
+
+        A subclass may return a replacement payload after proactive context
+        maintenance (for example, Compact). The caller re-protects and
+        re-estimates the rebuilt payload before submission. Returning None
+        sends the original payload unchanged.
+        """
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
         """Reject a clearly oversized text payload before an HTTP call.
@@ -4222,11 +4228,17 @@ class OpenRouterAdapter(BaseBackend):
                     # audited and sent over HTTP.
                     self._preflight_payload_capacity(payload)
                     capacity_start = len(provider_calls)
-                    await self._prepare_payload_capacity(
+                    rebuilt_payload = await self._prepare_payload_capacity(
                         payload,
                         request_id=str(request_id or ""),
                         provider_calls=provider_calls,
                     )
+                    if isinstance(rebuilt_payload, Mapping):
+                        payload = dict(rebuilt_payload)
+                        payload = await self._protect_outbound_payload(
+                            payload, request_id=str(request_id or ""), gate=privacy_gate
+                        )
+                        self._preflight_payload_capacity(payload)
                     provider_call_count += len(provider_calls) - capacity_start
                     for capacity_call in provider_calls[capacity_start:]:
                         total_prompt += int(capacity_call.get("input") or 0)
