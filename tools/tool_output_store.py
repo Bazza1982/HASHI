@@ -5,6 +5,12 @@ new filesystem or network authority. Agent-owned stores survive Function Worker
 replacement while the Run remains active. Only a canonically terminal Run is
 eligible for automatic cleanup. Registries without an Agent home use a private
 process-local temporary store.
+
+Each instance keeps its own store under its own OS-local home (separate stores
+for Windows and WSL). When an operator deliberately points two lock families at
+the same underlying directory, the sealed root marker records the creating
+family and every staging directory records its writer family, so cleanup never
+treats a foreign family's free-looking lock as liveness proof.
 """
 
 from __future__ import annotations
@@ -38,7 +44,17 @@ _FRAME_RECORD = struct.Struct(">qqqqqq")
 _FRAME_RECORD_SIZE = _FRAME_RECORD.size + 32
 _REF = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 _HEX = re.compile(r"^[0-9a-f]{64}$")
-_MARKER = {"type": "hashi.tool-output-retention", "version": 1}
+_MARKER = {"type": "hashi.tool-output-retention", "version": 2, "owner_family": os.name}
+
+
+def _marker_matches(value: Any) -> bool:
+    """Accept legacy v1 markers and family-recorded v2 markers."""
+    if not isinstance(value, Mapping) or value.get("type") != "hashi.tool-output-retention":
+        return False
+    version = value.get("version")
+    if version == 1:
+        return True
+    return version == 2 and value.get("owner_family") in {"nt", "posix"}
 
 
 def run_binding(context: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -245,7 +261,7 @@ class ToolOutputStore:
 
                 protect_private_file(root)
                 write_config_json(marker, _MARKER, expected_revision=None)
-            if marker.is_symlink() or dict(read_config_json(marker)) != _MARKER:
+            if marker.is_symlink() or not _marker_matches(read_config_json(marker)):
                 raise OSError("tool output retention directory is not owned by HASHI")
         return root
 
