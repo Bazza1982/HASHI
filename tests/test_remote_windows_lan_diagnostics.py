@@ -37,6 +37,7 @@ STUB_TEMPLATE = r"""
 $global:FirewallRules = @()
 $global:PortFilters = @{}
 $global:AddressFilters = @{}
+$global:ApplicationFilters = @{}
 $global:Profiles = @(
     [pscustomobject]@{ Name='Domain'; Enabled=$true; DefaultInboundAction='Allow'; AllowLocalFirewallRules=$true },
     [pscustomobject]@{ Name='Private'; Enabled=$true; DefaultInboundAction='Allow'; AllowLocalFirewallRules=$true },
@@ -81,6 +82,13 @@ function Get-NetFirewallAddressFilter {
     }
     return $null
 }
+function Get-NetFirewallApplicationFilter {
+    param($AssociatedNetFirewallRule, [string]$ErrorAction = '')
+    if ($null -ne $AssociatedNetFirewallRule -and $global:ApplicationFilters.ContainsKey([string]$AssociatedNetFirewallRule.Name)) {
+        return $global:ApplicationFilters[[string]$AssociatedNetFirewallRule.Name]
+    }
+    return $null
+}
 function Get-NetFirewallProfile {
     param([string]$PolicyStore, [string]$ErrorAction = '')
     return @($global:Profiles)
@@ -98,7 +106,8 @@ function Get-CimInstance {
     param([string]$ClassName, [string]$Filter, [string]$ErrorAction = '')
     if ($ClassName -eq 'Win32_Process') {
         if ($Filter -match "ProcessId = $global:OwnedPid") {
-            return [pscustomobject]@{ CommandLine = "python.exe -B -m remote --hashi-root `"$global:OwnedRoot`" --port 8767" }
+            return [pscustomobject]@{ CommandLine = "python.exe -B -m remote --hashi-root `"$global:OwnedRoot`" --port 8767";
+                ExecutablePath = "C:\Users\thene\projects\HASHI3\.venv\Scripts\python.exe" }
         }
         return [pscustomobject]@{ CommandLine = 'C:\Windows\System32\svchost.exe -k netsvcs' }
     }
@@ -250,6 +259,30 @@ def test_doctor_explicit_block_is_detected(tmp_path):
     )
     result, parsed = _run_doctor(tmp_path, scenario, "-Json")
     assert parsed["firewall"]["state"] == "degraded"
+    assert parsed["firewall"]["reason_code"] == "firewall_explicitly_blocked"
+    assert len(parsed["firewall"]["explicit_block_evidence"]) == 1
+
+
+def test_doctor_program_restricted_block_for_other_app_is_not_evidence(tmp_path):
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="chrome-block"; DisplayName="chrome-block"; '
+        'Direction="Inbound"; Action="Block"; Enabled=$true; Profile=@("Private","Public") }); '
+        '$global:PortFilters["chrome-block"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="Any" }; '
+        '$global:ApplicationFilters["chrome-block"] = [pscustomobject]@{ Program="C:\\Program Files\\chrome.exe" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert len(parsed["firewall"]["explicit_block_evidence"]) == 0
+    assert parsed["firewall"]["reason_code"] == "firewall_rule_missing"
+
+
+def test_doctor_program_restricted_block_for_our_listener_is_evidence(tmp_path):
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="python-block"; DisplayName="python-block"; '
+        'Direction="Inbound"; Action="Block"; Enabled=$true; Profile=@("Private","Public") }); '
+        '$global:PortFilters["python-block"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="Any" }; '
+        '$global:ApplicationFilters["python-block"] = [pscustomobject]@{ Program="C:\\Users\\thene\\projects\\HASHI3\\.venv\\Scripts\\python.exe" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
     assert parsed["firewall"]["reason_code"] == "firewall_explicitly_blocked"
     assert len(parsed["firewall"]["explicit_block_evidence"]) == 1
 

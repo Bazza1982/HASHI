@@ -492,7 +492,7 @@ function Test-RemotePortSpecCovers {
 }
 
 function Get-RemoteFirewallDiagnostics {
-    param([int]$EffectivePort, [string]$InstanceId)
+    param([int]$EffectivePort, [string]$InstanceId, [string]$ListenerProcessPath = "")
 
     $Diagnostics = [ordered]@{
         state = "unknown"
@@ -641,15 +641,38 @@ function Get-RemoteFirewallDiagnostics {
     }
 
     # ── Explicit Block evidence (only with matching effective policy) ─
+    # A per-program Block rule only counts when it targets the actual listener
+    # executable; port rules without a program restriction cover every owner.
     foreach ($Rule in @($Rules | Where-Object { $_.Direction -eq "Inbound" -and $_.Enabled -and $_.Action -eq "Block" })) {
         $PortFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule -ErrorAction SilentlyContinue
-        if ($null -ne $PortFilter -and (Test-RemotePortSpecCovers -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort $EffectivePort)) {
-            $Diagnostics.explicit_block_evidence += [ordered]@{
-                name = [string]$Rule.Name
-                display_name = [string]$Rule.DisplayName
-                local_port = [string]$PortFilter.LocalPort
-                profile = @([string[]]$Rule.Profile)
+        if ($null -eq $PortFilter -or -not (Test-RemotePortSpecCovers -PortSpec ([string]$PortFilter.LocalPort) -EffectivePort $EffectivePort)) {
+            continue
+        }
+        $AppFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule -ErrorAction SilentlyContinue
+        $Program = if ($null -ne $AppFilter) { [string]$AppFilter.Program } else { "" }
+        $AppliesToListener = $true
+        if ($Program) {
+            if ([string]::IsNullOrWhiteSpace($ListenerProcessPath)) {
+                # A program-restricted rule with an unknown listener path is
+                # reported as unverified context, not as proof.
+                $AppliesToListener = $false
+            } else {
+                try {
+                    $AppliesToListener = ([System.IO.Path]::GetFullPath($Program)).Equals(
+                        ([System.IO.Path]::GetFullPath($ListenerProcessPath)),
+                        [System.StringComparison]::OrdinalIgnoreCase)
+                } catch {
+                    $AppliesToListener = $false
+                }
             }
+        }
+        if (-not $AppliesToListener) { continue }
+        $Diagnostics.explicit_block_evidence += [ordered]@{
+            name = [string]$Rule.Name
+            display_name = [string]$Rule.DisplayName
+            local_port = [string]$PortFilter.LocalPort
+            program = $Program
+            profile = @([string[]]$Rule.Profile)
         }
     }
 
@@ -716,6 +739,7 @@ function Get-RemoteListenerDiagnostics {
         $Address = [string]$Row.LocalAddress
         $ListenerPid = [int]$Row.OwningProcess
         $ProcessName = ""
+        $ExecutablePath = ""
         $OwnedProcess = $false
         if ($ListenerPid -gt 0) {
             try {
@@ -724,7 +748,10 @@ function Get-RemoteListenerDiagnostics {
             } catch { }
             try {
                 $Cim = Get-CimInstance Win32_Process -Filter "ProcessId = $ListenerPid" -ErrorAction SilentlyContinue
-                if ($Cim) { $OwnedProcess = Test-OwnedRemoteCommandLine ([string]$Cim.CommandLine) }
+                if ($Cim) {
+                    $OwnedProcess = Test-OwnedRemoteCommandLine ([string]$Cim.CommandLine)
+                    $ExecutablePath = [string]$Cim.ExecutablePath
+                }
             } catch { }
         }
         if ($OwnedProcess) { $Owned = $true }
@@ -735,6 +762,7 @@ function Get-RemoteListenerDiagnostics {
             port = [int]$Row.LocalPort
             pid = $ListenerPid
             process_name = $ProcessName
+            executable_path = $ExecutablePath
             owned = $OwnedProcess
         }
     }
@@ -998,8 +1026,9 @@ function Show-RemoteDoctor {
         @($Backends | Where-Object { $_.browsing -ne $true }).Count -eq 0
     } else { $false }
 
-    $Firewall = Get-RemoteFirewallDiagnostics -EffectivePort $EffectivePort -InstanceId $InstanceId
     $Listener = Get-RemoteListenerDiagnostics -EffectivePort $EffectivePort -HealthReachable ($null -ne $Health)
+    $ListenerPath = if (@($Listener.listeners).Count -gt 0) { [string]$Listener.listeners[0].executable_path } else { "" }
+    $Firewall = Get-RemoteFirewallDiagnostics -EffectivePort $EffectivePort -InstanceId $InstanceId -ListenerProcessPath $ListenerPath
     $Mdns = Get-RemoteMdnsDiagnostics -Health $Health -FirewallDiagnostics $Firewall
 
     # ── v1 lan_readiness snapshot ───────────────────────────────────
