@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 import tempfile
+from contextlib import aclosing
 from typing import Any
 
 from tools.web_fetch_stream import _bounded_preview, _retain_text, _run_spool_task
@@ -64,20 +65,21 @@ async def execute_streamed_http(
                     chunk_size = min(65536, max_response_bytes + 1) if max_response_bytes else 65536
                     from tools.http_response_stream import decoded_response_bytes
 
-                    async for chunk in decoded_response_bytes(response, chunk_size=chunk_size):
-                        observed_at_least = received + len(chunk)
-                        if max_response_bytes is not None:
-                            room = max_response_bytes - received
-                            if len(chunk) > room:
-                                chunk = chunk[:room]
-                                complete = False
-                        received += len(chunk)
-                        text = decoder.decode(chunk, final=False)
-                        if text:
-                            captured.write(text.encode("utf-8"))
-                            characters += len(text)
-                        if not complete:
-                            break
+                    async with aclosing(decoded_response_bytes(response, chunk_size=chunk_size)) as decoded_chunks:
+                        async for chunk in decoded_chunks:
+                            observed_at_least = received + len(chunk)
+                            if max_response_bytes is not None:
+                                room = max_response_bytes - received
+                                if len(chunk) > room:
+                                    chunk = chunk[:room]
+                                    complete = False
+                            received += len(chunk)
+                            text = decoder.decode(chunk, final=False)
+                            if text:
+                                captured.write(text.encode("utf-8"))
+                                characters += len(text)
+                            if not complete:
+                                break
                     final = decoder.decode(b"", final=True)
                     if final:
                         captured.write(final.encode("utf-8"))

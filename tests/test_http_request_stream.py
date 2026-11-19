@@ -186,7 +186,7 @@ async def test_http_capture_and_retention_failures_report_effect_truthfully(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["http_request", "web_fetch"])
-@pytest.mark.parametrize("coding", ["gzip", "deflate", "raw_deflate"])
+@pytest.mark.parametrize("coding", ["gzip", "deflate", "raw_deflate", "gzip_deflate", "deflate_gzip"])
 async def test_large_compressed_response_does_not_inflate_whole_body_in_memory(tmp_path, tool, coding):
     import gzip
     import zlib
@@ -195,12 +195,16 @@ async def test_large_compressed_response_does_not_inflate_whole_body_in_memory(t
     sentinel = b"COMPRESSED-HTTP-COMPLETE"
     raw = b"x" * payload_size + sentinel
     if coding == "gzip":
-        compressed = gzip.compress(raw, mtime=0)
+        compressed, header = gzip.compress(raw, mtime=0), "gzip"
+    elif coding == "gzip_deflate":
+        compressed, header = zlib.compress(gzip.compress(raw, mtime=0)), "gzip, deflate"
+    elif coding == "deflate_gzip":
+        compressed, header = gzip.compress(zlib.compress(raw), mtime=0), "deflate, gzip"
     else:
         compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS if coding == "raw_deflate" else zlib.MAX_WBITS)
         compressed = compressor.compress(raw) + compressor.flush()
+        header = "deflate"
     del raw
-    header = "gzip" if coding == "gzip" else "deflate"
     received = []
 
     async def respond(request):
@@ -267,13 +271,20 @@ async def test_gzip_members_preserve_unicode_and_truncated_stream_fails(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_explicit_http_budget_applies_to_decompressed_gzip_bytes(tmp_path):
+@pytest.mark.parametrize("stacked", [False, True])
+async def test_explicit_http_budget_applies_to_decompressed_gzip_bytes(tmp_path, stacked):
     import gzip
+    import zlib
+
+    body = gzip.compress(b"abcdefghijk", mtime=0)
+    if stacked:
+        body = zlib.compress(body)
+    header = "gzip, deflate" if stacked else "gzip"
 
     async def respond(_request):
         return web.Response(
-            body=gzip.compress(b"abcdefghijk", mtime=0),
-            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "gzip"},
+            body=body,
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": header},
         )
 
     runner, url = await _serve(respond)
@@ -318,11 +329,16 @@ async def test_other_http_content_encodings_keep_existing_support(tmp_path, tool
 
 
 @pytest.mark.asyncio
-async def test_cancel_during_gzip_expansion_does_not_repeat_post(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stacked", [False, True])
+async def test_cancel_during_gzip_expansion_does_not_repeat_post(tmp_path, monkeypatch, stacked):
     import gzip
+    import zlib
     from contextlib import contextmanager
 
     compressed = gzip.compress(b"x" * (32 * 1024 * 1024), mtime=0)
+    if stacked:
+        compressed = zlib.compress(compressed)
+    header = "gzip, deflate" if stacked else "gzip"
     received = []
     reached = asyncio.Event()
 
@@ -330,7 +346,7 @@ async def test_cancel_during_gzip_expansion_does_not_repeat_post(tmp_path, monke
         received.append(await request.text())
         return web.Response(
             body=compressed,
-            headers={"Content-Type": "text/plain", "Content-Encoding": "gzip"},
+            headers={"Content-Type": "text/plain", "Content-Encoding": header},
         )
 
     runner, url = await _serve(respond)

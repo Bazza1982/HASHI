@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 import threading
-from contextlib import ExitStack
+from contextlib import ExitStack, aclosing
 from html.parser import HTMLParser
 from typing import Any, Iterator
 
@@ -321,11 +321,12 @@ async def fetch_web_text(args: dict[str, Any], *, max_length: int | None = None,
                         decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
                     except LookupError:
                         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                    async for chunk in decoded_response_bytes(response):
-                        text = decoder.decode(chunk, final=False)
-                        if text:
-                            converter.feed(text)
-                            _check_parser_budget(converter, parser_budget)
+                    async with aclosing(decoded_response_bytes(response)) as decoded_chunks:
+                        async for chunk in decoded_chunks:
+                            text = decoder.decode(chunk, final=False)
+                            if text:
+                                converter.feed(text)
+                                _check_parser_budget(converter, parser_budget)
                     final = decoder.decode(b"", final=True)
                     if final:
                         converter.feed(final)

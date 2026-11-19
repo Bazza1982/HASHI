@@ -64,3 +64,25 @@ async def test_deflate_decodes_across_transport_boundaries(width, chunk_size, ra
     ]
     assert all(0 < len(chunk) <= chunk_size for chunk in chunks)
     assert b"".join(chunks) == data
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [1, 7, 4096])
+@pytest.mark.parametrize("chunk_size", [1, 257])
+@pytest.mark.parametrize("coding", ["gzip, deflate", "deflate, gzip"])
+async def test_compressed_chain_across_transport_boundaries(width, chunk_size, coding):
+    import zlib
+
+    data = b"a" * 4000 + "中文-tail".encode()
+    if coding == "gzip, deflate":
+        wire = zlib.compress(gzip.compress(data, mtime=0))
+    else:
+        wire = gzip.compress(zlib.compress(data), mtime=0)
+    chunks = [
+        chunk async for chunk in decoded_response_bytes(
+            _RawResponse(wire, width, coding), chunk_size=chunk_size,
+        )
+    ]
+    assert all(0 < len(chunk) <= chunk_size for chunk in chunks)
+    assert b"".join(chunks) == data
