@@ -912,15 +912,34 @@ def resolve_trigger_budget(
     *,
     policy: CompactionPolicy | None = None,
 ) -> CompactionTriggerBudget:
-    """Resolve the universal manual/automatic Compact operating window.
+    """Resolve Compact triggers; HLI proactively tracks its real context size.
 
-    Provider capacity metadata remains diagnostic information only.  It must
-    not silently move the user-selected 64k manual floor or 128k automatic
-    trigger, and response headroom is not counted as existing context.
+    Existing providers retain the fixed 64k/128k product behaviour. Only
+    HLI, a local small-model provider, opts into a capacity-aware automatic
+    trigger so that a 8k/16k model is not allowed to overflow before Compact.
     """
 
     effective_policy = policy or load_policy(runtime)
     target = resolve_target_capacity(runtime)
+    try:
+        selection = runtime.backend_manager.get_her_v2_configuration()
+        main_provider = canonical_backend_engine(str(getattr(selection, "fast_provider", "") or ""))
+        main_model = str(getattr(selection, "fast_model", "") or "")
+    except (AttributeError, ValueError, TypeError):
+        main_provider, main_model = "", ""
+    if main_provider == "hli-api" and main_model:
+        hli_capacity = resolve_capacity_profile(runtime, main_provider, main_model)
+        if hli_capacity is not None:
+            usable = hli_capacity.usable_input_tokens
+            return CompactionTriggerBudget(
+                high_projected_tokens=min(effective_policy.auto_trigger_tokens,
+                                          max(512, int(usable * 0.70))),
+                low_input_tokens=min(effective_policy.post_compaction_target_tokens,
+                                     max(256, int(usable * 0.40))),
+                response_headroom_tokens=0,
+                provenance="hli_live_context_capacity_v1",
+                target=hli_capacity,
+            )
     return CompactionTriggerBudget(
         high_projected_tokens=effective_policy.auto_trigger_tokens,
         low_input_tokens=effective_policy.post_compaction_target_tokens,

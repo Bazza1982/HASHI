@@ -3597,7 +3597,7 @@ class OpenRouterAdapter(BaseBackend):
         # reasoning is marked as such and never reconstructed.
         reasoning_fragments: list[str] = []
         encrypted_reasoning = False
-        reasoning_text = str(message.get("reasoning") or "").strip()
+        reasoning_text = str(message.get("reasoning") or message.get("reasoning_content") or "").strip()
         if reasoning_text:
             reasoning_fragments.append(reasoning_text)
             if on_stream_event is not None:
@@ -3822,7 +3822,7 @@ class OpenRouterAdapter(BaseBackend):
 
                 # Text content
                 content = delta.get("content", "")
-                reasoning_text = str(delta.get("reasoning") or "")
+                reasoning_text = str(delta.get("reasoning") or delta.get("reasoning_content") or "")
                 reasoning_details = delta.get("reasoning_details") or []
                 tool_call_deltas = delta.get("tool_calls") or []
                 audio_delta = delta.get("audio")
