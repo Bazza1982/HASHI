@@ -200,3 +200,49 @@ def test_cursor_expiry_and_byte_limits_apply_without_evicting_other_active_curso
     isolated = RunContinuations(store, ("HASHI5", "fixture", "owner", "session", "run2", "request2"))
     isolated.configure({"continuations": {"max_bytes": 80, "max_state_bytes": 80}})
     assert isolated.put("query", {"name": "x" * 200}, "operation") is None
+
+
+@pytest.mark.asyncio
+async def test_continuation_recovers_in_a_fresh_python_process(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    root, home, instance = tmp_path / "files", tmp_path / "agent", tmp_path / "instance"
+    for directory in (root, home, instance):
+        directory.mkdir()
+    (root / "one.txt").write_text("needle needle", encoding="utf-8")
+    args = {"query": "needle", "mode": "content", "roots": [str(root)], "max_results": 1}
+    context = {
+        "instance_id": "HASHI5", "agent_name": "fixture", "owner_id": "owner:one",
+        "hashi_session_id": "session-one", "hashi_run_id": "run-one",
+        "request_id": "request-one", "function_generation": "original-process",
+    }
+    first = data(await registry(root, home, instance).execute_with_audit_context(
+        "file_search", args, audit_context=context), "file_search")
+    code = """
+import asyncio, json, sys
+from pathlib import Path
+from types import SimpleNamespace
+from tools.registry import ToolRegistry
+root,home,instance=map(Path,sys.argv[1:4])
+context={"instance_id":"HASHI5","agent_name":"fixture","owner_id":"owner:one",
+"hashi_session_id":"session-one","hashi_run_id":"run-one","request_id":"request-one",
+"function_generation":"new-process"}
+registry=ToolRegistry(["file_search"],root,home,{},
+    audit_context={"agent_name":"fixture","global_config":SimpleNamespace(bridge_home=instance)},
+    search_scope={"agent_id":"fixture","agent_home":str(home),"owner_id":"owner:one"})
+args={"query":"needle","mode":"content","roots":[str(root)],"max_results":1,"cursor":sys.argv[4]}
+result=asyncio.run(registry.execute_with_audit_context("file_search",args,audit_context=context))
+print(json.dumps({"error":result.is_error,"result":json.loads(result.output)}))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(str(item) for item in sys.path if item)
+    process = subprocess.run(
+        [sys.executable, "-B", "-c", code, str(root), str(home), str(instance), first["next_cursor"]],
+        cwd=home, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", timeout=30, check=True,
+    )
+    observed = json.loads(process.stdout.splitlines()[-1])
+    assert not observed["error"], process.stdout + process.stderr
+    assert observed["result"]["data"]["matches"][0]["character_offset"] == 7
