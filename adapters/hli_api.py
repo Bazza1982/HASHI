@@ -176,6 +176,20 @@ class HLIAdapter(OpenAICompatibleAdapter):
 
     def _build_payload(self, *args, **kwargs) -> dict:
         self._install_on_demand_tool_view()
+        registry = getattr(self, "tool_registry", None)
+        try:
+            self.logger.debug(
+                "HLI payload tools registry=%s tool_find_allowed=%s defs=%s",
+                type(registry).__name__,
+                bool(getattr(registry, "is_allowed")("tool_find"))
+                if registry is not None and callable(getattr(registry, "is_allowed", None))
+                else None,
+                len(getattr(registry, "get_tool_definitions")(tiers=None) or [])
+                if registry is not None and callable(getattr(registry, "get_tool_definitions", None))
+                else None,
+            )
+        except Exception:
+            pass
         payload = super()._build_payload(*args, **kwargs)
         extra = dict(getattr(self.config, "extra", None) or {})
         requested = extra.get("provider_reasoning", extra.get("reasoning_effort"))
