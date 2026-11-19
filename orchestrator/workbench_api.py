@@ -6985,7 +6985,7 @@ class WorkbenchApiServer:
 
         await audit("requested")
         runtime = self._runtime_map().get(run["agent_id"])
-        during_handoff = bool(getattr(self.orchestrator, "_handoff_draining", False))
+        during_handoff = bool(getattr(getattr(self, "orchestrator", None), "_handoff_draining", False))
         method = "cancel_session_run_during_handoff" if during_handoff else "cancel_session_run"
         cancel = getattr(runtime, method, None) if runtime is not None else None
         if not callable(cancel):
@@ -8606,7 +8606,7 @@ class WorkbenchApiServer:
                 ).lower() in {"1", "true", "yes"},
                 "limit": int(request.query.get("limit") or 100),
             }
-            if getattr(self.orchestrator, "_handoff_draining", False):
+            if getattr(getattr(self, "orchestrator", None), "_handoff_draining", False):
                 # Normal listing may backfill placeholder titles; a retiring
                 # generation must return only the durable rows it can read.
                 options["repair_titles"] = False
@@ -13477,10 +13477,11 @@ class WorkbenchApiServer:
                     canonical_text=text,
                     attachment_binding=normalized_remote_attachments or [],
                     payload_to_execute=pending_execution_payload,
-                    age_policy=({"mode": "observe"} if bound_origin else None if is_reply else getattr(
-                        self.global_config, "hchat_request_age_policy", None
+                    age_policy=({"mode": "observe"} if bound_origin else None if is_reply else (
+                        getattr(self.global_config, "hchat_request_age_policy", None)
+                        or {"mode": "confirm"}
                     )),
-                )
+            )
             except HChatMessageExpired as exc:
                 return web.json_response(
                     {"ok": False, "error": str(exc), "error_code": "hchat_message_expired"},
@@ -14172,8 +14173,9 @@ class WorkbenchApiServer:
                     connector_id="hchat_workbench_exchange",
                     idempotency_key=idempotency_key,
                     canonical_text=text,
-                    age_policy=(None if is_reply else getattr(
-                        self.global_config, "hchat_request_age_policy", None
+                    age_policy=(None if is_reply else (
+                        getattr(self.global_config, "hchat_request_age_policy", None)
+                        or {"mode": "confirm"}
                     )),
                     payload_to_execute={
                         "runtime_payload": {
