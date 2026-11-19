@@ -501,7 +501,11 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
     cursor = args.get('cursor')
     if cursor:
         try:
-            config['state'], operation_id = continuations.get(cursor, binding)
+            if isinstance(continuations, RunContinuations):
+                config['state'], operation_id = await asyncio.to_thread(
+                    continuations.get, cursor, binding)
+            else:
+                config['state'], operation_id = continuations.get(cursor, binding)
             continuations.drop(cursor)
             if activity:
                 activity.operation_id = operation_id
@@ -604,7 +608,8 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                      if saved_reference.get('sha256') == digest else None)
         if not reference:
             try:
-                reference = retain_scope(encoded) if retain_scope is not None else None
+                reference = (await asyncio.to_thread(retain_scope, encoded)
+                             if retain_scope is not None else None)
             except Exception:
                 reference = None
         if not reference:
@@ -672,7 +677,10 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
         complete, status = False, 'partial'
     if state and compact_scope:
         state['scope_metadata_reference'] = result['scope_reference']
-    next_cursor = continuations.put(binding, state, operation_id) if state else None
+    if state and isinstance(continuations, RunContinuations):
+        next_cursor = await asyncio.to_thread(continuations.put, binding, state, operation_id)
+    else:
+        next_cursor = continuations.put(binding, state, operation_id) if state else None
     result.update(can_continue=next_cursor is not None, next_cursor=next_cursor)
     if state and next_cursor is None:
         result['warnings'].append('Continuation storage unavailable or configured capacity reached; no automatic restart')

@@ -246,3 +246,61 @@ print(json.dumps({"error":result.is_error,"result":json.loads(result.output)}))
     observed = json.loads(process.stdout.splitlines()[-1])
     assert not observed["error"], process.stdout + process.stderr
     assert observed["result"]["data"]["matches"][0]["character_offset"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["read", "write"])
+async def test_slow_cursor_storage_does_not_block_or_prevent_cancellation(tmp_path, monkeypatch, operation):
+    import threading
+
+    root, home, instance = tmp_path / "files", tmp_path / "agent", tmp_path / "instance"
+    for directory in (root, home, instance):
+        directory.mkdir()
+    (root / "one.txt").write_text("needle needle", encoding="utf-8")
+    context = {
+        "instance_id": "HASHI5", "agent_name": "fixture", "owner_id": "owner:one",
+        "hashi_session_id": "session-one", "hashi_run_id": "run-one", "request_id": "request-one",
+    }
+    reg = registry(root, home, instance)
+    run_state = {"value": "running"}
+    reg._tool_output_store._state_resolver = lambda _binding: run_state["value"]
+    args = {"query": "needle", "mode": "content", "roots": [str(root)], "max_results": 1}
+    if operation == "read":
+        first = data(await reg.execute_with_audit_context("file_search", args, audit_context=context), "file_search")
+        args["cursor"] = first["next_cursor"]
+    name = "read_search_continuation" if operation == "read" else "retain_search_continuation"
+    original = getattr(reg._tool_output_store, name)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def slow(*call_args, **call_kwargs):
+        started.set()
+        try:
+            if not release.wait(5):
+                raise TimeoutError("fixture storage was not released")
+            return original(*call_args, **call_kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(reg._tool_output_store, name, slow)
+    emergency_release = threading.Timer(3, release.set)
+    emergency_release.start()
+    task = asyncio.create_task(reg.execute_with_audit_context("file_search", args, audit_context=context))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert not release.is_set(), "synchronous storage blocked the event loop"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        if operation == "write":
+            run_state["value"] = "stopped"
+    finally:
+        release.set()
+        emergency_release.cancel()
+        assert await asyncio.to_thread(finished.wait, 6)
+    monkeypatch.setattr(reg._tool_output_store, name, original)
+    if operation == "read":
+        assert data(await reg.execute_with_audit_context(
+            "file_search", args, audit_context=context), "file_search")["matches"]
+    else:
+        from tools.tool_output_store import run_binding
+        assert not reg._tool_output_store.has_bound(run_binding(context))
