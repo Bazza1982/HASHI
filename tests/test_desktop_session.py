@@ -590,3 +590,46 @@ def test_abandoned_view_sessions_release_cached_frames(desktop):
         assert len(c.sessions) == 0
     assert native.captures == 12
 # HASHI-Fingerprint: hfp_c59651ddac1849ff8beba460357f5277
+
+async def test_orphan_release_clears_the_worker_control_lock(desktop, tmp_path):
+    """A heartbeat transport failure drops the broker lease while the worker
+    still holds its OS-level control lock; the release that follows (even for
+    the already-dropped broker lease) must still reach the worker so a later
+    takeover is never blocked by the stale lock for the full TTL."""
+    controller, _native, _now = desktop
+    broker, _registration = make_broker(tmp_path, controller)
+    pin = broker.desktop_targets()[0]
+    acquired = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'})
+    lease_id = acquired['lease_id']
+    assert controller.owner == ('owner-a', 'session-a', lease_id)
+    # Inject one heartbeat transport failure: the broker drops the lease, but
+    # the worker never sees the heartbeat and keeps its OS-level lock.
+    original = broker._transport
+    fail_next = {'heartbeat': True}
+    async def flaky(reg, token, payload, timeout):
+        if (fail_next['heartbeat'] and payload['action'] == 'desktop_control'
+                and payload['args'].get('mode') == 'heartbeat'):
+            fail_next['heartbeat'] = False
+            raise DesktopError('desktop_worker_unavailable', 503)
+        return await original(reg, token, payload, timeout)
+    broker.set_transport_for_testing(flaky)
+    with pytest.raises(DesktopError, match='desktop_worker_unavailable'):
+        await broker.invoke_desktop(
+            pin, actor_id='owner-a', session_id='session-a',
+            operation='desktop_control', args={'mode': 'heartbeat', 'lease_id': lease_id})
+    assert not broker._leases
+    assert controller.owner == ('owner-a', 'session-a', lease_id)  # OS lock still held
+    # The client's release arrives for the already-dropped broker lease; it is
+    # still forwarded so the worker's OS-level lock is cleared.
+    released = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'release', 'lease_id': lease_id})
+    assert released['controlling'] is False
+    assert controller.owner is None
+    # The very next takeover succeeds immediately instead of busy for the TTL.
+    again = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'})
+    assert again['controlling'] is True

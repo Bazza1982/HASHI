@@ -33,15 +33,18 @@ def _is_loopback(request) -> bool:
 def _admit_and_resolve_owner(api, request) -> str:
     """Admit a desktop caller and resolve its authenticated owner.
 
-    Trust boundary (OS-user model, reviewed 2026-11-19):
+    Trust boundary (host-level model, reviewed 2026-11-19):
 
     * Loopback callers (the local Workbench on 127.0.0.1/::1) are exempt from
-      the HASHI admin token. A process able to reach the local loopback is
-      already running inside the interactive user's own OS session, where it
-      can capture the desktop and inject input directly; demanding a HASHI
-      admin token adds no real protection, it only binds the local entry to a
-      rotatable HASHI secret. This exemption removes a false gate, it does not
-      weaken a real one.
+      the HASHI admin token. Loopback reachability is a host-level boundary,
+      not a Windows-session boundary: on a multi-user Windows host, a process
+      in ANY OS user session can reach a service bound to 127.0.0.1, so
+      reachability alone does not prove the caller belongs to the interactive
+      user's own session. The supported deployment assumes a single trusted
+      OS user on this workstation; under that assumption the token only binds
+      the local entry to a rotatable HASHI secret and the exemption removes a
+      false gate, not a real one. Multi-user hosts need a per-session boundary
+      (see docs/HASHI_MANUAL_DESKTOP.md, "Multi-user hosts").
     * Remote callers keep the existing admin-token requirement. A remote hop
       with no configured admin token is always rejected.
     * A loopback caller whose owner cannot be resolved falls back to the
@@ -82,29 +85,78 @@ class DesktopSessionService:
 
     @staticmethod
     def _refresh_target(requested, targets):
-        """Resolve a requested target without ever switching to another machine.
+        """Resolve a requested target without ever substituting another session.
 
-        A same-device refresh is always safe: a restarted worker advances
-        worker_generation and may re-register under a new capability_id, but
-        the device identity stays stable. Match the requested target by device
-        identity first, then by capability identity, against the live list.
-        If the requested device is no longer registered, report
-        desktop_target_changed instead of silently substituting an unrelated
-        target; the client then rediscovers. Only an absent/empty request
-        selects the first registered target.
+        The stable identity of a desktop target is
+        (instance_id, device_id, user_session_id): one physical computer can
+        run several Windows interactive sessions, each with its own worker,
+        and matching by device alone can select the wrong session. A
+        same-device refresh is therefore only safe when the request pins the
+        same HASHI instance, device and Windows user session. A restarted
+        worker may advance worker_generation and re-register under a new
+        capability_id; those fields are allowed to change and are only used
+        to prefer the exact re-registration. Optional physical_host_id and
+        interactive_session_id identifiers are verified when both the request
+        and the live target provide them.
+
+        * An explicit request resolves to the requested session, or raises
+          desktop_target_changed when it no longer exists. It never falls
+          back to another user session or another HASHI instance that shares
+          device_id.
+        * A device-scoped request without a user session resolves only when
+          the device maps to exactly one live target; an ambiguous device is
+          reported as desktop_target_changed so the client re-discovers and
+          sends the full identity instead of guessing a session.
+        * A capability-only request resolves by unique capability identity.
+        * An absent/empty request keeps the no-target discovery behaviour and
+          selects the first registered target.
         """
         if not targets:
             raise DesktopError("desktop_worker_unavailable", 503)
-        if isinstance(requested, dict):
-            for field in ("device_id", "capability_id"):
-                value = requested.get(field)
-                if value:
-                    for target in targets:
-                        if target.get(field) == value:
-                            return target
-            if any(requested.get(field) for field in ("device_id", "capability_id")):
-                raise DesktopError("desktop_target_changed", 409)
-        return targets[0]
+        if not isinstance(requested, dict) or not requested:
+            return targets[0]
+
+        instance_id = requested.get("instance_id")
+        device_id = requested.get("device_id")
+        user_session_id = requested.get("user_session_id")
+        capability_id = requested.get("capability_id")
+        physical_host_id = requested.get("physical_host_id")
+        interactive_session_id = requested.get("interactive_session_id")
+        if not any((instance_id, device_id, user_session_id, capability_id,
+                    physical_host_id, interactive_session_id)):
+            return targets[0]
+
+        if capability_id and not any((instance_id, device_id, user_session_id,
+                                      physical_host_id, interactive_session_id)):
+            matches = [t for t in targets if t.get("capability_id") == capability_id]
+            if len(matches) == 1:
+                return matches[0]
+            raise DesktopError("desktop_target_changed", 409)
+
+        def _pins_session(target):
+            return (
+                (not instance_id or target.get("instance_id") == instance_id)
+                and (not device_id or target.get("device_id") == device_id)
+                and (not user_session_id or target.get("user_session_id") == user_session_id)
+                and (not physical_host_id or not target.get("physical_host_id")
+                     or target.get("physical_host_id") == physical_host_id)
+                and (not interactive_session_id or not target.get("interactive_session_id")
+                     or target.get("interactive_session_id") == interactive_session_id)
+            )
+
+        pinned = [t for t in targets if _pins_session(t)]
+        if not pinned:
+            raise DesktopError("desktop_target_changed", 409)
+        if capability_id:
+            for target in pinned:
+                if target.get("capability_id") == capability_id:
+                    return target
+        if len(pinned) == 1:
+            return pinned[0]
+        # Multiple live targets satisfy the request identity: guessing a user
+        # session or an instance is exactly the substitution this guard exists
+        # to prevent. The client re-discovers and sends the full identity.
+        raise DesktopError("desktop_target_changed", 409)
 
     async def run(self, owner, body):
         b = fields(body, {"operation", "client_id", "session_id", "target", "options", "after_frame", "refresh_profile", "mode", "lease_id", "event"}, {"operation", "client_id"})

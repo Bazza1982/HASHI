@@ -71,6 +71,7 @@ class ManualDesktopBroker:
             if operation == "desktop_previews" and operation not in registration.supported_actions:
                 raise DesktopError("desktop_preview_unsupported", 501)
             lease = None
+            orphan_release = False
             arguments = dict(args)
             if operation == "desktop_control":
                 mode = args.get("mode")
@@ -90,16 +91,22 @@ class ManualDesktopBroker:
                         lease = self._desktop_lease(pin, actor_id, session_id, args.get("lease_id", ""))
                     except DesktopError as exc:
                         if mode == "release" and exc.code == "desktop_control_expired":
-                            # Releasing an already-dropped lease is idempotent:
-                            # there is nothing left to release.
-                            return {"controlling": False}
-                        raise
+                            # The broker lease is already gone (for example
+                            # dropped after a failed heartbeat transport), but
+                            # the worker may still hold its OS-level control
+                            # lock. Forward an idempotent release below so the
+                            # next takeover is never blocked by a stale lock.
+                            orphan_release = True
+                        else:
+                            raise
                     if mode == "heartbeat":
                         lease = replace(lease, expires_at=time.time()+CONTROL_TTL)
                         self._leases[lease.lease_id] = lease
                 else:
                     raise DesktopError("desktop_invalid_control")
-                arguments = {"mode": mode, "lease_id": lease.lease_id, "ttl": CONTROL_TTL}
+                arguments = ({"mode": mode, "lease_id": lease.lease_id, "ttl": CONTROL_TTL}
+                              if not orphan_release else
+                              {"mode": "release", "lease_id": args.get("lease_id", ""), "ttl": CONTROL_TTL})
             elif operation == "desktop_input":
                 lease = self._desktop_lease(pin, actor_id, session_id, args.get("lease_id", ""))
         payload = {"protocol_version": 1, "request_id": "desktop-"+uuid4().hex,
@@ -107,6 +114,12 @@ class ManualDesktopBroker:
                    "worker_generation": pin["worker_generation"],
                    "actor": {"type": "user", "id": actor_id}, "desktop_session_id": session_id,
                    "action": operation, "args": arguments}
+        if orphan_release:
+            try:
+                await self._transport(registration, token, payload, 5.0)
+            except Exception:
+                pass  # Best effort: the worker may be gone; broker state is clean.
+            return {"controlling": False}
         failed = False
         try:
             response = await self._transport(registration, token, payload, 5.0)

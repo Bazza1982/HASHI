@@ -59,16 +59,36 @@ The local Workbench entry is a pure local capability: HASHI must not gate it.
 The HASHI-side `desktop_enabled` global switch and the governed-profile gate
 were removed, and the Workbench keeps an explicit user opt-out.
 
-Loopback admission rests on the actual OS-user trust boundary. A process able
-to reach the local loopback is already running inside the interactive user's
-own OS session, where it can capture the desktop and inject input directly.
-Requiring the HASHI admin token there adds no protection and only binds the
-local entry to a rotatable HASHI secret, so loopback callers are exempt.
-Remote callers still require the configured admin token, and a remote hop with
-no admin token configured is always rejected. When the Workbench session
-cannot resolve a user owner, the reserved `workbench-local` identity is used;
-the resolved owner is pinned for the session lifetime and never derived from
-the client.
+Loopback admission is a *host-level* trust boundary, not an OS-session
+boundary. On Windows, any process in any Windows user session on the same
+machine can connect to a service bound to 127.0.0.1, so loopback reachability
+alone does **not** prove that the caller belongs to the interactive user's own
+session. The supported deployment assumes a single trusted OS user on this
+workstation; under that assumption the token only binds the local entry to a
+rotatable HASHI secret, and the loopback exemption removes a false gate rather
+than weakening a real one. Remote callers still require the configured admin
+token, and a remote hop with no admin token configured is always rejected.
+When the Workbench session cannot resolve a user owner, the reserved
+`workbench-local` identity is used; the resolved owner is pinned for the
+session lifetime and never derived from the client.
+
+### Multi-user hosts
+
+Target refresh and open are pinned to (instance_id, device_id,
+user_session_id), so a caller is never silently switched to another machine
+or another Windows session; that pinning is correctness, not an authorization
+boundary. On a multi-user Windows host, another session's process can still
+reach the loopback desktop endpoint and request the interactive session the
+worker is bound to. Minimum viable options, none implemented without explicit
+approval:
+
+1. Keep the loopback exemption and document the single-trusted-user
+   deployment assumption (current behaviour).
+2. Restrict loopback admission to callers of the same Windows session
+   (named-pipe transport or an impersonation/session check) so processes
+   from other sessions are rejected.
+3. Require the admin token for loopback callers on hosts explicitly
+   configured as multi-user (a deployment gate, not a new default).
 
 ## Protocol
 
