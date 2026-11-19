@@ -316,6 +316,67 @@ def workzone_owner(
         return None
 
 
+def safevoice_update_route(update: Any) -> dict[str, int | None] | None:
+    """Bind a voice decision to its observed Telegram sender, chat and topic."""
+    query = getattr(update, "callback_query", None)
+    user = getattr(update, "effective_user", None) or getattr(query, "from_user", None)
+    message = (
+        getattr(update, "effective_message", None)
+        or getattr(update, "message", None)
+        or getattr(query, "message", None)
+    )
+    chat = getattr(update, "effective_chat", None) or getattr(message, "chat", None)
+    chat_value = getattr(chat, "id", None)
+    if chat_value is None:
+        chat_value = getattr(message, "chat_id", None)
+    thread_value = getattr(message, "message_thread_id", None)
+    try:
+        actor_id = int(getattr(user, "id"))
+        chat_id = int(chat_value)
+        if actor_id <= 0 or chat_id == 0:
+            return None
+        if isinstance(thread_value, bool):
+            return None
+        thread_id = int(thread_value) if thread_value is not None else None
+        if thread_id is not None and thread_id <= 0:
+            return None
+        return {"actor_id": actor_id, "chat_id": chat_id, "thread_id": thread_id}
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def safevoice_callback_matches(runtime: Any, update: Any) -> bool:
+    """A button only decides its exact pending transcript and original route."""
+    query = getattr(update, "callback_query", None)
+    parts = str(getattr(query, "data", "") or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != "safevoice" or parts[1] not in {"yes", "no"}:
+        return True
+    pending = getattr(runtime, "_pending_voice", None)
+    record = pending.get(parts[2]) if isinstance(pending, dict) else None
+    if record is None:
+        return True  # An expired button cannot release a transcript.
+    route = record.get("telegram_route") if isinstance(record, dict) else None
+    if route is not None:
+        return isinstance(route, dict) and safevoice_update_route(update) == route
+
+    # Old in-memory records lack an actor/topic binding. A real private chat
+    # proves its actor via Telegram's chat ID; an old group record does not.
+    message = getattr(query, "message", None)
+    chat = getattr(update, "effective_chat", None) or getattr(message, "chat", None)
+    if chat is None:
+        return False
+    observed = safevoice_update_route(update)
+    try:
+        return (
+            observed is not None
+            and str(getattr(chat, "type", "")) == "private"
+            and observed["chat_id"] == observed["actor_id"] == int(record["chat_id"])
+            and observed["thread_id"] is None
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _safevoice_callback_matches_chat(runtime: Any, data: str, chat_id: int) -> bool:
     parts = data.split(":", 2)
     if len(parts) != 3 or parts[0] != "safevoice" or parts[1] not in {"yes", "no"}:

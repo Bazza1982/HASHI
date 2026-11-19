@@ -409,7 +409,7 @@ class FlexibleAgentRuntime:
 
         # Safe voice confirmation layer
         self._safevoice_enabled: bool = self._get_skill_state().get("safevoice", True)
-        self._pending_voice: dict = {}  # chat_id -> {prompt, summary, media_kind, timestamp}
+        self._pending_voice: dict = {}  # confirmation ID -> exact pending transcript and route
         self._native_voice_transcripts: dict[str, dict[str, Any]] = {}
 
         # Command policy
@@ -6711,6 +6711,16 @@ class FlexibleAgentRuntime:
             )
             await query.answer(ui_language.tr("safevoice.updated"))
             return
+        if action not in {"yes", "no"} or not chat_key:
+            await query.answer()
+            return
+        from orchestrator.telegram_actor_scope import safevoice_callback_matches
+
+        if not safevoice_callback_matches(self, update):
+            # Do not consume another actor's or topic's pending transcript.
+            await query.answer()
+            return
+
         was_long_batch_voice = chat_key in self._long_pending_voice_keys
         pending = self._pending_voice.pop(chat_key, None)
         is_long_batch_voice = was_long_batch_voice or bool(pending and pending.get("long_batch"))

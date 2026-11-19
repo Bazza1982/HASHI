@@ -808,10 +808,16 @@ async def _present_safe_voice_transcript(
         telegram_message_age_metadata, telegram_message_idempotency_key,
     )
     chat_id = update.effective_chat.id
+    from orchestrator.telegram_actor_scope import safevoice_update_route
+
+    route = safevoice_update_route(update)
+    if route is None:
+        raise ValueError("Telegram voice confirmation route is unavailable")
     locale = ui_language.preferred_locale(runtime, update)
-    chat_key = str(chat_id)
+    chat_key = f"voice-{uuid4().hex}"
     runtime._pending_voice[chat_key] = {
         "prompt": prompt,
+        "telegram_route": route,
         "transcript": transcript,
         "summary": summary,
         "chat_id": chat_id,
@@ -1404,6 +1410,14 @@ async def handle_voice_or_audio(
             f"Transcribed {media_kind.lower()} ({filename}): {len(transcript)} chars"
         )
 
+        route = None
+        if runtime._safevoice_enabled:
+            from orchestrator.telegram_actor_scope import safevoice_update_route
+
+            route = safevoice_update_route(update)
+            if route is None:
+                raise ValueError("Telegram voice confirmation route is unavailable")
+
         batch_pending_key = None
         if runtime._safevoice_enabled and voice_reservation:
             batch_pending_key = runtime_long.register_voice_confirmation(
@@ -1422,9 +1436,10 @@ async def handle_voice_or_audio(
 
         if runtime._safevoice_enabled:
             locale = ui_language.preferred_locale(runtime, update)
-            chat_key = batch_pending_key or str(chat_id)
+            chat_key = batch_pending_key or f"voice-{uuid4().hex}"
             runtime._pending_voice[chat_key] = {
                 "prompt": prompt,
+                "telegram_route": route,
                 "transcript": transcript,
                 "summary": f"{media_kind}: {filename}",
                 "chat_id": chat_id,

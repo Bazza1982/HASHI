@@ -398,6 +398,9 @@ async def test_safevoice_callback_confirms_into_batch_without_enqueuing():
         transcript="hello batch",
         summary="Voice: note.ogg",
     )
+    runtime._pending_voice[pending_key]["telegram_route"] = {
+        "actor_id": 1, "chat_id": 123, "thread_id": None,
+    }
     edits = []
     answers = []
 
@@ -411,7 +414,10 @@ async def test_safevoice_callback_confirms_into_batch_without_enqueuing():
         async def answer(self, text):
             answers.append(text)
 
-    update = SimpleNamespace(callback_query=_Query())
+    update = SimpleNamespace(
+        callback_query=_Query(), effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=123, type="supergroup"),
+    )
 
     await FlexibleAgentRuntime.callback_safevoice(runtime, update, SimpleNamespace())
 
@@ -427,6 +433,7 @@ async def test_safevoice_callback_confirms_into_batch_without_enqueuing():
 @pytest.mark.parametrize("known_update", [False, True])
 async def test_safevoice_callback_preserves_telegram_connector_on_confirm(known_update):
     runtime = _runtime()
+    runtime._is_authorized_user = lambda user_id: user_id == 123
     runtime._pending_voice["123"] = {
         "prompt": "[Voice message transcription] send this",
         "transcript": "send this",
@@ -442,7 +449,7 @@ async def test_safevoice_callback_preserves_telegram_connector_on_confirm(known_
 
     class _Query:
         data = "safevoice:yes:123"
-        from_user = SimpleNamespace(id=1)
+        from_user = SimpleNamespace(id=123)
 
         async def edit_message_text(self, text, **kwargs):
             edits.append({"text": text, **kwargs})
@@ -452,7 +459,10 @@ async def test_safevoice_callback_preserves_telegram_connector_on_confirm(known_
 
     await FlexibleAgentRuntime.callback_safevoice(
         runtime,
-        SimpleNamespace(callback_query=_Query()),
+        SimpleNamespace(
+            callback_query=_Query(), effective_user=SimpleNamespace(id=123),
+            effective_chat=SimpleNamespace(id=123, type="private"),
+        ),
         SimpleNamespace(),
     )
 
