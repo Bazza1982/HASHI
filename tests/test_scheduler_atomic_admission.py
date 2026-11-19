@@ -203,7 +203,7 @@ async def test_real_runtime_admits_one_owner_bound_child_and_replays(tmp_path):
     for _ in range(2):
         ok, message = await handle._run_job_now(job, kind="cron", operation_admission=admission)
         assert ok, message
-    assert client.calls == ["runtime.run_job_now", "runtime.run_job_now"]
+    assert client.calls == ["runtime.run_job_now_scoped", "runtime.run_job_now_scoped"]
     assert runtime.queue.qsize() == 1
     child = runtime.queue.get_nowait()
     run = server.session_store.get_run(child.run_id, owner_id=binding["owner_id"])
@@ -252,3 +252,24 @@ async def test_real_runtime_rechecks_parent_at_transaction_after_cancel(tmp_path
     ok, message = await task
     assert not ok and "stopped" in message
     assert runtime.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_legacy_worker_cannot_ignore_scoped_admission():
+    effects = []
+
+    async def legacy_responder(method, params):
+        if method == "runtime.run_job_now":
+            # The old Worker accepts this method but ignores unfamiliar fields.
+            effects.append(params["job"])
+            return [True, "queued"]
+        raise RuntimeError("unknown Worker method")
+
+    handle = _handle(_Kernel(), _Client("momo", 101, responder=legacy_responder))
+    with pytest.raises(RuntimeError, match="unknown Worker method"):
+        await handle._run_job_now(
+            {"id": "job", "agent": "momo", "prompt": "fixture"},
+            kind="cron",
+            operation_admission={"approval_id": "fixture"},
+        )
+    assert effects == []

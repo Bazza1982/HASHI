@@ -819,7 +819,8 @@ parent's owner. The Worker checks the complete approved job definition. An
 exact retry returns the same child, and a failed transaction consumes neither
 the approval nor a child. A parent stopped before admission cannot start it;
 an already accepted child has its own lifecycle. No SQLite transaction is held
-across Worker RPC or an await.
+across Worker RPC or an await. Scoped admission uses a distinct Worker method:
+an older Worker cannot silently ignore the new binding and execute the task.
 
 Other async scheduler actions and recovery still check their Run before dispatch
 and recovery checks again after its lock wait and between occurrences. Those

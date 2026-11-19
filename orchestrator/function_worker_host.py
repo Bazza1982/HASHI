@@ -1689,11 +1689,15 @@ class FunctionWorkerHost:
                 parse_mode=params.get("parse_mode"),
             )
             return list(result)
-        if method == "runtime.run_job_now":
-            operation_admission = params.get("operation_admission")
+        if method in {"runtime.run_job_now", "runtime.run_job_now_scoped"}:
             options = {"kind": params.get("kind")}
-            if operation_admission is not None:
+            if method == "runtime.run_job_now_scoped":
+                operation_admission = params.get("operation_admission")
+                if not isinstance(operation_admission, Mapping) or not operation_admission:
+                    raise FunctionWorkerStateError("scoped scheduler admission is required")
                 options["operation_admission"] = operation_admission
+            elif "operation_admission" in params:
+                raise FunctionWorkerStateError("scoped scheduler admission requires the scoped method")
             result = await runtime._run_job_now(
                 dict(params.get("job") or {}),
                 **options,

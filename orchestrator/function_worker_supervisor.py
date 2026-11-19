@@ -1224,9 +1224,16 @@ class AgentRuntimeHandle:
         kind: str | None = None,
         operation_admission: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
+        method = (
+            "runtime.run_job_now_scoped"
+            if operation_admission is not None else "runtime.run_job_now"
+        )
+        params = {"job": dict(job), "kind": kind}
+        if operation_admission is not None:
+            params["operation_admission"] = operation_admission
         result = await self._route(
-            "runtime.run_job_now",
-            {"job": dict(job), "kind": kind, "operation_admission": operation_admission},
+            method,
+            params,
         )
         return bool(result[0]), str(result[1])
 
