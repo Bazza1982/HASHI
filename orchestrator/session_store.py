@@ -4627,6 +4627,7 @@ class SessionStore:
         expected_context_generation: int | None = None,
         agent_workspace: Path | str | None = None,
         replay_only: bool = False,
+        operation_admission: Mapping[str, Any] | None = None,
     ) -> AcceptedRun:
         from orchestrator.fingerprint.models import FingerprintPolicy
         frozen_fingerprint = FingerprintPolicy.from_snapshot(dict(fingerprint_policy or {})).snapshot()
@@ -4661,6 +4662,34 @@ class SessionStore:
             ).fetchone()
             if session is None:
                 raise SessionNotFound(session_id)
+            operation_approval = None
+            if operation_admission is not None:
+                binding = operation_admission.get("binding")
+                scope = operation_admission.get("scope")
+                approval_id = operation_admission.get("approval_id")
+                if not isinstance(binding, Mapping) or not isinstance(scope, Mapping):
+                    raise SessionConflict("invalid scheduler operation admission")
+                self._assert_active_run(connection, **dict(binding))
+                if (
+                    str(source) != "scheduler"
+                    or str(owner_id) != binding["owner_id"]
+                    or str(agent_id).lower() != binding["agent_id"].lower()
+                    or str(parent_run_id or "") != binding["run_id"]
+                    or scope.get("operation") != "activity.scheduler.run"
+                    or scope.get("agent_id") != str(agent_id).lower()
+                    or not isinstance(approval_id, str)
+                    or str(idempotency_key) != f"pao-scheduler:{approval_id}"
+                ):
+                    raise SessionConflict("scheduler operation admission binding changed")
+                operation_approval = connection.execute(
+                    """SELECT * FROM run_approvals
+                       WHERE approval_id=? AND run_id=? AND session_id=? AND owner_id=?
+                         AND fencing_token=? AND scope_json=?""",
+                    (approval_id, binding["run_id"], binding["session_id"], binding["owner_id"],
+                     binding["fencing_token"], _json(dict(scope))),
+                ).fetchone()
+                if operation_approval is None or operation_approval["decision"] != "approved":
+                    raise SessionConflict("scheduler operation is not approved")
             if connection.execute(
                 """SELECT 1 FROM pcm_forget_operations WHERE instance_id=?
                    AND agent_id=? AND state='pending'""",
@@ -4843,6 +4872,8 @@ class SessionStore:
                 (session_id, str(idempotency_key)),
             ).fetchone()
             if existing is not None:
+                if operation_approval is not None and operation_approval["state"] != "consumed":
+                    raise SessionConflict("scheduler approval does not match the existing Run")
                 stored_digest = str(existing["request_digest"])
                 winner_request_id = str(existing["request_id"])
                 legacy_request_matches = stored_digest == _legacy_request_digest(
@@ -4930,6 +4961,20 @@ class SessionStore:
                 )
             if replay_only:
                 raise ExistingRunNotFound("no prior Run was accepted for this request")
+            if operation_approval is not None:
+                if operation_approval["state"] != "decided":
+                    raise SessionConflict("scheduler approval has already been consumed")
+                connection.execute(
+                    "UPDATE run_approvals SET state='consumed' WHERE approval_id=?",
+                    (operation_approval["approval_id"],),
+                )
+                self._append_event(
+                    connection, session_id=binding["session_id"], run_id=binding["run_id"],
+                    kind="approval.consumed", status="consumed", phase="control",
+                    summary="Approval consumed with scheduler Run admission",
+                    detail={"approval_id": operation_approval["approval_id"], "scope": dict(scope)},
+                    outbox=True,
+                )
             run_id = _new_id("run")
             message_id = _new_id("msg")
             generation = int(session["context_generation"])
@@ -9351,13 +9396,14 @@ class SessionStore:
     @contextmanager
     def hold_operation_approval(
         self, *, binding: Mapping[str, Any], scope: Mapping[str, Any],
+        consume: bool = True,
     ) -> Iterator[dict[str, Any]]:
         """Reserve one trusted PAO decision for a short, exact Run-bound effect.
 
         A pending request uses the existing owner approval endpoint/events.
-        Consumption commits before dispatch, then the normal Run fence is
-        reacquired through the effect. Failure/unknown outcomes never refund a
-        decision; stop in the gap prevents dispatch rather than replaying it.
+        For a short local effect, consumption commits before dispatch and the
+        Run fence is reacquired. A scheduler Run may instead inspect with
+        consume=False; its Run admission consumes the decision atomically.
         """
         scope_json = _json(dict(scope))
         with self.hold_active_run(**binding) as connection:
@@ -9390,7 +9436,7 @@ class SessionStore:
             result = dict(row)
             result["scope"] = _json_object(result.pop("scope_json"))
             result["authorized"] = row["state"] == "decided" and row["decision"] == "approved"
-            if result["authorized"]:
+            if result["authorized"] and consume:
                 connection.execute(
                     "UPDATE run_approvals SET state='consumed' WHERE approval_id=?",
                     (row["approval_id"],),
@@ -9401,7 +9447,7 @@ class SessionStore:
                     summary="Approval reserved for one dispatch",
                     detail={"approval_id": row["approval_id"], "scope": dict(scope)}, outbox=True,
                 )
-        if result["authorized"]:
+        if result["authorized"] and consume:
             with self.hold_active_run(**binding):
                 yield result
         else:
@@ -9626,6 +9672,37 @@ class SessionStore:
             ).fetchall()
         return [self._run_dict(row) for row in result]
 
+    def _assert_active_run(
+        self, connection: sqlite3.Connection, *, run_id: str, owner_id: str,
+        agent_id: str, session_id: str, request_id: str, context_generation: int,
+        fencing_token: int, worker_id: str,
+    ) -> None:
+        for value in (run_id, owner_id, agent_id, session_id, request_id, worker_id):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("complete Run binding is required")
+        if (type(context_generation) is not int or context_generation <= 0
+                or type(fencing_token) is not int or fencing_token <= 0):
+            raise ValueError("positive Run and context fences are required")
+        row = connection.execute(
+            """SELECT r.run_id, r.request_id, r.session_id, r.agent_id,
+                      r.context_generation AS run_generation, r.fencing_token,
+                      r.worker_id, r.state, s.instance_id, s.owner_id,
+                      s.agent_id AS session_agent, s.status AS session_status,
+                      s.context_generation AS session_generation
+               FROM runs r JOIN sessions s ON s.session_id = r.session_id
+               WHERE r.run_id = ? AND s.instance_id = ?""",
+            (run_id, self.instance_id),
+        ).fetchone()
+        if row is None or any((
+            row["run_id"] != run_id, row["request_id"] != request_id,
+            row["session_id"] != session_id, row["owner_id"] != owner_id,
+            row["agent_id"] != agent_id.lower(), row["session_agent"] != agent_id.lower(),
+            row["run_generation"] != context_generation, row["session_generation"] != context_generation,
+            row["fencing_token"] != fencing_token, row["worker_id"] != worker_id,
+            row["state"] != "running", row["session_status"] != "active",
+        )):
+            raise StaleFencingToken("Run execution is no longer current")
+
     @contextmanager
     def hold_active_run(
         self, *, run_id: str, owner_id: str, agent_id: str, session_id: str,
@@ -9637,33 +9714,13 @@ class SessionStore:
         make a slow/blocking effect safely cancellable. Callers must not hold
         this transaction while waiting for a human or an external service.
         """
-        for value in (run_id, owner_id, agent_id, session_id, request_id, worker_id):
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError("complete Run binding is required")
-        if (type(context_generation) is not int or context_generation <= 0
-                or type(fencing_token) is not int or fencing_token <= 0):
-            raise ValueError("positive Run and context fences are required")
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """SELECT r.run_id, r.request_id, r.session_id, r.agent_id,
-                          r.context_generation AS run_generation, r.fencing_token,
-                          r.worker_id, r.state, s.instance_id, s.owner_id,
-                          s.agent_id AS session_agent, s.status AS session_status,
-                          s.context_generation AS session_generation
-                   FROM runs r JOIN sessions s ON s.session_id = r.session_id
-                   WHERE r.run_id = ? AND s.instance_id = ?""",
-                (run_id, self.instance_id),
-            ).fetchone()
-            if row is None or any((
-                row["run_id"] != run_id, row["request_id"] != request_id,
-                row["session_id"] != session_id, row["owner_id"] != owner_id,
-                row["agent_id"] != agent_id.lower(), row["session_agent"] != agent_id.lower(),
-                row["run_generation"] != context_generation, row["session_generation"] != context_generation,
-                row["fencing_token"] != fencing_token, row["worker_id"] != worker_id,
-                row["state"] != "running", row["session_status"] != "active",
-            )):
-                raise StaleFencingToken("Run execution is no longer current")
+            self._assert_active_run(
+                connection, run_id=run_id, owner_id=owner_id, agent_id=agent_id,
+                session_id=session_id, request_id=request_id, context_generation=context_generation,
+                fencing_token=fencing_token, worker_id=worker_id,
+            )
             yield connection
 
     def get_run(self, run_id: str, *, owner_id: str | None = None) -> dict[str, Any]:

@@ -51,6 +51,22 @@ def invoke_mutation(server, binding, callback, *, scope=None):
         _reject(401, error_code="agent_run_not_active")
 
 
+def prepare_operation_admission(server, binding, scope):
+    """Inspect the existing PAO decision; the Run writer consumes it on admission."""
+    try:
+        with server.session_store.hold_operation_approval(
+            binding=binding, scope=scope, consume=False
+        ) as approval:
+            if not approval["authorized"]:
+                _reject(403, error_code="approval_required", approval=approval,
+                        decision_path=f"/api/v1/approvals/{approval['approval_id']}",
+                        message="The exact operation requires a trusted PAO owner decision.")
+            return {"binding": dict(binding), "scope": dict(scope),
+                    "approval_id": approval["approval_id"]}
+    except StaleFencingToken:
+        _reject(401, error_code="agent_run_not_active")
+
+
 async def invoke_async_mutation(server, binding, callback, *, scope=None):
     # Never hold SQLite across Worker RPC, queue admission or a service await.
     # A scheduled child has its own lifecycle once admitted. Recovery rechecks

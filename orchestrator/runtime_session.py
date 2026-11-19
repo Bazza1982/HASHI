@@ -606,6 +606,7 @@ def accept_request(
     request_content: Mapping[str, Any] | None,
     idempotency_key: str | None,
     replay_only: bool = False,
+    operation_admission: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Any | None, str, str, str]:
     session, resolved_owner, surface, channel_key = resolve_request_session(
         runtime, source=source, chat_id=chat_id, metadata=request_metadata
@@ -695,6 +696,7 @@ def accept_request(
         fingerprint_policy=admission_policy(runtime),
         agent_workspace=getattr(runtime, "workspace_dir", None),
         replay_only=replay_only,
+        operation_admission=operation_admission,
     )
     return session, accepted, resolved_owner, surface, channel_key
 

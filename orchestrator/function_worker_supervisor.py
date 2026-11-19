@@ -1222,10 +1222,11 @@ class AgentRuntimeHandle:
         job: dict[str, Any],
         *,
         kind: str | None = None,
+        operation_admission: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
         result = await self._route(
             "runtime.run_job_now",
-            {"job": dict(job), "kind": kind},
+            {"job": dict(job), "kind": kind, "operation_admission": operation_admission},
         )
         return bool(result[0]), str(result[1])
 

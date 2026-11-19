@@ -48,6 +48,7 @@ def accept_runtime_ingress(
     request_content: Mapping[str, Any] | None,
     idempotency_key: str | None,
     replay_only: bool = False,
+    operation_admission: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Any | None, str, str, str]:
     """Validate the standard envelope, then use PAO's sole Run writer."""
 
@@ -250,6 +251,7 @@ def accept_runtime_ingress(
             request_content=request_content,
             idempotency_key=idempotency_key,
             replay_only=replay_only,
+            operation_admission=operation_admission,
         )
     session, accepted, _owner, _surface, _channel = result
     if accepted is not None and not replay_only:

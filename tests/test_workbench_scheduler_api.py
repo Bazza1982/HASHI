@@ -183,7 +183,20 @@ class _FakeRuntime:
         self.reruns = []
         self.recovery_resolutions = []
 
-    async def _run_job_now(self, job, *, kind=None):
+    async def _run_job_now(self, job, *, kind=None, operation_admission=None):
+        if operation_admission is not None:
+            binding = operation_admission["binding"]
+            session = self.session_store.ensure_agent_activity_session(
+                owner_id=binding["owner_id"], agent_id=self.name,
+            )
+            approval_id = operation_admission["approval_id"]
+            self.session_store.accept_run(
+                session_id=session["session_id"], owner_id=binding["owner_id"],
+                agent_id=self.name, request_id=f"child-{approval_id}",
+                text=job["prompt"], source="scheduler",
+                idempotency_key=f"pao-scheduler:{approval_id}",
+                parent_run_id=binding["run_id"], operation_admission=operation_admission,
+            )
         self.reruns.append((kind, dict(job)))
         return True, f"Queued cron task [{job['id']}]"
 
@@ -275,6 +288,7 @@ def _server(tmp_path: Path, *, persistent_session_v1=False) -> tuple[WorkbenchAp
         config_path=config_path, global_config=global_config, orchestrator=orchestrator,
     )
     server.admin_token = "fixture-owner-key"
+    runtime.session_store = server.session_store
     return server, runtime
 
 

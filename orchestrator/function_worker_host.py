@@ -1690,9 +1690,13 @@ class FunctionWorkerHost:
             )
             return list(result)
         if method == "runtime.run_job_now":
+            operation_admission = params.get("operation_admission")
+            options = {"kind": params.get("kind")}
+            if operation_admission is not None:
+                options["operation_admission"] = operation_admission
             result = await runtime._run_job_now(
                 dict(params.get("job") or {}),
-                kind=params.get("kind"),
+                **options,
             )
             return list(result)
         if method == "runtime.invoke_scheduler_skill":

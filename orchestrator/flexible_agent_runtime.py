@@ -1158,6 +1158,7 @@ class FlexibleAgentRuntime:
         idempotency_key: str | None = None,
         reply_to_message_id: Any | None = None,
         replay_only: bool = False,
+        operation_admission: Mapping[str, Any] | None = None,
     ):
         # Mirror targets are server-owned. Legacy client delivery flags cannot
         # override the owner's persistent connector preference.
@@ -1646,6 +1647,7 @@ class FlexibleAgentRuntime:
                 request_content=normalized_request_content,
                 idempotency_key=idempotency_key,
                 replay_only=replay_only,
+                operation_admission=operation_admission,
             ),
             name=f"admit-{self.name}-{request_id}",
         )
@@ -7747,6 +7749,7 @@ class FlexibleAgentRuntime:
         job: dict[str, Any],
         *,
         kind: str | None = None,
+        operation_admission: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
         from orchestrator.job_ownership import ownership_mismatch_label
         from orchestrator.her_v2.request_policy import (
@@ -7754,9 +7757,25 @@ class FlexibleAgentRuntime:
             infer_scheduler_job_kind,
         )
 
+        if operation_admission is not None:
+            from orchestrator.skill_manager import scheduler_job_deletion_revision
+
+            binding = operation_admission.get("binding")
+            expected_scope = {
+                "operation": "activity.scheduler.run", "agent_id": self.name,
+                "kind": kind, "job_id": str(job.get("id") or ""),
+                "expected_revision": scheduler_job_deletion_revision(job),
+            }
+            if (not isinstance(binding, Mapping)
+                    or dict(operation_admission.get("scope") or {}) != expected_scope
+                    or job.get("action", "enqueue_prompt") != "enqueue_prompt"):
+                return False, "Scheduler operation no longer matches its approval."
+
         mismatch = ownership_mismatch_label(job)
         if mismatch:
             message = f"Refusing to run job {job.get('id')}: {mismatch}."
+            if operation_admission is not None:
+                return False, message
             await self.send_long_message(
                 chat_id=self._primary_chat_id(),
                 text=message,
@@ -7807,6 +7826,8 @@ class FlexibleAgentRuntime:
                 "jobs.no_prompt",
                 task_id=job.get("id"),
             )
+            if operation_admission is not None:
+                return False, no_prompt
             await self.send_long_message(
                 chat_id=self._primary_chat_id(),
                 text=no_prompt,
@@ -7826,13 +7847,29 @@ class FlexibleAgentRuntime:
         summary_prefix = (
             "Heartbeat Task" if resolved_kind == "heartbeat" else "Cron Task"
         )
-        await self.enqueue_request(
-            chat_id=self._primary_chat_id(),
-            prompt=prompt,
-            source="scheduler",
-            summary=f"{summary_prefix} [{job.get('id')}]",
-            scheduler_context=scheduler_context,
-        )
+        enqueue_options = {}
+        if operation_admission is not None:
+            enqueue_options = {
+                "request_metadata": {"owner_id": binding["owner_id"],
+                                     "parent_run_id": binding["run_id"]},
+                "idempotency_key": f"pao-scheduler:{operation_admission['approval_id']}",
+                "operation_admission": operation_admission,
+            }
+        from orchestrator.session_store import StaleFencingToken
+
+        try:
+            request_id = await self.enqueue_request(
+                chat_id=self._primary_chat_id(),
+                prompt=prompt,
+                source="scheduler",
+                summary=f"{summary_prefix} [{job.get('id')}]",
+                scheduler_context=scheduler_context,
+                **enqueue_options,
+            )
+        except StaleFencingToken:
+            return False, "The requesting Run stopped before the task was admitted."
+        if not request_id:
+            return False, f"Could not queue {summary_prefix.lower()} [{job.get('id')}]"
         return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"
 
     async def _handle_job_command(self, update: Update, kind: str, args: list[str]):

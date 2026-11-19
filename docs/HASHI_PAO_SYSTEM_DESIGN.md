@@ -812,14 +812,20 @@ Confirmed Scheduler deletion above retains its existing writer, ownership and
 revision checks unchanged.
 
 Short local effects reacquire and hold the Run fence through the write, including
-after body parsing. Async queue/Worker operations validate admission without
-holding a SQLite transaction across an await. An accepted scheduled child has
-its own lifecycle. Recovery additionally checks after its lock wait and before
-each additional dispatch. If the source Run stops midway, no further occurrences
-start; accepted effects are durably accounted and the unstarted remainder is
-skipped in a terminal resolution. Retrying that batch cannot duplicate work.
-Stopped, cancelled, completed, revoked or superseded Run credentials cannot
-initiate further mutations.
+after body parsing. A Run-scoped immediate prompt rerun carries its exact PAO
+decision and Run binding through the Worker. PAO rechecks the active parent and
+consumes the decision in the same transaction that accepts the child under that
+parent's owner. The Worker checks the complete approved job definition. An
+exact retry returns the same child, and a failed transaction consumes neither
+the approval nor a child. A parent stopped before admission cannot start it;
+an already accepted child has its own lifecycle. No SQLite transaction is held
+across Worker RPC or an await.
+
+Other async scheduler actions and recovery still check their Run before dispatch
+and recovery checks again after its lock wait and between occurrences. Those
+checks are not yet atomic with every downstream effect: a stop or Worker failure
+in the remaining dispatch gap can leave an outcome uncertain. They must not be
+described as having the atomic prompt-admission guarantee above.
 
 #### Scheduler recovery conversation contract (2026-09-30)
 

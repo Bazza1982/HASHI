@@ -192,7 +192,9 @@ from orchestrator.multimodal_contract import (
 )
 from orchestrator.pathing import BridgePaths, resolve_instance_id, resolve_path_value
 from orchestrator.service_endpoints import ServiceEndpointError, select_service_bind_host
-from orchestrator.agent_mutation import mutation_authority, invoke_mutation, invoke_async_mutation
+from orchestrator.agent_mutation import (
+    mutation_authority, invoke_mutation, invoke_async_mutation, prepare_operation_admission,
+)
 from orchestrator.session_store import (
     MAX_SESSION_ATTACHMENT_BYTES,
     MAX_SESSION_ATTACHMENTS_PER_MESSAGE,
@@ -15811,8 +15813,16 @@ class WorkbenchApiServer:
             scope = {"operation": "activity.scheduler.run", "agent_id": agent_name,
                      "kind": kind, "job_id": job_id,
                      "expected_revision": scheduler_job_deletion_revision(job)}
-            ok, message = await invoke_async_mutation(
-                self, binding, lambda: runtime._run_job_now(job, kind=kind), scope=scope)
+            if binding is not None and job.get("action", "enqueue_prompt") == "enqueue_prompt":
+                admission = await self._await_session_storage(
+                    prepare_operation_admission, self, binding, scope
+                )
+                ok, message = await runtime._run_job_now(
+                    job, kind=kind, operation_admission=admission
+                )
+            else:
+                ok, message = await invoke_async_mutation(
+                    self, binding, lambda: runtime._run_job_now(job, kind=kind), scope=scope)
         except web.HTTPException:
             raise
         except Exception as e:
