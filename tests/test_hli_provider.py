@@ -1,4 +1,4 @@
-"""HLI provider regression checks; no local Compute or NVIDIA GPU required."""
+﻿"""HLI provider regression checks; no local Compute or NVIDIA GPU required."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
-from adapters.hli_api import HLIAdapter, normalized_hli_effort
+import httpx
+from unittest.mock import patch
+
+from adapters.hli_api import HLIAdapter, _hli_native_estimate, normalized_hli_effort
+from adapters.openrouter_api import _stable_provider_error_code
 from adapters.registry import get_backend_class
 from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.context_compaction import CompactionPolicy, resolve_trigger_budget
@@ -90,6 +94,106 @@ class KeylessInitializationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(backend.client)
             finally:
                 await backend.shutdown()
+
+
+class HLICapacityPreflightTests(unittest.IsolatedAsyncioTestCase):
+    """The HLI adapter must never hard-reject on HASHI's token estimator."""
+
+    def _backend(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = AgentConfig(
+                name="herv3-hli", engine="hli-api", workspace_dir=root,
+                system_md=root / "agent.md", model="qwen-local", is_active=True,
+                extra={},
+            )
+            return HLIAdapter(agent, GlobalConfig(authorized_id=1), api_key=None)
+
+    def test_preflight_logs_but_never_rejects_oversized_estimate(self):
+        backend = self._backend()
+        backend.config._hashi_runtime = SimpleNamespace()
+        capacity = SimpleNamespace(
+            usable_input_tokens=768, provider="hli-api", model="qwen-local",
+        )
+        payload = {"model": "qwen-local",
+                   "messages": [{"role": "user", "content": "x" * 4000}]}
+        with patch("orchestrator.context_compaction.resolve_capacity_profile",
+                   return_value=capacity), \
+             patch("adapters.hli_api._hli_native_estimate",
+                   return_value=5000):
+            backend._preflight_payload_capacity(payload)  # must not raise
+        self.assertTrue(True)
+
+    async def test_oversized_estimate_requests_targeted_hli_compact(self):
+        backend = self._backend()
+        calls: list = []
+
+        class FakeCoordinator:
+            async def compact(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(changed=False)
+
+        backend.config._hashi_runtime = SimpleNamespace(
+            _context_compaction_test_coordinator=FakeCoordinator(),
+        )
+        capacity = SimpleNamespace(
+            usable_input_tokens=768, provider="hli-api", model="qwen-local",
+        )
+        payload = {"model": "qwen-local",
+                   "messages": [{"role": "user", "content": "y" * 4000}]}
+        with patch("orchestrator.context_compaction.resolve_capacity_profile",
+                   return_value=capacity), \
+             patch("adapters.hli_api._hli_native_estimate",
+                   return_value=5000):
+            await backend._prepare_payload_capacity(
+                payload, request_id="req-test", provider_calls=[],
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["trigger"], "hli_preflight")
+        self.assertGreater(calls[0]["required_reduction_tokens"], 0)
+        self.assertTrue(calls[0]["continue_request_on_failure"])
+
+
+    def test_llama_server_context_overflow_maps_to_typed_capacity_code(self):
+        response = httpx.Response(
+            400,
+            json={"error": {"code": 400, "type": "invalid_request_error",
+                            "message": "request (28562 tokens) exceeds the available "
+                                       "context size (8192 tokens), try increasing it"}},
+            request=httpx.Request("POST", "http://127.0.0.1/v1/chat/completions"),
+        )
+        self.assertEqual(
+            _stable_provider_error_code(response), "CONTEXT_CAPACITY_REJECTED"
+        )
+        ordinary = httpx.Response(
+            400,
+            json={"error": {"code": 400, "type": "invalid_request_error",
+                            "message": "unknown field temperaturex"}},
+            request=httpx.Request("POST", "http://127.0.0.1/v1/chat/completions"),
+        )
+        self.assertEqual(_stable_provider_error_code(ordinary), "")
+
+    def test_calibrated_native_estimate_covers_json_dense_envelopes(self):
+        text = "{\"key\":\"value\",\"key2\":\"value2\"}" * 100  # 3300 chars
+        self.assertGreaterEqual(_hli_native_estimate(text), int(len(text) * 1.5) - 1)
+        self.assertEqual(_hli_native_estimate(""), 1)
+
+    async def test_oversized_estimate_without_coordinator_still_proceeds(self):
+        backend = self._backend()
+        backend.config._hashi_runtime = SimpleNamespace()
+        capacity = SimpleNamespace(
+            usable_input_tokens=768, provider="hli-api", model="qwen-local",
+        )
+        payload = {"model": "qwen-local",
+                   "messages": [{"role": "user", "content": "z" * 4000}]}
+        with patch("orchestrator.context_compaction.resolve_capacity_profile",
+                   return_value=capacity), \
+             patch("adapters.hli_api._hli_native_estimate",
+                   return_value=5000):
+            await backend._prepare_payload_capacity(
+                payload, request_id="req-test", provider_calls=[],
+            )  # must not raise
+        self.assertTrue(True)
 
 
 if __name__ == "__main__":

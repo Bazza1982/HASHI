@@ -444,6 +444,20 @@ def _stable_provider_error_code(response: httpx.Response | None) -> str:
             if isinstance(metadata, Mapping):
                 candidates.extend((metadata.get("code"), metadata.get("type")))
         candidates.extend((payload.get("code"), payload.get("type")))
+    # llama.cpp/llama-server reports native per-slot context overflow as a
+    # plain HTTP 400 with this message shape; it carries no provider code.
+    # Recognising it lets HASHI's typed capacity recovery Compact and retry
+    # exactly once instead of surfacing a generic bad request.
+    messages: list[Any] = []
+    if isinstance(payload, Mapping):
+        messages.append(payload.get("message"))
+        payload_error = payload.get("error")
+        if isinstance(payload_error, Mapping):
+            messages.append(payload_error.get("message"))
+    for value in messages:
+        lowered = str(value or "").casefold()
+        if "exceeds the available context size" in lowered:
+            return "CONTEXT_CAPACITY_REJECTED"
     for candidate in candidates:
         normalized = str(candidate or "").strip().lower()
         if normalized == "resource_profile_unverified":

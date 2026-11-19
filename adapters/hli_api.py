@@ -1,4 +1,4 @@
-"""HERV3 provider for Hashi Local Inference (HLI) via Hashi Compute.
+﻿"""HERV3 provider for Hashi Local Inference (HLI) via Hashi Compute.
 
 HLI needs no API key. It reuses the established OpenAI-compatible streaming,
 tool calls, and HASHI-owned tool execution. GPU allocation is solely Compute's
@@ -6,6 +6,7 @@ concern; this adapter never inspects CUDA or imposes a model-size restriction.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -31,6 +32,21 @@ HASHI_COMPACTION_CAPABILITIES = {
 # Exact context capacities learned from Hashi Compute's existing catalogue.
 # Missing discovery never makes initialization fail or creates a permission gate.
 HASHI_MODEL_CAPACITY_PROFILES: dict[str, dict] = {}
+
+
+def _hli_native_estimate(text: str) -> int:
+    """Calibrated native-token estimate for llama-server's tokenizer.
+
+    The HERV3 fixed envelope is JSON/token dense: local measurement showed
+    ~1.37 native tokens per character for the full prepared prompt. HLI uses
+    a 1.5 tokens/character estimate so proactive Compact engages before the
+    native per-slot boundary, not after it. This is a local estimate only;
+    llama-server's own per-slot context remains the final limit.
+    """
+    try:
+        return max(1, int(len(text) * 1.5))
+    except TypeError:
+        return 0
 
 
 def normalized_hli_effort(value: object) -> str | None:
@@ -99,6 +115,82 @@ class HLIAdapter(OpenAICompatibleAdapter):
             # template decides whether it has a meaningful effect.
             payload["reasoning_effort"] = effort
         return payload
+
+    def _estimate_payload_tokens(self, payload: Mapping) -> tuple[int | None, Any | None]:
+        """Shared HLI capacity measurement; informational, never a rejection."""
+        from orchestrator.context_compaction import resolve_capacity_profile
+
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        if runtime is None:
+            return None, None
+        model = str(payload.get("model") or self.config.model)
+        capacity = resolve_capacity_profile(runtime, self.config.engine, model)
+        if capacity is None:
+            return None, None
+        serialized = json.dumps(
+            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        if "data:" in serialized or "base64," in serialized:
+            return None, capacity
+        return _hli_native_estimate(serialized), capacity
+
+    def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
+        """HLI never hard-rejects on HASHI's conservative token estimator.
+
+        The native llama-server per-slot context is the actual boundary. An
+        oversized estimate is logged and handled by the async prepare step,
+        which asks the HLI Compact route for a targeted reduction; a missing
+        or failed Compact still does not create an artificial rejection.
+        """
+        estimated, capacity = self._estimate_payload_tokens(payload)
+        if (estimated is not None and capacity is not None
+                and estimated > capacity.usable_input_tokens):
+            self.logger.warning(
+                "HLI payload estimate %s tokens exceeds usable input %s for "
+                "%s/%s; deferring to proactive Compact and native limits",
+                estimated, capacity.usable_input_tokens,
+                capacity.provider, capacity.model,
+            )
+
+    async def _prepare_payload_capacity(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        request_id: str,
+        provider_calls: list,
+    ) -> None:
+        """Best-effort targeted Compact when the estimate exceeds capacity.
+
+        Compact availability or failure never rejects the request: llama-server's
+        per-slot context remains the real limit. This replaces the generic
+        provider's hard preflight rejection for local small models.
+        """
+        try:
+            estimated, capacity = self._estimate_payload_tokens(payload)
+            if (estimated is None or capacity is None
+                    or estimated <= capacity.usable_input_tokens):
+                return
+            from orchestrator.context_compaction import coordinator_for
+
+            runtime = getattr(self.config, "_hashi_runtime", None)
+            coordinator = (coordinator_for(runtime, request_ref=str(request_id or ""))
+                           if runtime is not None else None)
+            if coordinator is None:
+                return
+            await coordinator.compact(
+                trigger="hli_preflight",
+                request_ref=str(request_id or ""),
+                force=False,
+                required_reduction_tokens=max(
+                    1, estimated - max(1, int(capacity.usable_input_tokens * 0.40))
+                ),
+                continue_request_on_failure=True,
+            )
+        except Exception as exc:
+            self.logger.debug("HLI preflight compaction unavailable (non-blocking): %s", exc)
 
     async def initialize(self) -> bool:
         initialized = await super().initialize()
