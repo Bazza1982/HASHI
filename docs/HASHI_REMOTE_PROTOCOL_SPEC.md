@@ -115,6 +115,76 @@ Static `instances.json` discovery is an observable bootstrap fallback. A peer
 reached through it is marked as such and must not be reported as proof that
 mDNS discovery succeeded.
 
+### LAN readiness contract (`lan_readiness` v1, 2026-11-19)
+
+`GET /health` additionally exposes an optional, additive `lan_readiness`
+object. It is a **read-only projection of a pre-computed in-memory snapshot**;
+no request path runs PowerShell, a firewall scan, a network probe or a file
+parse to produce it. The snapshot is refreshed only by an explicit local
+doctor/repair report (`POST /lan-readiness/report`, loopback-or-HMAC,
+bounded, schema-validated) or by an existing lifecycle operation. A missing,
+stale or degraded report never blocks an otherwise healthy Remote, Core or
+Workbench route.
+
+Shape (`schema_version: 1`; consumers must tolerate absent fields and unknown
+values):
+
+```json
+{
+  "schema_version": 1,
+  "state": "degraded",
+  "observed_at": 1789000000.0,
+  "stale": false,
+  "source": "windows_doctor",
+  "process": {"state": "ok"},
+  "listener": {"state": "ok", "address": "0.0.0.0", "port": 8767, "pid": 1234},
+  "firewall": {
+    "state": "degraded",
+    "reason_code": "firewall_rule_missing",
+    "effective_policy_checked": true
+  },
+  "mdns": {"advertising": "ok", "browsing": "ok", "external_visibility": "unknown"},
+  "external_reachability": {"state": "unknown", "reason_code": "lan_reachability_unverified"},
+  "reason_codes": ["firewall_rule_missing", "lan_reachability_unverified"]
+}
+```
+
+Semantics:
+
+- `state` describes the **local instance** scope only (process, listener,
+  firewall policy, local health). `ok` requires listener + process evidence
+  and an ok-or-unverified firewall policy; a degraded firewall policy makes
+  `state` degraded. mDNS quality never demotes local `state` on its own.
+- `external_reachability` stays `unknown`/`lan_reachability_unverified` until a
+  timestamped probe from another host proves a directed route. The local
+  Remote never claims another machine can reach it.
+- `stale` is derived from `observed_at` (older than one hour). A stale green is
+  never presented as live proof.
+- Older Remotes without this field simply omit it; clients show
+  unknown/not-provided.
+- Stable reason codes: `remote_process_down`, `loopback_only_bind`,
+  `listening_port_mismatch`, `port_owned_by_other_process`,
+  `diagnostics_unavailable`, `firewall_rule_missing`, `firewall_rule_disabled`,
+  `firewall_profile_mismatch`, `firewall_remote_address_mismatch`,
+  `firewall_rule_port_mismatch`, `firewall_explicitly_blocked`,
+  `firewall_local_rules_ignored_by_policy`, `firewall_policy_unverified`,
+  `mdns_advertise_failed`, `mdns_browse_failed`, `mdns_rule_missing`,
+  `mdns_visibility_unverified`, `lan_reachability_unverified`,
+  `tcp_connection_timeout`, `tcp_connection_refused`, `tls_handshake_failed`,
+  `authentication_rejected`, `identity_mismatch`, `gateway_unavailable`.
+  `gateway_unavailable` is only produced by Workbench observations, never by
+  local HASHI. Unknown future codes pass through verbatim.
+
+The Windows doctor (`bin/hashi_remote_ctl.ps1 doctor -Json`) is the reporter:
+it reads the ActiveStore effective policy, locates HASHI-owned rules by stable
+internal `Name` (`HashiRemote_<InstanceId>_TCP_<port>`,
+`HashiRemote_mDNS_UDP_5353`), verifies the listening PID and bind address, and
+emits exactly one JSON document on stdout. Explicit firewall repair
+(`doctor -Repair`) is the only path that creates or updates the narrowly scoped
+owned rules (Domain/Private, LocalSubnet, never Public) and presents UAC on the
+affected local machine; a declined prompt is a diagnostic outcome, never a
+retry loop.
+
 The Remote-owned peer registry projects confirmed routes and liveness into the
 optional legacy `instances.json` view. An absent optional value and its empty
 representation are the same state for change detection; an unchanged projection
