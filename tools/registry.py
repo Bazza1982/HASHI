@@ -2613,8 +2613,14 @@ class ToolRegistry:
             http_options = opts.get("http_request") or {}
             if not isinstance(http_options, dict):
                 return "Error: HTTP tool configuration must be an object"
+            from tools.tool_output_store import run_binding
+
+            binding = run_binding(context)
+            capture_options = ({"retained_output": (self._tool_output_store, binding, tool_name)}
+                               if binding is not None else {})
             return await execute_http_request(
-                arguments, max_response_bytes=http_options.get("max_response_bytes", 16 * 1024 * 1024)
+                arguments, max_response_bytes=http_options.get("max_response_bytes"),
+                **capture_options,
             )
 
         if tool_name == "xai_imagine":

@@ -260,21 +260,19 @@ the existing read scope, and performs no network access.
 ## HTTP response and write budgets in the remediation candidate
 
 The ordinary HTTP tool honors its positive requested timeout instead of
-clamping it to 60 seconds. The Registry option
-http_request.max_response_bytes selects the maximum decoded response bytes
-retained in the response body buffer (default 16 MiB). HTTP decompression may
-transiently allocate more; the Run-bound output store is not a memory quota.
-The tool reads incrementally and reports
-the selected limit, response status and whether the full response arrived.
-A response within that limit is available in full; when its displayed text
-is too long, the existing Run-bound result reader supplies continuation pages.
-If the response exceeds the selected limit, the prefix is marked incomplete;
-the response may correspond to a request that has already taken effect, and
-the tool does not replay it. Cancellation stops waiting and does not retry.
+clamping it to 60 seconds. By default it streams decoded response text to a
+temporary file and, for a bound Run, retains the full result for paging.
+There is no default response-size cutoff. An explicitly configured
+http_request.max_response_bytes still selects a response-byte budget.
+When exceeded, the retained prefix is marked incomplete; the request may
+already have taken effect, and the tool never automatically replays it.
+Cancellation stops waiting and does not retry. An unavailable capture is
+reported before dispatch; a retention failure after a response is reported
+without repeating the request. Standalone calls without a Run binding still
+return their complete result in memory. HTTP decompression can transiently
+allocate more, and the Run-bound output store is not a disk quota.
 
 The existing file_write.max_file_size_kb option controls allowed content
 size. An oversized write is rejected before touching the destination. File
 writes still use the existing direct write path; crash-safe atomic publication
-and streaming artifact delivery have not been added by this change. Result
-continuations remain process-local and their retained memory is not yet
-lifecycle-quota-managed.
+and streaming artifact delivery have not been added by this change.

@@ -2500,77 +2500,13 @@ async def execute_frontend_publish_deliverable(
 
 
 async def execute_http_request(
-    args: dict, *, max_response_bytes: int = 16 * 1024 * 1024
+    args: dict, *, max_response_bytes: int | None = None, retained_output=None,
 ) -> str | BuiltinExecutionResult:
-    url = str(args.get("url", "")).strip()
-    if not url:
-        return "Error: url is required"
-    timeout, error = _positive_seconds(args.get("timeout", 30), label="HTTP timeout")
-    if error:
-        return error
-    if type(max_response_bytes) is not int or max_response_bytes < 1:
-        return "Error: configured HTTP max_response_bytes must be a positive integer"
+    from tools.http_request_stream import execute_streamed_http
 
-    method = str(args.get("method", "GET")).upper()
-    headers = args.get("headers") or {}
-    body = args.get("body")
-    status = None
-    try:
-        import httpx
-
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            headers={"User-Agent": "HASHI/2.2"},
-        ) as client:
-            req_kwargs: dict = {"headers": headers}
-            if body:
-                req_kwargs["content"] = body.encode() if isinstance(body, str) else body
-            async with client.stream(method, url, **req_kwargs) as response:
-                status = response.status_code
-                content_type = response.headers.get("content-type", "")
-                encoding = response.encoding or "utf-8"
-                received = bytearray()
-                complete = True
-                observed_at_least = 0
-                async for chunk in response.aiter_bytes(chunk_size=min(65536, max_response_bytes + 1)):
-                    observed_at_least = len(received) + len(chunk)
-                    room = max_response_bytes - len(received)
-                    if len(chunk) > room:
-                        received.extend(chunk[:room])
-                        complete = False
-                        break
-                    received.extend(chunk)
-                try:
-                    body_text = received.decode(encoding, errors="replace")
-                except LookupError:
-                    body_text = received.decode("utf-8", errors="replace")
-        warning = (
-            ""
-            if complete
-            else (
-                f"\n[Response incomplete: selected {max_response_bytes}-byte "
-                "limit; the request may already have taken effect. No automatic retry.]"
-            )
-        )
-        return BuiltinExecutionResult(
-            f"Status: {status}\nContent-Type: {content_type}\n\n{body_text}{warning}",
-            {
-                "http_status": status,
-                "response_complete": complete,
-                "complete_content": complete,
-                "response_limit_bytes": max_response_bytes,
-                "response_bytes": len(received),
-                "response_observed_at_least_bytes": observed_at_least,
-                "timeout_seconds": timeout,
-            },
-        )
-    except Exception as exc:
-        return BuiltinExecutionResult(
-            "Error: HTTP response unavailable; the request may already have taken effect. "
-            f"Do not retry without checking ({type(exc).__name__}).",
-            {"http_status": status, "response_complete": False, "request_effect": "unknown"},
-        )
+    return await execute_streamed_http(
+        args, max_response_bytes=max_response_bytes, retained_output=retained_output,
+    )
 
 
 async def execute_web_fetch(
