@@ -1000,6 +1000,17 @@ class WorkbenchApiServer:
             ("POST", "/api/v1/file-content", self.handle_v1_file_content),
         ):
             self.app.router.add_route(method, path, session_handler(handler))
+
+        # HEA v1: one owner-scoped, low-volume feed for durable Agent terminal events.
+        # It reuses Session API qualification and the existing authenticated Remote hop.
+        from orchestrator.automation_events import handle_automation_events
+
+        async def automation_events(request):
+            return await handle_automation_events(self, request)
+
+        self.app.router.add_get(
+            "/api/v1/automation/events", session_handler(automation_events)
+        )
         self.app.router.add_get(
             "/api/agents/{name}/overview", self.handle_agent_overview
         )
