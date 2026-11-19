@@ -151,6 +151,7 @@ _WORKBENCH_GATEWAY_VERBOSE_SUCCESS_EVENTS = frozenset(
         "local_response_body_completed",
         "proxy_response_ready",
         "asgi_response_started",
+        "asgi_response_completed",
     }
 )
 

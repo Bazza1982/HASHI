@@ -1719,13 +1719,48 @@ class HerSessionStore:
             "parent_run_id": str(value.get("parent_run_id") or "") or None,
         }
 
+    def _verified_provider_context_claim(
+        self,
+        state: Mapping[str, Any],
+        *,
+        source_request_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the verified producer claim for one recovery row's private
+        provider checkpoint, or None when its provenance is missing/invalid.
+
+        The checkpoint itself stays stored as evidence; only the claim that
+        it is a verified private continuation is withheld. Never relabel an
+        unverified checkpoint as belonging to the canonical source Run.
+        """
+
+        claim = self._normalise_run_claim(
+            state.get("provider_context_producer_claim")
+            if isinstance(state.get("provider_context_producer_claim"), Mapping)
+            else None,
+            expected_request_id=source_request_id,
+        )
+        digest = str(state.get("provider_context_producer_claim_digest") or "")
+        if (
+            claim is None
+            or str(claim.get("state") or "") != "running"
+            or not digest
+            or _digest(claim) != digest
+        ):
+            return None
+        return claim
+
     def interruption_evidence_for_request(
         self,
         request_id: str,
         *,
         run_claim: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Return a privacy-safe receipt for one interrupted provider Turn."""
+        """Return a privacy-safe receipt for one interrupted provider Turn.
+
+        The receipt always binds the canonical PAO source Run identity. When
+        the Turn has no private provider checkpoint the adoption still works
+        and the successor continues without private provider context.
+        """
 
         canonical_run = self._normalise_run_claim(
             run_claim,
@@ -1752,56 +1787,106 @@ class HerSessionStore:
         if state is None:
             return None
         source_request_id = str(state.get("source_request_id") or "")
-        producer_claim = self._normalise_run_claim(
+        recorded_claim = self._normalise_run_claim(
             state.get("provider_context_producer_claim")
             if isinstance(state.get("provider_context_producer_claim"), Mapping)
             else None,
             expected_request_id=source_request_id,
         )
-        producer_claim_digest = str(
-            state.get("provider_context_producer_claim_digest") or ""
+        verified_claim = self._verified_provider_context_claim(
+            state, source_request_id=source_request_id
         )
-        if (
-            producer_claim is None
-            or producer_claim.get("state") != "running"
-            or not producer_claim_digest
-            or _digest(producer_claim) != producer_claim_digest
+        if verified_claim is None:
+            if recorded_claim is not None and (
+                str(recorded_claim.get("run_id") or "")
+                == str(canonical_run.get("run_id") or "")
+                and str(recorded_claim.get("request_id") or "")
+                == str(canonical_run.get("request_id") or "")
+            ):
+                stored_digest = str(
+                    state.get("provider_context_producer_claim_digest") or ""
+                )
+                if stored_digest and _digest(recorded_claim) == stored_digest:
+                    # The recorded claim names the same Run/request and its
+                    # own digest checks out, yet it still fails verification:
+                    # the source attempt or fence has genuinely moved on and
+                    # the receipt chain is stale. Reject it.
+                    return None
+                # The stored claim names the same Run/request but its digest
+                # is missing or mismatched: the private checkpoint's
+                # integrity is insufficient. That must not be confused with
+                # a stale authoritative Run. The canonical PAO source Run
+                # chain is still valid, so fall through to the degraded
+                # continuation below; never relabel the checkpoint as
+                # verified.
+            # Case A: no private provider checkpoint exists. Case B: a
+            # checkpoint exists whose producer provenance is missing,
+            # conflicting, or whose claim digest is broken. In every case
+            # bind the evidence to the canonical PAO source Run identity so
+            # the successor can adopt the steered Turn and continue without
+            # private provider context. An unverified checkpoint is never
+            # claimed as verified.
+            run_identity = dict(canonical_run)
+            provider_context = self._provider_context_metadata(None, digest="")
+        elif (
+            str(verified_claim.get("run_id") or "")
+            != str(canonical_run.get("run_id") or "")
+            or str(verified_claim.get("request_id") or "")
+            != str(canonical_run.get("request_id") or "")
         ):
-            return None
-        for key in (
-            "run_id",
-            "request_id",
-            "attempt",
-            "attempt_id",
-            "state_revision",
-            "input_digest",
-            "parent_run_id",
-        ):
-            if producer_claim.get(key) != canonical_run.get(key):
-                return None
-        provider_context = self._provider_context_metadata(
-            state.get("provider_context")
-            if isinstance(state.get("provider_context"), Mapping)
-            else None,
-            digest=str(state.get("provider_context_digest") or ""),
+            # The checkpoint is internally intact but its producer is not the
+            # canonical source Run: conflicting provenance. Treat it as
+            # unverified private context and continue degraded.
+            run_identity = dict(canonical_run)
+            provider_context = self._provider_context_metadata(None, digest="")
+        else:
+            for key in (
+                "attempt",
+                "attempt_id",
+                "state_revision",
+                "input_digest",
+                "parent_run_id",
+            ):
+                if verified_claim.get(key) != canonical_run.get(key):
+                    # Same Run/request, but the canonical attempt has moved
+                    # on: the receipt chain is stale.
+                    return None
+            run_identity = dict(verified_claim)
+            provider_context = self._provider_context_metadata(
+                state.get("provider_context")
+                if isinstance(state.get("provider_context"), Mapping)
+                else None,
+                digest=str(state.get("provider_context_digest") or ""),
+            )
+        provider_context_available = bool(
+            provider_context.get("available")
         )
-        provider = str(provider_context.get("provider") or "")
-        model = str(provider_context.get("model") or "")
-        effort = str(provider_context.get("effort") or "")
-        if not bool(provider_context.get("available")) or not all(
-            (provider, model, effort)
-        ):
-            return None
+        provider = (
+            str(provider_context.get("provider") or "")
+            if provider_context_available
+            else ""
+        )
+        model = (
+            str(provider_context.get("model") or "")
+            if provider_context_available
+            else ""
+        )
+        effort = (
+            str(provider_context.get("effort") or "")
+            if provider_context_available
+            else ""
+        )
         evidence = {
             "kind": "herv3_active_turn_recovery",
             "source_request_id": source_request_id,
-            "run_id": producer_claim["run_id"],
-            "attempt_id": producer_claim["attempt_id"],
-            "state_revision": producer_claim["state_revision"],
-            "input_digest": producer_claim["input_digest"],
+            "run_id": run_identity["run_id"],
+            "attempt_id": run_identity["attempt_id"],
+            "state_revision": run_identity["state_revision"],
+            "input_digest": run_identity["input_digest"],
             "provider": provider,
             "model": model,
             "effort": effort,
+            "provider_context_available": provider_context_available,
             "turn_id": str(state.get("turn_id") or ""),
             "turn_status": str(state.get("turn_status") or ""),
             "recovery_status": str(state.get("status") or ""),
@@ -1860,12 +1945,14 @@ class HerSessionStore:
         )
         if canonical is None:
             return None
+        # /steer adoption needs the authoritative steer terminal state. It
+        # deliberately does not gate on safe_to_resume or the recovery
+        # disposition: a hard stop of a busy non-read-only Tool IS an
+        # unresolved side effect, and those fields protect crash-recovery
+        # replay of the source Turn, never the opening of the successor.
         if (
             str(canonical.get("turn_status") or "") != "steered"
             or str(canonical.get("recovery_status") or "") != "terminated"
-            or str(canonical.get("recovery_disposition") or "")
-            not in {"steered", "stopped"}
-            or not bool(canonical.get("safe_to_resume"))
         ):
             return None
         for key in (
@@ -1880,8 +1967,11 @@ class HerSessionStore:
             "model",
             "effort",
         ):
+            # provider/model/effort are empty in the degraded no-checkpoint
+            # path; canonical always carries non-empty identity and digest
+            # fields, so equality alone cannot weaken those bindings.
             supplied = str(candidate.get(key) or "")
-            if not supplied or supplied != str(canonical.get(key) or ""):
+            if supplied != str(canonical.get(key) or ""):
                 return None
         reference = str(canonical.get("evidence_ref") or "")
         prefix = "herv3:"
@@ -1935,9 +2025,18 @@ class HerSessionStore:
         return result
 
     def consume_recovery_context(
-        self, *, session_id: str, current_turn_id: str
+        self,
+        *,
+        session_id: str,
+        current_turn_id: str,
+        source_run_claim: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Bind one interrupted canonical state to the next Turn transactionally.
+
+        When ``source_run_claim`` is supplied (the /steer path), the private
+        provider checkpoint is inherited only if its producer claim also
+        matches that verified canonical PAO source Run identity; otherwise
+        the successor continues through the degraded, context-free path.
 
         The source is deliberately left terminated until the receiving Turn
         settles.  Its evidence is also copied into the receiving projection so
@@ -1987,6 +2086,60 @@ class HerSessionStore:
             state = self._recovery_dict(row)
             if state is None:
                 return None
+            state_turn_id = str(state.get("turn_id") or "")
+            state_turn_row = connection.execute(
+                "SELECT request_id FROM her_turns "
+                "WHERE session_id = ? AND turn_id = ?",
+                (session_id, state_turn_id),
+            ).fetchone()
+            state_request_id = (
+                str(state_turn_row["request_id"] or "")
+                if state_turn_row
+                else ""
+            )
+            verified_source_claim = self._verified_provider_context_claim(
+                state, source_request_id=state_request_id
+            )
+            if (
+                source_run_claim is not None
+                and verified_source_claim is not None
+            ):
+                canonical_source_run = self._normalise_run_claim(
+                    source_run_claim,
+                    expected_request_id=state_request_id,
+                )
+                if canonical_source_run is None:
+                    verified_source_claim = None
+                else:
+                    for key in (
+                        "run_id",
+                        "request_id",
+                        "attempt",
+                        "attempt_id",
+                        "state_revision",
+                        "input_digest",
+                        "parent_run_id",
+                    ):
+                        if (
+                            verified_source_claim.get(key)
+                            != canonical_source_run.get(key)
+                        ):
+                            # Conflicting or stale producer provenance: the
+                            # checkpoint is not inherited, but the recovery
+                            # facts still flow to the successor.
+                            verified_source_claim = None
+                            break
+            provider_context_checkpoint = self._provider_context_metadata(
+                state.get("provider_context")
+                if verified_source_claim is not None
+                and isinstance(state.get("provider_context"), Mapping)
+                else None,
+                digest=(
+                    str(state.get("provider_context_digest") or "")
+                    if verified_source_claim is not None
+                    else ""
+                ),
+            )
             payload = {
                 "format": "her-active-turn-recovery-context-v1",
                 "authority": "quoted_recovery_context",
@@ -2002,16 +2155,12 @@ class HerSessionStore:
                 "recovery_disposition": str(
                     state.get("recovery_disposition") or ""
                 ),
-                "provider_context_checkpoint": self._provider_context_metadata(
-                    state.get("provider_context")
-                    if isinstance(state.get("provider_context"), Mapping)
-                    else None,
-                    digest=str(state.get("provider_context_digest") or ""),
-                ),
+                "provider_context_checkpoint": provider_context_checkpoint,
                 "limitations": [
                     "Complete provider context is retained privately when the API supplies it.",
                     "Partial or uncommitted streamed reasoning is never replayed as complete context.",
                     "UNKNOWN_SIDE_EFFECT entries must be investigated, never replayed automatically.",
+                    "A private provider checkpoint without verifiable producer provenance is never inherited.",
                 ],
             }
             if not existing_source:
@@ -2037,22 +2186,53 @@ class HerSessionStore:
                     if current_state.get("provider_context")
                     else state
                 )
-                inherited_provider_context = (
-                    provider_context_source.get("provider_context") or {}
+                source_turn_id_for_claim = str(
+                    provider_context_source.get("turn_id") or ""
                 )
-                inherited_provider_context_digest = str(
-                    provider_context_source.get("provider_context_digest") or ""
+                claim_turn_row = connection.execute(
+                    "SELECT request_id FROM her_turns "
+                    "WHERE session_id = ? AND turn_id = ?",
+                    (session_id, source_turn_id_for_claim),
+                ).fetchone()
+                claim_request_id = (
+                    str(claim_turn_row["request_id"] or "")
+                    if claim_turn_row
+                    else ""
                 )
-                inherited_producer_claim = (
-                    provider_context_source.get("provider_context_producer_claim")
-                    or {}
-                )
-                inherited_producer_claim_digest = str(
-                    provider_context_source.get(
-                        "provider_context_producer_claim_digest"
+                if provider_context_source is state:
+                    verified_inheritance = verified_source_claim
+                else:
+                    verified_inheritance = self._verified_provider_context_claim(
+                        provider_context_source,
+                        source_request_id=claim_request_id,
                     )
-                    or ""
-                )
+                if verified_inheritance is not None:
+                    inherited_provider_context = (
+                        provider_context_source.get("provider_context") or {}
+                    )
+                    inherited_provider_context_digest = str(
+                        provider_context_source.get("provider_context_digest")
+                        or ""
+                    )
+                    inherited_producer_claim = (
+                        provider_context_source.get(
+                            "provider_context_producer_claim"
+                        )
+                        or {}
+                    )
+                    inherited_producer_claim_digest = str(
+                        provider_context_source.get(
+                            "provider_context_producer_claim_digest"
+                        )
+                        or ""
+                    )
+                else:
+                    # Missing or conflicting producer provenance: never
+                    # inherit or replay the unverified private messages.
+                    inherited_provider_context = {}
+                    inherited_provider_context_digest = ""
+                    inherited_producer_claim = {}
+                    inherited_producer_claim_digest = ""
                 connection.execute(
                     """
                     UPDATE her_active_turn_recovery
@@ -2104,6 +2284,7 @@ class HerSessionStore:
                 if (
                     not current_state.get("provider_context")
                     and state.get("provider_context")
+                    and verified_source_claim is not None
                 ):
                     connection.execute(
                         """

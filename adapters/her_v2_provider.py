@@ -3252,12 +3252,19 @@ class HashiStageProvider(StageProvider):
         *,
         observer: Callable[[Mapping[str, Any]], Any] | None,
         recovery: Mapping[str, Any] | None,
+        resume_pending_tools: bool = True,
     ) -> None:
-        """Bind private complete-boundary persistence and one-shot replay."""
+        """Bind private complete-boundary persistence and one-shot replay.
+
+        ``resume_pending_tools=False`` closes an interrupted pending Tool
+        batch with synthetic cancellation results for a /steer successor
+        instead of handing the batch back to the backend for completion.
+        """
 
         self._provider_context_observer = observer
         self._provider_context_recovery = dict(recovery or {})
         self._provider_context_recovery_consumed = False
+        self._provider_context_resume_pending = bool(resume_pending_tools)
 
     def _bind_provider_context_observer(
         self,
@@ -3313,8 +3320,26 @@ class HashiStageProvider(StageProvider):
         )
         raw_messages = context.get("messages")
         if not matches or not isinstance(raw_messages, list) or not raw_messages:
-            if context.get("boundary") in {"pending_tool_batch", "ready_provider_request"}:
-                raise ProviderContextObserverError("pending Tool continuation cannot change provider, model, or stage")
+            if (
+                self._provider_context_resume_pending
+                and context.get("boundary")
+                in {"pending_tool_batch", "ready_provider_request"}
+            ):
+                # Ordinary crash recovery resumes the exact pending Tool
+                # batch or provider request, so a changed provider, model or
+                # stage must fail closed instead of silently re-driving the
+                # old work under a different backend.
+                raise ProviderContextObserverError(
+                    "pending Tool continuation cannot change provider, "
+                    "model, or stage"
+                )
+            # A /steer successor never replays the interrupted pending batch
+            # or provider request. An incompatible private checkpoint is
+            # therefore discarded and the successor continues with the new
+            # provider request and its new steering instruction. The
+            # interrupted Tool's unknown-side-effect evidence stays on the
+            # session-store ledger and is not affected by this discard.
+            self._provider_context_recovery_consumed = True
             return None
         if any(not isinstance(item, Mapping) for item in raw_messages):
             raise ProviderContextObserverError(
@@ -3324,8 +3349,35 @@ class HashiStageProvider(StageProvider):
         if context.get("boundary") == "pending_tool_batch":
             from orchestrator.her_v2.provider_continuation import pending_tool_calls
 
-            pending_tool_calls(continuation)
-        elif context.get("boundary") != "ready_provider_request":
+            pending = pending_tool_calls(continuation)
+            if not self._provider_context_resume_pending:
+                for call in pending:
+                    continuation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": str(call.get("id") or ""),
+                            "content": (
+                                "This Tool call was interrupted by /steer "
+                                "before it returned a result. Do not assume "
+                                "it ran; verify any affected state before "
+                                "acting and never replay it automatically."
+                            ),
+                        }
+                    )
+                continuation.append(
+                    {"role": "user", "content": stage_prompt}
+                )
+        elif context.get("boundary") == "ready_provider_request":
+            if not self._provider_context_resume_pending:
+                # /steer successor: the checkpoint ends at the original
+                # provider request, so the new steering instruction must be
+                # appended or the backend payload only carries the old one.
+                # Ordinary crash recovery re-drives the identical request and
+                # must not duplicate the original prompt.
+                continuation.append(
+                    {"role": "user", "content": stage_prompt}
+                )
+        else:
             continuation.append({"role": "user", "content": stage_prompt})
         self._provider_context_recovery_consumed = True
         return continuation
@@ -6030,7 +6082,11 @@ class HashiStageProvider(StageProvider):
                     generation_kwargs["continuation_messages"] = (
                         continuation_messages
                     )
-                    if self._provider_context_recovery.get("boundary") == "pending_tool_batch":
+                    if (
+                        self._provider_context_recovery.get("boundary")
+                        == "pending_tool_batch"
+                        and self._provider_context_resume_pending
+                    ):
                         if "resume_pending_tools" not in parameters and not accepts_extra_keywords:
                             raise ProviderContextObserverError("selected provider cannot resume a pending Tool batch")
                         generation_kwargs["resume_pending_tools"] = True

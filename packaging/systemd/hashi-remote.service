@@ -11,11 +11,11 @@ Environment=HASHI_REMOTE_SUPERVISED=1
 Environment=HASHI_INSTANCE_ID=%HASHI_INSTANCE_ID%
 Environment=PYTHONUTF8=1
 Environment=PYTHONIOENCODING=utf-8
-ExecStart=%PYTHON% -B -m remote --hashi-root %HASHI_ROOT% --supervised
+ExecStart=%PYTHON% -B -m remote --hashi-root %HASHI_ROOT% --supervised --log-file %HASHI_ROOT%/logs/hashi-remote-supervisor.log
 Restart=always
 RestartSec=5
-StandardOutput=append:%HASHI_ROOT%/logs/hashi-remote-supervisor.log
-StandardError=append:%HASHI_ROOT%/logs/hashi-remote-supervisor.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target

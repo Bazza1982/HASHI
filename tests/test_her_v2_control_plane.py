@@ -591,6 +591,221 @@ def test_steered_turn_is_recoverable_once_while_cancelled_turn_is_not(tmp_path):
     ) is None
 
 
+
+
+def test_steer_adoption_survives_an_unresolved_side_effect(tmp_path):
+    """A hard /steer stop on a busy non-read-only Tool leaves an unresolved
+    side effect (safe_to_resume=0, UNKNOWN_SIDE_EFFECT). The successor must
+    still adopt the steered Turn; replay safety stays on the source ledger."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-unsafe", "Run a non-read-only command")
+    coordinator.store.record_runtime_event(
+        session_id=turn.session_id,
+        turn_id=turn.turn_id,
+        record=_runtime_event(
+            turn.turn_id,
+            "turn-unsafe:tool:shell:intent",
+            "tool_intent",
+            operation_id="turn-unsafe:shell:1",
+            tool_call_id="shell",
+            tool_name="shell",
+            arguments_sha256="sha256:shell",
+            read_only=False,
+        ),
+    )
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Run a non-read-only command"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "read",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"target.txt"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "read", "content": "old content"},
+    ]
+    coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "messages": provider_messages,
+            "reasoning": [],
+            "provider_request_id": "provider-read",
+            "invocation_id": "turn-unsafe:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-unsafe",
+                "turn-unsafe",
+                input_digest="sha256:unsafe-input",
+            ),
+        },
+    )
+    closed = coordinator.steer(turn, reason="The user supplied a new direction.")
+    assert closed["status"] == "steered"
+    recovery = coordinator.store.active_turn_recovery(
+        turn.session_id, turn.turn_id
+    )
+    assert recovery["status"] == "terminated"
+    assert recovery["recovery_disposition"] == "UNKNOWN_SIDE_EFFECT"
+    assert recovery["safe_to_resume"] is False
+
+    source_claim = _run_claim(
+        "run-unsafe",
+        "turn-unsafe",
+        state="superseded",
+        input_digest="sha256:unsafe-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-unsafe",
+        run_claim=source_claim,
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["recovery_disposition"] == "UNKNOWN_SIDE_EFFECT"
+    assert evidence["safe_to_resume"] is False
+    assert evidence["provider_context"]["available"] is True
+
+    successor_claim = _run_claim(
+        "run-unsafe-successor",
+        "turn-unsafe-successor",
+        state="running",
+        parent_run_id="run-unsafe",
+        input_digest="sha256:unsafe-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    successor = _accept(
+        coordinator,
+        "turn-unsafe-successor",
+        "Continue without replaying the interrupted command",
+    )
+    context = coordinator.store.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+    )
+    assert context["interrupted_turn_id"] == turn.turn_id
+    assert context["recovery_disposition"] == "UNKNOWN_SIDE_EFFECT"
+    assert context["safe_to_resume"] is False
+    assert any(
+        str(effect.get("tool_name") or "") == "shell"
+        for effect in context["side_effects"]
+    )
+    assert context["provider_context_checkpoint"]["available"] is True
+    # The interrupted Tool is never replayed automatically: the source stays
+    # terminated and the successor carries the evidence for investigation.
+    assert coordinator.store.active_turn_recovery(
+        turn.session_id, turn.turn_id
+    )["status"] == "terminated"
+
+
+def test_steer_evidence_degrades_without_private_provider_checkpoint(tmp_path):
+    """A Turn steered before any private provider checkpoint still yields
+    adoption evidence bound to the canonical PAO source Run. The successor
+    continues without private provider context instead of being refused."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-noprovider", "Start a plan")
+    closed = coordinator.steer(turn, reason="The user supplied a new direction.")
+    assert closed["status"] == "steered"
+
+    source_claim = _run_claim(
+        "run-noprovider",
+        "turn-noprovider",
+        state="superseded",
+        input_digest="sha256:noprovider-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-noprovider",
+        run_claim=source_claim,
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["provider_context_available"] is False
+    assert evidence["provider"] == ""
+    assert evidence["model"] == ""
+    assert evidence["effort"] == ""
+    assert evidence["run_id"] == "run-noprovider"
+    assert evidence["attempt_id"] == "run-noprovider:attempt:1"
+    assert evidence["input_digest"] == "sha256:noprovider-input"
+
+    successor_claim = _run_claim(
+        "run-noprovider-successor",
+        "turn-noprovider-successor",
+        state="running",
+        parent_run_id="run-noprovider",
+        input_digest="sha256:noprovider-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    # A later source attempt keeps the old receipt diagnostic-only even in
+    # the degraded path.
+    stale_source_claim = {
+        **source_claim,
+        "attempt": 2,
+        "attempt_id": "run-noprovider:attempt:2",
+        "state_revision": 2,
+    }
+    reopened = HerSessionStore(coordinator.store.path)
+    assert reopened.verified_steer_session_id(
+        evidence,
+        source_run_claim=stale_source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) is None
+
+    successor = _accept(
+        coordinator,
+        "turn-noprovider-successor",
+        "Continue without private provider context",
+    )
+    context = coordinator.store.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+    )
+    assert context is not None
+    assert context["interrupted_turn_id"] == turn.turn_id
+    assert context["provider_context_checkpoint"]["available"] is False
+    assert coordinator.store.provider_context_for_turn(
+        successor.session_id, successor.turn_id
+    ) is None
+
+
 def test_provider_context_checkpoint_is_segmented_without_count_or_size_ceiling(
     tmp_path,
 ):
@@ -1639,3 +1854,380 @@ def test_provider_checkpoint_omits_live_camera_but_preserves_pending_and_complet
         ).fetchall()
     assert camera not in json.dumps(saved)
     assert attachment in json.dumps(saved)
+def test_steer_checkpoint_without_producer_claim_is_never_inherited(tmp_path):
+    """A private checkpoint stored without a producer Run claim must not be
+    claimed as verified or inherited by a /steer successor. Adoption still
+    proceeds through the degraded, context-free path bound to the canonical
+    PAO source Run, before and after reopening the durable store."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-orphan", "Delete obsolete reports")
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Delete obsolete reports"},
+    ]
+    coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "ready_provider_request",
+            "messages": provider_messages,
+            "reasoning": [],
+            "provider_request_id": "provider-orphan",
+            "invocation_id": "turn-orphan:execution:1",
+            # No producer_run_claim: the checkpoint writer permits this, and
+            # the successor must never inherit the unverified messages.
+        },
+    )
+    closed = coordinator.steer(turn, reason="User supplied a new direction.")
+    assert closed["status"] == "steered"
+
+    source_claim = _run_claim(
+        "run-orphan",
+        "turn-orphan",
+        state="superseded",
+        input_digest="sha256:orphan-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-orphan", run_claim=source_claim
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["provider_context_available"] is False
+    assert evidence["provider"] == ""
+    assert evidence["model"] == ""
+    assert evidence["effort"] == ""
+    assert evidence["run_id"] == "run-orphan"
+    assert evidence["attempt_id"] == "run-orphan:attempt:1"
+
+    successor_claim = _run_claim(
+        "run-orphan-successor",
+        "turn-orphan-successor",
+        state="running",
+        parent_run_id="run-orphan",
+        input_digest="sha256:orphan-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    # An incorrect successor parent chain still rejects adoption.
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim={**successor_claim, "parent_run_id": "run-other"},
+        **binding,
+    ) is None
+
+    # Reopening the durable store keeps the same degraded behaviour.
+    reopened = HerSessionStore(coordinator.store.path)
+    reopened_evidence = reopened.interruption_evidence_for_request(
+        "turn-orphan", run_claim=source_claim
+    )
+    assert reopened_evidence["provider_context_available"] is False
+    assert reopened.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    successor = _accept(
+        coordinator,
+        "turn-orphan-successor",
+        "Stop deleting. Investigate the reports instead.",
+    )
+    context = reopened.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+    )
+    assert context["interrupted_turn_id"] == turn.turn_id
+    assert context["recovery_disposition"] == "steered"
+    assert context["provider_context_checkpoint"]["available"] is False
+    assert reopened.provider_context_for_turn(
+        successor.session_id, successor.turn_id
+    ) is None
+
+
+def test_steer_checkpoint_with_conflicting_producer_claim_is_never_inherited(
+    tmp_path,
+):
+    """A checkpoint whose producer claim names a different Run than the
+    canonical source Run is conflicting provenance: it must not be inherited
+    or relabelled, while the verified /steer successor still continues
+    through the degraded, context-free path."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-conflict", "Delete obsolete reports")
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Delete obsolete reports"},
+    ]
+    coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "ready_provider_request",
+            "messages": provider_messages,
+            "reasoning": [],
+            "provider_request_id": "provider-conflict",
+            "invocation_id": "turn-conflict:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-other",
+                "turn-conflict",
+                input_digest="sha256:conflict-input",
+            ),
+        },
+    )
+    closed = coordinator.steer(turn, reason="User supplied a new direction.")
+    assert closed["status"] == "steered"
+
+    source_claim = _run_claim(
+        "run-conflict",
+        "turn-conflict",
+        state="superseded",
+        input_digest="sha256:conflict-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-conflict", run_claim=source_claim
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["provider_context_available"] is False
+    assert evidence["provider"] == ""
+    assert evidence["model"] == ""
+    assert evidence["effort"] == ""
+    # Never relabel the conflicting checkpoint as the canonical source Run.
+    assert evidence["run_id"] == "run-conflict"
+    assert evidence["attempt_id"] == "run-conflict:attempt:1"
+
+    successor_claim = _run_claim(
+        "run-conflict-successor",
+        "turn-conflict-successor",
+        state="running",
+        parent_run_id="run-conflict",
+        input_digest="sha256:conflict-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    reopened = HerSessionStore(coordinator.store.path)
+    assert reopened.interruption_evidence_for_request(
+        "turn-conflict", run_claim=source_claim
+    )["provider_context_available"] is False
+
+    successor = _accept(
+        coordinator,
+        "turn-conflict-successor",
+        "Stop deleting. Investigate the reports instead.",
+    )
+    context = reopened.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+        source_run_claim=source_claim,
+    )
+    assert context["interrupted_turn_id"] == turn.turn_id
+    assert context["provider_context_checkpoint"]["available"] is False
+    assert reopened.provider_context_for_turn(
+        successor.session_id, successor.turn_id
+    ) is None
+
+@pytest.mark.parametrize("broken_digest", ["", "sha256:tampered-digest"])
+def test_steer_checkpoint_with_broken_producer_digest_degrades_not_rejects(
+    tmp_path, broken_digest
+):
+    """A stored producer claim that names the same Run/request but whose
+    digest is missing or mismatched is a private-checkpoint integrity gap,
+    not a stale authoritative Run. The /steer successor must continue
+    degraded, bound to the canonical PAO source Run, instead of the whole
+    adoption being rejected. Verified behaviour survives reopening the
+    durable store and the unverified private messages are never inherited."""
+
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-brokendigest", "Delete obsolete reports")
+    producer_claim = _run_claim(
+        "run-brokendigest",
+        "turn-brokendigest",
+        input_digest="sha256:brokendigest-input",
+    )
+    coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "ready_provider_request",
+            "messages": [
+                {"role": "system", "content": "private system context"},
+                {"role": "user", "content": "Delete obsolete reports"},
+            ],
+            "reasoning": [],
+            "provider_request_id": "provider-brokendigest",
+            "invocation_id": "turn-brokendigest:execution:1",
+            "producer_run_claim": producer_claim,
+        },
+    )
+    closed = coordinator.steer(turn, reason="User supplied a new direction.")
+    assert closed["status"] == "steered"
+
+    # Break only the producer claim digest: the claim itself stays
+    # structurally valid and still names the same Run/request.
+    with sqlite3.connect(coordinator.store.path) as connection:
+        connection.execute(
+            """
+            UPDATE her_active_turn_recovery
+            SET provider_context_producer_claim_digest = ?
+            WHERE session_id = ? AND turn_id = ?
+            """,
+            (broken_digest, turn.session_id, turn.turn_id),
+        )
+
+    source_claim = _run_claim(
+        "run-brokendigest",
+        "turn-brokendigest",
+        state="superseded",
+        input_digest="sha256:brokendigest-input",
+    )
+    evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-brokendigest", run_claim=source_claim
+    )
+    assert evidence is not None
+    assert evidence["turn_status"] == "steered"
+    assert evidence["provider_context_available"] is False
+    assert evidence["provider"] == ""
+    assert evidence["model"] == ""
+    assert evidence["effort"] == ""
+    assert evidence["run_id"] == "run-brokendigest"
+    assert evidence["attempt_id"] == "run-brokendigest:attempt:1"
+
+    successor_claim = _run_claim(
+        "run-brokendigest-successor",
+        "turn-brokendigest-successor",
+        state="running",
+        parent_run_id="run-brokendigest",
+        input_digest="sha256:brokendigest-successor-input",
+    )
+    binding = {
+        "instance_id": "HASHI3",
+        "agent_id": "agent1",
+        "owner_id": "owner",
+        "hashi_conversation_id": "conversation",
+        "context_generation": 1,
+        "workzone_identity": "workzone",
+    }
+    assert coordinator.store.verified_steer_session_id(
+        evidence,
+        source_run_claim=source_claim,
+        successor_run_claim=successor_claim,
+        **binding,
+    ) == turn.session_id
+
+    # The degraded continuation is durable and never inherits the
+    # unverified private messages.
+    reopened = HerSessionStore(coordinator.store.path)
+    assert reopened.interruption_evidence_for_request(
+        "turn-brokendigest", run_claim=source_claim
+    )["provider_context_available"] is False
+
+    successor = _accept(
+        coordinator,
+        "turn-brokendigest-successor",
+        "Stop deleting. Investigate the reports instead.",
+    )
+    context = reopened.consume_recovery_context(
+        session_id=successor.session_id,
+        current_turn_id=successor.turn_id,
+        source_run_claim=source_claim,
+    )
+    assert context["interrupted_turn_id"] == turn.turn_id
+    assert context["provider_context_checkpoint"]["available"] is False
+    assert reopened.provider_context_for_turn(
+        successor.session_id, successor.turn_id
+    ) is None
+
+
+def test_steer_checkpoint_with_valid_digest_still_rejects_stale_source_attempt(
+    tmp_path,
+):
+    """The digest-based degradation must never loosen Run fencing: when the
+    stored producer claim verifies (digest intact) but the presented source
+    Run attempt has moved on, adoption stays rejected."""
+
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "turn-staleattempt", "Delete obsolete reports")
+    coordinator.record_provider_context_checkpoint(
+        turn,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "ready_provider_request",
+            "messages": [
+                {"role": "system", "content": "private system context"},
+                {"role": "user", "content": "Delete obsolete reports"},
+            ],
+            "reasoning": [],
+            "provider_request_id": "provider-staleattempt",
+            "invocation_id": "turn-staleattempt:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-staleattempt",
+                "turn-staleattempt",
+                input_digest="sha256:staleattempt-input",
+            ),
+        },
+    )
+    closed = coordinator.steer(turn, reason="User supplied a new direction.")
+    assert closed["status"] == "steered"
+
+    source_claim = _run_claim(
+        "run-staleattempt",
+        "turn-staleattempt",
+        state="superseded",
+        input_digest="sha256:staleattempt-input",
+    )
+    # The exact stored attempt still verifies and inherits its context.
+    verified_evidence = coordinator.store.interruption_evidence_for_request(
+        "turn-staleattempt", run_claim=source_claim
+    )
+    assert verified_evidence is not None
+    assert verified_evidence["provider_context_available"] is True
+
+    # A genuinely newer source attempt is a stale fence and must reject.
+    stale_source_claim = {
+        **source_claim,
+        "attempt": 2,
+        "attempt_id": "run-staleattempt:attempt:2",
+        "state_revision": 2,
+    }
+    assert coordinator.store.interruption_evidence_for_request(
+        "turn-staleattempt", run_claim=stale_source_claim
+    ) is None
