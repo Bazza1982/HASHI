@@ -32,6 +32,7 @@ from remote.exchange_outbox import (
 )
 from remote.exchange_protocol import (
     AUTHORIZED_ROUTES_CAPABILITY,
+    PRIVATE_AUTHORIZATION_CAPABILITY,
     CAPABILITIES,
     MAX_FRAME_BYTES,
     SUBPROTOCOL,
@@ -414,7 +415,10 @@ class ExchangeTransport:
     ) -> dict[str, Any]:
         message = await ws.receive()
         if message.type == aiohttp.WSMsgType.TEXT:
-            return decode_server_frame(message.data)
+            return decode_server_frame(
+                message.data,
+                capabilities=self._negotiated_capabilities,
+            )
         if message.type in {
             aiohttp.WSMsgType.CLOSE,
             aiohttp.WSMsgType.CLOSED,
@@ -543,7 +547,9 @@ class ExchangeTransport:
         welcome = self._welcome
         if welcome is None:
             raise ExchangeTransportError("STALE_CONNECTION")
-        prompt = render_exchange_hchat_prompt(delivery)
+        prompt = render_exchange_hchat_prompt(
+            delivery, capabilities=self._negotiated_capabilities
+        )
         claims = build_exchange_ingress_claims(
             delivery=delivery,
             welcome=welcome,
@@ -783,13 +789,16 @@ class ExchangeTransport:
         authorization_resources: list[str] | None = None,
         private_authorization_proofs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        if authorization_resources or private_authorization_proofs:
-            raise ExchangeTransportError("UNSUPPORTED_CAPABILITY")
+        has_private = bool(authorization_resources or private_authorization_proofs)
         destination = PublicAddress.parse(to_address)
         await self._wait_ready()
         ws = self._ws
         if ws is None or ws.closed:
             raise ExchangeTransportError("EXCHANGE_UNAVAILABLE", retryable=True)
+        if has_private and PRIVATE_AUTHORIZATION_CAPABILITY not in self._negotiated_capabilities:
+            # The peer did not negotiate the private-authorization capability.
+            # Never silently downgrade a private request to a public message.
+            raise ExchangeTransportError("UNSUPPORTED_CAPABILITY")
         normalized_sender = str(from_agent or "").strip().lower()
         if normalized_sender not in self._published_agents:
             raise ExchangeTransportError("SENDER_NOT_PUBLISHED")
@@ -866,6 +875,8 @@ class ExchangeTransport:
             message_type=message_type,
             in_reply_to=in_reply_to,
             text=str(text),
+            authorization_resources=list(authorization_resources or []),
+            private_authorization_proofs=list(private_authorization_proofs or []),
         )
         try:
             record = self.outbox.put(outbound)

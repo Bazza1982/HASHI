@@ -4237,15 +4237,6 @@ def create_app(
                     "error_code": "invalid_message",
                 },
             )
-        if payload.authorization_resources or payload.private_authorization_proofs:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "ok": False,
-                    "state": "rejected",
-                    "code": "UNSUPPORTED_CAPABILITY",
-                },
-            )
         try:
             result = await _exchange_transport.send_message(
                 from_agent=payload.from_agent,

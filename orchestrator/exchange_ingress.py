@@ -19,11 +19,15 @@ from datetime import datetime, timedelta, timezone
 from orchestrator.exchange_config import ExchangeConfig, load_exchange_config
 from orchestrator.message_context import (
     CONNECTOR_EVIDENCE_METADATA_KEY,
+    PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY,
+    PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY,
+    PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY,
     seal_connector_evidence,
     verify_connector_evidence,
 )
 from orchestrator.session_store import SessionNotFound
 from remote.exchange_protocol import (
+    PRIVATE_AUTHORIZATION_CAPABILITY,
     canonical_json,
     delivery_identity_key,
     delivery_payload_digest,
@@ -133,10 +137,14 @@ class VerifiedRemotePrincipal:
         }
 
 
-def render_exchange_hchat_prompt(delivery: Mapping[str, Any]) -> str:
+def render_exchange_hchat_prompt(
+    delivery: Mapping[str, Any], *, capabilities=None,
+) -> str:
     """Build the legacy-compatible display envelope from typed identity."""
 
-    normalized = validate_delivery_frame(dict(delivery))
+    normalized = validate_delivery_frame(
+        dict(delivery), capabilities=capabilities
+    )
     sender = ExchangeAddress.from_mapping(normalized["sender"])
     text = str(normalized["content"]["text"])
     from tools.hchat_send import (
@@ -160,18 +168,67 @@ def render_exchange_hchat_prompt(delivery: Mapping[str, Any]) -> str:
     )
 
 
+def _exchange_private_authorization_metadata(
+    delivery: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project carried private authorization into receiver-owned metadata.
+
+    The proof material already passed protocol structure validation and, when
+    the peer negotiated the capability, stays bound to the exact delivery by
+    delivery_payload_digest.  Here we rebuild the receiver-side binding the
+    same way the ordinary HChat ingress does, with content_sha256 over the
+    delivered text, so the existing resolve_private_authorizations authority
+    verifies it without a second approval step.  Proofs are never fabricated
+    and private material is never downgraded to public text.
+    """
+    content = delivery.get("content")
+    if not isinstance(content, Mapping):
+        return {}
+    proofs = content.get("private_authorization_proofs") or []
+    if not isinstance(proofs, list) or not proofs:
+        return {}
+    from orchestrator.private_authorization import authorization_content_sha256
+
+    sender = ExchangeAddress.from_mapping(delivery["sender"])
+    recipient = ExchangeAddress.from_mapping(delivery["recipient"])
+    content_digest = authorization_content_sha256(
+        str(content.get("text") or "")
+    )
+    return {
+        PRIVATE_AUTHORIZATION_PROOFS_METADATA_KEY: [
+            dict(item) for item in proofs if isinstance(item, Mapping)
+        ],
+        PRIVATE_AUTHORIZATION_BINDING_METADATA_KEY: {
+            "message_id": str(delivery.get("message_id") or ""),
+            "from_instance": sender.registered_instance_id,
+            "from_agent": sender.agent_id,
+            "to_instance": recipient.registered_instance_id,
+            "to_agent": recipient.agent_id,
+            "content_sha256": content_digest,
+            "resources": list(content.get("authorization_resources") or []),
+        },
+        PRIVATE_AUTHORIZATION_CONTENT_DIGEST_METADATA_KEY: content_digest,
+    }
+
+
 def build_exchange_ingress_claims(
     *,
     delivery: Mapping[str, Any],
     welcome: Mapping[str, Any],
 ) -> dict[str, Any]:
-    normalized = validate_delivery_frame(dict(delivery))
+    negotiated = {
+        str(value) for value in (welcome.get("capabilities") or [])
+    }
+    normalized = validate_delivery_frame(
+        dict(delivery), capabilities=negotiated
+    )
     return {
         "type": EXCHANGE_INGRESS_CLAIMS_TYPE,
         "version": EXCHANGE_INGRESS_CLAIMS_VERSION,
         "connection_epoch": str(welcome.get("epoch") or ""),
         "local_actor_id": str(welcome.get("actor_id") or ""),
         "local_instance_address": str(welcome.get("instance_address") or ""),
+        "negotiated_capabilities": sorted(negotiated),
         "delivery": normalized,
     }
 
@@ -192,8 +249,14 @@ def _principal_from_claims(
         raise ExchangeIngressAuthenticationError("invalid Exchange ingress claims")
     if not config.enabled:
         raise ExchangeIngressPermissionError("Exchange is disabled")
+    negotiated_capabilities = {
+        str(value) for value in (claims.get("negotiated_capabilities") or [])
+    }
     try:
-        delivery = validate_delivery_frame(dict(claims.get("delivery") or {}))
+        delivery = validate_delivery_frame(
+            dict(claims.get("delivery") or {}),
+            capabilities=negotiated_capabilities,
+        )
         sender = ExchangeAddress.from_mapping(delivery["sender"])
         recipient = ExchangeAddress.from_mapping(delivery["recipient"])
         local_instance = PublicAddress.parse(
@@ -224,7 +287,9 @@ def _principal_from_claims(
             validate_delivery_deadline(delivery, now=now)
         except ValueError as exc:
             raise ExchangeIngressError("Exchange delivery expired") from exc
-    rendered = render_exchange_hchat_prompt(delivery)
+    rendered = render_exchange_hchat_prompt(
+        delivery, capabilities=negotiated_capabilities
+    )
     if rendered != str(prompt):
         raise ExchangeIngressAuthenticationError(
             "Exchange prompt/evidence binding mismatch"
@@ -404,7 +469,9 @@ class ExchangeInbox:
             not isinstance(admission_owner_id, str) or not admission_owner_id.strip()
         ):
             raise ValueError("Exchange admission owner is invalid")
-        normalized = validate_delivery_frame(dict(delivery))
+        normalized = validate_delivery_frame(
+            dict(delivery), capabilities=(PRIVATE_AUTHORIZATION_CAPABILITY,)
+        )
         identity = delivery_identity_key(normalized)
         inbox_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         idempotency_key = f"exchange-{inbox_key}"
@@ -470,7 +537,9 @@ class ExchangeInbox:
 
     def existing_delivery(self, delivery: Mapping[str, Any]) -> InboxRecord | None:
         """Read an already accepted exact delivery without creating a new item."""
-        normalized = validate_delivery_frame(dict(delivery))
+        normalized = validate_delivery_frame(
+            dict(delivery), capabilities=(PRIVATE_AUTHORIZATION_CAPABILITY,)
+        )
         key = hashlib.sha256(delivery_identity_key(normalized).encode("utf-8")).hexdigest()
         record = self.get(key)
         if record is None:
@@ -1475,6 +1544,7 @@ class ExchangeIngressService:
                 "ingress_transport": "exchange.wss",
                 "session_surface": "workbench",
                 "session_channel_key": "default",
+                **_exchange_private_authorization_metadata(delivery),
             }
             request_id = await runtime.enqueue_api_text(
                 prompt,

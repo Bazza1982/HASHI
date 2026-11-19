@@ -27,7 +27,11 @@ from orchestrator.hchat_delivery_status import (
 )
 from orchestrator.session_store import SessionStore
 from remote.exchange_outbox import ExchangeOutbox
-from remote.exchange_protocol import send_frame, utc_timestamp
+from remote.exchange_protocol import (
+    PRIVATE_AUTHORIZATION_CAPABILITY,
+    send_frame,
+    utc_timestamp,
+)
 
 
 def _address(*, actor: str, instance: str, agent: str, address: str):
@@ -925,3 +929,91 @@ def test_inbound_reply_cannot_swap_the_original_conversation(tmp_path):
     with pytest.raises(ExchangeIngressPermissionError):
         service.accept(evidence=evidence, prompt=prompt)
 # HASHI-Fingerprint: hfp_b1b36e7e40734f018f7114ae40c237e9
+
+
+
+def _private_proof(*, message_id: str = "message_1") -> dict:
+    return {
+        "type": "hashi.private-authorization-proof",
+        "version": 1,
+        "credential_id": "finance",
+        "issued_at": 1_800_000_000,
+        "expires_at": 1_800_000_090,
+        "nonce": "nonce_1",
+        "digest": "a" * 64,
+        "binding": {
+            "message_id": message_id,
+            "from_instance": "instance_alice",
+            "from_agent": "planner",
+            "to_instance": "instance_barry",
+            "to_agent": "reviewer",
+            "content_sha256": "b" * 64,
+            "resources": ["finance:read"],
+        },
+    }
+
+
+def test_private_authorization_metadata_binds_delivery_identity():
+    from orchestrator.exchange_ingress import (
+        _exchange_private_authorization_metadata,
+    )
+
+    delivery = _delivery(1_800_000_000)
+    delivery["content"]["authorization_resources"] = ["finance:read"]
+    delivery["content"]["private_authorization_proofs"] = [_private_proof()]
+
+    meta = _exchange_private_authorization_metadata(delivery)
+    assert meta["_private_authorization_proofs"][0]["credential_id"] == "finance"
+    binding = meta["_private_authorization_binding"]
+    assert binding["from_instance"] == "instance_alice"
+    assert binding["from_agent"] == "planner"
+    assert binding["to_instance"] == "instance_barry"
+    assert binding["to_agent"] == "reviewer"
+    assert binding["resources"] == ["finance:read"]
+    assert binding["message_id"] == "message_1"
+    # content digest is over the delivered text
+    from orchestrator.private_authorization import authorization_content_sha256
+
+    assert binding["content_sha256"] == authorization_content_sha256(
+        "Please review."
+    )
+    assert meta["_private_authorization_content_sha256"] == binding["content_sha256"]
+
+
+def test_private_authorization_metadata_is_empty_without_proofs():
+    from orchestrator.exchange_ingress import (
+        _exchange_private_authorization_metadata,
+    )
+
+    assert _exchange_private_authorization_metadata(_delivery(1_800_000_000)) == {}
+
+
+def test_claims_accept_private_proof_when_peer_negotiated(tmp_path):
+    delivery = _delivery(1_800_000_000)
+    delivery["content"]["authorization_resources"] = ["finance:read"]
+    delivery["content"]["private_authorization_proofs"] = [_private_proof()]
+    welcome = {
+        "epoch": delivery["recipient_epoch"],
+        "actor_id": delivery["recipient"]["actor_id"],
+        "instance_address": "server.barry",
+        "capabilities": [PRIVATE_AUTHORIZATION_CAPABILITY],
+    }
+    claims = build_exchange_ingress_claims(delivery=delivery, welcome=welcome)
+    assert PRIVATE_AUTHORIZATION_CAPABILITY in claims["negotiated_capabilities"]
+    assert claims["delivery"]["content"]["private_authorization_proofs"][0][
+        "credential_id"
+    ] == "finance"
+
+
+def test_claims_reject_private_proof_when_peer_not_negotiated():
+    delivery = _delivery(1_800_000_000)
+    delivery["content"]["private_authorization_proofs"] = [_private_proof()]
+    welcome = {
+        "epoch": delivery["recipient_epoch"],
+        "actor_id": delivery["recipient"]["actor_id"],
+        "instance_address": "server.barry",
+    }
+    from remote.exchange_protocol import ExchangeProtocolError
+
+    with pytest.raises(ExchangeProtocolError, match="UNSUPPORTED_CAPABILITY"):
+        build_exchange_ingress_claims(delivery=delivery, welcome=welcome)

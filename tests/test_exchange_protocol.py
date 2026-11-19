@@ -8,6 +8,7 @@ import pytest
 from remote.exchange_protocol import (
     AUTHORIZED_ROUTES_CAPABILITY,
     CAPABILITIES,
+    PRIVATE_AUTHORIZATION_CAPABILITY,
     ExchangeProtocolError,
     decode_server_frame,
     delivery_payload_digest,
@@ -214,3 +215,95 @@ def test_reply_frame_preserves_conversation_and_original_request():
     assert frame["conversation_id"] == "conversation_1"
     assert frame["in_reply_to"] == "message_1"
     assert frame["message_type"] == "agent_reply"
+
+
+
+def _proof(*, credential_id: str = "finance") -> dict:
+    return {
+        "type": "hashi.private-authorization-proof",
+        "version": 1,
+        "credential_id": credential_id,
+        "issued_at": 1_800_000_000,
+        "expires_at": 1_800_000_090,
+        "nonce": "nonce_1",
+        "digest": "a" * 64,
+        "binding": {
+            "message_id": "message_1",
+            "from_instance": "instance_alice",
+            "from_agent": "planner",
+            "to_instance": "instance_barry",
+            "to_agent": "reviewer",
+            "content_sha256": "b" * 64,
+            "resources": ["finance:read"],
+        },
+    }
+
+
+def _private_delivery(proofs=None, resources=None):
+    delivery = _delivery()
+    delivery["content"]["authorization_resources"] = list(resources or [])
+    delivery["content"]["private_authorization_proofs"] = list(proofs or [])
+    return delivery
+
+
+def test_delivery_accepts_private_proof_when_capability_negotiated():
+    delivery = _private_delivery(
+        proofs=[_proof()], resources=["finance:read"]
+    )
+    normalized = validate_delivery_frame(
+        delivery, capabilities=(PRIVATE_AUTHORIZATION_CAPABILITY,)
+    )
+    assert normalized["content"]["authorization_resources"] == ["finance:read"]
+    assert normalized["content"]["private_authorization_proofs"][0][
+        "credential_id"
+    ] == "finance"
+
+
+def test_delivery_rejects_private_proof_without_capability_still():
+    delivery = _private_delivery(proofs=[_proof()])
+    with pytest.raises(ExchangeProtocolError, match="UNSUPPORTED_CAPABILITY"):
+        validate_delivery_frame(delivery)
+
+
+def test_private_proof_structural_validation_rejects_bad_digest():
+    proof = _proof()
+    proof["digest"] = "not-hex"
+    delivery = _private_delivery(proofs=[proof])
+    with pytest.raises(ExchangeProtocolError, match="INVALID_MESSAGE"):
+        validate_delivery_frame(
+            delivery, capabilities=(PRIVATE_AUTHORIZATION_CAPABILITY,)
+        )
+
+
+def test_private_proof_budget_and_resource_budget_are_enforced():
+    proof = _proof()
+    many = _private_delivery(
+        proofs=[dict(proof) for _ in range(17)],
+        resources=["finance:read"],
+    )
+    with pytest.raises(ExchangeProtocolError, match="PROOF_BUDGET_EXCEEDED"):
+        validate_delivery_frame(
+            many, capabilities=(PRIVATE_AUTHORIZATION_CAPABILITY,)
+        )
+    too_many_resources = _private_delivery(
+        proofs=[proof],
+        resources=[f"res:{i}" for i in range(65)],
+    )
+    with pytest.raises(ExchangeProtocolError, match="RESOURCE_BUDGET_EXCEEDED"):
+        validate_delivery_frame(
+            too_many_resources,
+            capabilities=(PRIVATE_AUTHORIZATION_CAPABILITY,),
+        )
+
+
+def test_private_delivery_digest_covers_proofs_despite_capability():
+    first = _private_delivery(proofs=[_proof()])
+    second = _private_delivery(proofs=[_proof(credential_id="other")])
+    # digest covers full content regardless of negotiated capability
+    assert delivery_payload_digest(first) != delivery_payload_digest(second)
+
+
+def test_capabilities_advertises_private_authorization():
+    assert PRIVATE_AUTHORIZATION_CAPABILITY in CAPABILITIES
+    # but a legacy peer without it is still accepted
+    assert set(["hchat_v1", "receipt_v1", "agent_reply_v1", "public_address_v1"]) <= set(CAPABILITIES)

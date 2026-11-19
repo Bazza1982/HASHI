@@ -11,6 +11,7 @@ from aiohttp import web
 from orchestrator.exchange_config import ExchangeConfig
 from remote.exchange_protocol import (
     AUTHORIZED_ROUTES_CAPABILITY,
+    PRIVATE_AUTHORIZATION_CAPABILITY,
     send_frame,
     utc_timestamp,
 )
@@ -421,3 +422,104 @@ def test_new_exchange_message_can_generate_and_reuse_its_creation_time(tmp_path)
     assert frames[0]["created_at"] == utc_timestamp(1_800_000_000.0)
     with pytest.raises(ExchangeTransportError, match="IDEMPOTENCY_CONFLICT"):
         asyncio.run(transport.send_message(**{**arguments, "text": "Different content"}))
+
+
+
+def _valid_proof(*, message_id: str = "message_private") -> dict:
+    return {
+        "type": "hashi.private-authorization-proof",
+        "version": 1,
+        "credential_id": "finance",
+        "issued_at": 1_800_000_000,
+        "expires_at": 1_800_000_090,
+        "nonce": "nonce_private_1",
+        "digest": "a" * 64,
+        "binding": {
+            "message_id": message_id,
+            "from_instance": "instance_barry",
+            "from_agent": "reviewer",
+            "to_instance": "instance_alice",
+            "to_agent": "planner",
+            "content_sha256": "b" * 64,
+            "resources": ["finance:read"],
+        },
+    }
+
+
+def test_send_message_rejects_private_without_negotiated_capability(tmp_path):
+    now = 1_800_000_000.0
+    transport = _ready_transport(tmp_path, now=now + 10)
+    transport._negotiated_capabilities = set()
+    transport._send_frame = lambda _ws, frame: None
+    transport._transmit_record = lambda _ws, record, *, replayed: {
+        "ok": True, "replayed": replayed,
+    }
+    with pytest.raises(ExchangeTransportError, match="UNSUPPORTED_CAPABILITY"):
+        asyncio.run(transport.send_message(
+            from_agent="reviewer",
+            to_address="planner@home.alice",
+            text="Please review.",
+            authorization_resources=["finance:read"],
+            private_authorization_proofs=[_valid_proof()],
+        ))
+
+
+def test_send_message_carries_private_when_capability_negotiated(tmp_path):
+    now = 1_800_000_000.0
+    transport = _ready_transport(tmp_path, now=now + 10)
+    transport._negotiated_capabilities = {PRIVATE_AUTHORIZATION_CAPABILITY}
+
+    async def send(_ws, frame):
+        if frame["type"] == "resolve":
+            transport._request_waiters[frame["request_id"]].set_result(
+                {"to": _target()}
+            )
+
+    frames = []
+
+    async def transmit(_ws, record, *, replayed):
+        frames.append(record.frame)
+        return {"ok": True, "replayed": replayed}
+
+    transport._send_frame = send
+    transport._transmit_record = transmit
+    proof = _valid_proof()
+    result = asyncio.run(transport.send_message(
+        from_agent="reviewer",
+        to_address="planner@home.alice",
+        text="Please review.",
+        authorization_resources=["finance:read"],
+        private_authorization_proofs=[proof],
+    ))
+    assert result["ok"] is True
+    content = frames[0]["content"]
+    assert content["authorization_resources"] == ["finance:read"]
+    assert content["private_authorization_proofs"] == [proof]
+    assert content["authorization_message_id"] is None
+
+
+def test_send_message_without_private_still_works_without_capability(tmp_path):
+    now = 1_800_000_000.0
+    transport = _ready_transport(tmp_path, now=now + 10)
+    transport._negotiated_capabilities = set()
+    frames = []
+
+    async def send(_ws, frame):
+        if frame["type"] == "resolve":
+            transport._request_waiters[frame["request_id"]].set_result(
+                {"to": _target()}
+            )
+
+    async def transmit(_ws, record, *, replayed):
+        frames.append(record.frame)
+        return {"ok": True, "replayed": replayed}
+
+    transport._send_frame = send
+    transport._transmit_record = transmit
+    result = asyncio.run(transport.send_message(
+        from_agent="reviewer",
+        to_address="planner@home.alice",
+        text="Please review.",
+    ))
+    assert result["ok"] is True
+    assert frames[0]["content"]["authorization_resources"] == []

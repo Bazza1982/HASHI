@@ -171,11 +171,24 @@ facts match an Exchange-accepted local outbound `agent_message`. A typed reply
 does not itself trigger another automatic reply. A public-looking legacy text
 header is display data and cannot trigger Exchange egress.
 
-Exchange v1 has no negotiated HASHI private/resource-proof capability. Any
-non-empty authorization message ID, protected resource list, or private proof
-is rejected as `UNSUPPORTED_CAPABILITY`; it is never dropped or downgraded to
-an ordinary public request. A future proof version requires a separately
-reviewed full-tuple binding and capability negotiation.
+Exchange v1 carries an explicit `private_authorization_v1` capability.
+When both peers advertise it in the negotiated capabilities, a delivery may
+carry a protected resource list (`authorization_resources`) and its bound
+private authorization proofs (`private_authorization_proofs`). The proof
+material reuses the existing HASHI `hashi.private-authorization-proof` HMAC
+scheme: each proof is bound to `message_id`, both instance and agent tuples,
+`content_sha256` (over the delivered text) and the resource list, and is
+verified on the receiver with the existing `resolve_private_authorizations`
+authority. No second approval or pairing step is introduced, and the proof
+secret never travels on the wire.
+
+A peer that has not negotiated `private_authorization_v1` keeps the original
+v1 behaviour: any non-empty authorization message ID, protected resource list,
+or private proof is rejected as `UNSUPPORTED_CAPABILITY`; it is never dropped
+or downgraded to an ordinary public request. Proofs whose structural envelope,
+digest, binding, or resource budget fail validation are rejected as
+`INVALID_MESSAGE` (or `PROOF_BUDGET_EXCEEDED` / `RESOURCE_BUDGET_EXCEEDED`)
+before any authorization is granted.
 
 ## Status projection
 

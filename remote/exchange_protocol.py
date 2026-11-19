@@ -22,6 +22,7 @@ SUBPROTOCOL = "hashi-exchange.v1"
 WIRE_VERSION = 1
 REMOTE_PROTOCOL_VERSION = "2.0"
 AUTHORIZED_ROUTES_CAPABILITY = "authorized_routes_v1"
+PRIVATE_AUTHORIZATION_CAPABILITY = "private_authorization_v1"
 REQUIRED_CAPABILITIES = (
     "hchat_v1",
     "receipt_v1",
@@ -29,16 +30,26 @@ REQUIRED_CAPABILITIES = (
     "public_address_v1",
 )
 # Message age handling is an endpoint policy, not a relay requirement.
-CAPABILITIES = REQUIRED_CAPABILITIES + ("message_freshness_v1", AUTHORIZED_ROUTES_CAPABILITY)
+CAPABILITIES = REQUIRED_CAPABILITIES + (
+    "message_freshness_v1",
+    AUTHORIZED_ROUTES_CAPABILITY,
+    PRIVATE_AUTHORIZATION_CAPABILITY,
+)
 MESSAGE_KINDS = frozenset({"agent_message", "agent_reply"})
 MAX_FRAME_BYTES = 65536
 MAX_JSON_DEPTH = 8
 MAX_JSON_ITEMS = 2048
+MAX_AUTHORIZATION_RESOURCES = 64
+MAX_PRIVATE_AUTHORIZATION_PROOFS = 16
 _TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]{1,6})?Z$",
     re.ASCII,
 )
+
+_PROOF_TYPE = "hashi.private-authorization-proof"
+_PROOF_VERSION = 1
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 
 
 class ExchangeProtocolError(ValueError):
@@ -159,7 +170,89 @@ def _address(value: Any) -> dict[str, str]:
         raise ExchangeProtocolError("INVALID_ADDRESS") from exc
 
 
-def _content(value: Any) -> dict[str, Any]:
+def _authorization_resources(value: Any) -> list[str]:
+    _require(isinstance(value, list), "INVALID_MESSAGE")
+    _require(len(value) <= MAX_AUTHORIZATION_RESOURCES, "RESOURCE_BUDGET_EXCEEDED")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        _require(isinstance(raw, str) and 0 < len(raw) <= 256, "INVALID_MESSAGE")
+        _require(not any(0xD800 <= ord(ch) <= 0xDFFF for ch in raw), "INVALID_MESSAGE")
+        _require(raw not in seen, "INVALID_MESSAGE")
+        seen.add(raw)
+        normalized.append(raw)
+    return normalized
+
+
+def _proof_binding(value: Any) -> dict[str, Any]:
+    binding = _keys(
+        value,
+        required={
+            "message_id",
+            "from_instance",
+            "from_agent",
+            "to_instance",
+            "to_agent",
+            "content_sha256",
+            "resources",
+        },
+    )
+    message_id = str(binding["message_id"] or "").strip()
+    _require(message_id == "" or (0 < len(message_id) <= 128), "INVALID_MESSAGE")
+    for key in ("from_instance", "from_agent", "to_instance", "to_agent"):
+        binding[key] = _identifier(binding[key], field=key)
+    content_sha256 = str(binding["content_sha256"]).strip().lower()
+    _require(_HEX64_RE.fullmatch(content_sha256) is not None, "INVALID_MESSAGE")
+    binding["content_sha256"] = content_sha256
+    binding["resources"] = _authorization_resources(binding["resources"])
+    binding["message_id"] = message_id or None
+    return binding
+
+
+def _private_authorization_proofs(value: Any) -> list[dict[str, Any]]:
+    _require(isinstance(value, list), "INVALID_MESSAGE")
+    _require(
+        len(value) <= MAX_PRIVATE_AUTHORIZATION_PROOFS, "PROOF_BUDGET_EXCEEDED"
+    )
+    normalized: list[dict[str, Any]] = []
+    for raw in value:
+        claims = _keys(
+            raw,
+            required={
+                "type",
+                "version",
+                "credential_id",
+                "issued_at",
+                "expires_at",
+                "nonce",
+                "digest",
+                "binding",
+            },
+        )
+        _require(
+            claims["type"] == _PROOF_TYPE
+            and claims["version"] == _PROOF_VERSION,
+            "INVALID_MESSAGE",
+        )
+        claims["credential_id"] = _identifier(
+            claims["credential_id"], field="credential_id"
+        )
+        _require(
+            type(claims["issued_at"]) is int
+            and type(claims["expires_at"]) is int
+            and 0 <= claims["issued_at"] < claims["expires_at"],
+            "INVALID_MESSAGE",
+        )
+        claims["nonce"] = _identifier(claims["nonce"], field="nonce")
+        digest = str(claims["digest"]).strip().lower()
+        _require(_HEX64_RE.fullmatch(digest) is not None, "INVALID_MESSAGE")
+        claims["digest"] = digest
+        claims["binding"] = _proof_binding(claims["binding"])
+        normalized.append(claims)
+    return normalized
+
+
+def _content(value: Any, *, allow_private: bool = False) -> dict[str, Any]:
     content = _keys(
         value,
         required={
@@ -173,24 +266,41 @@ def _content(value: Any) -> dict[str, Any]:
     _require(content["format"] == "hchat")
     text = _text(content["text"], limit=MAX_FRAME_BYTES)
     _require(len(text.encode("utf-8")) <= MAX_FRAME_BYTES, "PAYLOAD_TOO_LARGE")
-    # Exchange v1 has no negotiated private-proof capability.  Dropping a
-    # non-empty proof would turn a private request into a public one.
-    _require(
-        content["authorization_message_id"] is None
-        and content["authorization_resources"] == []
-        and content["private_authorization_proofs"] == [],
-        "UNSUPPORTED_CAPABILITY",
+    authorization_message_id = content["authorization_message_id"]
+    if authorization_message_id is not None:
+        _require(
+            isinstance(authorization_message_id, str)
+            and 0 < len(authorization_message_id) <= 128,
+            "INVALID_MESSAGE",
+        )
+    resources = content["authorization_resources"]
+    proofs = content["private_authorization_proofs"]
+    has_private = bool(
+        authorization_message_id is not None
+        or resources
+        or proofs
     )
+    if has_private and not allow_private:
+        # A peer without the negotiated private-authorization capability must
+        # never receive private material as a public request. Dropping a
+        # non-empty proof would silently downgrade a private request to public.
+        _require(False, "UNSUPPORTED_CAPABILITY")
     return {
         "format": "hchat",
         "text": text,
-        "authorization_message_id": None,
-        "authorization_resources": [],
-        "private_authorization_proofs": [],
+        "authorization_message_id": (
+            authorization_message_id if authorization_message_id is not None else None
+        ),
+        "authorization_resources": (
+            _authorization_resources(resources) if resources else []
+        ),
+        "private_authorization_proofs": (
+            _private_authorization_proofs(proofs) if proofs else []
+        ),
     }
 
 
-def decode_server_frame(raw: Any) -> dict[str, Any]:
+def decode_server_frame(raw: Any, *, capabilities=None) -> dict[str, Any]:
     frame = strict_json(raw)
     _require(isinstance(frame, dict))
     _require(type(frame.get("v")) is int and frame["v"] == WIRE_VERSION)
@@ -359,7 +469,7 @@ def decode_server_frame(raw: Any) -> dict[str, Any]:
         if "code" in frame:
             frame["code"] = _identifier(frame["code"], field="code")
     elif kind == "delivery":
-        frame = validate_delivery_frame(frame)
+        frame = validate_delivery_frame(frame, capabilities=capabilities)
     else:
         _keys(
             frame,
@@ -374,7 +484,7 @@ def decode_server_frame(raw: Any) -> dict[str, Any]:
     return frame
 
 
-def validate_delivery_frame(value: Any) -> dict[str, Any]:
+def validate_delivery_frame(value: Any, *, capabilities=None) -> dict[str, Any]:
     frame = _keys(
         value,
         required={
@@ -423,7 +533,8 @@ def validate_delivery_frame(value: Any) -> dict[str, Any]:
         )
     else:
         _require(frame["in_reply_to"] is None)
-    normalized["content"] = _content(frame["content"])
+    allow_private = PRIVATE_AUTHORIZATION_CAPABILITY in (capabilities or ())
+    normalized["content"] = _content(frame["content"], allow_private=allow_private)
     _require(len(canonical_json(normalized)) <= MAX_FRAME_BYTES, "PAYLOAD_TOO_LARGE")
     return normalized
 
@@ -532,6 +643,9 @@ def send_frame(
     message_type: str,
     in_reply_to: str | None,
     text: str,
+    authorization_message_id: str | None = None,
+    authorization_resources: list[str] | None = None,
+    private_authorization_proofs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _require(message_type in MESSAGE_KINDS)
     if message_type == "agent_reply":
@@ -541,14 +655,20 @@ def send_frame(
         normalized_reply = None
     parse_timestamp(created_at)
     parse_timestamp(expires_at)
+    has_private = bool(
+        authorization_message_id is not None
+        or authorization_resources
+        or private_authorization_proofs
+    )
     content = _content(
         {
             "format": "hchat",
             "text": text,
-            "authorization_message_id": None,
-            "authorization_resources": [],
-            "private_authorization_proofs": [],
-        }
+            "authorization_message_id": authorization_message_id,
+            "authorization_resources": list(authorization_resources or []),
+            "private_authorization_proofs": list(private_authorization_proofs or []),
+        },
+        allow_private=has_private,
     )
     frame = {
         "v": WIRE_VERSION,
@@ -623,10 +743,22 @@ def delivery_identity_key(delivery: Mapping[str, Any]) -> str:
     )
 
 
-def delivery_payload_digest(delivery: Mapping[str, Any]) -> str:
-    """Digest immutable message semantics, excluding retry/epoch metadata."""
+def delivery_payload_digest(
+    delivery: Mapping[str, Any], *, capabilities=None,
+) -> str:
+    """Digest immutable message semantics, excluding retry/epoch metadata.
 
-    normalized = validate_delivery_frame(dict(delivery))
+    The digest covers the complete content, including any carried private
+    authorization material.  It is a fingerprint for deduplication and conflict
+    detection, so it must represent the whole message regardless of the
+    negotiated capabilities; it never grants access on its own.
+    """
+
+    normalized = validate_delivery_frame(
+        dict(delivery),
+        capabilities=(capabilities if capabilities is not None
+                      else (PRIVATE_AUTHORIZATION_CAPABILITY,)),
+    )
     immutable = {
         key: normalized[key]
         for key in (
@@ -646,6 +778,7 @@ def delivery_payload_digest(delivery: Mapping[str, Any]) -> str:
 
 __all__ = [
     "AUTHORIZED_ROUTES_CAPABILITY",
+    "PRIVATE_AUTHORIZATION_CAPABILITY",
     "CAPABILITIES",
     "ExchangeProtocolError",
     "MAX_FRAME_BYTES",

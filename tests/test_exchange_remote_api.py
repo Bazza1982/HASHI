@@ -13,8 +13,9 @@ from remote.terminal.executor import TerminalExecutor
 
 
 class _ExchangeTransportStub:
-    def __init__(self):
+    def __init__(self, *, supports_private_authorization: bool = False):
         self.calls = []
+        self.supports_private_authorization = supports_private_authorization
 
     def status(self):
         return {
@@ -29,6 +30,17 @@ class _ExchangeTransportStub:
         }
 
     async def send_message(self, **kwargs):
+        has_private = bool(
+            kwargs.get("authorization_resources")
+            or kwargs.get("private_authorization_proofs")
+        )
+        if has_private and not self.supports_private_authorization:
+            # Mirrors the real transport: a peer that did not negotiate the
+            # private-authorization capability must never receive private
+            # material as a public request.
+            from remote.exchange_transport import ExchangeTransportError
+
+            raise ExchangeTransportError("UNSUPPORTED_CAPABILITY")
         self.calls.append(kwargs)
         return {
             "ok": True,
@@ -222,3 +234,71 @@ def test_exchange_status_is_also_hmac_protected(tmp_path):
     assert unauthenticated.status_code == 401
     assert authenticated.status_code == 200
     assert authenticated.json()["state"] == "ready"
+
+
+
+def _valid_proof() -> dict:
+    return {
+        "type": "hashi.private-authorization-proof",
+        "version": 1,
+        "credential_id": "finance",
+        "issued_at": 1_800_000_000,
+        "expires_at": 1_800_000_090,
+        "nonce": "nonce_1",
+        "digest": "a" * 64,
+        "binding": {
+            "message_id": "message_1",
+            "from_instance": "HASHI_LOCAL",
+            "from_agent": "planner",
+            "to_instance": "instance_barry",
+            "to_agent": "reviewer",
+            "content_sha256": "b" * 64,
+            "resources": ["finance:read"],
+        },
+    }
+
+
+def test_exchange_message_relays_private_proof_when_capable(tmp_path):
+    token = "synthetic-local-shared-token"
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": token}),
+        encoding="utf-8",
+    )
+    transport = _ExchangeTransportStub(supports_private_authorization=True)
+    app = create_app(
+        {
+            "instance_id": "HASHI_LOCAL",
+            "display_name": "Local",
+            "remote_port": 8766,
+        },
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=True),
+        TerminalExecutor(),
+        exchange_transport=transport,
+        hashi_root=str(tmp_path),
+        workbench_port=18800,
+    )
+    client = TestClient(app, client=("127.0.0.1", 50123))
+    proof = _valid_proof()
+    body = json.dumps(
+        _payload(
+            authorization_resources=["finance:read"],
+            private_authorization_proofs=[proof],
+        )
+    ).encode("utf-8")
+
+    response = client.post(
+        "/exchange/message",
+        content=body,
+        headers=_signed_headers(
+            token=token,
+            method="POST",
+            path="/exchange/message",
+            from_instance="HASHI_LOCAL",
+            body=body,
+        ),
+    )
+
+    assert response.status_code == 200
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["authorization_resources"] == ["finance:read"]
+    assert transport.calls[0]["private_authorization_proofs"] == [proof]
