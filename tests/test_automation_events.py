@@ -1,9 +1,12 @@
 """HEA v1 terminal event projection: read-only and cursor-safe."""
+import asyncio
+import json
 import sqlite3
 import threading
+from types import SimpleNamespace
 from contextlib import contextmanager
 
-from orchestrator.automation_events import terminal_events_page
+from orchestrator.automation_events import terminal_events_page, handle_automation_events
 
 
 class Store:
@@ -72,3 +75,27 @@ def test_paging_reset_and_bounds(tmp_path):
             assert False, "expected ValueError"
         except ValueError:
             pass
+
+
+def test_api_projects_only_small_typed_events_and_requires_owner(tmp_path):
+    store = Store(tmp_path / "hea.sqlite")
+    server = SimpleNamespace(
+        session_store=store,
+        _v1_owner_id=lambda req: "owner-a" if req.headers.get("x-owner") == "allowed" else None,
+    )
+    response = asyncio.run(handle_automation_events(server, SimpleNamespace(
+        query={"after": "0", "limit": "20", "wait_seconds": "0"},
+        headers={"x-owner": "allowed"},
+    )))
+    payload = json.loads(response.text)
+    assert response.status == 200
+    assert payload["schema"] == "hashi.automation-events/v1"
+    assert payload["instance_id"] == "HASHI1"
+    assert [event["type"] for event in payload["events"]] == [
+        "agent.run.completed", "agent.run.failed",
+    ]
+    assert all("text" not in event and "error" not in event for event in payload["events"])
+    denied = asyncio.run(handle_automation_events(server, SimpleNamespace(
+        query={}, headers={},
+    )))
+    assert denied.status == 401
