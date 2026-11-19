@@ -3345,7 +3345,17 @@ class HashiStageProvider(StageProvider):
                 continuation.append(
                     {"role": "user", "content": stage_prompt}
                 )
-        elif context.get("boundary") != "ready_provider_request":
+        elif context.get("boundary") == "ready_provider_request":
+            if not self._provider_context_resume_pending:
+                # /steer successor: the checkpoint ends at the original
+                # provider request, so the new steering instruction must be
+                # appended or the backend payload only carries the old one.
+                # Ordinary crash recovery re-drives the identical request and
+                # must not duplicate the original prompt.
+                continuation.append(
+                    {"role": "user", "content": stage_prompt}
+                )
+        else:
             continuation.append({"role": "user", "content": stage_prompt})
         self._provider_context_recovery_consumed = True
         return continuation

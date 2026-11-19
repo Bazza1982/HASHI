@@ -184,25 +184,39 @@ without a mid-task wrapper.
   repair in the isolated D non-production environment; this PR is review-only
   and does not merge or deploy.
 - Problem: adopting a steered Turn was gated on safe_to_resume == 1 and a
-  ecovery_disposition whitelist. A hard stop of a busy non-read-only Tool
+  recovery_disposition whitelist. A hard stop of a busy non-read-only Tool
   IS an unresolved side effect, so steering a busy run always ended with
   "The /steer continuation receipt is invalid or no longer resumable." A
   Turn steered before any private provider checkpoint had no adoption
   evidence at all, and an interrupted pending Tool batch was handed back to
   the provider to resume (replay) instead of being closed.
 - Implementation: HERV3 adoption now requires only the authoritative steer
-  terminal state (Turn steered, recovery 	erminated) plus the existing
+  terminal state (Turn steered, recovery terminated) plus the existing
   PAO Run-chain, digest, session and binding verification. safe_to_resume
   keeps its crash-recovery meaning. A steered Turn without a private
   provider checkpoint still yields adoption evidence bound to the canonical
   PAO source Run; the successor continues without private provider context.
   For a /steer successor, an interrupted pending Tool batch is closed with
   synthetic "/steer interrupted" Tool results instead of
-  esume_pending_tools; crash recovery keeps its resume-pending behavior.
+  resume_pending_tools; crash recovery keeps its resume-pending behavior.
+- New instruction delivery: when the recovered checkpoint ends at the
+  ready_provider_request boundary, a /steer successor appends the new
+  steering instruction as the final user message (the original request stays
+  historical context only); ordinary crash recovery reuses the checkpointed
+  messages as-is and never duplicates the original prompt.
+- Private context provenance: a checkpoint whose producer Run claim is
+  missing, malformed, or conflicting is never claimed as verified and is
+  never inherited by a successor. Such a successor continues through the
+  degraded, context-free path bound to the canonical PAO source Run. Only a
+  checkpoint with an intact, digest-matching producer claim for the
+  canonical source Run is inherited. A stale source attempt or a wrong
+  successor parent chain still rejects adoption.
 - Safety: attempt/fence/digest binding, the open-session check and the full
   instance/Agent/owner/conversation/generation/Workzone binding are
   unchanged. Unresolved side effects stay on the source Turn ledger and are
-  surfaced in the successor's recovery context for investigation.
+  surfaced in the successor's recovery context for investigation; they are
+  never replayed automatically and unknown outcomes remain recorded as
+  unknown.
 - Validation: six new focused tests with red/green evidence; the owning
   control-plane, adapter, steer-command, session-store and permission-park
   suites passed (242 tests); the deterministic Core gate passes with one

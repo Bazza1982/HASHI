@@ -5837,3 +5837,198 @@ async def test_read_only_delegation_uses_registry_capability_not_her_name_list()
     assert [item[0] for item in base_registry.executed] == ["file_read"]
     assert base_registry.denials[0][0] == "file_write"
     assert base_registry.denials[0][3]["safety_mode"] == "read_only"
+
+
+def test_partial_adapter_without_init_keeps_steer_tracking_safe():
+    """HCC and runtime integration tests build partial adapters with __new__
+    without __init__; steer adoption probing must never raise AttributeError
+    and must keep per-instance, request-scoped tracking."""
+
+    adapter = HERv2Adapter.__new__(HERv2Adapter)
+    assert not hasattr(adapter, "_steer_continuation_requests")
+    adapter._adopt_verified_steer_session({})
+    assert adapter._steer_continuation_requests == set()
+    adapter._adopt_verified_steer_session({"request_id": "req-x"})
+    assert "req-x" not in adapter._steer_continuation_requests
+    adapter._steer_continuation_tracking().add("req-x")
+    assert "req-x" in adapter._steer_continuation_requests
+    # Ordinary, non-steer requests are unaffected by the tracking probe.
+    adapter._adopt_verified_steer_session(
+        {"request_id": "req-plain", "request_metadata": {}}
+    )
+    assert "req-plain" not in adapter._steer_continuation_requests
+
+
+@pytest.mark.asyncio
+async def test_stage_provider_steer_successor_delivers_new_instruction_at_ready_provider_request():
+    """A /steer successor adopting a ready_provider_request checkpoint must
+    receive the new steering instruction as the final user message while the
+    original request is retained only as historical context."""
+
+    class ContinuationBackend(_FakeBackend):
+        def __init__(self, system_md=None):
+            super().__init__(system_md)
+            self.continuation_messages = None
+
+        def set_provider_context_observer(self, observer):
+            self.context_observer = observer
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+            continuation_messages=None,
+            provider_call_limit=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.provider_call_limit = provider_call_limit
+            self.continuation_messages = continuation_messages
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"investigation started"}',
+                duration_ms=1,
+            )
+
+    class ContinuationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = ContinuationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    private_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "Delete obsolete reports."},
+    ]
+    manager = ContinuationManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    persisted = []
+    provider.bind_provider_context(
+        observer=persisted.append,
+        recovery={
+            "format": "herv3-provider-context-v1",
+            "provider": "openrouter-api",
+            "model": "configured/model",
+            "stage": "execution",
+            "boundary": "ready_provider_request",
+            "message_count": len(private_messages),
+            "messages": private_messages,
+            "reasoning_count": 0,
+            "reasoning": [],
+        },
+        resume_pending_tools=False,
+    )
+    from dataclasses import replace
+
+    request = replace(
+        _stage_request(
+            Stage.EXECUTION, allow_tools=False, allow_side_effects=False
+        ),
+        goal="Stop deleting. Investigate the reports instead.",
+    )
+    response = await provider.invoke(
+        ProviderProfile("execution", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[0]
+    messages = backend.continuation_messages
+    assert messages is not None
+    # The original request is retained only as historical context.
+    assert messages[:-1] == private_messages
+    assert any(
+        "Delete obsolete reports." in str(item.get("content") or "")
+        for item in messages[:-1]
+    )
+    # The new steering instruction is delivered as the final user message.
+    assert messages[-1]["role"] == "user"
+    assert "Stop deleting. Investigate the reports instead." in messages[-1][
+        "content"
+    ]
+    assert persisted == []
+    # A valid successor can continue to produce a response.
+    assert response is not None
+    assert json.loads(response.text)["disposition"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_stage_provider_crash_recovery_reuses_ready_provider_request_without_duplicate_prompt():
+    """Ordinary crash recovery at the ready_provider_request boundary reuses
+    the checkpointed messages as-is: the original prompt is never duplicated
+    and no new instruction is invented."""
+
+    class ContinuationBackend(_FakeBackend):
+        def __init__(self, system_md=None):
+            super().__init__(system_md)
+            self.continuation_messages = None
+
+        def set_provider_context_observer(self, observer):
+            self.context_observer = observer
+
+        async def generate_response(
+            self,
+            prompt,
+            request_id,
+            is_retry=False,
+            silent=False,
+            on_stream_event=None,
+            continuation_messages=None,
+            provider_call_limit=None,
+        ):
+            del request_id, is_retry, silent, on_stream_event
+            self.prompt = prompt
+            self.provider_call_limit = provider_call_limit
+            self.continuation_messages = continuation_messages
+            return BackendResponse(
+                text='{"disposition":"COMPLETED","summary":"continued"}',
+                duration_ms=1,
+            )
+
+    class ContinuationManager(_FakeManager):
+        def create_ephemeral_backend(self, engine, target_model=None):
+            assert (engine, target_model) == (
+                "openrouter-api",
+                "configured/model",
+            )
+            backend = ContinuationBackend(self.system_md)
+            self.backends.append(backend)
+            return backend
+
+    private_messages = [
+        {"role": "system", "content": "execution contract"},
+        {"role": "user", "content": "Delete obsolete reports."},
+    ]
+    manager = ContinuationManager()
+    provider = HashiStageProvider(backend_manager=manager)
+    provider.bind_provider_context(
+        observer=lambda checkpoint: None,
+        recovery={
+            "format": "herv3-provider-context-v1",
+            "provider": "openrouter-api",
+            "model": "configured/model",
+            "stage": "execution",
+            "boundary": "ready_provider_request",
+            "message_count": len(private_messages),
+            "messages": private_messages,
+            "reasoning_count": 0,
+            "reasoning": [],
+        },
+    )
+    request = _stage_request(
+        Stage.EXECUTION, allow_tools=False, allow_side_effects=False
+    )
+    response = await provider.invoke(
+        ProviderProfile("execution", "openrouter-api", "configured/model"),
+        request,
+    )
+
+    backend = manager.backends[0]
+    assert backend.continuation_messages == private_messages
+    assert response is not None
+    assert json.loads(response.text)["disposition"] == "COMPLETED"
