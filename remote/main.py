@@ -46,6 +46,7 @@ from orchestrator.stable_port_allocator import (
     StablePortAllocator,
 )
 from remote.api.server import create_app
+from remote.api.lan_readiness import LanReadinessCache
 from remote.exchange_transport import ExchangeTransport
 from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
 from remote.peer.base import PeerInfo
@@ -779,6 +780,10 @@ class HashiRemoteApplication:
             )
         )
 
+        # Lan-readiness snapshot cache: updated only by explicit local doctor /
+        # repair reports. /health remains a pure in-memory read.
+        lan_readiness_cache = LanReadinessCache(self._hashi_root, instance_id)
+
         # Create FastAPI app
         app = create_app(
             instance_info=instance_info,
@@ -787,6 +792,7 @@ class HashiRemoteApplication:
             peer_registry=self._registry,
             protocol_manager=self._protocol_manager,
             exchange_transport=self._exchange_transport,
+            lan_readiness_cache=lan_readiness_cache,
             workbench_port=workbench_port,
             hashi_root=str(self._hashi_root),
             control_hashi_root=str(self._control_hashi_root),
