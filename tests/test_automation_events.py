@@ -82,6 +82,7 @@ def test_api_projects_only_small_typed_events_and_requires_owner(tmp_path):
     server = SimpleNamespace(
         session_store=store,
         _v1_owner_id=lambda req: "owner-a" if req.headers.get("x-owner") == "allowed" else None,
+        _check_admin_auth=lambda req: req.headers.get("x-owner") == "allowed",
     )
     response = asyncio.run(handle_automation_events(server, SimpleNamespace(
         query={"after": "0", "limit": "20", "wait_seconds": "0"},
