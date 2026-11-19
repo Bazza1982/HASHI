@@ -243,6 +243,24 @@ def test_human_control_holds_real_cross_process_lock(desktop,tmp_path):
     other.acquire(); other.release()
 
 
+def test_locked_display_failure_releases_os_lock_for_later_acquisition(desktop):
+    """A locked/secure desktop failing during display read must not leave the
+    OS control lock held until TTL: the next acquisition after unlock works."""
+    controller, native, _ = desktop
+    controller.frame('', 'session-a')
+    control(controller)
+    original_displays = native.displays
+    native.locked = True
+    with pytest.raises(DesktopError, match='desktop_locked'):
+        controller.input(event(controller), 'owner-a', 'session-a', 'lease-a')
+    assert controller.owner is None
+    # Unlock and re-acquire immediately succeeds (no 30-second busy wait).
+    native.locked = False
+    native.displays = original_displays
+    acquired = control(controller)
+    assert acquired['controlling'] is True
+
+
 def test_input_retains_typed_native_failure_and_releases_its_control(desktop):
     controller, native, _ = desktop
     controller.frame('', 'session-a')
@@ -349,6 +367,29 @@ async def test_service_binds_actor_and_target_without_agent_run(desktop,tmp_path
     assert lease.actor_type=='user' and lease.agent_id==''
     await s.run('owner-a',{**request,'operation':'close'})
     assert c.owner is None and not b._leases
+
+
+async def test_releasing_an_already_dropped_lease_is_idempotent(desktop, tmp_path):
+    """A release for a lease the worker already dropped succeeds without
+    error instead of 409: control release is an idempotent operation."""
+    controller, _native, _now = desktop
+    broker, _ = make_broker(tmp_path, controller)
+    pin = broker.desktop_targets()[0]
+    acquired = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'},
+    )
+    lease_id = acquired['lease_id']
+    first = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'release', 'lease_id': lease_id},
+    )
+    assert first['controlling'] is False
+    second = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'release', 'lease_id': lease_id},
+    )
+    assert second['controlling'] is False
 
 
 async def test_stale_worker_input_keeps_manual_broker_lease(desktop, tmp_path):

@@ -31,7 +31,23 @@ def _is_loopback(request) -> bool:
 
 
 def _admit_and_resolve_owner(api, request) -> str:
-    """Local Workbench desktop is a pure local capability: HASHI must not gate it."""
+    """Admit a desktop caller and resolve its authenticated owner.
+
+    Trust boundary (OS-user model, reviewed 2026-11-19):
+
+    * Loopback callers (the local Workbench on 127.0.0.1/::1) are exempt from
+      the HASHI admin token. A process able to reach the local loopback is
+      already running inside the interactive user's own OS session, where it
+      can capture the desktop and inject input directly; demanding a HASHI
+      admin token adds no real protection, it only binds the local entry to a
+      rotatable HASHI secret. This exemption removes a false gate, it does not
+      weaken a real one.
+    * Remote callers keep the existing admin-token requirement. A remote hop
+      with no configured admin token is always rejected.
+    * A loopback caller whose owner cannot be resolved falls back to the
+      reserved "workbench-local" identity; the resolved owner is pinned for
+      the lifetime of the session and is never derived from the client.
+    """
     if not _is_loopback(request) and (not api.admin_token or not api._check_admin_auth(request)):
         raise DesktopError("desktop_auth_required", 403)
     owner = api._v1_owner_id(request)
@@ -66,16 +82,28 @@ class DesktopSessionService:
 
     @staticmethod
     def _refresh_target(requested, targets):
-        """A restarted worker or changed generation must not kill the entry."""
+        """Resolve a requested target without ever switching to another machine.
+
+        A same-device refresh is always safe: a restarted worker advances
+        worker_generation and may re-register under a new capability_id, but
+        the device identity stays stable. Match the requested target by device
+        identity first, then by capability identity, against the live list.
+        If the requested device is no longer registered, report
+        desktop_target_changed instead of silently substituting an unrelated
+        target; the client then rediscovers. Only an absent/empty request
+        selects the first registered target.
+        """
         if not targets:
             raise DesktopError("desktop_worker_unavailable", 503)
         if isinstance(requested, dict):
-            for field in ("capability_id", "device_id"):
+            for field in ("device_id", "capability_id"):
                 value = requested.get(field)
                 if value:
                     for target in targets:
                         if target.get(field) == value:
                             return target
+            if any(requested.get(field) for field in ("device_id", "capability_id")):
+                raise DesktopError("desktop_target_changed", 409)
         return targets[0]
 
     async def run(self, owner, body):
@@ -88,13 +116,16 @@ class DesktopSessionService:
             return {"targets": self.broker().desktop_targets(), "protocol_version": 1}
         if op == "open":
             async with self.open_lock:
-                await self._evict_for_capacity()
-                requested = b.get("target")
                 targets = self.broker().desktop_targets()
-                target = requested if isinstance(requested, dict) and requested in targets else self._refresh_target(requested, targets)
+                target = self._refresh_target(b.get("target"), targets)
                 sid = "desktop-"+uuid4().hex
+                # Validate the target and the open operation BEFORE evicting
+                # any existing session: a failed open must never disrupt an
+                # active viewer. Capacity eviction only runs after the worker
+                # has confirmed the new session.
                 info = await self.broker().invoke_desktop(target, actor_id=owner, session_id=sid,
                                                          operation="desktop_info", args={})
+                await self._evict_for_capacity()
                 now = self.clock()
                 record = DesktopSession(owner, client, dict(target), now+SESSION_TTL, now)
                 self.sessions[sid] = record

@@ -452,7 +452,14 @@ class DesktopController:
                     }
                     raise error
                 # Close the display-change race before mapping input coordinates.
-                rows, _ = self.native.displays()
+                try:
+                    rows, _ = self.native.displays()
+                except DesktopError:
+                    # A locked/secure desktop (or a display failure) cannot
+                    # receive this input; release the OS lock so that a later
+                    # acquisition after unlock succeeds immediately.
+                    self._release()
+                    raise
                 if self._display_revision(rows, sess.view) != sess.display_revision:
                     self._release()
                     raise DesktopError("desktop_display_changed", 409)

@@ -13,14 +13,17 @@ Computer Worker. No `CORE_SOURCE_PATHS` file is edited. No model/Agent Run is cr
 ## Enable locally
 
 1. Use the reviewed shared-code checkout and preserve unrelated local changes.
-2. In the selected instance's ignored `agents.json`, set `global.desktop_enabled`
-   to `true` using the established revision-safe configuration workflow. Default is
-   false. `HASHI_DESKTOP_ENABLED=1` is an optional process-local alternative.
+2. No HASHI global desktop switch gates the local entry point: `desktop_enabled`
+   defaults and governed deployment profiles cannot remove the local Workbench
+   desktop. The Workbench keeps its own explicit opt-out (its settings switch or
+   `HASHI_WORKBENCH_DESKTOP=0`), which is a user preference, not a HASHI gate.
 3. The existing ignored `secrets.json` MUST contain a nonempty
-   `workbench_admin_token`. Reuse the existing value, or create a unique random
-   value for this instance through revision-safe configuration when absent.
-   Preserve every other secret and do not add another pairing system. The
-   authenticated Remote proxy injects this token on its loopback Backend API hop.
+   `workbench_admin_token` for remote desktop callers. Reuse the existing value,
+   or create a unique random value for this instance through revision-safe
+   configuration when absent. Local loopback callers are exempt (see "Local
+   availability and trust boundary"). Preserve every other secret and do not
+   add another pairing system. The authenticated Remote proxy injects this
+   token on its loopback Backend API hop.
 4. Adopt the updated shared Functions using the instance's established hot adoption
    procedure. These are shared services, not merely one Agent's code. Source pull
    and running-generation adoption are distinct facts.
@@ -50,15 +53,38 @@ environment; do not install packages into a running protected Core interpreter.
    in v1; governed profiles return `desktop_profile_unsupported` until explicit
    role-aware admission is qualified.
 
+## Local availability and trust boundary
+
+The local Workbench entry is a pure local capability: HASHI must not gate it.
+The HASHI-side `desktop_enabled` global switch and the governed-profile gate
+were removed, and the Workbench keeps an explicit user opt-out.
+
+Loopback admission rests on the actual OS-user trust boundary. A process able
+to reach the local loopback is already running inside the interactive user's
+own OS session, where it can capture the desktop and inject input directly.
+Requiring the HASHI admin token there adds no protection and only binds the
+local entry to a rotatable HASHI secret, so loopback callers are exempt.
+Remote callers still require the configured admin token, and a remote hop with
+no admin token configured is always rejected. When the Workbench session
+cannot resolve a user owner, the reserved `workbench-local` identity is used;
+the resolved owner is pinned for the session lifetime and never derived from
+the client.
+
 ## Protocol
 
-`POST /api/v1/desktop/operation`, JSON, <=32 KiB. Requires the existing Backend
-API admin token on every call. A session ID alone grants no authority. Client ID
-is tab correlation, not an authentication credential. Operations:
+`POST /api/v1/desktop/operation`, JSON, <=32 KiB. Loopback callers (the local
+Workbench) are admitted without the Backend API admin token; remote callers
+require it. A session ID alone grants no authority. Client ID is tab
+correlation, not an authentication credential. Operations:
 
 - `targets`: sanitized Windows computer capabilities with all desktop actions.
-- `open`: an exact target including worker generation; server returns session ID
-  and display metadata. No new OS login session is created.
+- `open`: an exact target including worker generation. The server validates the
+  target and the worker open BEFORE evicting any session for capacity, so a
+  failed open never disrupts an active viewer. Same-device refreshes (a
+  restarted worker advancing generation or re-registering its capability) are
+  accepted; a requested device that is no longer registered returns
+  `desktop_target_changed` instead of silently switching machines. The server
+  returns session ID and display metadata. No new OS login session is created.
 - `frame`: session ID, optional `after_frame`, and optional `refresh_profile=smooth`
   or `refresh_profile=ultra_smooth`;
   returns `image/jpeg` or HTTP 204
@@ -81,14 +107,16 @@ only for this new path. Existing tool interfaces remain compatible.
 The Worker holds the existing OS file lock for the entire manual-control lease,
 including idle gaps; legacy agent mutations attempt that same lock. An independent
 watchdog releases only this controller's injected states and expires control after
-8 seconds without renewal. A stale cleanup request from an Agent cannot release
+30 seconds without renewal (one missed heartbeat no longer drops control). A stale cleanup request from an Agent cannot release
 someone else's active manual input.
 
 ## Bounds and privacy
 
 Each live desktop session has its own bounded in-memory JPEG cache, <=512 KiB per
-frame; at most eight API sessions and 1600x900 pixels (1280x720 small). Worker
-sessions without contact expire after 60 seconds and release their cached frames.
+frame; at most eight API sessions (the least recently touched session is evicted
+for the current user instead of refusing, and eviction runs only after the new
+open is validated) and 1600x900 pixels (1280x720 small). Worker
+sessions without contact expire after 600 seconds and release their cached frames.
 Quality starts at 75, with four bounded encoding attempts maximum. GDI captures/scales
 the selected monitor/region directly; no screenshot temp files. Capture/encoding
 uses the existing request worker thread, not Core/HTTP event loops. Concurrent frame
@@ -184,8 +212,9 @@ worker test fail; restored code passed. No mutation is retained.
 
 ## Rollback
 
-Release/close the desktop, set `global.desktop_enabled=false` and adopt that instance
-configuration normally. No desktop polling continues when the frontend leaves.
+Release/close the desktop and disable the Workbench desktop entry from the
+Workbench settings to deny access; there is no HASHI global desktop switch
+anymore. No desktop polling continues when the frontend leaves.
 To roll back code, follow ordinary Functions/Remote/Worker adoption at the same
 scope; do not cold-restart protected Core merely as a testing shortcut.
 

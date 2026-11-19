@@ -86,7 +86,14 @@ class ManualDesktopBroker:
                     self._leases[lease.lease_id] = lease
                     self._resource_leases[resource] = lease.lease_id
                 elif mode in {"heartbeat", "release"}:
-                    lease = self._desktop_lease(pin, actor_id, session_id, args.get("lease_id", ""))
+                    try:
+                        lease = self._desktop_lease(pin, actor_id, session_id, args.get("lease_id", ""))
+                    except DesktopError as exc:
+                        if mode == "release" and exc.code == "desktop_control_expired":
+                            # Releasing an already-dropped lease is idempotent:
+                            # there is nothing left to release.
+                            return {"controlling": False}
+                        raise
                     if mode == "heartbeat":
                         lease = replace(lease, expires_at=time.time()+CONTROL_TTL)
                         self._leases[lease.lease_id] = lease
