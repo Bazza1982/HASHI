@@ -80,6 +80,9 @@ def test_registry_exposes_shell_but_accepts_persisted_bash_calls(tmp_path):
     assert [
         definition["function"]["name"] for definition in registry.get_tool_definitions()
     ] == ["shell", "tool_catalog"]
+    assert "tool_output_read" not in [
+        definition["function"]["name"] for definition in registry.get_tool_definitions()
+    ]
 
 
 def test_process_liveness_probe_does_not_signal_the_current_process():
