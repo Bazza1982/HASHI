@@ -7856,6 +7856,7 @@ class FlexibleAgentRuntime:
                 "operation_admission": operation_admission,
             }
         from orchestrator.session_store import StaleFencingToken
+        from orchestrator.skill_manager import SchedulerJobChanged
 
         try:
             request_id = await self.enqueue_request(
@@ -7868,6 +7869,8 @@ class FlexibleAgentRuntime:
             )
         except StaleFencingToken:
             return False, "The requesting Run stopped before the task was admitted."
+        except SchedulerJobChanged:
+            return False, "The scheduler task changed before it could be admitted."
         if not request_id:
             return False, f"Could not queue {summary_prefix.lower()} [{job.get('id')}]"
         return True, f"Queued {summary_prefix.lower()} [{job.get('id')}]"

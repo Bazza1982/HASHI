@@ -196,6 +196,10 @@ class _FakeRuntime:
                 text=job["prompt"], source="scheduler",
                 idempotency_key=f"pao-scheduler:{approval_id}",
                 parent_run_id=binding["run_id"], operation_admission=operation_admission,
+                operation_revision_guard=lambda: self.skill_manager.hold_owned_job_revision(
+                    kind, job["id"], agent_name=self.name,
+                    expected_revision=operation_admission["scope"]["expected_revision"],
+                ),
             )
         self.reruns.append((kind, dict(job)))
         return True, f"Queued cron task [{job['id']}]"

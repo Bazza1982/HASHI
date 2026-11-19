@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -4628,6 +4628,7 @@ class SessionStore:
         agent_workspace: Path | str | None = None,
         replay_only: bool = False,
         operation_admission: Mapping[str, Any] | None = None,
+        operation_revision_guard: Any = None,
     ) -> AcceptedRun:
         from orchestrator.fingerprint.models import FingerprintPolicy
         frozen_fingerprint = FingerprintPolicy.from_snapshot(dict(fingerprint_policy or {})).snapshot()
@@ -4650,7 +4651,7 @@ class SessionStore:
             ).strip()
         now = _utc_now()
         staging_files_to_remove: list[Path] = []
-        with self._lock, self._connection() as connection:
+        with self._lock, ExitStack() as operation_guards, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(
                 """
@@ -4964,6 +4965,9 @@ class SessionStore:
             if operation_approval is not None:
                 if operation_approval["state"] != "decided":
                     raise SessionConflict("scheduler approval has already been consumed")
+                if not callable(operation_revision_guard):
+                    raise SessionConflict("scheduler revision guard is unavailable")
+                operation_guards.enter_context(operation_revision_guard())
                 connection.execute(
                     "UPDATE run_approvals SET state='consumed' WHERE approval_id=?",
                     (operation_approval["approval_id"],),

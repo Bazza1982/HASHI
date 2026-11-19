@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from orchestrator.her_v2.models import effort_display_label
 from orchestrator.config_json import (
     ConfigDocument,
     ConfigList,
+    file_write_lock,
     new_config_json,
     read_managed_json,
     write_config_json,
@@ -1176,6 +1178,46 @@ class SkillManager:
             if job.get("id") == task_id:
                 return job
         return None
+
+    @contextmanager
+    def hold_owned_job_revision(
+        self, kind: str, task_id: str, *, agent_name: str, expected_revision: str,
+    ):
+        """Hold managed task writers while validating one exact persisted job."""
+        if kind not in {"cron", "heartbeat"}:
+            raise SchedulerJobChanged("invalid scheduler task kind")
+        paths = [self.tasks_path]
+        if kind == "heartbeat":
+            paths.append(self.active_heartbeats_path)
+        with ExitStack() as locks:
+            for path in sorted(paths, key=lambda item: str(item).casefold()):
+                locks.enter_context(file_write_lock(path))
+            try:
+                tasks = read_managed_json(self.tasks_path)
+            except FileNotFoundError:
+                tasks = {}
+            if not isinstance(tasks, dict):
+                raise SchedulerJobChanged("invalid scheduler task collection")
+            jobs = tasks.get(self._task_key_for_kind(kind), [])
+            if not isinstance(jobs, list):
+                raise SchedulerJobChanged("invalid scheduler task collection")
+            matches = [job for job in jobs if isinstance(job, dict) and job.get("id") == task_id]
+            if kind == "heartbeat":
+                try:
+                    active = read_managed_json(self.active_heartbeats_path)
+                except FileNotFoundError:
+                    active = {}
+                active_jobs = active if isinstance(active, list) else (
+                    active.get("heartbeats", []) if isinstance(active, dict) else None
+                )
+                if not isinstance(active_jobs, list):
+                    raise SchedulerJobChanged("invalid active heartbeat collection")
+                matches.extend(job for job in active_jobs
+                               if isinstance(job, dict) and job.get("id") == task_id)
+            if (len(matches) != 1 or matches[0].get("agent") != agent_name
+                    or scheduler_job_deletion_revision(matches[0]) != expected_revision):
+                raise SchedulerJobChanged("task changed after confirmation")
+            yield
 
     def upsert_cron_job(
         self,

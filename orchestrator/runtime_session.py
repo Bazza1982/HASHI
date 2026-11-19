@@ -661,6 +661,20 @@ def accept_request(
         else None if replay_only else int(session["context_generation"])
     )
     from orchestrator.fingerprint.runtime import admission_policy
+    operation_revision_guard = None
+    if operation_admission is not None:
+        scope = operation_admission.get("scope")
+        manager = getattr(runtime, "skill_manager", None)
+        guard = getattr(manager, "hold_owned_job_revision", None)
+        if not isinstance(scope, Mapping) or not callable(guard):
+            raise SessionConflict("scheduler revision guard is unavailable")
+
+        def operation_revision_guard():
+            return guard(
+                str(scope.get("kind") or ""), str(scope.get("job_id") or ""),
+                agent_name=runtime.name, expected_revision=str(scope.get("expected_revision") or ""),
+            )
+
     accepted = ensure_store(runtime).accept_run(
         session_id=session["session_id"],
         owner_id=resolved_owner,
@@ -697,6 +711,7 @@ def accept_request(
         agent_workspace=getattr(runtime, "workspace_dir", None),
         replay_only=replay_only,
         operation_admission=operation_admission,
+        operation_revision_guard=operation_revision_guard,
     )
     return session, accepted, resolved_owner, surface, channel_key
 

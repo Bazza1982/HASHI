@@ -17,7 +17,7 @@ from aiohttp.test_utils import TestServer
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.function_worker_host import FunctionWorkerHost
 from orchestrator.session_store import IdempotencyConflict, SessionConflict, SessionStore
-from orchestrator.skill_manager import scheduler_job_deletion_revision
+from orchestrator.skill_manager import SchedulerJobChanged, scheduler_job_deletion_revision
 from tests.test_scheduler_run_authorization import (
     active_run,
     credential,
@@ -55,6 +55,11 @@ async def test_cancel_between_approval_and_scheduler_admission_does_not_queue(tm
         if kwargs.get("operation_admission") is not None:
             args["operation_admission"] = kwargs["operation_admission"]
             args["parent_run_id"] = kwargs["request_metadata"]["parent_run_id"]
+            scope = kwargs["operation_admission"]["scope"]
+            args["operation_revision_guard"] = lambda: runtime.skill_manager.hold_owned_job_revision(
+                scope["kind"], scope["job_id"], agent_name="momo",
+                expected_revision=scope["expected_revision"],
+            )
         accepted = server.session_store.accept_run(**args)
         admitted.append(accepted.run_id)
         return accepted.request_id
@@ -98,7 +103,11 @@ def test_scheduler_decision_admission_is_atomic_and_idempotent(tmp_path):
     args = dict(session_id=session["session_id"], owner_id=binding["owner_id"], agent_id="momo",
                 request_id="child-request", text=job["prompt"], source="scheduler",
                 idempotency_key=f"pao-scheduler:{approval_id}",
-                parent_run_id=binding["run_id"], operation_admission=admission)
+                parent_run_id=binding["run_id"], operation_admission=admission,
+                operation_revision_guard=lambda: runtime.skill_manager.hold_owned_job_revision(
+                    "cron", job["id"], agent_name="momo",
+                    expected_revision=scope["expected_revision"],
+                ))
 
     other = store.ensure_agent_activity_session(owner_id="other-user", agent_id="momo")
     with pytest.raises(SessionConflict):
@@ -132,7 +141,11 @@ def test_scheduler_admission_failure_rolls_back_approval_and_child(tmp_path, mon
     args = dict(session_id=session["session_id"], owner_id=binding["owner_id"], agent_id="momo",
                 request_id="rollback-child", text=job["prompt"], source="scheduler",
                 idempotency_key=f"pao-scheduler:{approval_id}", parent_run_id=binding["run_id"],
-                operation_admission={"binding": binding, "scope": scope, "approval_id": approval_id})
+                operation_admission={"binding": binding, "scope": scope, "approval_id": approval_id},
+                operation_revision_guard=lambda: runtime.skill_manager.hold_owned_job_revision(
+                    "cron", job["id"], agent_name="momo",
+                    expected_revision=scope["expected_revision"],
+                ))
     original = store._append_event
 
     def fail_after_insert(connection, **event):
@@ -151,6 +164,92 @@ def test_scheduler_admission_failure_rolls_back_approval_and_child(tmp_path, mon
         idempotency_key=args["idempotency_key"],
     ) is None
     assert not store.accept_run(**args).replayed
+
+
+def test_task_edit_waits_until_approved_child_commit(tmp_path, monkeypatch):
+    server, runtime = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, runtime)
+    binding = active_run(server)
+    store = server.session_store
+    manager = runtime.skill_manager
+    job = manager.get_job("cron", "daily-report")
+    scope = {"operation": "activity.scheduler.run", "agent_id": "momo", "kind": "cron",
+             "job_id": job["id"], "expected_revision": scheduler_job_deletion_revision(job)}
+    with store.hold_operation_approval(binding=binding, scope=scope, consume=False) as pending:
+        approval_id = pending["approval_id"]
+    store.decide_approval(approval_id=approval_id, owner_id=binding["owner_id"],
+                          decision="approved")
+    session = store.ensure_agent_activity_session(owner_id=binding["owner_id"], agent_id="momo")
+    args = dict(session_id=session["session_id"], owner_id=binding["owner_id"], agent_id="momo",
+                request_id="serialized-child", text=job["prompt"], source="scheduler",
+                idempotency_key=f"pao-scheduler:{approval_id}", parent_run_id=binding["run_id"],
+                operation_admission={"binding": binding, "scope": scope, "approval_id": approval_id},
+                operation_revision_guard=lambda: manager.hold_owned_job_revision(
+                    "cron", job["id"], agent_name="momo",
+                    expected_revision=scope["expected_revision"],
+                ))
+    reached, release, writer_started, writer_done = (threading.Event() for _ in range(4))
+    original = store._append_event
+
+    def delayed_commit(connection, **event):
+        if event.get("kind") == "run.accepted":
+            reached.set()
+            if not release.wait(10):
+                raise TimeoutError("test did not release commit")
+        return original(connection, **event)
+
+    monkeypatch.setattr(store, "_append_event", delayed_commit)
+
+    def edit():
+        tasks = manager._load_tasks()
+        tasks["crons"][0]["prompt"] = "modified after child admission"
+        writer_started.set()
+        manager._save_tasks(tasks)
+        writer_done.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        child = pool.submit(store.accept_run, **args)
+        try:
+            assert reached.wait(10)
+            update = pool.submit(edit)
+            assert writer_started.wait(10)
+            assert not writer_done.wait(0.2)
+        finally:
+            release.set()
+        assert not child.result(timeout=10).replayed
+        update.result(timeout=10)
+    assert writer_done.is_set()
+    assert manager.get_job("cron", job["id"])["prompt"] == "modified after child admission"
+
+
+@pytest.mark.parametrize("location", ["tasks", "active"])
+def test_heartbeat_revision_guard_handles_both_stores_and_rejects_duplicates(tmp_path, location):
+    _server_instance, runtime = _server(tmp_path, persistent_session_v1=True)
+    manager = runtime.skill_manager
+    job = {"id": "heartbeat-fixture", "agent": "momo", "enabled": True,
+           "interval_seconds": 600, "prompt": "fixture"}
+    if location == "tasks":
+        tasks = manager._load_tasks()
+        tasks["heartbeats"].append(job)
+        manager._save_tasks(tasks)
+    else:
+        manager._save_active_heartbeats([job])
+    expected = scheduler_job_deletion_revision(job)
+    with manager.hold_owned_job_revision(
+        "heartbeat", job["id"], agent_name="momo", expected_revision=expected
+    ):
+        pass
+    if location == "tasks":
+        manager._save_active_heartbeats([job])
+    else:
+        tasks = manager._load_tasks()
+        tasks["heartbeats"].append(job)
+        manager._save_tasks(tasks)
+    with pytest.raises(SchedulerJobChanged):
+        with manager.hold_owned_job_revision(
+            "heartbeat", job["id"], agent_name="momo", expected_revision=expected
+        ):
+            pass
 
 
 @pytest.mark.asyncio
@@ -190,6 +289,7 @@ async def test_real_runtime_admits_one_owner_bound_child_and_replays(tmp_path):
     )
     runtime = runtime_at(tmp_path, False, instance_id=server.session_store.instance_id, agent="momo")
     runtime.session_store = server.session_store
+    runtime.skill_manager = fixture.skill_manager
     runtime._primary_chat_id = lambda: 123
     runtime._run_job_now = MethodType(FlexibleAgentRuntime._run_job_now, runtime)
     admission = {"binding": binding, "scope": scope, "approval_id": approval_id}
@@ -229,6 +329,7 @@ async def test_real_runtime_rechecks_parent_at_transaction_after_cancel(tmp_path
     )
     runtime = runtime_at(tmp_path, False, instance_id=server.session_store.instance_id, agent="momo")
     runtime.session_store = server.session_store
+    runtime.skill_manager = fixture.skill_manager
     runtime._primary_chat_id = lambda: 123
     admission = {"binding": binding, "scope": scope, "approval_id": approval_id}
     reached, release = threading.Event(), threading.Event()
@@ -252,6 +353,41 @@ async def test_real_runtime_rechecks_parent_at_transaction_after_cancel(tmp_path
     ok, message = await task
     assert not ok and "stopped" in message
     assert runtime.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_changed_persisted_job_is_not_admitted_after_approval(tmp_path):
+    server, fixture = _server(tmp_path, persistent_session_v1=True)
+    setup_personal(server, fixture)
+    binding = active_run(server)
+    job = fixture.skill_manager.get_job("cron", "daily-report")
+    scope = {"operation": "activity.scheduler.run", "agent_id": "momo", "kind": "cron",
+             "job_id": job["id"], "expected_revision": scheduler_job_deletion_revision(job)}
+    with server.session_store.hold_operation_approval(
+        binding=binding, scope=scope, consume=False
+    ) as pending:
+        approval_id = pending["approval_id"]
+    server.session_store.decide_approval(
+        approval_id=approval_id, owner_id=binding["owner_id"], decision="approved"
+    )
+    changed = fixture.skill_manager._load_tasks()
+    changed["crons"][0]["prompt"] = "changed after approval"
+    fixture.skill_manager._save_tasks(changed)
+    runtime = runtime_at(tmp_path, False, instance_id=server.session_store.instance_id, agent="momo")
+    runtime.session_store = server.session_store
+    runtime.skill_manager = fixture.skill_manager
+    runtime._primary_chat_id = lambda: 123
+
+    ok, _message = await FlexibleAgentRuntime._run_job_now(
+        runtime, job, kind="cron",
+        operation_admission={"binding": binding, "scope": scope, "approval_id": approval_id},
+    )
+    assert not ok
+    assert runtime.queue.empty()
+    with server.session_store.hold_operation_approval(
+        binding=binding, scope=scope, consume=False
+    ) as decision:
+        assert decision["authorized"]
 
 
 @pytest.mark.asyncio
