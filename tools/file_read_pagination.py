@@ -1,6 +1,6 @@
 """Bounded, resumable reads of authorized text files.
 
-A cursor is a position hint, never permission to read a path.  The caller must
+A cursor is a position hint, never permission to read a path. The caller must
 resolve and authorize the path on each request.
 """
 
@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import hashlib
+import io
 import json
 import os
 import re
@@ -26,9 +28,10 @@ def _path_id(path: Path) -> str:
 
 def _encode_cursor(path: Path, info: os.stat_result, position: int, line: int, digest: str) -> str:
     value = {
-        "v": 1,
+        "v": 2,
         "path": _path_id(path),
         "file": _file_version(info),
+        # Position is a character offset in the normalized UTF-8 text stream.
         "position": position,
         "line": line,
         "sha256": digest,
@@ -45,8 +48,14 @@ def _decode_cursor(token: Any, path: Path, info: os.stat_result) -> tuple[int, i
         value = json.loads(data)
     except (ValueError, UnicodeError):
         raise ValueError("invalid file read cursor") from None
-    if not isinstance(value, dict) or value.get("v") != 1 or value.get("path") != _path_id(path):
+    if not isinstance(value, dict) or value.get("path") != _path_id(path):
         raise ValueError("file read cursor does not match this path")
+    if value.get("v") == 1:
+        # The old cursor's digest could describe different bytes from its first
+        # page. It cannot establish a consistent sequence after an upgrade.
+        raise ValueError("file read cursor was issued before consistent paging; start a new read")
+    if value.get("v") != 2:
+        raise ValueError("invalid file read cursor")
     if value.get("file") != _file_version(info):
         raise ValueError("file changed since the cursor was issued; start a new read")
     position, line = value.get("position"), value.get("line")
@@ -62,72 +71,105 @@ async def _yield_hash_progress() -> None:
     await asyncio.sleep(0)
 
 
-async def _content_digest(path: Path, before: os.stat_result) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        if _file_version(before)[:4] != _file_version(os.fstat(handle.fileno()))[:4]:
-            raise ValueError("file changed during the read; start a new read")
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-            await _yield_hash_progress()
-        if _file_version(before)[:4] != _file_version(os.fstat(handle.fileno()))[:4]:
-            raise ValueError("file changed during the read; start a new read")
-    return digest.hexdigest()
-
-
 async def read_file_page(path: Path, offset: int, limit: int, cursor: Any = None) -> tuple[str, str | None]:
-    # Leave room for the header and cursor before the registry's output bound.
+    """Read and hash one byte stream so every returned page belongs to that hash."""
     display_path = str(path)
     if len(display_path) > 2048:
         display_path = "…" + display_path[-2047:]
     max_chars = 15_000
 
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
+    with path.open("rb") as handle:
         before = path.stat()
         # On Windows fstat's ctime may differ from path.stat's creation time.
-        # Compare the shared identity/version fields across the open handle.
         if _file_version(before)[:4] != _file_version(os.fstat(handle.fileno()))[:4]:
             raise ValueError("file changed during the read; start a new read")
-        expected_digest = None
-        if cursor is None:
-            start_line = offset
-            for _ in range(offset - 1):
-                while True:
-                    chunk = handle.readline(8192)
-                    if not chunk:
-                        return f"[{display_path}] No lines at offset {offset}", None
-                    if chunk.endswith("\n"):
-                        break
-                    await _yield_hash_progress()
-        else:
-            position, start_line, expected_digest = _decode_cursor(cursor, path, before)
-            try:
-                handle.seek(position)
-            except (OSError, ValueError, OverflowError):
-                raise ValueError("invalid file read cursor position") from None
 
+        expected_digest = None
+        cursor_position = None
+        start_line = offset
+        if cursor is not None:
+            cursor_position, start_line, expected_digest = _decode_cursor(cursor, path, before)
+
+        # A UTF-8 decoder with universal newlines has the same text semantics as
+        # the original text-mode file reader, including invalid byte replacement.
+        decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True,
+        )
+        digest = hashlib.sha256()
+        stream_position = 0
+        lines_to_skip = offset - 1 if cursor_position is None else 0
+        started = lines_to_skip == 0 and cursor_position is None
+        page_finished = False
+        has_more = False
+        selected: list[str] = []
+        selected_chars = 0
+        complete_lines = 0
         current_line = start_line
         last_line = start_line - 1
-        complete_lines = 0
-        remaining = max_chars
-        selected = []
-        while remaining and complete_lines < limit:
-            chunk = handle.readline(remaining)
-            if not chunk:
-                break
-            selected.append(chunk)
-            remaining -= len(chunk)
-            last_line = current_line
-            if chunk.endswith("\n"):
-                complete_lines += 1
-                current_line += 1
+        next_position = 0
 
-        next_position = handle.tell()
-        has_more = bool(handle.read(1))
-        # A metadata-only check cannot detect a same-size rewrite with restored
-        # timestamps. Verify exact bytes whenever a continuation is involved.
-        digest = await _content_digest(path, before) if has_more or expected_digest is not None else None
-        if expected_digest is not None and digest != expected_digest:
+        while True:
+            raw = handle.read(65536)
+            if raw:
+                digest.update(raw)
+                text = decoder.decode(raw)
+            else:
+                text = decoder.decode(b"", final=True)
+
+            index = 0
+            if not started:
+                if cursor_position is not None:
+                    skipped = min(len(text), max(0, cursor_position - stream_position))
+                    stream_position += skipped
+                    index += skipped
+                    started = stream_position == cursor_position
+                else:
+                    while index < len(text) and lines_to_skip:
+                        newline = text.find("\n", index)
+                        if newline < 0:
+                            stream_position += len(text) - index
+                            index = len(text)
+                            break
+                        stream_position += newline + 1 - index
+                        index = newline + 1
+                        lines_to_skip -= 1
+                    started = lines_to_skip == 0
+
+            if started and index < len(text):
+                if page_finished:
+                    has_more = True
+                else:
+                    end = min(len(text), index + max_chars - selected_chars)
+                    remaining_lines = limit - complete_lines
+                    newline_index = index
+                    for _ in range(remaining_lines):
+                        newline_index = text.find("\n", newline_index, end)
+                        if newline_index < 0:
+                            break
+                        newline_index += 1
+                    else:
+                        end = newline_index
+
+                    part = text[index:end]
+                    if part:
+                        line_breaks = part.count("\n")
+                        last_line = current_line + line_breaks - int(part.endswith("\n"))
+                        current_line += line_breaks
+                        complete_lines += line_breaks
+                        selected_chars += len(part)
+                        stream_position += len(part)
+                        selected.append(part)
+                        next_position = stream_position
+                    page_finished = selected_chars == max_chars or complete_lines == limit
+                    if page_finished and end < len(text):
+                        has_more = True
+
+            if not raw:
+                break
+            await _yield_hash_progress()
+
+        actual_digest = digest.hexdigest()
+        if expected_digest is not None and actual_digest != expected_digest:
             raise ValueError("file changed since the cursor was issued; start a new read")
         handle_after = os.fstat(handle.fileno())
         try:
@@ -139,12 +181,16 @@ async def read_file_page(path: Path, offset: int, limit: int, cursor: Any = None
             or _file_version(after)[:4] != _file_version(handle_after)[:4]
         ):
             raise ValueError("file changed during the read; start a new read")
+        if not started:
+            if cursor_position is not None:
+                raise ValueError("invalid file read cursor position")
+            return f"[{display_path}] No lines at offset {offset}", None
 
     header = f"[{display_path}] lines {start_line}-{last_line}"
     content = "".join(selected)
     next_cursor = None
     if has_more:
-        next_cursor = _encode_cursor(path, after, next_position, current_line, digest)
+        next_cursor = _encode_cursor(path, after, next_position, current_line, actual_digest)
         content += f"\n[truncated by HASHI; next_cursor={next_cursor}]"
     return f"{header}\n{content}", next_cursor
-# HASHI-Fingerprint: hfp_f9e04809c85b49249d5248d38005801a
+# HASHI-Fingerprint: hfp_4f1a55e629bb4d108b86c35608c07bd9

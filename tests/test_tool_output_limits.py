@@ -336,6 +336,146 @@ async def test_cursor_detects_changed_bytes_even_if_metadata_appears_identical(t
 
 
 @pytest.mark.asyncio
+async def test_file_pages_never_mix_bytes_from_two_same_metadata_versions(tmp_path: Path, monkeypatch):
+    import tools.file_read_pagination as pagination
+
+    source = tmp_path / "racing-file.txt"
+    first_version = "a" * 30_000
+    second_version = "b" * 30_000
+    source.write_text(first_version, encoding="utf-8")
+    monkeypatch.setattr(pagination, "_file_version", lambda _stat: [1, 2, 30_000, 4, 5])
+    original_open = Path.open
+    replaced = False
+
+    def change_before_binary_open(path, mode="r", *args, **kwargs):
+        nonlocal replaced
+        if path == source and mode == "rb" and not replaced:
+            replaced = True
+            with original_open(source, "w", encoding="utf-8") as target:
+                target.write(second_version)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", change_before_binary_open)
+    registry = ToolRegistry(["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    first = await registry.execute("file_read", {"path": str(source)})
+    assert replaced
+    if first.is_error:
+        assert "changed" in first.output.lower()
+        return
+    first_page, cursor = _parts(first.output)
+    assert cursor
+    second = await registry.execute("file_read", {"path": str(source), "cursor": cursor})
+    if second.is_error:
+        assert "changed" in second.output.lower()
+        return
+    second_page, cursor = _parts(second.output)
+    assert cursor is None
+    assert first_page + second_page in {first_version, second_version}
+
+
+@pytest.mark.asyncio
+async def test_file_pages_preserve_universal_newlines_and_invalid_utf8_at_chunk_boundaries(tmp_path: Path):
+    source = tmp_path / "mixed-newlines.txt"
+    raw = (b"a" * 65_535 + b"\r\n" + b"\xe7\x95\x8c" * 7000
+           + b"\r" + b"\xff" + b"\nend \n")
+    source.write_bytes(raw)
+    expected = source.read_text(encoding="utf-8", errors="replace")
+    registry = ToolRegistry(["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    result_parts = []
+    cursor = None
+    for _ in range(15):
+        args = {"path": str(source)}
+        if cursor:
+            args["cursor"] = cursor
+        result = await registry.execute("file_read", args)
+        assert not result.is_error, result.output
+        part, cursor = _parts(result.output)
+        result_parts.append(part)
+        if not cursor:
+            break
+    else:
+        pytest.fail("file continuation did not end")
+    assert "".join(result_parts) == expected
+
+    second_line = await registry.execute("file_read", {
+        "path": str(source), "offset": 2, "limit": 1,
+    })
+    assert not second_line.is_error, second_line.output
+    line, _ = _parts(second_line.output)
+    assert line == "界" * 7000 + "\n"
+
+
+@pytest.mark.asyncio
+async def test_file_change_during_hash_never_yields_mixed_followup_pages(tmp_path: Path, monkeypatch):
+    import tools.file_read_pagination as pagination
+
+    source = tmp_path / "mutating.txt"
+    source.write_text("a" * 150_000, encoding="utf-8")
+    monkeypatch.setattr(pagination, "_file_version", lambda _stat: [1, 2, 150_000, 4, 5])
+    changed = False
+
+    async def mutate_once():
+        nonlocal changed
+        if not changed:
+            changed = True
+            source.write_text("b" * 150_000, encoding="utf-8")
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(pagination, "_yield_hash_progress", mutate_once)
+    registry = ToolRegistry(["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    first = await registry.execute("file_read", {"path": str(source)})
+    assert changed
+    if first.is_error:
+        assert "changed" in first.output.lower()
+        return
+    _, cursor = _parts(first.output)
+    assert cursor
+    second = await registry.execute("file_read", {"path": str(source), "cursor": cursor})
+    assert second.is_error and "changed" in second.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_old_file_cursor_requires_restart_instead_of_claiming_consistent_pages(tmp_path: Path):
+    import base64
+
+    source = tmp_path / "legacy-cursor.txt"
+    source.write_text("a" * 30_000, encoding="utf-8")
+    registry = ToolRegistry(["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    first = await registry.execute("file_read", {"path": str(source)})
+    _, cursor = _parts(first.output)
+    decoded = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+    decoded["v"] = 1
+    old_cursor = base64.urlsafe_b64encode(json.dumps(decoded).encode()).decode().rstrip("=")
+    resumed = await registry.execute("file_read", {"path": str(source), "cursor": old_cursor})
+    assert resumed.is_error and "start a new read" in resumed.output
+    fresh = await registry.execute("file_read", {"path": str(source)})
+    assert not fresh.is_error
+
+
+@pytest.mark.asyncio
+async def test_large_file_page_does_not_materialize_the_whole_file(tmp_path: Path):
+    import tracemalloc
+
+    source = tmp_path / "large-file.txt"
+    chunk = b"x" * (1024 * 1024)
+    with source.open("wb") as stream:
+        for _ in range(32):
+            stream.write(chunk)
+    del chunk
+    registry = ToolRegistry(["file_read"], access_root=tmp_path, workspace_dir=tmp_path, secrets={})
+    tracemalloc.start()
+    try:
+        first = await registry.execute("file_read", {"path": str(source)})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert not first.is_error, first.output
+    page, cursor = _parts(first.output)
+    assert page == "x" * 15_000 and cursor
+    assert peak < 8 * 1024 * 1024
+
+
+@pytest.mark.asyncio
 async def test_file_read_cancellation_closes_hash_and_source_handles(tmp_path: Path, monkeypatch):
     import tools.file_read_pagination as pagination
 
