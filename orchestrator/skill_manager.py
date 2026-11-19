@@ -30,7 +30,6 @@ from orchestrator.her_v2.request_policy import (
     discard_legacy_job_effort_in_place,
     job_effort_policy,
 )
-from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.timezone_policy import (
     UTC_TIMEZONE_NAME,
     canonical_timezone_name,
@@ -1409,10 +1408,6 @@ class SkillManager:
                 if job.get("id") != task_id:
                     continue
                 discard_legacy_job_effort_in_place(job)
-                if enabled:
-                    mismatch = ownership_mismatch_label(job)
-                    if mismatch:
-                        return False, f"Refusing to enable {task_id}: {mismatch}."
                 job["enabled"] = enabled
                 self._save_active_heartbeats(jobs)
                 return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
@@ -1423,10 +1418,6 @@ class SkillManager:
                 continue
             if kind in {"cron", "heartbeat"}:
                 discard_legacy_job_effort_in_place(job)
-            if enabled:
-                mismatch = ownership_mismatch_label(job)
-                if mismatch:
-                    return False, f"Refusing to enable {task_id}: {mismatch}."
             job["enabled"] = enabled
             self._save_tasks(tasks)
             return True, f"{task_id} is now {'ON' if enabled else 'OFF'}."
@@ -1510,9 +1501,6 @@ class SkillManager:
         new_job["note"] = (
             job.get("note") or job["id"]
         ) + f" [transferred from {job.get('agent', '?')}]"
-        mismatch = ownership_mismatch_label(new_job)
-        if mismatch:
-            new_job["note"] += f" [{mismatch}; review before enabling]"
 
         tasks = self._load_tasks()
         key = self._task_key_for_kind(kind)
@@ -1531,12 +1519,6 @@ class SkillManager:
         job = dict(job)
         if kind in {"cron", "heartbeat"}:
             discard_legacy_job_effort_in_place(job)
-        mismatch = ownership_mismatch_label(job)
-        if mismatch:
-            job["enabled"] = False
-            note = job.get("note") or job.get("id") or ""
-            suffix = f"[{mismatch}; imported disabled]"
-            job["note"] = f"{note} {suffix}".strip()
         # Avoid duplicate IDs
         existing_ids = {j.get("id") for j in tasks.get(key, [])}
         if job.get("id") in existing_ids:
@@ -1797,8 +1779,6 @@ class SkillManager:
             loop_meta = job.setdefault("loop_meta", {})
             loop_meta["max"] = max_value
             loop_meta.setdefault("count", 0)
-        if job.get("enabled") and ownership_mismatch_label(job):
-            return False, f"Refusing to enable {task_id}: {ownership_mismatch_label(job)}.", None
         if kind in {"cron", "heartbeat"}:
             discard_legacy_job_effort_in_place(job)
         job["updated_at"] = self._now()

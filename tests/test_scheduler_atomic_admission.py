@@ -415,6 +415,9 @@ async def test_legacy_worker_cannot_ignore_scoped_admission():
 async def test_http_retry_returns_the_same_real_worker_child(tmp_path):
     server, fixture = _server(tmp_path, persistent_session_v1=True)
     setup_personal(server, fixture)
+    tasks = fixture.skill_manager._load_tasks()
+    tasks["crons"][0]["prompt"] = "Summarize a note mentioning workspaces/lily/example.txt."
+    fixture.skill_manager._save_tasks(tasks)
     parent = active_run(server)
     runtime = runtime_at(tmp_path, False, instance_id=server.session_store.instance_id, agent="momo")
     runtime.session_store = server.session_store

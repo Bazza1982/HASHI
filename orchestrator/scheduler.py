@@ -19,7 +19,6 @@ from orchestrator.config_json import (
     write_config_json,
 )
 from orchestrator.her_v2.request_policy import build_scheduler_request_context
-from orchestrator.job_ownership import ownership_mismatch_label
 from orchestrator.runtime_common import _safe_excerpt
 from orchestrator.superloop_scheduler import advance_superloops_once
 from orchestrator.timezone_policy import (
@@ -1302,19 +1301,6 @@ class TaskScheduler:
         except Exception as e:
             scheduler_logger.error("Enterprise scheduler lease release failed: %s", e, exc_info=True)
 
-    def _job_owner_mismatch(self, job: dict, *, task_kind: str, task_id: str, agent_name: str) -> str | None:
-        label = ownership_mismatch_label(job)
-        if not label:
-            return None
-        scheduler_logger.error(
-            "Blocking %s %s for %s: %s. Review the task owner before enabling it.",
-            task_kind,
-            task_id,
-            agent_name,
-            label,
-        )
-        return label
-
     def _create_recovery_batch(
         self,
         *,
@@ -1464,12 +1450,22 @@ class TaskScheduler:
                 await self._deliver_recovery_notice(runtime, batch)
 
     @staticmethod
-    def _find_job(tasks: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
-        key = "crons" if item.get("kind") == "cron" else "heartbeats"
-        for job in tasks.get(key, []):
-            if str(job.get("id")) == str(item.get("task_id")):
-                return job
-        return None
+    def _find_job(
+        tasks: dict[str, Any], item: dict[str, Any], *, agent_name: str,
+    ) -> dict[str, Any] | None:
+        kind = item.get("kind")
+        if kind not in {"cron", "heartbeat"} or not agent_name:
+            return None
+        if str(item.get("agent") or agent_name) != agent_name:
+            return None
+        key = "crons" if kind == "cron" else "heartbeats"
+        matches = [
+            job for job in tasks.get(key, [])
+            if isinstance(job, dict) and str(job.get("id")) == str(item.get("task_id"))
+        ]
+        if len(matches) != 1 or str(matches[0].get("agent") or "") != agent_name:
+            return None
+        return matches[0]
 
     async def _resolve_recovery_batch(
         self,
@@ -1507,18 +1503,14 @@ class TaskScheduler:
 
             executed = 0
             failed = 0
-            job = self._find_job(tasks, item) if requested else None
+            job = self._find_job(
+                tasks, item, agent_name=str(batch.get("agent") or "")
+            ) if requested else None
             if origin_stopped:
                 pass  # No further starts; final accounting retains accepted effects.
             elif requested and (
                 job is None
                 or not job.get("enabled", False)
-                or self._job_owner_mismatch(
-                    job,
-                    task_kind="Scheduler recovery",
-                    task_id=task_id,
-                    agent_name=str(batch.get("agent") or ""),
-                )
             ):
                 failed = requested
             elif requested and job is not None:
@@ -2001,10 +1993,6 @@ class TaskScheduler:
                     last_run = self.state["heartbeats"].get(task_id, 0)
                     if now - last_run < interval:
                         continue
-                    if self._job_owner_mismatch(hb, task_kind="Heartbeat", task_id=task_id, agent_name=agent_name):
-                        self.state["heartbeats"][task_id] = now
-                        state_changed = True
-                        continue
                     if self._startup_recovery_pending and last_run:
                         occurrences = scheduler_recovery.collect_heartbeat_occurrences(
                             float(last_run),
@@ -2046,11 +2034,6 @@ class TaskScheduler:
 
                     last_run = self.state.setdefault("nudges", {}).get(task_id, 0)
                     if now - last_run < interval:
-                        continue
-
-                    if self._job_owner_mismatch(nudge, task_kind="Nudge", task_id=task_id, agent_name=agent_name):
-                        self.state["nudges"][task_id] = now
-                        state_changed = True
                         continue
 
                     rt = runtime_map[agent_name]
@@ -2182,11 +2165,6 @@ class TaskScheduler:
                     missed_by = _should_fire(schedule, last_run_ts, cron_now)
                     if missed_by is None:
                         continue
-                    if self._job_owner_mismatch(cron, task_kind="Cron", task_id=task_id, agent_name=agent_name):
-                        self.state["crons"][task_id] = now
-                        state_changed = True
-                        continue
-
                     requires_prompt = missed_by > CRON_CATCHUP_THRESHOLD_S
                     if self._startup_recovery_pending or requires_prompt:
                         occurrences = scheduler_recovery.collect_cron_occurrences(

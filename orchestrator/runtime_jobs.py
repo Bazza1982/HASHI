@@ -13,7 +13,6 @@ from orchestrator import ui_language
 from orchestrator.command_ui import back_label, card_title
 from orchestrator.her_v2.request_policy import job_effort_policy
 from orchestrator.her_v2.models import effort_display_label
-from orchestrator.job_ownership import ownership_mismatch_label
 
 CALLBACK_DATA_LIMIT = 64
 CALLBACK_TOKEN_TTL_SECONDS = 30 * 60
@@ -197,9 +196,6 @@ def _build_jobs_with_buttons(runtime, agent_name: str, skill_manager, filter_age
         note = str(job.get("note") or "")
         if note and note != jid:
             lines.append(html.escape(note))
-        mismatch = ownership_mismatch_label(job)
-        if mismatch:
-            lines.append(f"⚠️ {html.escape(str(mismatch))}")
 
     for kind, job in all_jobs:
         jid = job["id"]
@@ -305,9 +301,6 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             )
             if note and note != job_id:
                 lines.append(f"      {html.escape(str(note))}")
-            mismatch = ownership_mismatch_label(h)
-            if mismatch:
-                lines.append(f"      ⚠️ {html.escape(str(mismatch))}")
         lines.append("")
         found = True
 
@@ -334,9 +327,6 @@ def _build_jobs_text(agent_name: str, skill_manager) -> str:
             )
             if note and note != job_id:
                 lines.append(f"      {html.escape(str(note))}")
-            mismatch = ownership_mismatch_label(c)
-            if mismatch:
-                lines.append(f"      ⚠️ {html.escape(str(mismatch))}")
         lines.append("")
         found = True
 
@@ -499,13 +489,6 @@ async def handle_skill_job_callback(runtime, query, data: str) -> bool:
         job = runtime.skill_manager.get_job(kind, task_id)
         if not job:
             await query.answer(ui_language.tr("jobs.unknown"), show_alert=True)
-            return True
-        mismatch = ownership_mismatch_label(job)
-        if mismatch:
-            await query.answer(
-                ui_language.tr("jobs.run_refused", reason=mismatch),
-                show_alert=True,
-            )
             return True
         await query.answer(ui_language.tr("jobs.running_now"))
         await runtime._run_job_now(job, kind=kind)

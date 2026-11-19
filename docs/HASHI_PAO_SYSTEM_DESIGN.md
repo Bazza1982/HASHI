@@ -831,6 +831,13 @@ checks are not yet atomic with every downstream effect: a stop or Worker failure
 in the remaining dispatch gap can leave an outcome uncertain. They must not be
 described as having the atomic prompt-admission guarantee above.
 
+Task text may mention any path without proving that the task can or will access
+it. A workspace name in a prompt, note or argument must not disable an imported
+task or block scheduling, editing or a manual run. Actual file and execution
+tools retain their own configured access checks. Recovery resolves a unique task
+owned by the Agent recorded in its batch; a reassigned or ambiguous task is not
+run on another Agent's behalf.
+
 #### Scheduler recovery conversation contract (2026-09-30)
 
 When persisted missed triggers require a decision, HASHI Scheduler creates one

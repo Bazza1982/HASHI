@@ -7751,7 +7751,6 @@ class FlexibleAgentRuntime:
         kind: str | None = None,
         operation_admission: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
-        from orchestrator.job_ownership import ownership_mismatch_label
         from orchestrator.her_v2.request_policy import (
             build_scheduler_request_context,
             infer_scheduler_job_kind,
@@ -7771,18 +7770,6 @@ class FlexibleAgentRuntime:
                     or job.get("action", "enqueue_prompt") != "enqueue_prompt"):
                 return False, "Scheduler operation no longer matches its approval."
 
-        mismatch = ownership_mismatch_label(job)
-        if mismatch:
-            message = f"Refusing to run job {job.get('id')}: {mismatch}."
-            if operation_admission is not None:
-                return False, message
-            await self.send_long_message(
-                chat_id=self._primary_chat_id(),
-                text=message,
-                request_id=f"job-{job.get('id')}",
-                purpose="skill-job-run",
-            )
-            return False, message
         action = job.get("action", "enqueue_prompt")
         if action == "export_transcript":
             exported = self.export_daily_transcript(datetime.now())

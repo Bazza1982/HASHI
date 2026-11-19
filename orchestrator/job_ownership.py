@@ -1,4 +1,4 @@
-"""Job ownership helpers for scheduler-managed prompts."""
+"""Legacy task-text inspection helpers; these do not establish resource authority."""
 
 from __future__ import annotations
 

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from orchestrator import runtime_jobs
-from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.job_ownership import ownership_mismatch_label, resource_owner_mismatches
 from orchestrator.runtime_jobs import _build_jobs_text, _build_jobs_with_buttons
-from orchestrator.scheduler import TaskScheduler
 from orchestrator.skill_manager import SkillManager
 
 
@@ -45,31 +44,7 @@ def test_resource_owner_mismatch_detects_windows_workspace_path():
     assert resource_owner_mismatches(job) == ["lily"]
 
 
-def test_scheduler_blocks_owner_mismatch_before_enqueue(tmp_path, caplog):
-    scheduler = TaskScheduler(
-        tmp_path / "tasks.json",
-        tmp_path / "scheduler_state.json",
-        runtimes=[],
-        authorized_id=1,
-    )
-    job = {
-        "id": "zelda-loop-9ada33",
-        "agent": "zelda",
-        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
-    }
-
-    label = scheduler._job_owner_mismatch(
-        job,
-        task_kind="Heartbeat",
-        task_id=job["id"],
-        agent_name=job["agent"],
-    )
-
-    assert label == "resource owner mismatch: workspaces/lily"
-    assert "Blocking Heartbeat zelda-loop-9ada33 for zelda" in caplog.text
-
-
-def test_skill_manager_refuses_to_enable_owner_mismatch(tmp_path):
+def test_skill_manager_allows_enable_with_other_workspace_mentioned(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -93,13 +68,13 @@ def test_skill_manager_refuses_to_enable_owner_mismatch(tmp_path):
 
     ok, message = manager.set_job_enabled("heartbeat", "zelda-loop-9ada33", True)
 
-    assert ok is False
-    assert "resource owner mismatch: workspaces/lily" in message
+    assert ok is True
+    assert "now ON" in message
     saved = json.loads(tasks_path.read_text(encoding="utf-8"))
-    assert saved["heartbeats"][0]["enabled"] is False
+    assert saved["heartbeats"][0]["enabled"] is True
 
 
-def test_skill_manager_imports_owner_mismatch_disabled(tmp_path):
+def test_skill_manager_import_preserves_enabled_state_with_workspace_mention(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(json.dumps({"heartbeats": [], "crons": [], "nudges": []}), encoding="utf-8")
     manager = SkillManager(tmp_path, tasks_path)
@@ -119,11 +94,11 @@ def test_skill_manager_imports_owner_mismatch_disabled(tmp_path):
     assert "Imported job" in message
     saved = json.loads(tasks_path.read_text(encoding="utf-8"))
     imported = saved["heartbeats"][0]
-    assert imported["enabled"] is False
-    assert "resource owner mismatch: workspaces/lily" in imported["note"]
+    assert imported["enabled"] is True
+    assert "note" not in imported
 
 
-def test_skill_manager_transfer_marks_mismatch_for_review(tmp_path):
+def test_skill_manager_transfer_keeps_source_note_without_false_mismatch(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -151,10 +126,11 @@ def test_skill_manager_transfer_marks_mismatch_for_review(tmp_path):
     assert "Transferred to zelda" in message
     assert new_job is not None
     assert new_job["enabled"] is False
-    assert "resource owner mismatch: workspaces/lily" in new_job["note"]
+    assert "transferred from lily" in new_job["note"]
+    assert "resource owner mismatch" not in new_job["note"]
 
 
-def test_jobs_text_displays_owner_mismatch(tmp_path):
+def test_jobs_text_does_not_claim_mismatch_from_task_words(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -177,10 +153,10 @@ def test_jobs_text_displays_owner_mismatch(tmp_path):
 
     text = _build_jobs_text("zelda", skill_manager)
 
-    assert "resource owner mismatch: workspaces/lily" in text
+    assert "resource owner mismatch" not in text
 
 
-def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
+def test_jobs_with_buttons_do_not_claim_mismatch_from_task_words(tmp_path):
     tasks_path = tmp_path / "tasks.json"
     tasks_path.write_text(
         json.dumps(
@@ -204,37 +180,14 @@ def test_jobs_with_buttons_displays_owner_mismatch(tmp_path):
 
     text, markup = _build_jobs_with_buttons(runtime, "zelda", skill_manager, filter_agent="zelda")
 
-    assert "resource owner mismatch: workspaces/lily" in text
+    assert "resource owner mismatch" not in text
     assert "HERV3 model effort" in text
     assert "inherit current model effort" in text
     assert markup is not None
 
 
 @pytest.mark.asyncio
-async def test_runtime_run_job_now_refuses_owner_mismatch():
-    runtime = object.__new__(FlexibleAgentRuntime)
-    runtime.sent = []
-    runtime._primary_chat_id = lambda: 1
-
-    async def _send_long_message(**kwargs):
-        runtime.sent.append(kwargs)
-
-    runtime.send_long_message = _send_long_message
-    job = {
-        "id": "zelda-loop-9ada33",
-        "agent": "zelda",
-        "prompt": "Check /home/user/projects/hashi/workspaces/lily/wiki_state.sqlite",
-    }
-
-    ok, message = await FlexibleAgentRuntime._run_job_now(runtime, job)
-
-    assert ok is False
-    assert "resource owner mismatch: workspaces/lily" in message
-    assert "Refusing to run job zelda-loop-9ada33" in runtime.sent[0]["text"]
-
-
-@pytest.mark.asyncio
-async def test_jobs_run_callback_refuses_owner_mismatch():
+async def test_jobs_run_callback_accepts_workspace_mention():
     class _SkillManager:
         def get_job(self, kind, task_id):
             return {
@@ -250,7 +203,7 @@ async def test_jobs_run_callback_refuses_owner_mismatch():
         async def answer(self, text=None, **kwargs):
             self.answers.append({"text": text, **kwargs})
 
-    runtime = SimpleNamespace(skill_manager=_SkillManager())
+    runtime = SimpleNamespace(skill_manager=_SkillManager(), _run_job_now=AsyncMock())
     query = _Query()
 
     handled = await runtime_jobs.handle_skill_job_callback(
@@ -260,5 +213,5 @@ async def test_jobs_run_callback_refuses_owner_mismatch():
     )
 
     assert handled is True
-    assert query.answers[-1]["show_alert"] is True
-    assert "resource owner mismatch: workspaces/lily" in query.answers[-1]["text"]
+    assert not query.answers[-1].get("show_alert", False)
+    assert runtime._run_job_now.await_count == 1
