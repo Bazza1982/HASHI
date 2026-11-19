@@ -2629,7 +2629,12 @@ class ToolRegistry:
             return await execute_web_search(arguments, brave_api_key=brave_key)
 
         if tool_name == "web_fetch":
-            return await execute_web_fetch(arguments)
+            from tools.tool_output_store import run_binding
+
+            binding = run_binding(context)
+            capture_options = ({"retained_output": (self._tool_output_store, binding, tool_name)}
+                               if binding is not None else {})
+            return await execute_web_fetch(arguments, **capture_options)
 
         if tool_name == "memory_search":
             from orchestrator.central_memory import (

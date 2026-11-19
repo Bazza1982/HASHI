@@ -54,9 +54,16 @@ zero, reports the exact SHA-256 and completeness, and verifies the original
 Run binding. Structured image blocks remain unchanged. An incomplete projection
 and its effect receipt explicitly report `complete_content=false`.
 
-Web fetch returns the full converted text to this paging layer unless the caller
-explicitly supplies a character limit; fetching and HTML conversion themselves
-still buffer the upstream page before that layer.
+Web fetch streams the response and HTML conversion through temporary files.
+With a bound Run, the converted text is retained for paging unless the caller
+explicitly supplies a character limit. A standalone call without a Run binding
+still returns its complete converted result in memory. The HTML parser's
+unconsumed input is budgeted at 8 Mi characters by default;
+`HASHI_WEB_FETCH_PARSER_MEMORY_CHARS` can change this budget or disable it with
+zero. Exceeding it returns an error rather than a partial success. Streaming
+does not guarantee bounded memory for all HTTP decompression or optional
+converter internals. Very long automatic links can use equivalent Markdown link
+formatting rather than the previous short form.
 
 Legacy screenshot strings with more frames or image bytes than fit in one MCP
 page are retained in the same Run-bound store.

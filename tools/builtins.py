@@ -2576,48 +2576,11 @@ async def execute_http_request(
 async def execute_web_fetch(
     args: dict,
     max_length: int | None = None,
-) -> str:
-    url = str(args.get("url", "")).strip()
-    if not url:
-        return "Error: no URL provided"
+    retained_output=None,
+):
+    from tools.web_fetch_stream import fetch_web_text
 
-    raw_limit = args.get("max_length", max_length)
-    max_len = None if raw_limit is None else int(raw_limit)
-    if max_len is not None and max_len < 0:
-        return "Error: max_length must be nonnegative"
-
-    try:
-        import httpx
-        async with httpx.AsyncClient(
-            timeout=30,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; HASHI/2.2)"},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            html = response.text
-
-        # Convert HTML to Markdown if html2text is available
-        try:
-            import html2text
-            h = html2text.HTML2Text()
-            h.ignore_links = False
-            h.ignore_images = True
-            h.body_width = 0
-            text = h.handle(html)
-        except ImportError:
-            # Fallback: basic tag stripping
-            import re as _re
-            text = _re.sub(r"<[^>]+>", "", html)
-            text = _re.sub(r"\n{3,}", "\n\n", text).strip()
-
-        if max_len is not None and len(text) > max_len:
-            text = text[:max_len] + "\n...[content truncated]"
-
-        return f"[Fetched: {url}]\n\n{text}"
-
-    except Exception as e:
-        return f"Error fetching URL: {e}"
+    return await fetch_web_text(args, max_length=max_length, retained_output=retained_output)
 
 
 # ---------------------------------------------------------------------------

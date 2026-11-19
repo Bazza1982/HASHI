@@ -1101,3 +1101,292 @@ async def test_web_fetch_pages_full_default_result_and_honors_explicit_length(tm
     finally:
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_streams_large_page_without_retaining_it_in_memory(tmp_path, monkeypatch):
+    import asyncio
+    import gc
+    import httpx
+    import tracemalloc
+    from tools.registry import ToolRegistry
+
+    assert httpx.AsyncClient is not None
+    home = tmp_path / "agent"
+    home.mkdir()
+    unit = b"data " * 8192
+    count = 600
+    prefix = b"<html><body><p>"
+    suffix = b"FINAL-LARGE-PAGE-SENTINEL</p></body></html>"
+    size = len(prefix) + len(unit) * count + len(suffix)
+
+    async def reply(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + f"Content-Length: {size}\r\nConnection: close\r\n\r\n".encode("ascii")
+                + prefix
+            )
+            for _ in range(count):
+                writer.write(unit)
+                await writer.drain()
+            writer.write(suffix)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    try:
+        gc.collect()
+        tracemalloc.start()
+        try:
+            result = await registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/large"})
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert not result.is_error, result.output
+        reference = result.details["output_continuation"]
+        item = registry._tool_output_store.lookup(run_binding(context), reference)
+        last = json.loads(registry._tool_output_store.page(
+            run_binding(context), reference, max(0, item.characters - 1000),
+        ))
+        assert "FINAL-LARGE-PAGE-SENTINEL" in last["text"]
+        assert peak < size // 2, f"web fetch used {peak} traced bytes for a {size}-byte response"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_cancellation_during_retention_cleans_only_its_output(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    body = ("<p>" + "data " * 20000 + "final</p>").encode("utf-8")
+    async def reply(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii") + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    server = await asyncio.start_server(reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-cancel", "request_id": "req-cancel",
+    }
+    registry = ToolRegistry(
+        ["web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    store = registry._tool_output_store
+    other = _binding("other-web-run")
+    other_reference = store.retain(other, "file_read", "other run survives")
+    original = store.retain_text_chunks
+    entered, release = threading.Event(), threading.Event()
+    def pause_after_prefix(binding, source_tool, chunks):
+        def paused():
+            for index, piece in enumerate(chunks):
+                if index == 1:
+                    entered.set()
+                    assert release.wait(5)
+                yield piece
+        return original(binding, source_tool, paused())
+    monkeypatch.setattr(store, "retain_text_chunks", pause_after_prefix)
+    task = asyncio.create_task(registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/"}))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert _all_pages(store, other, other_reference)[0] == "other run survives"
+        cancelled_dir = store._run_dir(store.private_root, run_binding(context))
+        assert not list(cancelled_dir.glob("*.data"))
+    finally:
+        release.set()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_parser_memory_budget_is_configurable(tmp_path, monkeypatch):
+    import asyncio
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    body = ('<p data-long="' + "x" * 150000 + '">VISIBLE-TEXT</p>').encode("utf-8")
+    async def reply(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii") + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    server = await asyncio.start_server(reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    try:
+        monkeypatch.setenv("HASHI_WEB_FETCH_PARSER_MEMORY_CHARS", "1024")
+        limited = await registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/"})
+        assert limited.is_error and "parser memory budget exceeded" in limited.output
+        monkeypatch.setenv("HASHI_WEB_FETCH_PARSER_MEMORY_CHARS", "0")
+        unlimited = await registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/"})
+        assert not unlimited.is_error, unlimited.output
+        assert "VISIBLE-TEXT" in unlimited.output
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_cancellation_closes_active_http_stream(tmp_path, monkeypatch):
+    import asyncio
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    started = asyncio.Event()
+    disconnected = asyncio.Event()
+    async def reply(reader, writer):
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                b"Content-Length: 10000000\r\nConnection: close\r\n\r\n<p>starting"
+            )
+            await writer.drain()
+            started.set()
+            await asyncio.wait_for(reader.read(), timeout=5)
+        except (ConnectionError, asyncio.TimeoutError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+            disconnected.set()
+    server = await asyncio.start_server(reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    task = asyncio.create_task(registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/"}))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(disconnected.wait(), timeout=5)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_reports_capture_and_retention_failures(tmp_path, monkeypatch):
+    import asyncio
+    from tools.registry import ToolRegistry
+
+    home = tmp_path / "agent"
+    home.mkdir()
+    body = ("<p>" + "text " * 20000 + "THE-END</p>").encode("utf-8")
+    calls = 0
+
+    async def reply(reader, writer):
+        nonlocal calls
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            calls += 1
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii")
+                + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(reply, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+    context = {
+        "instance_id": "HASHI3", "agent_name": "lily", "owner_id": "user:7",
+        "hashi_session_id": "session-1", "hashi_run_id": "run-1", "request_id": "req-1",
+    }
+    registry = ToolRegistry(
+        ["web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
+        audit_context=context, search_scope={"agent_id": "lily", "agent_home": str(home)},
+    )
+    store = registry._tool_output_store
+
+    def fail(*args, **kwargs):
+        raise OSError("disk unavailable")
+
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(store, "temporary_capture_file", fail)
+            failed = await registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/"})
+        assert failed.is_error
+        assert "disk unavailable" in failed.output
+        assert calls == 0
+
+        with monkeypatch.context() as m:
+            m.setattr(store, "retain_text_chunks", fail)
+            partial = await registry.execute("web_fetch", {"url": f"http://127.0.0.1:{port}/"})
+        assert calls == 1
+        assert "retention is unavailable" in partial.output
+        assert partial.details["complete_content"] is False
+        assert partial.details["output_continuation"] is None
+        assert partial.details["output_retention"] == "unavailable"
+    finally:
+        server.close()
+        await server.wait_closed()
