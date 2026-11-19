@@ -359,11 +359,19 @@ def stage_agent_move(
             str(package.conversation_continuity.get("owner_id") or "").strip()
             if package.conversation_continuity is not None else ""
         )
-        _require_governed_history_mapping(
-            root, package, local_authenticated=bool(
-                local_principal and local_principal == local_history_owner
-            ),
-        )
+        governed_target_owner = None
+        history_mapping_downgraded = False
+        try:
+            governed_target_owner = _require_governed_history_mapping(
+                root, package, local_authenticated=bool(
+                    local_principal and local_principal == local_history_owner
+                ),
+            )
+        except GovernedHistoryMappingUnavailable:
+            # The transfer itself is still valid; only conversation history
+            # cannot yet be attributed to a verified destination user. Fall
+            # back to an Agent-only transfer instead of rejecting the Clone.
+            history_mapping_downgraded = True
         if "secrets/agent.enc" in package.names:
             # Decrypt during staging so a bad/mismatched shared key fails before
             # any target configuration is touched.
@@ -515,7 +523,22 @@ def stage_agent_move(
                 ),
                 "reboot_required": False,
             }
-            if package.conversation_continuity is not None:
+            if history_mapping_downgraded:
+                # Governed target could not resolve a verified destination user.
+                # Complete the Agent transfer without conversation history; the
+                # history is never silently attributed to another user.
+                record["history_mode"] = "none"
+                record["conversation_history_downgraded"] = True
+                record["conversation_continuity_summary"] = None
+                record["conversation_owner_binding"] = None
+                record["conversation_target_owner_id"] = None
+                record["conversation_target_owner_origin"] = None
+                warnings = list(record.get("warnings") or [])
+                warnings.append(
+                    "governed destination user unavailable; conversation history skipped"
+                )
+                record["warnings"] = warnings
+            elif package.conversation_continuity is not None:
                 # A local clone has the same authenticated user at both ends.
                 # Never replace that principal with an unrelated legacy config.
                 local_owner = None
@@ -530,7 +553,7 @@ def stage_agent_move(
                 binding = _conversation_owner_binding(
                     root, package, source_instance=source,
                     target_instance=target, target_agent_id=selected_agent_id,
-                    target_owner_id=local_owner,
+                    target_owner_id=local_owner or governed_target_owner,
                 )
                 record["conversation_owner_binding"] = asdict(binding)
                 # This is transaction data, not a credential. The journal is
@@ -538,6 +561,8 @@ def stage_agent_move(
                 record["conversation_target_owner_id"] = binding.target_owner_id
                 if local_owner:
                     record["conversation_target_owner_origin"] = "authenticated_local"
+                elif governed_target_owner:
+                    record["conversation_target_owner_origin"] = "authenticated_governed"
             _atomic_json(record_path, record, mode=0o600)
             incomplete_record_dir = None
             return _public_state(record)
@@ -615,7 +640,9 @@ def commit_agent_move(
                 or record.get("retain_telegram_backup", False) != package.manifest.get("retain_telegram_backup", False)):
             raise AgentMoveError("staged target activation policy changed")
         continuity_binding = None
-        if package.conversation_continuity is not None:
+        if package.conversation_continuity is not None and not record.get(
+            "conversation_history_downgraded"
+        ):
             source_instance = _normalize_instance(record.get("source_instance"))
             target_instance = _normalize_instance(record.get("target_instance"))
             if source_instance != _normalize_instance(
@@ -678,13 +705,39 @@ def commit_agent_move(
                     raise AgentMoveError("target data binding is invalid") from exc
                 if local_owner is not None and local_owner != continuity_binding.target_owner_id:
                     raise AgentMoveError("staged conversation target data binding changed")
-            _require_governed_history_mapping(
-                root, package, local_authenticated=(
-                    record.get("conversation_target_owner_origin") == "authenticated_local"
-                    and operation == "clone" and source_instance == target_instance
-                ),
-            )
-            if saved_binding is None:
+            try:
+                governed_owner = _require_governed_history_mapping(
+                    root, package, local_authenticated=(
+                        record.get("conversation_target_owner_origin") == "authenticated_local"
+                        and operation == "clone" and source_instance == target_instance
+                    ),
+                )
+            except GovernedHistoryMappingUnavailable:
+                # Target became governed (or lost its verified destination user)
+                # after staging. Do not silently attribute the history to the
+                # staged personal owner; skip history and continue the transfer.
+                governed_owner = None
+                continuity_binding = None
+                record["conversation_history_downgraded"] = True
+                record["history_mode"] = "none"
+                record["conversation_owner_binding"] = None
+                record["conversation_target_owner_id"] = None
+                record["conversation_target_owner_origin"] = None
+                warnings = list(record.get("warnings") or [])
+                warnings.append(
+                    "governed destination user unavailable; conversation history skipped"
+                )
+                record["warnings"] = warnings
+                _atomic_json(record_dir / "state.json", record, mode=0o600)
+            if governed_owner is not None and (
+                record.get("conversation_target_owner_origin") != "authenticated_governed"
+                or governed_owner != staged_target_owner
+            ):
+                # The staged governed destination user must still resolve to the
+                # exact staged target owner; a changed or stale identity is never
+                # silently substituted for the commit.
+                raise AgentMoveError("staged governed destination user changed")
+            if saved_binding is None and continuity_binding is not None:
                 # Older authenticated stage records predate this binding.
                 # Freeze it only after the independent target binding succeeds.
                 record["conversation_owner_binding"] = asdict(continuity_binding)
@@ -964,7 +1017,7 @@ def commit_agent_move(
                     }
 
             continuity_result: dict[str, Any]
-            if package.conversation_continuity is not None:
+            if package.conversation_continuity is not None and continuity_binding is not None:
                 try:
                     continuity_result = _session_store(root).import_conversation_continuity(
                         package.conversation_continuity,
@@ -982,7 +1035,9 @@ def commit_agent_move(
                 continuity_result = {
                     "transfer_id": package.package_id,
                     "history_mode": str(
-                        package.manifest.get("history_mode") or "none"
+                        record.get("history_mode")
+                        or package.manifest.get("history_mode")
+                        or "none"
                     ),
                     "target_session_ids": [],
                     "created_session_ids": [],
@@ -3464,28 +3519,67 @@ def _configured_instance_id(root: Path) -> str:
     return "HASHI"
 
 
-def _require_governed_history_mapping(
-    root: Path, package: AgentMoveArchive, *, local_authenticated: bool
-) -> None:
-    capsule = package.conversation_continuity
-    if capsule is None or local_authenticated:
-        return
-    summary = capsule.get("summary") or {}
-    if int(summary.get("session_count") or 0) == 0:
-        return
+def _target_deployment_profile(root: Path) -> str | None:
+    """Return the target's effective deployment profile value, or None."""
     from orchestrator.enterprise.profile import resolve_deployment_profile
 
     config = _load_json(root / "agents.json")
     global_config = config.get("global", {})
     if not isinstance(global_config, Mapping):
         raise AgentMoveError("target deployment configuration is invalid")
-    if resolve_deployment_profile(dict(global_config)).value != "personal":
-        # Instance HMAC is not a governed user or project decision. This
-        # incomplete cross-instance path must not silently attribute history to
-        # a different user while a verified mapping is being implemented.
-        raise AgentMoveError(
+    return resolve_deployment_profile(dict(global_config)).value
+
+
+def _governed_target_owner_identity(root: Path) -> str | None:
+    """Resolve the authenticated destination user for a governed target.
+
+    Reuses the authenticated command principal already established by the
+    Backend API / Worker boundary for this instance; it is the target's existing
+    authentication mechanism, not a new pairing system. Governed users carry a
+    canonical `enterprise:<user_id>` owner; any other form is not a governed
+    destination user and must not be treated as one.
+    """
+    owner = authenticated_conversation_command_owner(root)
+    if not owner:
+        return None
+    if not owner.startswith("enterprise:"):
+        return None
+    user_id = owner.removeprefix("enterprise:").strip()
+    return owner if user_id else None
+
+
+class GovernedHistoryMappingUnavailable(AgentMoveError):
+    """A governed target has history but no verified destination user yet.
+
+    Recoverable: the Clone may proceed without conversation history, or wait for
+    a destination identity. It is never a reason to reject the whole transfer.
+    """
+
+
+def _require_governed_history_mapping(
+    root: Path, package: AgentMoveArchive, *, local_authenticated: bool
+) -> str | None:
+    """Return the verified destination owner, or None when no mapping is needed.
+
+    Personal deployments and locally-authenticated history do not need a governed
+    mapping. A governed target with nonempty history must resolve the authenticated
+    destination user; when it cannot, the caller downgrades to an Agent-only Clone
+    rather than rejecting the whole operation.
+    """
+    capsule = package.conversation_continuity
+    if capsule is None or local_authenticated:
+        return None
+    summary = capsule.get("summary") or {}
+    if int(summary.get("session_count") or 0) == 0:
+        return None
+    if _target_deployment_profile(root) == "personal":
+        return None
+    owner = _governed_target_owner_identity(root)
+    if owner is None:
+        raise GovernedHistoryMappingUnavailable(
             "governed target needs an authenticated user mapping for conversation history"
         )
+    return owner
 
 
 def _configured_session_owner_id(root: Path) -> str:

@@ -1143,6 +1143,10 @@ def test_governed_remote_clone_allows_no_history_and_empty_history(tmp_path, his
 def test_governed_remote_history_does_not_treat_instance_token_as_user_mapping(
     tmp_path, same_instance_claim
 ):
+    # A governed target without a verified destination user must not reject the
+    # whole Clone. It downgrades to an Agent-only transfer: the Agent is staged
+    # and committed, but its conversation history is never silently attributed
+    # to an unverified user or to the instance token.
     source, target, _ = _roots(tmp_path)
     _authorize_owner(source)
     _authorize_owner(target, 8)
@@ -1158,15 +1162,27 @@ def test_governed_remote_history_does_not_treat_instance_token_as_user_mapping(
         source, "zelda", package_path, source_instance="HASHI1", operation="clone",
         transfer_mode="workspace", history_mode="copy", include_telegram_secret=False,
     )
-    with pytest.raises(AgentMoveError, match="authenticated.*user.*mapping"):
-        stage_agent_move(
-            target, package_path, expected_sha256=package_sha256(package_path),
-            source_instance="HASHI1", operation="clone", target_agent_id="zelda-copy",
-        )
-    assert not (target / "workspaces/zelda-copy").exists()
+    staged = stage_agent_move(
+        target, package_path, expected_sha256=package_sha256(package_path),
+        source_instance="HASHI1", operation="clone", target_agent_id="zelda-copy",
+    )
+    assert staged["status"] == "staged"
+    assert staged.get("history_mode") == "none"
+    assert staged.get("conversation_owner_binding") is None
+    committed = commit_agent_move(target, staged["package_id"])
+    assert committed["status"] in {"committed_inactive", "completed"}
+    assert (target / "workspaces/zelda-copy").exists()
+    # No conversation history may be imported without a verified destination user.
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    assert target_store.list_sessions(owner_id="user:7", agent_id="zelda-copy") == []
+    assert target_store.list_sessions(owner_id="user:8", agent_id="zelda-copy") == []
 
 
 def test_staged_personal_history_does_not_bypass_later_governed_policy(tmp_path):
+    # If the target becomes governed between stage and commit, the staged
+    # personal owner mapping must not be silently reused for governed history.
+    # The transfer still succeeds, but conversation history is skipped rather
+    # than attributed to the stale personal owner.
     source, target, _ = _roots(tmp_path)
     _authorize_owner(source)
     _authorize_owner(target, 8)
@@ -1184,9 +1200,11 @@ def test_staged_personal_history_does_not_bypass_later_governed_policy(tmp_path)
     target_config = json.loads((target / "agents.json").read_text())
     target_config["global"].update(deployment_profile="enterprise", organization_id="org-a")
     _write_json(target / "agents.json", target_config)
-    with pytest.raises(AgentMoveError, match="authenticated.*user.*mapping"):
-        commit_agent_move(target, staged["package_id"])
-    assert not (target / "workspaces/zelda-copy").exists()
+    committed = commit_agent_move(target, staged["package_id"])
+    assert committed["status"] in {"committed_inactive", "completed"}
+    assert (target / "workspaces/zelda-copy").exists()
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    assert target_store.list_sessions(owner_id="user:8", agent_id="zelda-copy") == []
 
 
 def test_clone_rejects_altered_staged_source_owner_binding(tmp_path):
@@ -3560,3 +3578,90 @@ def test_quarantined_backup_cannot_be_swapped_between_target_agents(tmp_path):
     assert service._recover_quarantined_telegram_token(target, second_id) == "agent-token"
     rows = json.loads((target / "agents.json").read_text())["agents"]
     assert all(not row["is_active"] for row in rows if row["name"].startswith("zelda-"))
+
+
+def test_governed_cross_instance_clone_maps_authenticated_target_user(tmp_path):
+    # Governed cross-instance clone: the target has a verified destination user
+    # and the history is attributed to that user, not the source owner or the
+    # instance token. Source and target local owner IDs differ and must not be
+    # required to match.
+    from types import SimpleNamespace
+
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target, 8)
+    target_config = json.loads((target / "agents.json").read_text())
+    target_config["global"].update(deployment_profile="enterprise", organization_id="org-a")
+    _write_json(target / "agents.json", target_config)
+    source_store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    source_store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    package_path = tmp_path / "governed-mapped.hashi-agent"
+    create_agent_move_package(
+        source, "zelda", package_path, source_instance="HASHI1", operation="clone",
+        transfer_mode="workspace", history_mode="copy", include_telegram_secret=False,
+    )
+    runtime = SimpleNamespace(global_config=SimpleNamespace(
+        project_root=target, instance_id="HASHI2", deployment_profile="enterprise",
+    ))
+    with bind_frontend_command_principal(runtime, "enterprise:user-8"):
+        staged = stage_agent_move(
+            target, package_path, expected_sha256=package_sha256(package_path),
+            source_instance="HASHI1", operation="clone", target_agent_id="zelda-copy",
+        )
+        assert staged["status"] == "staged"
+        assert staged.get("history_mode") == "copy"
+        _, record = service._load_record(target, staged["package_id"])
+        binding = record["conversation_owner_binding"]
+        assert binding["target_owner_id"] == "enterprise:user-8"
+        assert binding["source_owner_id"] == "user:7"
+        assert record["conversation_target_owner_origin"] == "authenticated_governed"
+        committed = commit_agent_move(target, staged["package_id"])
+    assert committed["status"] == "committed_inactive"
+    target_store = SessionStore(target / "state/sessions.sqlite3", instance_id="HASHI2")
+    sessions = target_store.list_sessions(owner_id="enterprise:user-8", agent_id="zelda-copy")
+    assert len(sessions) == 1
+    assert target_store.list_sessions(owner_id="user:7", agent_id="zelda-copy") == []
+
+
+def test_governed_cross_instance_clone_rejects_changed_destination_identity(tmp_path):
+    # If the authenticated governed destination user changes between stage and
+    # commit, the history must not be silently reassigned to the new identity.
+    # The commit is rejected rather than substituting another user's history.
+    from types import SimpleNamespace
+
+    from orchestrator.frontend_command_context import bind_frontend_command_principal
+
+    source, target, _ = _roots(tmp_path)
+    _authorize_owner(source)
+    _authorize_owner(target, 8)
+    target_config = json.loads((target / "agents.json").read_text())
+    target_config["global"].update(deployment_profile="enterprise", organization_id="org-a")
+    _write_json(target / "agents.json", target_config)
+    source_store = SessionStore(source / "state/sessions.sqlite3", instance_id="HASHI1")
+    source_store.ensure_default_session(owner_id="user:7", agent_id="zelda")
+    package_path = tmp_path / "governed-changed.hashi-agent"
+    create_agent_move_package(
+        source, "zelda", package_path, source_instance="HASHI1", operation="clone",
+        transfer_mode="workspace", history_mode="copy", include_telegram_secret=False,
+    )
+
+    def _runtime(owner_project_root):
+        return SimpleNamespace(global_config=SimpleNamespace(
+            project_root=owner_project_root, instance_id="HASHI2",
+            deployment_profile="enterprise",
+        ))
+
+    with bind_frontend_command_principal(_runtime(target), "enterprise:user-8"):
+        staged = stage_agent_move(
+            target, package_path, expected_sha256=package_sha256(package_path),
+            source_instance="HASHI1", operation="clone", target_agent_id="zelda-copy",
+        )
+    assert staged["status"] == "staged"
+
+    # Commit with a different authenticated destination user.
+    with bind_frontend_command_principal(_runtime(target), "enterprise:user-9"):
+        with pytest.raises(AgentMoveError, match="governed destination user changed"):
+            commit_agent_move(target, staged["package_id"])
+    assert not (target / "workspaces/zelda-copy").exists()
