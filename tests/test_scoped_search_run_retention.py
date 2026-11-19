@@ -304,3 +304,51 @@ async def test_slow_cursor_storage_does_not_block_or_prevent_cancellation(tmp_pa
     else:
         from tools.tool_output_store import run_binding
         assert not reg._tool_output_store.has_bound(run_binding(context))
+
+
+@pytest.mark.asyncio
+async def test_herv3_gateway_retains_actual_run_binding_across_registry_replacement(tmp_path):
+    from orchestrator.flexible_backend_manager import FlexibleBackendManager
+    from orchestrator.session_store import SessionStore
+    from tools.gateway.context import GatewayContext
+    from tools.tool_output_store import run_binding
+
+    root, home, instance = tmp_path / "files", tmp_path / "agent", tmp_path / "instance"
+    for directory in (root, home, instance):
+        directory.mkdir()
+    (root / "one.txt").write_text("needle needle", encoding="utf-8")
+    store = SessionStore(instance / "state" / "sessions.sqlite3", instance_id="HASHI5")
+    session = store.ensure_default_session(owner_id="owner:one", agent_id="fixture")
+    run = store.accept_run(
+        session_id=session["session_id"], owner_id="owner:one", agent_id="fixture",
+        request_id="request-one", text="fixture", source="test", idempotency_key="request-one",
+    )
+    fence = store.mark_request_running("request-one", worker_id="fixture-worker")
+    global_config = SimpleNamespace(instance_id="HASHI5", bridge_home=instance)
+    runtime = SimpleNamespace(
+        name="fixture", global_config=global_config, session_store=store,
+        _request_meta_by_id={"request-one": {
+            "request_id": "request-one", "hashi_session_id": session["session_id"],
+            "hashi_run_id": run.run_id, "hashi_fencing_token": fence, "owner_id": "owner:one",
+        }},
+    )
+    source = registry(root, home, instance)
+    source.audit_context["global_config"] = global_config
+    manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
+    manager.runtime = runtime
+    manager.config = SimpleNamespace(active_backend="her-v3")
+    manager.current_backend = SimpleNamespace(tool_registry=source)
+    manager._refresh_tool_runtime_context("request-one")
+    gateway = GatewayContext.from_registry(source, backend="her-v3")
+    args = {"query": "needle", "mode": "content", "roots": [str(root)], "max_results": 1}
+    first = data(await gateway.build_registry().execute("file_search", args), "file_search")
+    cursor = first["next_cursor"]
+    assert cursor
+    replacement = gateway.build_registry()
+    second = data(await replacement.execute("file_search", {**args, "cursor": cursor}), "file_search")
+    assert second["matches"][0]["character_offset"] == 7
+    binding = run_binding(gateway.audit)
+    assert replacement._tool_output_store.has_bound(binding)
+    store.cancel_run(run.run_id, owner_id="owner:one")
+    after_cancel = gateway.build_registry()
+    assert not after_cancel._tool_output_store.has_bound(binding)
