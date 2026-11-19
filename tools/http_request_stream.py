@@ -62,7 +62,9 @@ async def execute_streamed_http(
                     complete = True
                     observed_at_least = 0
                     chunk_size = min(65536, max_response_bytes + 1) if max_response_bytes else 65536
-                    async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                    from tools.http_response_stream import decoded_response_bytes
+
+                    async for chunk in decoded_response_bytes(response, chunk_size=chunk_size):
                         observed_at_least = received + len(chunk)
                         if max_response_bytes is not None:
                             room = max_response_bytes - received

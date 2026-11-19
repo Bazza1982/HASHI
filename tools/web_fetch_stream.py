@@ -314,8 +314,21 @@ async def fetch_web_text(args: dict[str, Any], *, max_length: int | None = None,
             ) as client:
                 async with client.stream("GET", url) as response:
                     response.raise_for_status()
-                    async for text in response.aiter_text(chunk_size=64 * 1024):
-                        converter.feed(text)
+                    from tools.http_response_stream import decoded_response_bytes
+
+                    encoding = response.encoding or "utf-8"
+                    try:
+                        decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+                    except LookupError:
+                        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                    async for chunk in decoded_response_bytes(response):
+                        text = decoder.decode(chunk, final=False)
+                        if text:
+                            converter.feed(text)
+                            _check_parser_budget(converter, parser_budget)
+                    final = decoder.decode(b"", final=True)
+                    if final:
+                        converter.feed(final)
                         _check_parser_budget(converter, parser_budget)
             converter.finish()
 

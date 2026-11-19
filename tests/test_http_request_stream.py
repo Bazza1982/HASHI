@@ -23,7 +23,7 @@ def _registry(tmp_path, *, run="run-http", request="request-http"):
         "hashi_session_id": "session-1", "hashi_run_id": run, "request_id": request,
     }
     registry = ToolRegistry(
-        ["http_request"], access_root=tmp_path, workspace_dir=home, secrets={},
+        ["http_request", "web_fetch"], access_root=tmp_path, workspace_dir=home, secrets={},
         audit_context=context, search_scope={"agent_id": "fixture", "agent_home": str(home)},
     )
     return registry, context
@@ -32,6 +32,7 @@ def _registry(tmp_path, *, run="run-http", request="request-http"):
 async def _serve(handler):
     app = web.Application()
     app.router.add_post("/effect", handler)
+    app.router.add_get("/effect", handler)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -180,3 +181,185 @@ async def test_http_capture_and_retention_failures_report_effect_truthfully(tmp_
     finally:
         await runner.cleanup()
 # HASHI-Fingerprint: hfp_ca814e5babb24670a8a8fc6d06ff36c9
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["http_request", "web_fetch"])
+async def test_large_gzip_http_response_does_not_inflate_whole_body_in_memory(tmp_path, tool):
+    import gzip
+
+    payload_size = 24 * 1024 * 1024
+    sentinel = b"GZIP-HTTP-COMPLETE"
+    compressed = gzip.compress(b"x" * payload_size + sentinel, mtime=0)
+    received = []
+
+    async def respond(request):
+        received.append(await request.text())
+        return web.Response(
+            body=compressed,
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "gzip"},
+        )
+
+    runner, url = await _serve(respond)
+    registry, context = _registry(tmp_path)
+    try:
+        gc.collect()
+        tracemalloc.start()
+        try:
+            arguments = {"url": url}
+            if tool == "http_request":
+                arguments.update(method="POST", body="once")
+            result = await registry.execute(tool, arguments)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert not result.is_error, result.output
+        if tool == "http_request":
+            assert result.details["response_complete"] is True
+        assert received == (["once"] if tool == "http_request" else [""])
+        reference = result.details["output_continuation"]
+        binding = run_binding(context)
+        item = registry._tool_output_store.lookup(binding, reference)
+        last = json.loads(registry._tool_output_store.page(
+            binding, reference, max(0, item.characters - 300),
+        ))
+        assert sentinel.decode("ascii") in last["text"]
+        assert peak < payload_size // 2, f"gzip inflated with {peak} traced bytes"
+    finally:
+        await runner.cleanup()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["http_request", "web_fetch"])
+async def test_gzip_members_preserve_unicode_and_truncated_stream_fails(tmp_path, tool):
+    import gzip
+    compressed = gzip.compress(b"first ", mtime=0) + gzip.compress("中文 last".encode(), mtime=0)
+    truncated = False
+
+    async def respond(_request):
+        return web.Response(
+            body=compressed[:-2] if truncated else compressed,
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "gzip"},
+        )
+
+    runner, url = await _serve(respond)
+    registry, _ = _registry(tmp_path)
+    try:
+        result = await registry.execute(tool, {"url": url})
+        assert not result.is_error, result.output
+        assert "first 中文 last" in result.output
+        truncated = True
+        incomplete = await registry.execute(tool, {"url": url})
+        assert incomplete.is_error
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_explicit_http_budget_applies_to_decompressed_gzip_bytes(tmp_path):
+    import gzip
+
+    async def respond(_request):
+        return web.Response(
+            body=gzip.compress(b"abcdefghijk", mtime=0),
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "gzip"},
+        )
+
+    runner, url = await _serve(respond)
+    home = tmp_path / "agent"
+    home.mkdir()
+    registry = ToolRegistry(
+        ["http_request"], access_root=tmp_path, workspace_dir=home, secrets={},
+        tool_options={"http_request": {"max_response_bytes": 5}},
+    )
+    try:
+        result = await registry.execute("http_request", {"url": url})
+        assert not result.is_error
+        assert result.details["response_complete"] is False
+        assert result.details["response_bytes"] == 5
+        assert "abcde" in result.output
+        assert "fgh" not in result.output
+        assert "No automatic retry" in result.output
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["http_request", "web_fetch"])
+async def test_other_http_content_encodings_keep_existing_support(tmp_path, tool):
+    import zlib
+
+    async def respond(_request):
+        return web.Response(
+            body=zlib.compress("deflate 中文".encode()),
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "deflate"},
+        )
+
+    runner, url = await _serve(respond)
+    registry, _ = _registry(tmp_path)
+    try:
+        result = await registry.execute(tool, {"url": url})
+        assert not result.is_error, result.output
+        assert "deflate 中文" in result.output
+    finally:
+        await runner.cleanup()
+
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_gzip_expansion_does_not_repeat_post(tmp_path, monkeypatch):
+    import gzip
+    from contextlib import contextmanager
+
+    compressed = gzip.compress(b"x" * (32 * 1024 * 1024), mtime=0)
+    received = []
+    reached = asyncio.Event()
+
+    async def respond(request):
+        received.append(await request.text())
+        return web.Response(
+            body=compressed,
+            headers={"Content-Type": "text/plain", "Content-Encoding": "gzip"},
+        )
+
+    runner, url = await _serve(respond)
+    registry, context = _registry(tmp_path)
+    store = registry._tool_output_store
+    original = store.temporary_capture_file
+
+    @contextmanager
+    def observed_capture():
+        with original() as capture:
+            class Observer:
+                written = 0
+
+                def write(self, data):
+                    self.written += len(data)
+                    if self.written > 1024 * 1024:
+                        reached.set()
+                    return capture.write(data)
+
+                def __getattr__(self, key):
+                    return getattr(capture, key)
+
+            yield Observer()
+
+    monkeypatch.setattr(store, "temporary_capture_file", observed_capture)
+    task = asyncio.create_task(registry.execute("http_request", {
+        "url": url, "method": "POST", "body": "once",
+    }))
+    try:
+        await asyncio.wait_for(reached.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert received == ["once"]
+        run_dir = store._run_dir(store.private_root, run_binding(context))
+        assert not list(run_dir.glob("*.data"))
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await runner.cleanup()

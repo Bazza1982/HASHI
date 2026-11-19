@@ -61,8 +61,9 @@ still returns its complete converted result in memory. The HTML parser's
 unconsumed input is budgeted at 8 Mi characters by default;
 `HASHI_WEB_FETCH_PARSER_MEMORY_CHARS` can change this budget or disable it with
 zero. Exceeding it returns an error rather than a partial success. Streaming
-does not guarantee bounded memory for all HTTP decompression or optional
-converter internals. Very long automatic links can use equivalent Markdown link
+expands single-layer gzip in bounded chunks. Other HTTP content encodings,
+chained encodings and optional converter internals have not been shown bounded
+for every input. Very long automatic links can use equivalent Markdown link
 formatting rather than the previous short form.
 
 Legacy screenshot strings with more frames or image bytes than fit in one MCP
@@ -269,8 +270,9 @@ already have taken effect, and the tool never automatically replays it.
 Cancellation stops waiting and does not retry. An unavailable capture is
 reported before dispatch; a retention failure after a response is reported
 without repeating the request. Standalone calls without a Run binding still
-return their complete result in memory. HTTP decompression can transiently
-allocate more, and the Run-bound output store is not a disk quota.
+return their complete result in memory. Single-layer gzip expansion is bounded;
+other HTTP content encodings or chains may transiently allocate more. The
+Run-bound output store is not a disk quota.
 
 The existing file_write.max_file_size_kb option controls allowed content
 size. An oversized write is rejected before touching the destination. File
