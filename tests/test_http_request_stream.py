@@ -186,19 +186,28 @@ async def test_http_capture_and_retention_failures_report_effect_truthfully(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["http_request", "web_fetch"])
-async def test_large_gzip_http_response_does_not_inflate_whole_body_in_memory(tmp_path, tool):
+@pytest.mark.parametrize("coding", ["gzip", "deflate", "raw_deflate"])
+async def test_large_compressed_response_does_not_inflate_whole_body_in_memory(tmp_path, tool, coding):
     import gzip
+    import zlib
 
     payload_size = 24 * 1024 * 1024
-    sentinel = b"GZIP-HTTP-COMPLETE"
-    compressed = gzip.compress(b"x" * payload_size + sentinel, mtime=0)
+    sentinel = b"COMPRESSED-HTTP-COMPLETE"
+    raw = b"x" * payload_size + sentinel
+    if coding == "gzip":
+        compressed = gzip.compress(raw, mtime=0)
+    else:
+        compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS if coding == "raw_deflate" else zlib.MAX_WBITS)
+        compressed = compressor.compress(raw) + compressor.flush()
+    del raw
+    header = "gzip" if coding == "gzip" else "deflate"
     received = []
 
     async def respond(request):
         received.append(await request.text())
         return web.Response(
             body=compressed,
-            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "gzip"},
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": header},
         )
 
     runner, url = await _serve(respond)
@@ -225,7 +234,7 @@ async def test_large_gzip_http_response_does_not_inflate_whole_body_in_memory(tm
             binding, reference, max(0, item.characters - 300),
         ))
         assert sentinel.decode("ascii") in last["text"]
-        assert peak < payload_size // 2, f"gzip inflated with {peak} traced bytes"
+        assert peak < payload_size // 2, f"{coding} inflated with {peak} traced bytes"
     finally:
         await runner.cleanup()
 
@@ -362,4 +371,24 @@ async def test_cancel_during_gzip_expansion_does_not_repeat_post(tmp_path, monke
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await runner.cleanup()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["http_request", "web_fetch"])
+async def test_identity_http_content_encoding_stays_supported(tmp_path, tool):
+    async def respond(_request):
+        return web.Response(
+            body="ordinary 中文".encode(),
+            headers={"Content-Type": "text/plain; charset=utf-8", "Content-Encoding": "identity"},
+        )
+
+    runner, url = await _serve(respond)
+    registry, _ = _registry(tmp_path)
+    try:
+        result = await registry.execute(tool, {"url": url})
+        assert not result.is_error, result.output
+        assert "ordinary 中文" in result.output
+    finally:
         await runner.cleanup()
