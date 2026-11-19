@@ -31,14 +31,16 @@ _SERVER = r"""
 import sys
 from pathlib import Path
 import uvicorn
+import remote.api.server as server
 from remote.api.server import create_app
 from remote.security.pairing import PairingManager
 from remote.terminal.executor import TerminalExecutor
-root=Path(sys.argv[1]); port=int(sys.argv[2])
+root=Path(sys.argv[1]); port=int(sys.argv[2]); workbench_port=int(sys.argv[3])
+server.local_http_hosts=lambda: ("127.0.0.1",)
 app=create_app(
     {"instance_id":"HASHI2", "display_name":"Synthetic target", "remote_port":port},
     PairingManager(storage_dir=root/"pairing", lan_mode=True),
-    TerminalExecutor(), hashi_root=str(root))
+    TerminalExecutor(), hashi_root=str(root), workbench_port=workbench_port)
 uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
 """
 
@@ -95,16 +97,29 @@ def _free_port() -> int:
 
 
 class _Receiver:
-    def __init__(self, root: Path, port: int) -> None:
+    def __init__(self, root: Path, port: int, *, workbench_port: int | None = None) -> None:
         self.root = root
         self.port = port
         self.process: subprocess.Popen | None = None
         self.error_log = root / "fixture-server.log"
+        self._reserved_health_port: socket.socket | None = None
+        if workbench_port is None:
+            # Reserve an unlistened fixture port; an omitted health server must
+            # never fall back to another running instance's default port.
+            while True:
+                candidate = socket.socket()
+                candidate.bind(("127.0.0.1", 0))
+                if candidate.getsockname()[1] != port:
+                    self._reserved_health_port = candidate
+                    break
+                candidate.close()
+            workbench_port = int(self._reserved_health_port.getsockname()[1])
+        self.workbench_port = workbench_port
 
     def start(self) -> None:
         with self.error_log.open("ab") as log:
             self.process = subprocess.Popen(
-                [sys.executable, "-u", "-c", _SERVER, str(self.root), str(self.port)],
+                [sys.executable, "-u", "-c", _SERVER, str(self.root), str(self.port), str(self.workbench_port)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
                 cwd=Path(__file__).resolve().parents[1],
             )
@@ -135,6 +150,12 @@ class _Receiver:
                 self.process.kill()
                 self.process.wait(timeout=8)
         self.process = None
+
+    def close(self) -> None:
+        self.stop()
+        if self._reserved_health_port is not None:
+            self._reserved_health_port.close()
+            self._reserved_health_port = None
 
 
 @pytest.mark.parametrize("operation", ["clone", "move"])
@@ -244,7 +265,7 @@ def test_real_remote_process_maps_personal_history_after_receiver_restart(
         )] == ["unrelated question", "unrelated answer"]
         assert source_store.messages(source_session, owner_id="owner:source") == original
     finally:
-        receiver.stop()
+        receiver.close()
 
 
 
@@ -288,4 +309,4 @@ def test_real_personal_move_with_empty_selected_history_keeps_old_owner(tmp_path
         assert target_store.list_sessions(owner_id="user:7", agent_id="zelda") == []
         assert source_store.messages(original_session, owner_id="user:7") == original
     finally:
-        receiver.stop()
+        receiver.close()
