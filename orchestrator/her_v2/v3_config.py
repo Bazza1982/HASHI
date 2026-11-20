@@ -139,10 +139,17 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             primary["reasoning"] = reasoning
     primary["reasoning"] = primary.get("reasoning") or "default"
 
-    auxiliary = deepcopy(dict(raw.get("auxiliary") or primary))
+    explicit_auxiliary = isinstance(raw.get("auxiliary"), Mapping)
+    auxiliary = deepcopy(dict(raw.get("auxiliary") if explicit_auxiliary else primary))
     if "provider" in auxiliary:
         auxiliary["engine"] = auxiliary.pop("provider")
-    auxiliary.setdefault("reasoning", "default")
+    # Auxiliary presentation/housekeeping stages (commentary, final style,
+    # meditation, dream) must not silently inherit expensive reasoning from the
+    # main target; disable reasoning by default unless explicitly requested.
+    if not explicit_auxiliary:
+        auxiliary["reasoning"] = "off"
+    else:
+        auxiliary.setdefault("reasoning", "off")
 
     for profile in (primary, auxiliary):
         if not str(profile.get("engine") or "").strip() or not str(profile.get("model") or "").strip():
@@ -205,9 +212,10 @@ def apply_v3_target(
     current_main.update(target.to_dict())
     updated["main"] = current_main
     # The auxiliary lane follows the main target unless an explicitly separate
-    # non-user-facing auxiliary target exists in configuration.
+    # non-user-facing auxiliary target exists in configuration, but keeps
+    # reasoning disabled by default to avoid expensive commentary calls.
     if not isinstance(updated.get("auxiliary"), Mapping):
-        updated["auxiliary"] = dict(current_main)
+        updated["auxiliary"] = {**current_main, "reasoning": "off"}
     return normalise_v3_config(updated)
 
 

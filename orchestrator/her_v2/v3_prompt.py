@@ -92,6 +92,19 @@ additional permissions. Do not request secrets through question cards.
 """
 
 
+DEVELOPER_TOOLKIT_CONTRACT = """Developer toolkit guidance:
+When these tools are available, prefer code_search for scoped source discovery,
+project_locate to locate repositories, git_inspect for read-only Git inspection,
+text_replace for targeted edits to existing UTF-8 files (instead of hand-written
+unified diffs or shell edit scripts), and tool_find when on-demand tool packs
+are enabled. Batch genuinely independent read-only inspections (such as reading
+multiple known files or running separate scoped searches) in one assistant turn
+when practical. On Windows, PowerShell 5.1 does not support bash `&&` chaining
+unless PowerShell 7 (`pwsh`) is installed; use `;` or `$LASTEXITCODE` checks
+rather than bash syntax.
+"""
+
+
 def compile_main_prompt(
     *,
     pcm_input: Mapping[str, object],
@@ -99,6 +112,7 @@ def compile_main_prompt(
     context: Mapping[str, object],
     fallback_persona: str = "",
     tools_available: bool = True,
+    developer_toolkit_enabled: bool = False,
     reference_projector: Callable[[dict], dict] | None = None,
 ) -> tuple[str, str]:
     """Compile one model request without adding another reasoning/router model call."""
@@ -107,6 +121,9 @@ def compile_main_prompt(
         system.append(NO_TOOLS_CONTRACT)
     else:
         system.append(QUESTION_CONTRACT)
+        if developer_toolkit_enabled or bool(context.get("developer_toolkit_enabled")):
+            if DEVELOPER_TOOLKIT_CONTRACT not in system:
+                system.append(DEVELOPER_TOOLKIT_CONTRACT)
     sections = sorted(
         (row for row in (pcm_input.get("sections") or []) if isinstance(row, Mapping)),
         key=lambda row: (int(row.get("order", 0)), str(row.get("key", ""))),

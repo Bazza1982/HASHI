@@ -74,9 +74,17 @@ def target_for(registry, arguments):
 
 def output_facts(result):
     from tools.builtins import BuiltinExecutionResult
+    import json
     output = result.output if isinstance(result, BuiltinExecutionResult) else str(result)
     details = dict(result.details) if isinstance(result, BuiltinExecutionResult) else {}
     failed = output.startswith("Error") or details.get("exit_code", 0) not in {0, None}
+    if not failed and output.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(output)
+            if isinstance(parsed, dict) and parsed.get("ok") is False:
+                failed = True
+        except Exception:
+            pass
     return output, details, "failed" if failed else "completed"
 
 
@@ -90,6 +98,21 @@ def expected_matches(name, arguments, before, after) -> bool:
         return expected == after.data
     if before.data is None:
         return False
+    if name == "text_replace":
+        find = arguments.get("find")
+        replace = arguments.get("replace")
+        if not isinstance(find, str) or not find or not isinstance(replace, str):
+            return False
+        try:
+            old = before.data.decode("utf-8").replace("\r\n", "\n")
+            expected_count = max(1, int(arguments.get("expected_count", 1)))
+            if old.count(find) != expected_count:
+                return False
+            expected_text = old.replace(find, replace)
+            actual_text = after.data.decode("utf-8").replace("\r\n", "\n")
+            return expected_text == actual_text
+        except (ValueError, UnicodeError):
+            return False
     from tools.builtins import _apply_unified_diff
     try:
         ok, text = _apply_unified_diff(before.data.decode("utf-8", "surrogateescape"), str(arguments.get("patch") or ""))
@@ -118,7 +141,9 @@ async def dispatch_controlled(registry, tool_name, arguments, *, tool_call_id):
     if tool_name in {"shell", "bash"}:
         from .coverage import dispatch_shell
         return await dispatch_shell(registry, tool_name, arguments, tool_call_id=tool_call_id)
-    if tool_name not in {"file_write", "apply_patch"}:
+    if tool_name not in {"file_write", "apply_patch", "text_replace"}:
+        return await registry._dispatch_observed(tool_name, arguments, tool_call_id=tool_call_id)
+    if tool_name == "text_replace" and arguments.get("preview_only") is True:
         return await registry._dispatch_observed(tool_name, arguments, tool_call_id=tool_call_id)
     policy = context_policy(context)
     if not policy.enabled:

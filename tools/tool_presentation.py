@@ -109,3 +109,29 @@ def on_demand_requested(
         return False
     options = tool_options.get("herv3_tool_presentation")
     return isinstance(options, dict) and options.get("mode") == "on_demand"
+
+
+def developer_toolkit_guidance_enabled(
+    tool_options: dict | None,
+    tool_names: set[str] | frozenset[str],
+    *,
+    model: str,
+    is_herv3: bool,
+) -> bool:
+    """Enable optional HERV3 Developer Toolkit guidance only on explicit opt-in."""
+    if not is_herv3:
+        return False
+    options = (
+        tool_options.get("herv3_tool_presentation")
+        if isinstance(tool_options, dict)
+        else None
+    )
+    if isinstance(options, dict):
+        mode = str(options.get("mode") or "").strip().casefold()
+        if mode in {"off", "disabled", "none", "false"}:
+            return False
+    if on_demand_requested(tool_options, model=model, is_herv3=is_herv3):
+        return True
+    from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES
+
+    return bool(set(tool_names) & set(TOOLKIT_TOOL_NAMES))
