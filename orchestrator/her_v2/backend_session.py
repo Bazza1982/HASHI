@@ -14,6 +14,7 @@ from orchestrator.her_v2.session_store import (
     HerSessionStore,
     HerSessionStoreError,
 )
+from tools.token_tracker import estimate_tokens
 
 HER_FIXED_PROTOCOL = "hashi.her-fixed-backend.v1"
 HER_FIXED_ENVELOPE_PREFIX = "HASHI_HER_FIXED_ENVELOPE_V1\n"
@@ -313,10 +314,19 @@ class HerBackendSessionCoordinator:
                 },
             }
             encoded = self.encode(payload)
+            materialized_tokens = estimate_tokens(
+                self._render_prompt(
+                    section_map,
+                    resource_snapshot,
+                    str(user_message),
+                    (),
+                )
+            )
             return encoded, {
                 "operation": "open_session",
                 "incremental": False,
                 "transport_chars": len(encoded),
+                "materialized_tokens": materialized_tokens,
                 "pcm_sections_sent": len(section_map),
                 "pcm_sections_unchanged": 0,
                 "pcm_sections_removed": 0,
@@ -427,10 +437,23 @@ class HerBackendSessionCoordinator:
             },
         }
         encoded = self.encode(payload)
+        active_history = self._uncompacted_history(
+            target_pcm,
+            self.store.recent_completed_turns(session_id),
+        )
+        materialized_tokens = estimate_tokens(
+            self._render_prompt(
+                target_pcm,
+                {"attachments": list(target_resource_map.values())},
+                str(user_message),
+                active_history,
+            )
+        )
         return encoded, {
             "operation": "append_turn",
             "incremental": True,
             "transport_chars": len(encoded),
+            "materialized_tokens": materialized_tokens,
             "pcm_sections_sent": len(operations),
             "pcm_sections_unchanged": unchanged,
             "pcm_sections_removed": len(removed),
@@ -604,10 +627,14 @@ class HerBackendSessionCoordinator:
             if isinstance(item, Mapping)
         ]
         materialized = ""
-        history = self.store.recent_completed_turns(session_id)
+        pcm_dict = session.get("pcm") or {}
+        history = self._uncompacted_history(
+            pcm_dict,
+            self.store.recent_completed_turns(session_id),
+        )
         pcm_sections = [
             dict(value)
-            for value in (session.get("pcm") or {}).values()
+            for value in pcm_dict.values()
             if isinstance(value, Mapping)
         ]
         pcm_input = {
@@ -642,6 +669,51 @@ class HerBackendSessionCoordinator:
             resource_attachments=tuple(turn_resources),
             pcm_input=pcm_input,
         )
+
+    @staticmethod
+    def _parse_utc_epoch(value: Any) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    @classmethod
+    def _uncompacted_history(
+        cls,
+        pcm: Mapping[str, Any],
+        history: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        section = pcm.get("extra:hashi_managed_conversation_history")
+        if not isinstance(section, Mapping):
+            return [dict(item) for item in history if isinstance(item, Mapping)]
+        metadata = section.get("metadata")
+        cutoff_raw = (
+            metadata.get("compacted_through_ts")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        cutoff_epoch = cls._parse_utc_epoch(cutoff_raw)
+        if cutoff_epoch is None:
+            return [dict(item) for item in history if isinstance(item, Mapping)]
+        filtered: list[dict[str, Any]] = []
+        for item in history:
+            if not isinstance(item, Mapping):
+                continue
+            item_epoch = cls._parse_utc_epoch(
+                item.get("conversation_at")
+                or item.get("completed_at")
+                or item.get("accepted_at")
+            )
+            if item_epoch is not None and item_epoch <= cutoff_epoch:
+                continue
+            filtered.append(dict(item))
+        return filtered
 
     @staticmethod
     def _render_prompt(
