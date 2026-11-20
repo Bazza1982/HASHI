@@ -45,9 +45,17 @@ def test_toolkit_schemas_and_permissions(tmp_path):
     } >= set(TOOLKIT_TOOL_NAMES)
     for name in TOOLKIT_TOOL_NAMES:
         assert registry.is_read_only(name) is (name in TOOLKIT_READ_ONLY_TOOLS)
-    assert not on_demand_requested({}, model="qwen3.5-9b", is_herv3=True)
+    assert on_demand_requested({}, model="qwen3.5-9b", is_herv3=True)
     assert on_demand_requested(
         {"herv3_tool_presentation": {"mode": "on_demand"}},
+        model="deepseek-v4-pro", is_herv3=True
+    )
+    assert not on_demand_requested(
+        {"herv3_tool_presentation": {"mode": "full"}},
+        model="deepseek-v4-pro", is_herv3=True
+    )
+    assert not on_demand_requested(
+        {"herv3_tool_presentation": {"mode": "off"}},
         model="deepseek-v4-pro", is_herv3=True
     )
     assert not on_demand_requested(
@@ -234,19 +242,18 @@ async def test_git_inspection_cannot_walk_to_repo_outside_accessible_root(tmp_pa
     assert result.is_error
 
 
-def test_wildcard_does_not_silently_adopt_toolkit_tools(tmp_path):
-    """A '*' allowlist keeps its prior behaviour: the new toolkit schemas do not
-    broaden a wildcard instance unless they are listed explicitly (same
-    precedent as media_read and vision_inspect)."""
+def test_wildcard_adopts_toolkit_tools_by_default_while_keeping_narrow_allowlists_scoped(tmp_path):
+    """A '*' allowlist enables the Developer Toolkit by default while keeping
+    media_read and vision_inspect opt-in and preserving narrow explicit allowlists."""
     wildcard = _registry(tmp_path, allowed=["*"])
     for name in TOOLKIT_TOOL_NAMES:
-        assert not wildcard.is_allowed(name), name
+        assert wildcard.is_allowed(name), name
     assert not wildcard.is_allowed("media_read")
     assert not wildcard.is_allowed("vision_inspect")
-    explicit = _registry(tmp_path, allowed=["*", "tool_find", "file_manage"])
-    assert explicit.is_allowed("tool_find")
-    assert explicit.is_allowed("file_manage")
-    assert not explicit.is_allowed("text_replace")
+    narrow = _registry(tmp_path, allowed=["file_read", "file_write", "tool_find"])
+    assert narrow.is_allowed("tool_find")
+    assert not narrow.is_allowed("text_replace")
+    assert not narrow.is_allowed("file_manage")
 
 def _with_protected(registry, protected: Path):
     """Attach a minimal live-runtime policy so toolkit tools receive
