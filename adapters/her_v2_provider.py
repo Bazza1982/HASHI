@@ -1701,41 +1701,6 @@ class _CognitiveControlToolRegistry:
             normalized.update({"bash", "shell"})
         return frozenset(normalized)
 
-    @staticmethod
-    def _task_delta_schema() -> dict[str, Any]:
-        return {
-            "type": "object",
-            "description": (
-                "TaskState delta from prior evidence; use the system contract. "
-                "Removed before the real tool executes."
-            ),
-            "properties": {"delta_id": {"type": "string"}},
-            "required": ["delta_id"],
-            "additionalProperties": True,
-        }
-
-    @classmethod
-    def _with_task_delta(cls, definition: Mapping[str, Any]) -> dict[str, Any]:
-        item = copy.deepcopy(dict(definition))
-        function = item.get("function")
-        if not isinstance(function, Mapping):
-            return item
-        function = dict(function)
-        parameters = function.get("parameters")
-        parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
-        parameters.setdefault("type", "object")
-        properties = parameters.get("properties")
-        properties = dict(properties) if isinstance(properties, Mapping) else {}
-        properties[HASHI_TASK_DELTA_ARGUMENT] = cls._task_delta_schema()
-        parameters["properties"] = properties
-        required = [str(value) for value in parameters.get("required", [])]
-        if HASHI_TASK_DELTA_ARGUMENT not in required:
-            required.append(HASHI_TASK_DELTA_ARGUMENT)
-        parameters["required"] = required
-        function["parameters"] = parameters
-        item["function"] = function
-        return item
-
     def get_tool_definitions(self, tiers=None):
         if self.controller.awaiting_decision:
             return [self.controller.decision_schema()]
@@ -6006,7 +5971,7 @@ class HashiStageProvider(StageProvider):
                         task_state_contract(
                             lifecycle_task_state.prompt_snapshot(),
                             stage=request.stage.value,
-                            tool_enabled=cognitive_registry is not None,
+                            tool_enabled=False,
                         )
                     )
                 contract = "\n\n".join(contracts)

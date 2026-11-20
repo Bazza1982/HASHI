@@ -20,6 +20,7 @@ from adapters.openrouter_api import (
     _request_wire_evidence,
     _response_wire_evidence,
     _stream_error_exception,
+    _usage_cache_tokens,
 )
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 from adapters.xai_imagine import generate_xai_image, is_imagine_image_model
@@ -303,6 +304,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         tool_calls = message.get("tool_calls") or None
         usage = data.get("usage") or {}
         comp_details = usage.get("completion_tokens_details") or {}
+        cache_hit, cache_miss = _usage_cache_tokens(usage)
         result = _APIResult(
             text=ai_text,
             tool_calls=tool_calls,
@@ -310,6 +312,8 @@ class XaiApiAdapter(OpenRouterAdapter):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             thinking_tokens=comp_details.get("reasoning_tokens", 0),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             structured_data=_message_structured_data(message),
         )
         result.reasoning_content = reasoning_content
@@ -599,6 +603,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         reasoning_content = "".join(reasoning_chunks)
         tool_calls = [tool_calls_acc[idx] for idx in sorted(tool_calls_acc)] if tool_calls_acc else None
         comp_details = stream_usage.get("completion_tokens_details") or {}
+        cache_hit, cache_miss = _usage_cache_tokens(stream_usage)
         result = _APIResult(
             text=full_text,
             tool_calls=tool_calls,
@@ -606,6 +611,8 @@ class XaiApiAdapter(OpenRouterAdapter):
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
             completion_tokens=stream_usage.get("completion_tokens", 0),
             thinking_tokens=comp_details.get("reasoning_tokens", 0),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
         )
         result.reasoning_content = reasoning_content
         result.wire_evidence = wire_evidence

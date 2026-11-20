@@ -1276,6 +1276,33 @@ def _optional_usage_token_count(value: Any) -> int | None:
         return None
 
 
+def _usage_cache_tokens(usage: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Extract optional prompt-cache hit and miss token counters without guessing."""
+
+    if not isinstance(usage, Mapping):
+        return None, None
+    hit = _optional_usage_token_count(usage.get("prompt_cache_hit_tokens"))
+    if hit is None:
+        hit = _optional_usage_token_count(usage.get("cache_read_input_tokens"))
+    if hit is None:
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(details_key)
+            if isinstance(details, Mapping) and "cached_tokens" in details:
+                hit = _optional_usage_token_count(details.get("cached_tokens"))
+                if hit is not None:
+                    break
+    miss = _optional_usage_token_count(usage.get("prompt_cache_miss_tokens"))
+    if miss is None:
+        miss = _optional_usage_token_count(usage.get("cache_creation_input_tokens"))
+    if miss is None and hit is not None:
+        prompt_tokens = _optional_usage_token_count(usage.get("prompt_tokens"))
+        if prompt_tokens is None:
+            prompt_tokens = _optional_usage_token_count(usage.get("input_tokens"))
+        if prompt_tokens is not None:
+            miss = max(0, prompt_tokens - hit)
+    return hit, miss
+
+
 def _retry_after_seconds(response: httpx.Response | None) -> float | None:
     if response is None:
         return None
@@ -4028,12 +4055,15 @@ class OpenRouterAdapter(BaseBackend):
         thinking_tokens = _usage_thinking_tokens(usage)
 
         reasoning_content = "".join(reasoning_fragments)
+        cache_hit, cache_miss = _usage_cache_tokens(usage)
         return _APIResult(
             text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=thinking_tokens,
             cost_usd=_usage_cost_usd(usage),
             reasoning_content=reasoning_content,
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             structured_data=_message_structured_data(message),
             audio_bytes=audio_bytes,
             audio_transcript=audio_transcript,
@@ -4383,6 +4413,7 @@ class OpenRouterAdapter(BaseBackend):
                     "provider audio output exceeds the 64 MiB limit",
                     code="AUDIO_OUTPUT_LIMIT_EXCEEDED",
                 )
+        cache_hit, cache_miss = _usage_cache_tokens(stream_usage)
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
@@ -4392,6 +4423,8 @@ class OpenRouterAdapter(BaseBackend):
             thinking_tokens=_usage_thinking_tokens(stream_usage),
             cost_usd=_usage_cost_usd(stream_usage),
             reasoning_content="".join(reasoning_chunks),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             audio_bytes=audio_bytes,
             audio_transcript=audio_transcript,
             raw_finish_reason=(

@@ -39,8 +39,22 @@ class HCCConflictError(ValueError):
     """The selected entry changed since inspection; no content was written."""
 
 
+def has_hcc_content(workspace_dir: str | Path) -> bool:
+    """True when workspace agent.md has a non-empty trusted [hcc] block."""
+    agent_md = Path(workspace_dir) / "agent.md"
+    if not agent_md.is_file():
+        return False
+    try:
+        return bool((load_pcm_document(agent_md, workspace_dir=workspace_dir).hcc or "").strip())
+    except (OSError, PCMValidationError, UnicodeError):
+        return False
+
+
 def is_hcc_enabled(workspace_dir: str | Path) -> bool:
-    return WorkspaceStateStore(Path(workspace_dir)).read().get(HCC_STATE_KEY) is True
+    state = WorkspaceStateStore(Path(workspace_dir)).read()
+    if HCC_STATE_KEY in state:
+        return state.get(HCC_STATE_KEY) is True
+    return has_hcc_content(workspace_dir)
 
 
 def set_hcc_enabled(workspace_dir: str | Path, enabled: bool) -> bool:

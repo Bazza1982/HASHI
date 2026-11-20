@@ -31,7 +31,13 @@ HASHI_COMPACTION_CAPABILITIES = {
     "semantic_reasoning": False,
     "local_or_slow": True,
 }
-HASHI_MODEL_CAPACITY_PROFILES = {}
+HASHI_MODEL_CAPACITY_PROFILES = {
+    "default": {
+        "context_window_tokens": 32_768,
+        "usable_input_tokens": 24_576,
+        "capacity_provenance": "ollama_default_32k",
+    }
+}
 
 
 class OllamaAdapter(OpenRouterAdapter):
