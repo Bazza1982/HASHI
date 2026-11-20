@@ -81,10 +81,10 @@ EXACT_OPENROUTER_MODEL_MAPPINGS: dict[
     # are the durable cross-channel identity for those same current families;
     # no DeepSeek pricing endpoint or copied provider schedule is consulted.
     ("deepseek-api", "deepseek-flash"): (
-        "~deepseek/deepseek-flash-latest",
+        "deepseek/deepseek-flash-latest",
     ),
     ("deepseek-api", "deepseek-v4-pro"): (
-        "~deepseek/deepseek-pro-latest",
+        "deepseek/deepseek-pro-latest",
     ),
     # Antigravity CLI (agy) models mapped to OpenRouter price references.
     ("antigravity-cli", "gemini-3.8-flash-high"): (
@@ -1019,7 +1019,7 @@ def _openrouter_fact(
         if isinstance(data, dict)
         else ""
     )
-    if response_model_id != source_model_id:
+    if response_model_id != source_model_id and canonical != source_model_id:
         raise PricingSourceError("model_id_mismatch")
     if evidence.url != _openrouter_url(source_model_id):
         raise PricingSourceError("source_url_mismatch")

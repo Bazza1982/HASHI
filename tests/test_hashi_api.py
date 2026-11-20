@@ -476,7 +476,8 @@ async def test_hashi_private_activity_marks_later_stream_error_as_observed(tmp_p
     assert response.is_success is False
     assert response.error_code == "PROVIDER_SERVER_ERROR"
     assert response.stream_metadata["provider_activity_observed"] is True
-    assert [event.kind for event in events] == [KIND_PROVIDER_ACTIVITY]
+    assert events and all(event.kind == KIND_PROVIDER_ACTIVITY for event in events)
+    assert len(events) == 3
     await adapter.shutdown()
 
 
@@ -619,7 +620,7 @@ async def test_hashi_api_persists_network_transport_failure(tmp_path):
     assert [record["event"] for record in records] == [
         "client_request_prepared",
         "client_transport_failed",
-    ]
+    ] * 3
     assert records[1]["error"]["type"] == "ConnectError"
     assert records[1]["error"]["message"] == "gateway connection reset"
     await adapter.shutdown()

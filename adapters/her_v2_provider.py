@@ -1037,6 +1037,7 @@ class _EvidenceRecordingToolRegistry:
         self._model = str(model or "")
         self._audit_log = audit_log
         self._serial = 0
+        self._state_lock = threading.Lock()
         self.max_loops = None
 
     def get_tool_definitions(self, tiers=None):
@@ -1199,28 +1200,30 @@ class _EvidenceRecordingToolRegistry:
                     },
                 )
         except asyncio.CancelledError:
-            receipt = self._receipt(
-                tool_name=tool_name,
-                tool_call_id=effective_call_id,
-                result=None,
-                completed=False,
-                status=ToolReceiptStatus.CANCELLED,
-                attachment_ids=matched_attachment_ids,
-            )
-            self._receipts.append(receipt)
-            self._record_recovery_receipt(receipt)
+            with self._state_lock:
+                receipt = self._receipt(
+                    tool_name=tool_name,
+                    tool_call_id=effective_call_id,
+                    result=None,
+                    completed=False,
+                    status=ToolReceiptStatus.CANCELLED,
+                    attachment_ids=matched_attachment_ids,
+                )
+                self._receipts.append(receipt)
+                self._record_recovery_receipt(receipt)
             raise
         except Exception:
-            receipt = self._receipt(
-                tool_name=tool_name,
-                tool_call_id=effective_call_id,
-                result=None,
-                completed=False,
-                status=ToolReceiptStatus.FAILED,
-                attachment_ids=matched_attachment_ids,
-            )
-            self._receipts.append(receipt)
-            self._record_recovery_receipt(receipt)
+            with self._state_lock:
+                receipt = self._receipt(
+                    tool_name=tool_name,
+                    tool_call_id=effective_call_id,
+                    result=None,
+                    completed=False,
+                    status=ToolReceiptStatus.FAILED,
+                    attachment_ids=matched_attachment_ids,
+                )
+                self._receipts.append(receipt)
+                self._record_recovery_receipt(receipt)
             raise
 
         if tool_name in {"office_inspect","office_read"}:
@@ -1228,20 +1231,21 @@ class _EvidenceRecordingToolRegistry:
             actual_id = str(office_result.get("data",{}).get("attachment_id") or "")
             admitted_ids = {str(item.get("attachment_id") or "") for item in self._request.attachment_manifest}
             matched_attachment_ids = (actual_id,) if office_result.get("status")=="ok" and actual_id and actual_id in admitted_ids else ()
-        receipt = self._receipt(
-            tool_name=tool_name,
-            tool_call_id=effective_call_id,
-            result=result,
-            completed=True,
-            status=(
-                ToolReceiptStatus.FAILED
-                if bool(getattr(result, "is_error", False))
-                else ToolReceiptStatus.SUCCESS
-            ),
-            attachment_ids=matched_attachment_ids,
-        )
-        self._receipts.append(receipt)
-        checkpoint_ref = self._record_recovery_receipt(receipt)
+        with self._state_lock:
+            receipt = self._receipt(
+                tool_name=tool_name,
+                tool_call_id=effective_call_id,
+                result=result,
+                completed=True,
+                status=(
+                    ToolReceiptStatus.FAILED
+                    if bool(getattr(result, "is_error", False))
+                    else ToolReceiptStatus.SUCCESS
+                ),
+                attachment_ids=matched_attachment_ids,
+            )
+            self._receipts.append(receipt)
+            checkpoint_ref = self._record_recovery_receipt(receipt)
         return self._attach_receipt(result, receipt, fallback_call_id=tool_call_id,
                                     checkpoint_ref=checkpoint_ref)
 
@@ -1648,6 +1652,7 @@ class _CognitiveControlToolRegistry:
         self._model = str(model or "")
         self._turn_services = turn_services
         self._audit_serial = 0
+        self._state_lock = threading.Lock()
         self._pending_run_questions: dict[str, dict[str, Any]] = {}
         self._run_question_poll_serial = 0
         self.task_state = (
@@ -2195,59 +2200,61 @@ class _CognitiveControlToolRegistry:
                 },
             )
 
-        if not self._control_allows(name):
-            payload = self.controller.interrupt_payload()
-            return self._result(
-                tool_call_id=tool_call_id,
-                output=json.dumps(
-                    {
-                        "status": "blocked",
-                        "code": "COGNITIVE_DECISION_REQUIRED",
-                        "cognitive_interrupt": payload or None,
-                        "instruction": (
-                            "Use the currently advertised cognitive decision "
-                            "boundary or return the normal stage response; do not "
-                            "call another ordinary tool."
-                        ),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                is_error=True,
-                details={
-                    "control_disposition": "cognitive_interrupt",
-                    "cognitive_control": self.controller.snapshot(),
-                },
-            )
-
-        semantic_arguments, delta = self._split_arguments(arguments)
-        if self._turn_services is not None:
-            notice = str(self._turn_services.take_intervention() or "").strip()
-            if notice:
+        with self._state_lock:
+            if not self._control_allows(name):
+                payload = self.controller.interrupt_payload()
                 return self._result(
                     tool_call_id=tool_call_id,
-                    output=(
-                        "HASHI_AGENT_COMPANION_INTERVENTION\n" + notice +
-                        "\nThe requested tool action was not executed. Decide the next "
-                        "step yourself; do not repeat mechanically."
+                    output=json.dumps(
+                        {
+                            "status": "blocked",
+                            "code": "COGNITIVE_DECISION_REQUIRED",
+                            "cognitive_interrupt": payload or None,
+                            "instruction": (
+                                "Use the currently advertised cognitive decision "
+                                "boundary or return the normal stage response; do not "
+                                "call another ordinary tool."
+                            ),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
                     ),
                     is_error=True,
-                    details={"control_disposition": "agent_companion_intervention"},
+                    details={
+                        "control_disposition": "cognitive_interrupt",
+                        "cognitive_control": self.controller.snapshot(),
+                    },
                 )
-            self._turn_services.tool_started(name, semantic_arguments, tool_call_id)
-        delta_application = self._apply_task_delta(
-            delta,
-            tool_call_id=tool_call_id,
-        )
+
+            semantic_arguments, delta = self._split_arguments(arguments)
+            if self._turn_services is not None:
+                notice = str(self._turn_services.take_intervention() or "").strip()
+                if notice:
+                    return self._result(
+                        tool_call_id=tool_call_id,
+                        output=(
+                            "HASHI_AGENT_COMPANION_INTERVENTION\n" + notice +
+                            "\nThe requested tool action was not executed. Decide the next "
+                            "step yourself; do not repeat mechanically."
+                        ),
+                        is_error=True,
+                        details={"control_disposition": "agent_companion_intervention"},
+                    )
+                self._turn_services.tool_started(name, semantic_arguments, tool_call_id)
+            delta_application = self._apply_task_delta(
+                delta,
+                tool_call_id=tool_call_id,
+            )
         result = await self._base.execute(name, semantic_arguments, tool_call_id)
-        return self._process_tool_result(
-            name=name,
-            arguments=semantic_arguments,
-            tool_call_id=tool_call_id,
-            result=result,
-            delta_application=delta_application,
-        )
+        with self._state_lock:
+            return self._process_tool_result(
+                name=name,
+                arguments=semantic_arguments,
+                tool_call_id=tool_call_id,
+                result=result,
+                delta_application=delta_application,
+            )
 
     async def record_policy_denial(
         self,

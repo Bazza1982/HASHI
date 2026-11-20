@@ -140,7 +140,33 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     primary["reasoning"] = primary.get("reasoning") or "default"
 
     explicit_auxiliary = isinstance(raw.get("auxiliary"), Mapping)
-    auxiliary = deepcopy(dict(raw.get("auxiliary") if explicit_auxiliary else primary))
+    migration_warnings: list[dict[str, str]] = []
+    if explicit_auxiliary:
+        auxiliary = deepcopy(dict(raw.get("auxiliary")))
+    else:
+        aux_candidate = profiles.get("lightweight") or profiles.get("triage")
+        if (
+            isinstance(aux_candidate, Mapping)
+            and str(aux_candidate.get("engine") or aux_candidate.get("provider") or "").strip()
+            and str(aux_candidate.get("model") or "").strip()
+        ):
+            candidate_copy = deepcopy(dict(aux_candidate))
+            if "provider" in candidate_copy:
+                candidate_copy["engine"] = candidate_copy.pop("provider")
+            candidate_engine = canonical_model_provider(candidate_copy["engine"])
+            if provider_allowlist is None or candidate_engine in provider_allowlist:
+                auxiliary = candidate_copy
+            else:
+                auxiliary = deepcopy(primary)
+                migration_warnings.append(
+                    {
+                        "field": "profiles.lightweight",
+                        "action": "fallback_to_main",
+                        "detail": "lightweight profile engine is outside v3_provider_allowlist",
+                    }
+                )
+        else:
+            auxiliary = deepcopy(primary)
     if "provider" in auxiliary:
         auxiliary["engine"] = auxiliary.pop("provider")
     # Auxiliary presentation/housekeeping stages (commentary, final style,
@@ -174,7 +200,42 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
         "stage_reasoning", "slot_models", "targets", "model_slots", "route_targets",
         "route_reasoning", "route_model_slots", "fallback", "voice_routes",
     ):
-        result.pop(key, None)
+        removed = result.pop(key, None)
+        if removed:
+            migration_warnings.append(
+                {
+                    "field": key,
+                    "action": "ignored_by_v3",
+                    "detail": f"legacy HERV2 field {key!r} is retired in HERV3 single-model routing",
+                }
+            )
+    if raw.get("strategy_tools_enabled") is True:
+        migration_warnings.append(
+            {
+                "field": "strategy_tools_enabled",
+                "action": "forced_false",
+                "detail": "strategy_tools_enabled is retired in HERV3",
+            }
+        )
+    if raw.get("planning_tools_enabled") is True:
+        migration_warnings.append(
+            {
+                "field": "planning_tools_enabled",
+                "action": "forced_false",
+                "detail": "planning_tools_enabled is retired in HERV3",
+            }
+        )
+    raw_review_limits = raw.get("review_limits")
+    if isinstance(raw_review_limits, Mapping) and any(
+        bool(v) for v in raw_review_limits.values()
+    ):
+        migration_warnings.append(
+            {
+                "field": "review_limits",
+                "action": "forced_zero",
+                "detail": "stage review_limits are retired in HERV3",
+            }
+        )
     result["routing_mode"] = "single"
     result["direct_strategy_self_selection"] = raw.get(
         "strategy_cards", raw.get("direct_strategy_self_selection", False)
@@ -184,6 +245,15 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     result["review_limits"] = {
         name: 0 for name in ("zero", "low", "medium", "high", "xhigh", "max")
     }
+    if migration_warnings:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "HERV3 config normalization recorded %d migration warning(s): %s",
+            len(migration_warnings),
+            ", ".join(item["field"] for item in migration_warnings),
+        )
+    result["migration_warnings"] = tuple(migration_warnings)
     return result
 
 

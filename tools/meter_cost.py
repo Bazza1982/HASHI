@@ -332,6 +332,7 @@ class UsageReceipt:
         if self.dominant_cost_source() in {
             "pricing_table",
             "openrouter_reference",
+            "static_fallback",
         }:
             from tools.token_tracker import PRICING_REVISION
 
@@ -383,6 +384,8 @@ class UsageReceipt:
             return "provider"
         if "openrouter_reference" in sources:
             return "openrouter_reference"
+        if "static_fallback" in sources:
+            return "static_fallback"
         return "pricing_table"
 
 

@@ -1766,6 +1766,14 @@ _PARALLEL_SAFE_READONLY_TOOLS = frozenset(
         "memory_search",
         "web_search",
         "web_fetch",
+        "wiki_search",
+        "documentation_read",
+        "workspace_inspect",
+        "tool_find",
+        "process_list",
+        "request_diagnostics",
+        "media_read",
+        "background_job_list",
     }
 )
 
@@ -3334,7 +3342,9 @@ class OpenRouterAdapter(BaseBackend):
         """
         if len(tool_calls) <= 1:
             return None
-        if getattr(self.tool_registry, "permission_durable_wait", False):
+        if getattr(self.tool_registry, "permission_durable_wait", False) and not getattr(
+            self.tool_registry, "supports_parallel_readonly", False
+        ):
             return None
 
         prepared: list[dict[str, Any]] = []
@@ -3937,6 +3947,7 @@ class OpenRouterAdapter(BaseBackend):
             json=payload,
             headers=headers,
         )
+        await _read_http_error_body(response)
         response.raise_for_status()
         try:
             response_request = response.request

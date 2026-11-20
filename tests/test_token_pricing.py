@@ -159,7 +159,7 @@ def test_direct_deepseek_usage_uses_cached_openrouter_reference(
 ):
     cache = tmp_path / "pricing-cache.json"
     monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
-    source_model = "~deepseek/deepseek-flash-latest"
+    source_model = "deepseek/deepseek-flash-latest"
     fact = pricing_sources.refresh_pricing_fact(
         "deepseek-api",
         "deepseek-flash",
@@ -185,7 +185,7 @@ def test_direct_deepseek_usage_uses_cached_openrouter_reference(
     assert receipt.pricing_revisions == (fact.source_revision,)
 
 
-def test_direct_deepseek_alias_never_falls_back_to_historical_static_price(
+def test_direct_deepseek_and_antigravity_fall_back_to_static_pricing_when_dynamic_unknown(
     tmp_path,
     monkeypatch,
 ):
@@ -210,9 +210,23 @@ def test_direct_deepseek_alias_never_falls_back_to_historical_static_price(
         token_source="provider",
     )
 
-    assert receipt.cost_usd is None
-    assert receipt.dominant_cost_source() == "unknown"
+    assert receipt.cost_usd == pytest.approx(calc_cost(2_000, 1_000, "deepseek-v4-pro"))
+    assert receipt.dominant_cost_source() == "static_fallback"
     assert scheduled == [("deepseek-api", "deepseek-v4-pro", None)]
+
+    agy_receipt = record_usage(
+        tmp_path,
+        model="gemini-3.8-flash-high",
+        backend="antigravity-cli",
+        engine="antigravity-cli",
+        input_tokens=2_000,
+        output_tokens=1_000,
+        token_source="provider",
+    )
+    assert agy_receipt.cost_usd == pytest.approx(
+        calc_cost(2_000, 1_000, "gemini-3.8-flash-high")
+    )
+    assert agy_receipt.dominant_cost_source() == "static_fallback"
 
 
 def test_record_usage_reads_dynamic_price_cache_and_links_exact_revision(

@@ -173,6 +173,27 @@ class BaseBackend(ABC):
         # cumulative count of output events (stdout lines for CLI, 1 for HTTP).
         # Codex increments this per stdout line; others increment once on start.
         self.output_line_count: int = 0
+        self._stream_event_tasks: set[asyncio.Task[Any]] = set()
+
+    def _schedule_stream_event(
+        self, on_stream_event: StreamCallback | None, event: Any
+    ) -> None:
+        if event is None or on_stream_event is None:
+            return
+        tasks = getattr(self, "_stream_event_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._stream_event_tasks = tasks
+        task = asyncio.create_task(on_stream_event(event))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def _drain_stream_event_tasks(self) -> None:
+        tasks = getattr(self, "_stream_event_tasks", None)
+        if not tasks:
+            return
+        pending = list(tasks)
+        await asyncio.gather(*pending, return_exceptions=True)
 
     @staticmethod
     def _configured_tuple(value: Any) -> tuple[str, ...]:
