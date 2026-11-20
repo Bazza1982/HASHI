@@ -14,9 +14,11 @@ from orchestrator.her_v2.runtime_configuration import HER_V2_CONFIGURATION_STATE
 from orchestrator.memory_index import MemoryIndex
 from orchestrator.memory_search_mode import (
     apply_memory_injection_preferences,
+    get_memory_sync_preference,
     is_memory_search_enabled,
     is_memory_turns_enabled,
     set_memory_search_enabled,
+    set_memory_sync_preference,
     set_memory_turns_enabled,
 )
 from orchestrator.memory_plus_mode import (
@@ -154,12 +156,26 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         )
         stats = runtime.memory_store.get_stats() if hasattr(runtime, "memory_store") else {}
         memories = stats.get("memories", "?")
-        sync_on = runtime._get_skill_state().get("memory_sync", False)
-        sync_state = (
-            f"{ui_language.tr('common.on')} 🔄"
-            if sync_on
-            else f"{ui_language.tr('common.off')} ⬜"
+        sync_pref = get_memory_sync_preference(runtime.workspace_dir)
+        skill_sync = runtime._get_skill_state().get("memory_sync", False) if hasattr(runtime, "_get_skill_state") else False
+        vec_status = (
+            runtime.memory_store.get_vector_status()
+            if hasattr(runtime, "memory_store") and hasattr(runtime.memory_store, "get_vector_status")
+            else {}
         )
+        sync_on = (
+            sync_pref
+            if sync_pref is not None
+            else (bool(vec_status.get("bge_requested")) or bool(skill_sync))
+        )
+        if sync_on and vec_status.get("degraded"):
+            sync_state = f"{ui_language.tr('common.on')} ⚠️ degraded ({vec_status.get('encoder_id', 'fallback')})"
+        else:
+            sync_state = (
+                f"{ui_language.tr('common.on')} 🔄"
+                if sync_on
+                else f"{ui_language.tr('common.off')} ⬜"
+            )
         continuity = get_memory_plus_status(
             runtime_session.current_session_workspace(runtime, update)
         )
@@ -287,14 +303,28 @@ async def cmd_memory(runtime: Any, update: Any, context: Any) -> None:
         else:
             await runtime._reply_text(update, ui_language.tr("memory.store_unavailable"))
     elif args == "sync on":
-        runtime._set_skill_state("memory_sync", True)
-        agent = runtime.workspace_dir.name
-        await runtime._reply_text(
-            update,
-            ui_language.tr("memory.sync_on", agent=agent),
+        set_memory_sync_preference(runtime.workspace_dir, True)
+        if hasattr(runtime, "_set_skill_state"):
+            runtime._set_skill_state("memory_sync", True)
+        vec_status = (
+            runtime.memory_store.sync_embeddings(enable_bge=True)
+            if hasattr(runtime, "memory_store") and hasattr(runtime.memory_store, "sync_embeddings")
+            else {}
         )
+        agent = runtime.workspace_dir.name
+        reply_text = ui_language.tr("memory.sync_on", agent=agent)
+        if vec_status.get("degraded"):
+            reason = vec_status.get("encoder_error") or "BGE-M3 unavailable"
+            reply_text += f"\nStatus: degraded ({reason}); active fallback: {vec_status.get('encoder_id')}."
+        elif vec_status.get("encoder_id"):
+            reply_text += f"\nEncoder: {vec_status['encoder_id']} (dim={vec_status.get('encoder_dim')}, vec_enabled={vec_status.get('vec_enabled')})."
+        await runtime._reply_text(update, reply_text)
     elif args == "sync off":
-        runtime._set_skill_state("memory_sync", False)
+        set_memory_sync_preference(runtime.workspace_dir, False)
+        if hasattr(runtime, "_set_skill_state"):
+            runtime._set_skill_state("memory_sync", False)
+        if hasattr(runtime, "memory_store") and hasattr(runtime.memory_store, "sync_embeddings"):
+            runtime.memory_store.sync_embeddings(enable_bge=False)
         agent = runtime.workspace_dir.name
         await runtime._reply_text(
             update,

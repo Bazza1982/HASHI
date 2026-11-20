@@ -9,20 +9,52 @@ from orchestrator.workspace_state import WorkspaceStateStore
 
 STATE_KEY = "memory_search"
 TURNS_STATE_KEY = "memory_turns"
+SYNC_STATE_KEY = "memory_sync"
 
 
 def is_memory_search_enabled(workspace_dir: str | Path) -> bool:
     """Return the persisted per-turn long-term-memory search preference.
 
-    Absence is deliberately OFF.  Retrieval is optional enrichment, not a
-    prerequisite for normal conversational continuity.
+    Long-term memory search defaults to ON for normal private Agents so saved
+    memories are usable out of the box without hidden opt-in switches. An
+    explicit persisted ``enabled: false`` disables retrieval across restarts.
     """
 
     state = WorkspaceStateStore(Path(workspace_dir)).read()
     block = state.get(STATE_KEY)
     if not isinstance(block, Mapping):
-        return False
-    return bool(block.get("enabled", False))
+        return True
+    return bool(block.get("enabled", True))
+
+
+def get_memory_sync_preference(workspace_dir: str | Path) -> bool | None:
+    """Return explicit BGE memory-sync opt-in/opt-out, or ``None`` when unset."""
+
+    state = WorkspaceStateStore(Path(workspace_dir)).read()
+    block = state.get(SYNC_STATE_KEY)
+    if not isinstance(block, Mapping) or "enabled" not in block:
+        return None
+    return bool(block.get("enabled"))
+
+
+def set_memory_sync_preference(
+    workspace_dir: str | Path,
+    enabled: bool,
+) -> bool:
+    """Persist the user's BGE memory-sync setting."""
+
+    normalized = bool(enabled)
+
+    def update(state: dict[str, Any]) -> dict[str, Any]:
+        state[SYNC_STATE_KEY] = {
+            "version": 1,
+            "enabled": normalized,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        return state
+
+    WorkspaceStateStore(Path(workspace_dir)).update(update)
+    return normalized
 
 
 def set_memory_search_enabled(

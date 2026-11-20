@@ -64,26 +64,68 @@ def global_sys_prompt_state_path(global_config: Any) -> Path:
     return Path(bridge_home) / "state" / "global_sys_prompts.json"
 
 
+_CJK_RUN_RE = re.compile(
+    r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
+)
+_LATIN_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_BGE_CACHE_LOCK = threading.Lock()
+_BGE_ENCODER_CACHE: dict[tuple[str, str], "BgeM3Encoder"] = {}
+
+
+def _tokenize_multilingual(text: str) -> list[str]:
+    """Extract ASCII/alphanumeric words plus CJK/Kana/Hangul n-grams.
+
+    Ensures pure Chinese, Japanese, Korean, and mixed-script texts produce
+    meaningful non-zero hash vectors and lexical overlap without external
+    segmentation dependencies.
+    """
+    lowered = (text or "").lower()
+    tokens: list[str] = _LATIN_TOKEN_RE.findall(lowered)
+    for run in _CJK_RUN_RE.findall(lowered):
+        n = len(run)
+        if n == 1:
+            tokens.append(run)
+            continue
+        for i in range(n - 1):
+            tokens.append(run[i : i + 2])
+        if 2 < n <= 6:
+            tokens.append(run)
+    return tokens
+
+
+def _cjk_query_substrings(text: str) -> list[str]:
+    """Return compact CJK/Kana/Hangul query terms for substring candidate lookup."""
+    terms: list[str] = []
+    seen: set[str] = set()
+    for run in _CJK_RUN_RE.findall(text or ""):
+        candidates = [run] if len(run) <= 4 else [run[i : i + 2] for i in range(len(run) - 1)]
+        for term in candidates:
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
+    return terms[:12]
+
+
 class LocalEmbeddingEncoder:
-    """Dependency-free hashed embedding encoder for durable local retrieval."""
+    """Dependency-free multilingual hashed embedding encoder for durable local retrieval."""
 
     def __init__(self, dim: int = 256):
         self.dim = dim
         self.vector_dim = dim
-        self.encoder_id = f"local-hash-v1:blake2b8:ascii-lower:{dim}"
+        self.encoder_id = f"local-hash-v2:blake2b8:cjk-ngram:{dim}"
         self.ready = True
         self.error = None
 
     def encode(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
-        tokens = re.findall(r"[a-zA-Z0-9_]+", (text or "").lower())
+        tokens = _tokenize_multilingual(text)
         if not tokens:
             return vec
         for tok in tokens:
             digest = hashlib.blake2b(
                 tok.encode("utf-8"),
                 digest_size=8,
-                person=b"HASHI-MEM-v1",
+                person=b"HASHI-MEM-v2",
             ).digest()
             idx = int.from_bytes(digest, "big") % self.dim
             vec[idx] += 1.0
@@ -100,7 +142,7 @@ class LocalEmbeddingEncoder:
 
 
 class BgeM3Encoder:
-    """BGE-M3 ONNX encoder with safe fallback to the legacy hash encoder."""
+    """BGE-M3 ONNX encoder with safe fallback to the multilingual hash encoder."""
 
     DIM = 1024
     DEFAULT_MODEL_DIR = Path(os.environ.get("HASHI_BGE_M3_MODEL_DIR") or Path.home() / "hashi_models/bge-m3-int8")
@@ -116,6 +158,7 @@ class BgeM3Encoder:
         self._input_names: set[str] = set()
         self._model_dir = Path(
             model_dir
+            or os.environ.get("HASHI_BGE_M3_MODEL_DIR")
             or self.DEFAULT_MODEL_DIR
         )
         self._tokenizer_dir = Path(
@@ -124,6 +167,52 @@ class BgeM3Encoder:
             or self._model_dir
         )
         self._init()
+
+    @classmethod
+    def resolve_model_path(cls, model_dir: str | Path | None = None) -> Path:
+        base = Path(
+            model_dir
+            or os.environ.get("HASHI_BGE_M3_MODEL_DIR")
+            or cls.DEFAULT_MODEL_DIR
+        )
+        onnx_nested = base / "onnx" / "model.onnx"
+        if onnx_nested.exists():
+            return onnx_nested
+        return base / "model.onnx"
+
+    @classmethod
+    def model_available(cls, model_dir: str | Path | None = None) -> bool:
+        return cls.resolve_model_path(model_dir).exists()
+
+    @classmethod
+    def cached(
+        cls,
+        model_dir: str | Path | None = None,
+        tokenizer_dir: str | Path | None = None,
+    ) -> "BgeM3Encoder":
+        resolved_model = str(
+            Path(
+                model_dir
+                or os.environ.get("HASHI_BGE_M3_MODEL_DIR")
+                or cls.DEFAULT_MODEL_DIR
+            )
+        )
+        resolved_tok = str(
+            Path(
+                tokenizer_dir
+                or os.environ.get("HASHI_BGE_M3_TOKENIZER_DIR")
+                or resolved_model
+            )
+        )
+        key = (resolved_model, resolved_tok)
+        with _BGE_CACHE_LOCK:
+            cached = _BGE_ENCODER_CACHE.get(key)
+            if cached is not None and cached.ready:
+                return cached
+            instance = cls(model_dir=resolved_model, tokenizer_dir=resolved_tok)
+            if instance.ready:
+                _BGE_ENCODER_CACHE[key] = instance
+            return instance
 
     @property
     def dim(self) -> int:
@@ -139,7 +228,7 @@ class BgeM3Encoder:
 
     @property
     def vector_dim(self) -> int | None:
-        return self.DIM if self._ready else None
+        return self.DIM if self._ready else self._fallback.vector_dim
 
     @property
     def encoder_id(self) -> str:
@@ -148,21 +237,17 @@ class BgeM3Encoder:
         return self._fallback.encoder_id
 
     def _init(self):
+        model_path = self.resolve_model_path(self._model_dir)
+        if not model_path.exists():
+            self._error = f"missing model: {model_path}"
+            return
+
         try:
             import numpy as np
             import onnxruntime as ort
             from transformers import AutoTokenizer
         except Exception as exc:
             self._error = f"dependencies unavailable: {exc}"
-            return
-
-        # Support both flat layout (model.onnx) and onnx/ subdirectory layout
-        if (self._model_dir / "onnx" / "model.onnx").exists():
-            model_path = self._model_dir / "onnx" / "model.onnx"
-        else:
-            model_path = self._model_dir / "model.onnx"
-        if not model_path.exists():
-            self._error = f"missing model: {model_path}"
             return
 
         tokenizer_candidates: list[str] = []
@@ -236,11 +321,13 @@ class BgeM3Encoder:
 
 
 class BridgeMemoryStore:
-    def __init__(self, workspace_dir: Path):
+    def __init__(self, workspace_dir: Path, *, bge_enabled: bool | None = None):
         self.workspace_dir = workspace_dir
         self.db_path = workspace_dir / "bridge_memory.sqlite"
         self.legacy_encoder = LocalEmbeddingEncoder()
-        self.encoder = LocalEmbeddingEncoder()  # BGE disabled by default; enable via /memory sync
+        self._bge_requested = False
+        self._encoder_degraded_reason: str | None = None
+        self.encoder = self._select_encoder(bge_enabled=bge_enabled)
         self._sqlite_vec_supported: bool | None = None
         self._vec_enabled = False
         self._vec_dim: int | None = None
@@ -267,6 +354,32 @@ class BridgeMemoryStore:
                 type(exc).__name__,
                 exc,
             )
+
+    def _select_encoder(self, *, bge_enabled: bool | None = None):
+        from orchestrator.memory_search_mode import get_memory_sync_preference
+
+        pref = get_memory_sync_preference(self.workspace_dir) if bge_enabled is None else bge_enabled
+        self._bge_requested = bool(pref is True or (pref is None and BgeM3Encoder.model_available()))
+        self._encoder_degraded_reason = None
+        if not self._bge_requested:
+            return LocalEmbeddingEncoder()
+        encoder = BgeM3Encoder.cached()
+        if not encoder.ready:
+            self._encoder_degraded_reason = encoder.error or "BGE-M3 unavailable; degraded to multilingual hash fallback"
+        return encoder
+
+    def sync_embeddings(self, *, enable_bge: bool | None = None) -> dict[str, Any]:
+        """Apply BGE/local encoder preference, migrate vector tables, and backfill."""
+        if enable_bge is not None:
+            from orchestrator.memory_search_mode import set_memory_sync_preference
+
+            set_memory_sync_preference(self.workspace_dir, bool(enable_bge))
+        self.encoder = self._select_encoder(bge_enabled=enable_bge)
+        self._vec_enabled = False
+        self._vec_dim = None
+        self._vec_reason = None
+        self._init_db()
+        return self.get_vector_status()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -431,6 +544,7 @@ class BridgeMemoryStore:
                 """
             )
             desired_vec_dim = self.encoder.vector_dim
+            force_vec_backfill = False
             if desired_vec_dim and self._sqlite_vec_supported:
                 existing_dims = {
                     dim
@@ -440,6 +554,11 @@ class BridgeMemoryStore:
                     )
                     if dim is not None
                 }
+                if existing_dims and existing_dims != {desired_vec_dim}:
+                    for vec_name in ("memory_vec", "turns_vec"):
+                        conn.execute(f"DROP TABLE IF EXISTS {vec_name}")
+                    existing_dims = set()
+                    force_vec_backfill = True
                 if not existing_dims:
                     conn.execute(
                         f"""
@@ -462,19 +581,19 @@ class BridgeMemoryStore:
                 elif existing_dims == {desired_vec_dim}:
                     self._vec_enabled = self._vec_table_exists(conn, "memory_vec") and self._vec_table_exists(conn, "turns_vec")
                     self._vec_dim = desired_vec_dim if self._vec_enabled else None
-                else:
-                    self._vec_reason = (
-                        f"existing sqlite-vec tables use dim {sorted(existing_dims)}, "
-                        f"current encoder uses {desired_vec_dim}"
-                    )
             elif desired_vec_dim:
                 self._vec_reason = self._vec_reason or "sqlite-vec unavailable"
             else:
-                self._vec_reason = self.encoder.error or "BGE-M3 unavailable; using legacy hash retrieval"
-            self._rebuild_stale_embeddings(conn)
+                self._vec_reason = self.encoder.error or "BGE-M3 unavailable; using multilingual hash retrieval"
+            self._rebuild_stale_embeddings(conn, force_vec_backfill=force_vec_backfill)
             conn.commit()
 
-    def _rebuild_stale_embeddings(self, conn: sqlite3.Connection) -> None:
+    def _rebuild_stale_embeddings(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        force_vec_backfill: bool = False,
+    ) -> None:
         """Rebuild derived vectors whose persisted encoder identity is stale."""
 
         encoder_id = str(self.encoder.encoder_id)
@@ -482,17 +601,23 @@ class BridgeMemoryStore:
             ("turns", "text", "turns_vec", "turn_id"),
             ("memories", "content", "memory_vec", "memory_id"),
         ):
-            rows = conn.execute(
-                f"SELECT id, {text_column} AS body FROM {table} "
-                "WHERE embedding_version != ? OR embedding_version IS NULL",
-                (encoder_id,),
-            ).fetchall()
+            if force_vec_backfill:
+                rows = conn.execute(
+                    f"SELECT id, {text_column} AS body, embedding_version FROM {table}"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT id, {text_column} AS body, embedding_version FROM {table} "
+                    "WHERE embedding_version != ? OR embedding_version IS NULL",
+                    (encoder_id,),
+                ).fetchall()
             for row in rows:
                 embedding = self.encoder.encode(str(row["body"] or ""))
-                conn.execute(
-                    f"UPDATE {table} SET embedding = ?, embedding_version = ? WHERE id = ?",
-                    (json.dumps(embedding), encoder_id, int(row["id"])),
-                )
+                if row["embedding_version"] != encoder_id:
+                    conn.execute(
+                        f"UPDATE {table} SET embedding = ?, embedding_version = ? WHERE id = ?",
+                        (json.dumps(embedding), encoder_id, int(row["id"])),
+                    )
                 self._upsert_vec(
                     conn,
                     vec_table,
@@ -522,11 +647,16 @@ class BridgeMemoryStore:
         if not q:
             return ""
         reserved = {"AND", "OR", "NOT", "NEAR"}
-        parts = [
-            p
-            for p in re.findall(r"[a-zA-Z0-9_]+", q)
-            if len(p) > 1 and p.upper() not in reserved
-        ]
+        parts: list[str] = []
+        seen: set[str] = set()
+        for tok in _LATIN_TOKEN_RE.findall(q):
+            if len(tok) > 1 and tok.upper() not in reserved and tok not in seen:
+                seen.add(tok)
+                parts.append(tok)
+        for term in _cjk_query_substrings(q):
+            if term not in seen:
+                seen.add(term)
+                parts.append(term)
         if not parts:
             return ""
         return " OR ".join(f'"{p}"' for p in parts[:16])
@@ -1013,14 +1143,20 @@ class BridgeMemoryStore:
         *,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve memories with separately observable relevance components."""
+        """Retrieve relevant memories without backfilling unrelated recency."""
 
-        safe_query = self._safe_query(query)
-        q_vec = self.encoder.encode(query or "")
+        query_text = (query or "").strip()
+        if not query_text:
+            return []
+
+        safe_query = self._safe_query(query_text)
+        cjk_terms = _cjk_query_substrings(query_text)
+        q_tokens = set(_tokenize_multilingual(query_text))
+        q_vec = self.encoder.encode(query_text)
         candidates: dict[int, dict[str, Any]] = {}
 
         with self._connect() as conn:
-            if self._vec_enabled and query.strip():
+            if self._vec_enabled:
                 try:
                     rows = conn.execute(
                         """
@@ -1062,18 +1198,52 @@ class BridgeMemoryStore:
                 except sqlite3.OperationalError:
                     pass
 
-            recent_rows = conn.execute(
-                """
-                SELECT id, ts, memory_type, source, content, importance,
-                       embedding, embedding_version
-                FROM memories
-                ORDER BY id DESC
-                LIMIT 60
-                """
-            ).fetchall()
-            for row in recent_rows:
-                candidates.setdefault(row["id"], dict(row))
+            if cjk_terms:
+                escaped_clauses = []
+                params: list[str] = []
+                for term in cjk_terms:
+                    escaped = (
+                        term.replace("\\", "\\\\")
+                        .replace("%", "\\%")
+                        .replace("_", "\\_")
+                    )
+                    escaped_clauses.append("content LIKE ? ESCAPE '\\'")
+                    params.append(f"%{escaped}%")
+                rows = conn.execute(
+                    f"""
+                    SELECT id, ts, memory_type, source, content, importance,
+                           embedding, embedding_version
+                    FROM memories
+                    WHERE {' OR '.join(escaped_clauses)}
+                    ORDER BY id DESC
+                    LIMIT 40
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    existing = candidates.get(row["id"], {})
+                    existing.update(dict(row))
+                    existing["_text_match"] = True
+                    candidates[row["id"]] = existing
 
+            if not self._vec_enabled:
+                recent_rows = conn.execute(
+                    """
+                    SELECT id, ts, memory_type, source, content, importance,
+                           embedding, embedding_version
+                    FROM memories
+                    ORDER BY id DESC
+                    LIMIT 200
+                    """
+                ).fetchall()
+                for row in recent_rows:
+                    candidates.setdefault(row["id"], dict(row))
+
+        is_dense_neural = (
+            bool(getattr(self.encoder, "ready", False))
+            and not isinstance(self.encoder, LocalEmbeddingEncoder)
+            and not (isinstance(self.encoder, BgeM3Encoder) and not self.encoder.ready)
+        )
         scoring_now = now or datetime.now(timezone.utc)
         if scoring_now.tzinfo is None:
             scoring_now = scoring_now.replace(tzinfo=timezone.utc)
@@ -1096,8 +1266,22 @@ class BridgeMemoryStore:
                 if len(emb) == len(q_vec):
                     sim = self.encoder.cosine(q_vec, emb)
             vector_score = max(0.0, min(1.0, float(sim)))
-            text_score = 1.0 if row.pop("_text_match", False) else 0.0
+            fts_hit = bool(row.pop("_text_match", False))
             row.pop("_vector_match", None)
+            doc_tokens = set(_tokenize_multilingual(str(row.get("content") or "")))
+            lexical_overlap = (
+                len(q_tokens & doc_tokens) / len(q_tokens) if q_tokens else 0.0
+            )
+            text_score = max(1.0 if fts_hit else 0.0, float(lexical_overlap))
+
+            relevant = (
+                text_score > 0.0 or vector_score >= 0.35
+                if is_dense_neural
+                else (text_score > 0.0 or (not q_tokens and vector_score >= 0.35))
+            )
+            if not relevant:
+                continue
+
             importance_score = max(
                 0.0, min(1.0, float(row.get("importance", 1.0)))
             )
@@ -1185,7 +1369,9 @@ class BridgeMemoryStore:
             "encoder_ready": bool(self.encoder.ready),
             "encoder_id": str(self.encoder.encoder_id),
             "encoder_dim": self.encoder.vector_dim,
-            "encoder_error": self.encoder.error,
+            "encoder_error": self._encoder_degraded_reason or self.encoder.error,
+            "bge_requested": bool(self._bge_requested),
+            "degraded": bool(self._encoder_degraded_reason),
             "sqlite_vec_supported": bool(self._sqlite_vec_supported),
             "vec_enabled": bool(self._vec_enabled),
             "vec_dim": self._vec_dim,
@@ -1234,7 +1420,9 @@ class BridgeMemoryStore:
             status["counts"]["turns_vec"] / turns_total if turns_total else 1.0
         )
 
-        if status["vec_enabled"]:
+        if self._encoder_degraded_reason:
+            status["overall_status"] = "degraded"
+        elif status["vec_enabled"]:
             fully_backfilled = (
                 status["coverage"]["memories"] >= 0.999
                 and status["coverage"]["turns"] >= 0.999
@@ -1560,7 +1748,7 @@ class BridgeContextAssembler:
         self.skill_catalog_provider = skill_catalog_provider
         self.tool_catalog_provider = tool_catalog_provider
         self.turns_injection_enabled = True
-        self.saved_memory_injection_enabled = False
+        self.saved_memory_injection_enabled = True
 
     @property
     def memory_injection_enabled(self) -> bool:
