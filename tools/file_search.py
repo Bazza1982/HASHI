@@ -148,15 +148,22 @@ def normalize_query(args: dict, *, defaults: list[dict], read_roots, cwd: Path,
     query = args.get('query')
     if not isinstance(query, str) or not query.strip() or len(query) > 1024:
         raise ValueError('query must be a non-empty string of at most 1024 characters')
+    import re
     mode = args.get('mode', 'path')
     match = args.get('match', 'literal')
     profile = args.get('profile', 'project')
     if mode not in {'path', 'content'} or match not in {'literal', 'glob', 'regex'}:
         raise ValueError('invalid mode or match')
+    if mode == 'content' and match not in {'literal', 'regex'}:
+        raise ValueError('content search supports literal or regex matching')
+    bools_case = args.get('case_sensitive', False)
     if match == 'regex':
-        raise NotImplementedError('Regex search backend is unavailable; use literal/path or an appropriate scoped Shell command')
-    if mode == 'content' and match != 'literal':
-        raise ValueError('content search supports literal matching')
+        if not isinstance(bools_case, bool):
+            raise ValueError('search boolean options must be true or false')
+        try:
+            re.compile(query, 0 if bools_case else re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f'invalid regex pattern: {exc}') from exc
     if profile not in {'project', 'expanded'}:
         raise ValueError('profile must be project or expanded')
     raw_roots = args.get('roots')

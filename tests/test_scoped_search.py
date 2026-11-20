@@ -191,8 +191,13 @@ async def test_zero_partial_and_exclusions_are_distinct(tmp_path):
     assert {Path(m['path']).name for m in expanded['matches']} == {'.env', 'needle.txt'}
     path = payload(await registry.execute('file_search', {'query': '*.pdf', 'match': 'glob', 'roots': [str(repo)]}))
     assert len(path['matches']) == 1
-    unavailable = await registry.execute('file_search', {**query, 'match': 'regex'})
-    assert unavailable.is_error and json.loads(unavailable.output)['status'] == 'unavailable'
+    regex_path = payload(await registry.execute('file_search', {'query': r'paper\.pdf$', 'match': 'regex', 'roots': [str(repo)]}))
+    assert len(regex_path['matches']) == 1
+    regex_content = payload(await registry.execute('file_search', {**query, 'query': r'SEC[A-Z]+', 'mode': 'content', 'match': 'regex'}))
+    assert len(regex_content['matches']) == 0  # .env excluded in project profile
+    regex_expanded = payload(await registry.execute('file_search', {
+        **query, 'query': r'SEC[A-Z]+', 'mode': 'content', 'match': 'regex', 'profile': 'expanded', 'include': ['*.txt']}))
+    assert len(regex_expanded['matches']) == 1
 
 
 @pytest.mark.asyncio

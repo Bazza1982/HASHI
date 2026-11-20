@@ -61,6 +61,16 @@ _QUERY_TOOLS = frozenset(
         "repo_discover",
         "process_list",
         "request_diagnostics",
+        "code_search",
+        "data_inspect",
+        "documentation_read",
+        "git_inspect",
+        "office_inspect",
+        "office_read",
+        "project_locate",
+        "tool_find",
+        "wiki_search",
+        "get_user_answer",
         "browser_active_tab",
         "browser_get_media_state",
         "browser_screenshot",
@@ -99,10 +109,14 @@ _VERIFY_TOOLS = frozenset({"workspace_inspect", "verification_run"})
 
 _IDEMPOTENT_ACTION_TOOLS = frozenset(
     {
+        "ask_user",
         "file_write",
         "browser_play",
         "browser_open_play_verify",
         "browser_react",
+        "browser_evaluate",
+        "browser_session",
+        "http_request",
         "background_job_cancel",
         "windows_mouse_move",
         "windows_window_focus",
@@ -116,8 +130,17 @@ _IDEMPOTENT_ACTION_TOOLS = frozenset(
 
 _SIDE_EFFECT_ACTION_TOOLS = frozenset(
     {
+        "bash",
+        "shell",
         "xai_imagine",
         "apply_patch",
+        "file_manage",
+        "text_replace",
+        "office_create",
+        "office_edit",
+        "office_finish",
+        "frontend_publish_deliverable",
+        "frontend_send_attachments",
         "process_kill",
         "telegram_send",
         "telegram_send_file",
@@ -278,8 +301,9 @@ _ONLY_MATCHING_RE = re.compile(
     r"(?i)(?<!\S)(?:-[A-Za-z]*o[A-Za-z]*|--only-matching)(?=\s|$)"
 )
 _BOUNDED_SEARCH_OUTPUT_RE = re.compile(
-    r"(?i)(?<!\S)(?:-[A-Za-z]*[qlc][A-Za-z]*|"
-    r"--(?:quiet|count|files-with-matches))(?=\s|$)"
+    r"(?i)(?:(?<!\S)(?:-[A-Za-z]*[qlcm][A-Za-z]*|"
+    r"--(?:quiet|count|files-with-matches|max-count)(?:=|\s|$))|"
+    r"\|\s*(?:head|tail|wc)\b)"
 )
 _BRE_CONTEXT_RE = re.compile(r"\.\\\{\d*,\d+\\\}")
 _ERE_CONTEXT_RE = re.compile(r"\.\{\d*,\d+\}")
@@ -293,7 +317,7 @@ _LOG_PATH_RE = re.compile(
     '''
 )
 _DEFAULT_LARGE_RECORD_BYTES = 1_000_000
-_DEFAULT_FILE_PROBE_BYTES = 32 * 1024 * 1024
+_DEFAULT_FILE_PROBE_BYTES = 2 * 1024 * 1024
 
 
 def _positive_int_setting(
@@ -556,7 +580,7 @@ def _generic_outcome(
     raw_is_error: bool,
     details: Mapping[str, Any],
 ) -> SmartToolOutcome:
-    if spec.name == "file_search" and details.get("search_outcome"):
+    if details.get("search_outcome"):
         data = _result_data(output)
         if isinstance(data, Mapping) and data.get("status") in {"success", "partial", "failed", "unavailable"}:
             error = data.get("error")
@@ -878,7 +902,7 @@ class SmartToolRuntime:
     def __init__(self, workspace_dir: Path, options: Mapping[str, Any] | None):
         configured = dict(options or {})
         self.workspace_dir = Path(workspace_dir).resolve()
-        self.enabled = configured.get("enabled") is True
+        self.enabled = bool(configured.get("enabled", True))
         raw_threshold = configured.get("repeat_threshold", 3)
         try:
             threshold = int(raw_threshold)
@@ -986,7 +1010,16 @@ class SmartToolRuntime:
             repeat_hash = _sha256({"status": outcome.status, "data": evidence,
                                   "error_code": outcome.error.code if outcome.error else None})
         fingerprint = _sha256([tool_name, args_hash, repeat_hash])
-        state_key = task_id if task_id != "unscoped" else f"unscoped:{call_id}"
+        scope_fallback = (
+            str(
+                context.get("request_id")
+                or context.get("session_id")
+                or context.get("conversation_id")
+                or "default"
+            ).strip()
+            or "default"
+        )
+        state_key = task_id if task_id != "unscoped" else f"unscoped:{scope_fallback}"
 
         with self._lock:
             state = self._tasks.get(state_key)

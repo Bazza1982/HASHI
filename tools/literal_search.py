@@ -15,9 +15,17 @@ CHUNK_CHARS = 64 * 1024
 def scan_literal(path: Path, *, terms: tuple[str, ...], case_sensitive: bool,
                  max_results: int, context_chars: int, state: dict | None = None,
                  character_budget: int | None = None, progress: Callable | None = None,
-                 chunk_chars: int = CHUNK_CHARS) -> dict:
-    patterns = [(term, re.compile(re.escape(term), 0 if case_sensitive else re.IGNORECASE))
-                for term in terms]
+                 chunk_chars: int = CHUNK_CHARS, regex: bool = False) -> dict:
+    patterns = [
+        (
+            term,
+            re.compile(
+                term if regex else re.escape(term),
+                0 if case_sensitive else re.IGNORECASE,
+            ),
+        )
+        for term in terms
+    ]
     longest = max(map(len, terms))
     saved = state or {}
     buffer = saved.get('buffer', '')
@@ -71,7 +79,7 @@ def scan_literal(path: Path, *, terms: tuple[str, ...], case_sensitive: bool,
             if complete or page or (character_budget is not None and characters >= character_budget):
                 break
             need_read = True
-    return {'path': str(path), 'file_size_bytes': path.stat().st_size, 'literal_only': True,
+    return {'path': str(path), 'file_size_bytes': path.stat().st_size, 'literal_only': not regex,
             'case_sensitive': case_sensitive, 'terms': list(terms), 'matches': matches,
             'result_limit_reached': page, 'characters_read': characters,
             'encoding_warning': encoding_warning, 'continuation': continuation,

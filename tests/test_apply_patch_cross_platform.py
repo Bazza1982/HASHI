@@ -137,7 +137,7 @@ async def test_patch_command_tier_wins_and_blocks_fallbacks(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_patch_command_rejection_is_authoritative(tmp_path, monkeypatch) -> None:
+async def test_patch_command_rejection_falls_back_to_python_safely(tmp_path, monkeypatch) -> None:
     target = _write(tmp_path)
     monkeypatch.setattr(builtins, "_find_patch_command", lambda: "patch")
     monkeypatch.setattr(
@@ -146,15 +146,42 @@ async def test_patch_command_rejection_is_authoritative(tmp_path, monkeypatch) -
         lambda *args, **kwargs: ("rejected", "hunk failed"),
     )
 
-    def fail(*args, **kwargs):
-        raise AssertionError("must not fall back after a rejection")
-
-    monkeypatch.setattr(builtins, "_apply_patch_with_git", fail)
-    monkeypatch.setattr(builtins, "_apply_patch_with_python", fail)
-
     result = await _apply(tmp_path)
-    assert result == "Error: patch rejected (dry-run):\nhunk failed"
+    assert result.startswith("OK: patch applied to")
+    assert _read(target) == "one\nTWO\nthree\n"
+
+
+@pytest.mark.asyncio
+async def test_patch_command_and_python_both_reject_leaves_file_unchanged(tmp_path, monkeypatch) -> None:
+    target = _write(tmp_path)
+    monkeypatch.setattr(builtins, "_find_patch_command", lambda: "patch")
+    monkeypatch.setattr(
+        builtins,
+        "_apply_patch_with_patch_command",
+        lambda *args, **kwargs: ("rejected", "hunk failed"),
+    )
+    bad = SIMPLE_DIFF.replace("-two", "-MISSING")
+
+    result = await _apply(tmp_path, patch=bad)
+    assert result.startswith("Error: patch rejected (dry-run):")
     assert _read(target) == BASE_TEXT
+
+
+def test_pure_python_hunk_searches_upward_and_handles_miscounted_header() -> None:
+    text = "alpha\ntwo\nthree\nfour\nfive\nsix\n"
+    # Header says line 5 and miscounts old/new len (says 2,2 for 3 context/change lines)
+    patch = (
+        "--- a/f\n"
+        "+++ b/f\n"
+        "@@ -5,2 +5,2 @@\n"
+        " alpha\n"
+        "-two\n"
+        "+TWO\n"
+        " three\n"
+    )
+    ok, out = builtins._apply_unified_diff(text, patch)
+    assert ok is True
+    assert out == "alpha\nTWO\nthree\nfour\nfive\nsix\n"
 
 
 @pytest.mark.asyncio

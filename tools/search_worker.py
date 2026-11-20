@@ -6,6 +6,7 @@ from functools import cache
 import json
 import stat
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -107,10 +108,20 @@ class Scanner:
         include = self.cfg['include']
         return not include or any(glob_match(relative, value, self.cfg['case_sensitive']) for value in include)
 
+    def _regex_pattern(self):
+        pattern = getattr(self, '_compiled_regex', None)
+        if pattern is None:
+            flags = 0 if self.cfg['case_sensitive'] else re.IGNORECASE
+            pattern = re.compile(self.cfg['query'], flags)
+            self._compiled_regex = pattern
+        return pattern
+
     def path_matches(self, relative):
         query = self.cfg['query']
         if self.cfg['match'] == 'glob':
             return glob_match(relative, query, self.cfg['case_sensitive'])
+        if self.cfg['match'] == 'regex':
+            return self._regex_pattern().search(relative) is not None
         return query in relative if self.cfg['case_sensitive'] else query.casefold() in relative.casefold()
 
     def add(self, match):
@@ -224,6 +235,7 @@ class Scanner:
             self.progress()
         result = scan_literal(physical, terms=tuple(self.cfg.get('terms') or [self.cfg['query']]),
                               case_sensitive=self.cfg['case_sensitive'],
+                              regex=self.cfg['match'] == 'regex',
                               max_results=max(1, self.cfg['max_results'] - len(self.matches)),
                               context_chars=self.cfg['context_chars'], state=item['text_state'],
                               character_budget=128 * 1024, progress=progress)

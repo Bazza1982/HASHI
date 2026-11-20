@@ -419,10 +419,10 @@ class ToolRegistry:
 
     def _search_options(self):
         options = dict(self.tool_options.get("file_search") or {})
-        if "timeout_seconds" not in options and self.smart_tools.enabled:
+        if self.smart_tools.enabled:
             timeout = self.smart_tools.foreground_timeout_seconds
-            if timeout is not None:
-                options["timeout_seconds"] = timeout
+            if timeout is not None and "timeout_max_seconds" not in options:
+                options["timeout_max_seconds"] = timeout
         return options
 
     async def execute_with_audit_context(
