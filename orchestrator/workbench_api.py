@@ -884,6 +884,11 @@ class WorkbenchApiServer:
             ),
             (
                 "GET",
+                "/api/v1/sessions/{session_id}/runs/by-idempotency",
+                self.handle_v1_session_run_by_idempotency,
+            ),
+            (
+                "GET",
                 "/api/v1/sessions/{session_id}/runs/{run_id}",
                 self.handle_v1_session_run_get,
             ),
@@ -8865,6 +8870,9 @@ class WorkbenchApiServer:
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             raise ValueError("message.content must be a list")
+        message_context = payload.get("message_context")
+        if message_context is not None and not isinstance(message_context, Mapping):
+            raise ValueError("message_context must be an object")
         display_text = None
         if "display_text" in message:
             display_text = message["display_text"]
@@ -9113,6 +9121,9 @@ class WorkbenchApiServer:
                 "session_message_text": text,
                 "session_message_display_text": display_text,
                 "session_message_content": content,
+                "session_message_context": (
+                    dict(message_context) if isinstance(message_context, Mapping) else None
+                ),
                 "session_context_generation": payload.get(
                     "session_context_generation"
                 ),
@@ -10182,6 +10193,32 @@ class WorkbenchApiServer:
                 )
             return web.json_response(
                 {"ok": True, "run": run, "final_message": final_message}
+            )
+        except Exception as exc:
+            return self._v1_error(exc)
+
+    async def handle_v1_session_run_by_idempotency(self, request):
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        try:
+            idempotency_key = str(request.query.get("idempotency_key") or "").strip()
+            if not idempotency_key or len(idempotency_key) > 400:
+                raise ValueError("idempotency_key query parameter is required")
+            run = await asyncio.to_thread(
+                self.session_store.find_run_by_idempotency,
+                session_id=request.match_info["session_id"],
+                owner_id=owner,
+                idempotency_key=idempotency_key,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "session_id": request.match_info["session_id"],
+                    "idempotency_key": idempotency_key,
+                    "run": run,
+                },
+                headers={"Cache-Control": "no-store"},
             )
         except Exception as exc:
             return self._v1_error(exc)

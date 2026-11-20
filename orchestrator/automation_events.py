@@ -1,8 +1,11 @@
 """Read-only, owner-scoped terminal Agent events for HEA v1.
 
 Only durable Run terminal events are exposed. This projection deliberately does
-not subscribe to provider deltas, logs, or text, and changes no Session schema.
-The rowid cursor is a v1 adapter over the existing canonical Run event table.
+not subscribe to provider deltas, logs, or text, and changes no Session schema
+semantics. Event order comes from the append-only ``automation_event_index``
+whose AUTOINCREMENT identity stays monotonic even after history deletion;
+``run_events.rowid`` is never used as a feed cursor, so SQLite rowid reuse
+cannot silently rewind or skip new events.
 """
 from __future__ import annotations
 
@@ -25,14 +28,11 @@ def terminal_events_page(store, *, owner_id: str, after: int, limit: int = 50) -
     if not isinstance(limit, int) or not 1 <= limit <= MAX_LIMIT:
         raise ValueError("limit is outside the supported range")
     with store._lock, store._connection() as connection:
-        scope = (store.instance_id, str(owner_id))
+        scope = (str(owner_id),)
         head = connection.execute(
-            """SELECT COALESCE(MAX(e.rowid), 0) AS cursor
-               FROM run_events AS e
-               JOIN sessions AS s ON s.session_id=e.session_id
-               WHERE s.instance_id=? AND s.owner_id=?
-                 AND s.status!='deleted'
-                 AND e.kind IN ('run.completed', 'run.failed')""",
+            """SELECT COALESCE(MAX(i.feed_id), 0) AS cursor
+               FROM automation_event_index AS i
+               WHERE i.owner_id = ?""",
             scope,
         ).fetchone()
         latest = int(head["cursor"])
@@ -42,22 +42,24 @@ def terminal_events_page(store, *, owner_id: str, after: int, limit: int = 50) -
                 "has_more": False, "reset_required": False,
             }
         if after > latest:
+            # History destruction can move the newest cursor backwards.
+            # Report a reset explicitly: consumers re-baseline and must not
+            # replay or silently drop events.
             return {
                 "events": [], "next_cursor": latest, "latest_cursor": latest,
                 "has_more": False, "reset_required": True,
             }
         rows = connection.execute(
-            """SELECT e.rowid AS cursor, e.event_id, e.run_id, e.session_id,
-                      e.kind, e.created_at, s.agent_id,
+            """SELECT i.feed_id AS cursor, i.event_id, i.run_id, i.session_id,
+                      i.kind, i.created_at, i.agent_id,
                       COALESCE(r.idempotency_key, '') AS run_idempotency_key
-               FROM run_events AS e
-               JOIN sessions AS s ON s.session_id=e.session_id
-               LEFT JOIN runs AS r ON r.run_id=e.run_id
-               WHERE s.instance_id=? AND s.owner_id=?
-                 AND s.status!='deleted'
-                 AND e.kind IN ('run.completed', 'run.failed')
-                 AND e.rowid > ?
-               ORDER BY e.rowid ASC LIMIT ?""",
+               FROM automation_event_index AS i
+               JOIN sessions AS s ON s.session_id = i.session_id
+               LEFT JOIN runs AS r ON r.run_id = i.run_id
+               WHERE i.owner_id = ?
+                 AND s.status != 'deleted'
+                 AND i.feed_id > ?
+               ORDER BY i.feed_id ASC LIMIT ?""",
             (*scope, after, limit + 1),
         ).fetchall()
 
@@ -128,3 +130,4 @@ async def handle_automation_events(server, request):
         return web.json_response(
             {"ok": False, "error_code": "automation_feed_unavailable"}, status=503,
         )
+# HASHI-Fingerprint: hfp_2a81a60d13cd41ceb1c6d85b1edb7ba1

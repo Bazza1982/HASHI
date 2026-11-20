@@ -480,7 +480,7 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 36
+    SCHEMA_VERSION = 37
 
     def __init__(
         self,
@@ -846,6 +846,22 @@ class SessionStore:
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id),
                     FOREIGN KEY(run_id) REFERENCES runs(run_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS automation_event_index (
+                    feed_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT,
+                    kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    event_sequence INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS automation_event_index_owner_cursor
+                    ON automation_event_index(owner_id, feed_id);
+                CREATE INDEX IF NOT EXISTS automation_event_index_session
+                    ON automation_event_index(session_id);
 
                 CREATE TABLE IF NOT EXISTS run_projection_records (
                     run_id TEXT PRIMARY KEY,
@@ -2779,6 +2795,32 @@ class SessionStore:
                 created_at,
             ),
         )
+        if kind in ("run.completed", "run.failed"):
+            # Append-only monotonic feed identity for HEA. SQLite rowid reuse
+            # after history deletion must never rewind the event feed cursor.
+            scope_row = connection.execute(
+                "SELECT owner_id, agent_id FROM sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if scope_row is not None:
+                connection.execute(
+                    """
+                    INSERT INTO automation_event_index(
+                        event_id, session_id, run_id, kind, owner_id, agent_id,
+                        event_sequence, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        session_id,
+                        run_id,
+                        kind,
+                        str(scope_row["owner_id"]),
+                        str(scope_row["agent_id"]),
+                        sequence,
+                        created_at,
+                    ),
+                )
         self._queue_foreground_event(
             connection,
             session_id=session_id,
@@ -3805,6 +3847,10 @@ class SessionStore:
             # Delete event/message/run graph only after every dependent projection.
             connection.execute(
                 f"DELETE FROM run_events WHERE session_id IN ({marks})",
+                session_ids,
+            )
+            connection.execute(
+                f"DELETE FROM automation_event_index WHERE session_id IN ({marks})",
                 session_ids,
             )
             connection.execute(

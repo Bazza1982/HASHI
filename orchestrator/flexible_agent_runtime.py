@@ -1577,6 +1577,23 @@ class FlexibleAgentRuntime:
                 "text": str(reply_reference.get("text") or "")[:4000]
                 or "[Referenced Agent message]",
             }
+        hea_trigger = (
+            request_metadata.get("session_message_context", {}).get("hea_trigger")
+            if isinstance(request_metadata.get("session_message_context"), Mapping)
+            else None
+        )
+        if isinstance(hea_trigger, Mapping):
+            message_context_snapshot["hea_trigger"] = {
+                "event_id": str(hea_trigger.get("event_id") or ""),
+                "event_type": str(hea_trigger.get("event_type") or ""),
+                "source_agent_id": str(hea_trigger.get("source_agent_id") or ""),
+                "source_session_id": str(hea_trigger.get("source_session_id") or ""),
+                "source_run_id": str(hea_trigger.get("source_run_id") or ""),
+                "source_instance_id": str(hea_trigger.get("source_instance_id") or ""),
+                "occurred_at": str(hea_trigger.get("occurred_at") or ""),
+                "rule_id": str(hea_trigger.get("rule_id") or ""),
+                "job_id": str(hea_trigger.get("job_id") or ""),
+            }
         from orchestrator.frontend_contracts import build_frontend_ingress_envelope
 
         frontend_ingress_envelope = build_frontend_ingress_envelope(
