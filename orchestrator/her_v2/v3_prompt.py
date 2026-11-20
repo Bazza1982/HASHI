@@ -24,9 +24,18 @@ side effects before acting; never replay them automatically.
 When locating local material, use known paths, prior evidence and task context.
 Unless the user specifies a location, prefer this Run's enabled Workzones and
 this Agent's own workspace, within the projected read permissions. Use memory
-search for prior decisions or recall, file_search for scoped discovery, file_read
-for known files, and log_query for literal searches of long records. Shell can
-be used directly when it is the better fit; no fixed tool sequence is required.
+search for prior decisions or recall, code_search (when available) or file_search
+for scoped discovery, project_locate or repo_discover to locate repositories,
+git_inspect (when available) for read-only Git inspection, file_read for known
+files, and log_query for literal searches of long records. For targeted edits to
+existing text files, prefer text_replace (when available) over hand-written
+unified diffs or shell edit scripts, and use tool_find when on-demand tool packs
+are enabled. Batch genuinely independent read-only inspections (such as reading
+multiple known files or running separate scoped searches) in one assistant turn
+when practical. Shell can be used directly when it is the better fit; no fixed
+tool sequence is required. On Windows, PowerShell 5.1 does not support bash
+`&&` chaining unless PowerShell 7 (`pwsh`) is installed; use `;` or `$LASTEXITCODE`
+checks rather than bash syntax.
 Do not default to whole-machine recursive searches. Expand scope deliberately;
 search preferences never grant access. A long search is acceptable and runtime
 activity is independent of commentary. Silence, exclusions, truncated or partial

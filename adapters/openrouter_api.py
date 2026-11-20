@@ -1737,13 +1737,148 @@ def _provider_call_retry_delay(
     *,
     default_s: float,
     maximum_s: float,
+    attempt: int = 1,
 ) -> float:
     response = getattr(error, "response", None)
     retry_after = _retry_after_seconds(
         response if isinstance(response, httpx.Response) else None
     )
-    delay = default_s if retry_after is None else retry_after
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        exponent = max(0, int(attempt) - 1)
+        delay = float(default_s) * (2 ** exponent)
     return max(0.0, min(float(maximum_s), float(delay)))
+
+
+_INTRA_TURN_COMPACTED_MARKER = "[HASHI intra-turn compacted tool output"
+_PARALLEL_SAFE_READONLY_TOOLS = frozenset(
+    {
+        "file_read",
+        "file_list",
+        "file_search",
+        "code_search",
+        "project_locate",
+        "git_inspect",
+        "log_query",
+        "repo_discover",
+        "data_inspect",
+        "memory_search",
+        "web_search",
+        "web_fetch",
+    }
+)
+
+
+def _estimate_messages_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif content is not None:
+            total += len(json.dumps(content, ensure_ascii=False, default=str))
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            total += len(json.dumps(tool_calls, ensure_ascii=False, default=str))
+    return total
+
+
+def _tool_call_meta_by_id(messages: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    meta: dict[str, tuple[str, str]] = {}
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or ():
+            if not isinstance(call, Mapping):
+                continue
+            call_id = str(call.get("id") or "")
+            if not call_id:
+                continue
+            fn = call.get("function") or {}
+            name = str(fn.get("name") or "unknown")
+            raw_args = fn.get("arguments")
+            target = ""
+            try:
+                parsed = (
+                    dict(raw_args)
+                    if isinstance(raw_args, Mapping)
+                    else json.loads(str(raw_args or "{}"))
+                )
+                if isinstance(parsed, Mapping):
+                    for key in ("path", "file_path", "command", "query", "pattern", "root", "url"):
+                        val = parsed.get(key)
+                        if val:
+                            target = str(val).replace("\n", " ")[:120]
+                            break
+            except Exception:
+                pass
+            meta[call_id] = (name, target)
+    return meta
+
+
+def compact_intra_turn_tool_messages(
+    messages: list[dict[str, Any]],
+    *,
+    last_input_tokens: int = 0,
+    trigger_tokens: int = 110_000,
+    trigger_chars: int = 360_000,
+    keep_recent_tool_messages: int = 12,
+    min_payload_chars: int = 1_200,
+    head_chars: int = 300,
+    tail_chars: int = 300,
+) -> int:
+    """Fold bulky older `role: "tool"` payloads in place without breaking tool pairing.
+
+    Preserves every assistant/tool message node and `tool_call_id` 1:1 mapping,
+    keeps the most recent tool outputs verbatim, and operates only when the
+    turn crosses its token or character threshold so KV prefix caching remains
+    stable between compaction epochs.
+    """
+    if (
+        int(last_input_tokens or 0) < int(trigger_tokens)
+        and _estimate_messages_chars(messages) < int(trigger_chars)
+    ):
+        return 0
+    tool_indices = [
+        idx
+        for idx, msg in enumerate(messages)
+        if isinstance(msg, Mapping) and msg.get("role") == "tool"
+    ]
+    cutoff = len(tool_indices) - max(0, int(keep_recent_tool_messages))
+    if cutoff <= 0:
+        return 0
+    meta_by_id = _tool_call_meta_by_id(messages)
+    compacted = 0
+    for idx in tool_indices[:cutoff]:
+        msg = messages[idx]
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        if len(content) < int(min_payload_chars):
+            continue
+        if content.startswith(_INTRA_TURN_COMPACTED_MARKER):
+            continue
+        call_id = str(msg.get("tool_call_id") or "")
+        tool_name, target = meta_by_id.get(call_id, ("tool", ""))
+        digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+        head = content[:head_chars].rstrip()
+        tail = content[-tail_chars:].lstrip() if tail_chars > 0 else ""
+        omitted = max(0, len(content) - len(head) - len(tail))
+        header = (
+            f"{_INTRA_TURN_COMPACTED_MARKER} | tool={tool_name}"
+            + (f" | target={target}" if target else "")
+            + f" | original_chars={len(content)} | sha256={digest}]"
+        )
+        msg["content"] = (
+            f"{header}\n{head}\n...[omitted {omitted} chars]...\n{tail}"
+            if tail
+            else f"{header}\n{head}\n...[omitted {omitted} chars]..."
+        )
+        compacted += 1
+    return compacted
 
 
 def _assistant_content_text(content: Any) -> str:
@@ -1850,8 +1985,12 @@ class OpenRouterAdapter(BaseBackend):
     # concrete compatible adapter may opt into narrowly scoped HTTP-call
     # recovery without replaying completed tool loops.
     TRANSIENT_PROVIDER_CALL_RETRIES = INVALID_TOOL_CALL_REPAIR_LIMIT
-    TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.0
-    TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 5.0
+    TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.5
+    TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 16.0
+    INTRA_TURN_COMPACTION_TRIGGER_TOKENS = 110_000
+    INTRA_TURN_COMPACTION_TRIGGER_CHARS = 360_000
+    INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS = 12
+    PARALLEL_READONLY_TOOL_CONCURRENCY = 4
 
     async def _prepare_payload_capacity(
         self,
@@ -3178,6 +3317,207 @@ class OpenRouterAdapter(BaseBackend):
     # Tool execution with stream events
     # ------------------------------------------------------------------
 
+    async def _try_run_parallel_readonly_tool_calls(
+        self,
+        tool_calls: list[dict],
+        messages: list[dict],
+        on_stream_event: StreamCallback,
+        *,
+        completed_bindings: dict[str, tuple[str, str, Any]],
+        provider_call_context: Mapping[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], ...] | None:
+        """Execute a pure, independent read-only batch concurrently with bounded fan-out.
+
+        Returns None (falling back to strict sequential execution) whenever any
+        call in the batch is mutating, unparsed, duplicated, policy-denied, or
+        requires durable permission-wait boundaries.
+        """
+        if len(tool_calls) <= 1:
+            return None
+        if getattr(self.tool_registry, "permission_durable_wait", False):
+            return None
+
+        prepared: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            tool_name = str(fn.get("name") or "unknown")
+            tc_id = str(tc.get("id") or "")
+            raw_args = fn.get("arguments", "{}")
+            if (
+                not tc_id
+                or tc_id in seen_ids
+                or tc_id in completed_bindings
+                or tool_name not in _PARALLEL_SAFE_READONLY_TOOLS
+                or tool_name in _MEDIA_FALLBACK_TOOL_NAMES
+            ):
+                return None
+            try:
+                arguments = (
+                    dict(raw_args)
+                    if isinstance(raw_args, Mapping)
+                    else (json.loads(raw_args) if raw_args else {})
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+            if not isinstance(arguments, Mapping):
+                return None
+            arguments = dict(arguments)
+            if not self._evaluate_tool_policy(tool_name, arguments).allowed:
+                return None
+            binding = _canonical_tool_binding(tool_name, arguments)
+            seen_ids.add(tc_id)
+            correlation = {
+                **dict(provider_call_context or {}),
+                "tool_call_id": tc_id,
+                "tool_name": tool_name,
+            }
+            event_metadata: dict[str, Any] = {}
+            event_path = ""
+            if tool_name == "file_read":
+                path = arguments.get("path") or arguments.get("file_path")
+                if path:
+                    event_path = str(path)
+                    event_metadata["file_paths"] = (event_path,)
+            prepared.append(
+                {
+                    "tool_name": tool_name,
+                    "tc_id": tc_id,
+                    "raw_args": raw_args if isinstance(raw_args, str) else json.dumps(arguments, ensure_ascii=False),
+                    "arguments": arguments,
+                    "binding": binding,
+                    "correlation": correlation,
+                    "evt_kind": KIND_FILE_READ if tool_name == "file_read" else KIND_TOOL_START,
+                    "event_metadata": event_metadata,
+                    "event_path": event_path,
+                }
+            )
+
+        claimed: list[tuple[str, tuple[str, str]]] = []
+        with self._tool_replay_lock:
+            try:
+                for item in prepared:
+                    claim_id = item["tc_id"]
+                    binding = item["binding"]
+                    inflight = self._inflight_tool_bindings.get(claim_id)
+                    if inflight is not None:
+                        raise ProviderToolReplayError(
+                            "Tool call ID is already executing"
+                            if inflight == binding
+                            else "Tool call ID is already bound to another request"
+                        )
+                    self._inflight_tool_bindings[claim_id] = binding
+                    claimed.append((claim_id, binding))
+            except BaseException:
+                for claim_id, binding in claimed:
+                    if self._inflight_tool_bindings.get(claim_id) == binding:
+                        self._inflight_tool_bindings.pop(claim_id, None)
+                raise
+
+        for item in prepared:
+            await self._emit(
+                on_stream_event,
+                item["evt_kind"],
+                f"{item['tool_name']}: {item['raw_args'][:120]}",
+                tool_name=item["tool_name"],
+                file_path=item["event_path"],
+                metadata={**item["event_metadata"], **item["correlation"]},
+            )
+
+        limit = max(1, int(getattr(self, "PARALLEL_READONLY_TOOL_CONCURRENCY", 4)))
+        semaphore = asyncio.Semaphore(limit)
+
+        async def _execute_one(item: dict[str, Any]):
+            async with semaphore:
+                return await self.tool_registry.execute(
+                    item["tool_name"],
+                    item["arguments"],
+                    tool_call_id=item["tc_id"],
+                )
+
+        tasks = [asyncio.create_task(_execute_one(item)) for item in prepared]
+        try:
+            results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError as exc:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            details = dict(getattr(exc, "hashi_tool_details", {}) or {})
+            for item in prepared:
+                await self._emit(
+                    on_stream_event,
+                    KIND_TOOL_END,
+                    f"{item['tool_name']}: cancelled after cleanup",
+                    tool_name=item["tool_name"],
+                    metadata={
+                        **item["correlation"],
+                        "is_error": True,
+                        "tool_result_details": details,
+                    },
+                )
+            raise
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            with self._tool_replay_lock:
+                for claim_id, binding in claimed:
+                    if self._inflight_tool_bindings.get(claim_id) == binding:
+                        self._inflight_tool_bindings.pop(claim_id, None)
+
+        effect_facts: list[dict[str, Any]] = []
+        deferred_tool_result_messages: list[dict[str, Any]] = []
+        for item, result in zip(prepared, results):
+            tool_name = item["tool_name"]
+            tc_id = item["tc_id"]
+            binding = item["binding"]
+            output_preview = result.output[:100].replace("\n", " ")
+            effect_facts.append(
+                _verified_read_effect_fact(
+                    tool_name=tool_name,
+                    tool_call_id=tc_id,
+                    result=result,
+                )
+            )
+            await self._emit(
+                on_stream_event,
+                KIND_TOOL_END,
+                f"{tool_name}: {output_preview}",
+                tool_name=tool_name,
+                metadata={
+                    **item["correlation"],
+                    "is_error": bool(getattr(result, "is_error", False)),
+                    "tool_result_details": dict(result.details or {}),
+                },
+            )
+            translated_messages = self._tool_result_messages(
+                tool_name=tool_name,
+                tool_call_id=tc_id,
+                output=result.output,
+                content=getattr(result, "content", None),
+            )
+            messages.extend(
+                message
+                for message in translated_messages
+                if message.get("role") == "tool"
+            )
+            deferred_tool_result_messages.extend(
+                message
+                for message in translated_messages
+                if message.get("role") != "tool"
+            )
+            completed_bindings[tc_id] = (
+                binding[0],
+                binding[1],
+                copy.deepcopy(result.output),
+            )
+        messages.extend(deferred_tool_result_messages)
+        return tuple(effect_facts)
+
     async def _run_tool_calls(
         self,
         tool_calls: list[dict],
@@ -3191,9 +3531,18 @@ class OpenRouterAdapter(BaseBackend):
         before_tool_dispatch: Callable[[], None] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
+        completed_bindings = _completed_tool_bindings(messages)
+        parallel_facts = await self._try_run_parallel_readonly_tool_calls(
+            tool_calls,
+            messages,
+            on_stream_event,
+            completed_bindings=completed_bindings,
+            provider_call_context=provider_call_context,
+        )
+        if parallel_facts is not None:
+            return parallel_facts
         effect_facts: list[dict[str, Any]] = []
         deferred_tool_result_messages: list[dict[str, Any]] = []
-        completed_bindings = _completed_tool_bindings(messages)
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
@@ -4563,6 +4912,7 @@ class OpenRouterAdapter(BaseBackend):
                                     maximum_s=(
                                         self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S
                                     ),
+                                    attempt=recovery_attempts_used,
                                 )
                             )
                             continue
@@ -4951,6 +5301,29 @@ class OpenRouterAdapter(BaseBackend):
                     for call in result.tool_calls
                     if isinstance(call, Mapping)
                 )
+                compacted_tool_outputs = compact_intra_turn_tool_messages(
+                    messages,
+                    last_input_tokens=int(
+                        (last_provider_call_record or {}).get("input") or 0
+                    ),
+                    trigger_tokens=int(
+                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_TOKENS", 110_000)
+                    ),
+                    trigger_chars=int(
+                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_CHARS", 360_000)
+                    ),
+                    keep_recent_tool_messages=int(
+                        getattr(self, "INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS", 12)
+                    ),
+                )
+                if compacted_tool_outputs:
+                    self.logger.info(
+                        "Intra-turn context maintenance compacted %d older tool result(s) "
+                        "(request_id=%s, loop=%d)",
+                        compacted_tool_outputs,
+                        request_id,
+                        loop_idx + 1,
+                    )
                 self._observe_provider_context(
                     boundary="completed_tool_batch",
                     messages=messages,

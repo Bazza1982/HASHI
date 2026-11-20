@@ -1889,13 +1889,14 @@ class _CognitiveControlToolRegistry:
             ),
             allow_focus=not self._request.role.startswith("sub_agent:"),
         )
-        self._audit(
-            "task_state_delta",
-            {
-                "application": application.as_dict(),
-                "task_state": self.task_state.snapshot(),
-            },
-        )
+        if application.status != "missing":
+            self._audit(
+                "task_state_delta",
+                {
+                    "application": application.as_dict(),
+                    "task_state": self.task_state.snapshot(),
+                },
+            )
         return application
 
     @staticmethod

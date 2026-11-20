@@ -12,6 +12,8 @@ import hashlib
 import inspect
 import os
 from pathlib import Path
+import re
+import shlex
 import time
 
 if os.name == 'nt':
@@ -174,37 +176,174 @@ async def execution_budget(runtime, item, frozen):
         reasons.pop(item.request_id,None)
 
 
+_SHELL_CONTROL_TOKENS = re.compile(r'[;&|><`\r\n]|\$\(')
+_SHELL_ESCAPE_TOKENS = re.compile(
+    r'(^|[\s"\'])\.\.([\\/]|$|[\s"\'])|(^|[\s"\'])~([\\/]|$)|\$env:|%[A-Za-z_][A-Za-z0-9_]*%|\b(?:cd|chdir|pushd|set-location|push-location|sl)\b',
+    re.IGNORECASE,
+)
+_READONLY_SHELL_COMMANDS = frozenset({
+    'rg', 'ripgrep', 'grep', 'findstr', 'where', 'where.exe', 'which',
+    'pwd', 'ls', 'dir', 'get-childitem', 'get-location', 'get-content',
+    'select-string', 'test-path', 'stat', 'wc', 'head', 'tail', 'cat',
+})
+_READONLY_GIT_SUBCOMMANDS = frozenset({
+    'status', 'log', 'diff', 'show', 'branch', 'rev-parse', 'remote',
+    'ls-files', 'describe', 'tag',
+})
+_MUTATING_GIT_TOKENS = frozenset({
+    '-d', '-D', '-m', '-M', '-c', '-C', '-f', '--delete', '--force',
+    '--move', '--copy', 'add', 'remove', 'rm', 'rename', 'set-url',
+    'prune', 'update',
+})
+
+
+def _is_strictly_readonly_shell_command(command: str) -> bool:
+    """Return True only for single, unchained, provably read-only commands."""
+    text = str(command or '').strip()
+    if not text or _SHELL_CONTROL_TOKENS.search(text):
+        return False
+    try:
+        tokens = shlex.split(text, posix=(os.name != 'nt'))
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    exe = Path(tokens[0].strip('"\'')).name.casefold()
+    if exe.endswith('.exe'):
+        exe_base = exe[:-4]
+    else:
+        exe_base = exe
+    if exe in _READONLY_SHELL_COMMANDS or exe_base in _READONLY_SHELL_COMMANDS:
+        return True
+    if exe_base == 'git':
+        idx = 1
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in {'-C', '--git-dir', '--work-tree'}:
+                idx += 2
+                continue
+            if tok.startswith(('--git-dir=', '--work-tree=', '--no-pager', '--paginate')):
+                idx += 1
+                continue
+            if tok.startswith('-'):
+                return False
+            sub = tok.casefold()
+            if sub not in _READONLY_GIT_SUBCOMMANDS:
+                return False
+            rest = {t.strip('"\'') for t in tokens[idx + 1:]}
+            if rest & _MUTATING_GIT_TOKENS:
+                return False
+            # `git branch <new-branch>` or `git tag <new-tag>` creates refs.
+            if sub in {'branch', 'tag'}:
+                positionals = [t for t in tokens[idx + 1:] if not t.startswith('-')]
+                if positionals:
+                    return False
+            return True
+    return False
+
+
+def _resolve_tool_target(raw_value: object, workspace_dir: Path) -> Path | None:
+    text = str(raw_value or '').strip()
+    if not text:
+        return None
+    raw_path = Path(text)
+    return raw_path.resolve() if raw_path.is_absolute() else (workspace_dir / raw_path).resolve()
+
+
+def _shell_lock_targets(registry, arguments: dict, roots: list[str]) -> list[Path]:
+    """Scope shell leases to the execution directory and any referenced roots."""
+    workspace = Path(registry.workspace_dir).resolve()
+    raw_cwd = str(arguments.get('cwd') or '').strip()
+    exec_dir = _resolve_tool_target(raw_cwd, workspace) if raw_cwd else workspace
+    if exec_dir is None:
+        exec_dir = workspace
+    command = str(arguments.get('command') or '').strip()
+    if not command or _SHELL_ESCAPE_TOKENS.search(command):
+        return [Path(p) for p in roots]
+
+    norm_cmd = command.casefold().replace('\\', '/')
+    targets: list[Path] = [exec_dir]
+    for raw_root in roots:
+        root_path = Path(raw_root)
+        if root_path == exec_dir:
+            continue
+        # If the execution dir is an ancestor of another root, locking exec_dir
+        # already covers it; if another root is explicitly referenced in the
+        # command, include it so cross-root writes remain synchronized.
+        root_norm = str(root_path).casefold().replace('\\', '/')
+        if root_norm and root_norm in norm_cmd:
+            targets.append(root_path)
+    return targets
+
+
 @asynccontextmanager
 async def tool_resource(registry, name, arguments):
-    """Serialize unknown shell writes against their authorized workspace set.
+    """Synchronize mutating filesystem tools without over-locking independent work.
 
-    Known file writes take shared workspace leases plus an exclusive file
-    lease, so independent files still proceed together. Reads take no lease.
-    Patch and arbitrary shell actions take exclusive workspace leases.
+    Known file mutations (`file_write`, `text_replace`, `apply_patch`,
+    `file_manage`) take shared parent-directory leases plus exclusive target
+    file leases, so independent files proceed concurrently while same-file
+    edits serialize across tools and processes. Strictly read-only shell
+    inspections take shared leases; arbitrary/mutating shell commands take
+    exclusive leases scoped to their execution directory and referenced roots.
+    Reads take no lease.
     """
-    if name not in {'shell','bash','file_write','apply_patch'}:
+    arguments = arguments if isinstance(arguments, dict) else {}
+    if name not in {'shell', 'bash', 'file_write', 'apply_patch', 'text_replace', 'file_manage'}:
+        yield 0
+        return
+    if name == 'text_replace' and arguments.get('preview_only') is True:
         yield 0
         return
     context = registry._effective_audit_context()
     config = context.get('global_config')
-    root = getattr(config,'bridge_home',None) or getattr(config,'project_root',None) or registry.workspace_dir
-    roots = sorted({str(Path(p).resolve()) for p in [registry.workspace_dir,*registry.access_roots]})
-    scopes = {}
-    def scope(path, shared):
-        key = 'filesystem:'+os.path.normcase(str(path))
+    root = getattr(config, 'bridge_home', None) or getattr(config, 'project_root', None) or registry.workspace_dir
+    workspace_dir = Path(registry.workspace_dir).resolve()
+    roots = sorted({str(Path(p).resolve()) for p in [workspace_dir, *registry.access_roots]})
+    scopes: dict[str, bool] = {}
+
+    def scope(path: Path, shared: bool):
+        key = 'filesystem:' + os.path.normcase(str(path))
         scopes[key] = scopes.get(key, True) and shared
-    if name == 'file_write':
-        raw_path = Path(str(arguments.get('path') or ''))
-        path = raw_path.resolve() if raw_path.is_absolute() else (registry.workspace_dir/raw_path).resolve()
+
+    def lock_path(path: Path, *, shared: bool = False):
         for parent in path.parents:
             scope(parent, True)
-        scope(path, False)
+        scope(path, shared)
+
+    if name in {'file_write', 'text_replace', 'apply_patch'}:
+        target = _resolve_tool_target(arguments.get('path'), workspace_dir)
+        if target is not None:
+            lock_path(target, shared=False)
+        else:
+            for raw_scope in roots:
+                lock_path(Path(raw_scope), shared=False)
+    elif name == 'file_manage':
+        op = str(arguments.get('operation') or '').strip().casefold()
+        locked_any = False
+        if op == 'mkdir':
+            target = _resolve_tool_target(arguments.get('path'), workspace_dir)
+            if target is not None:
+                lock_path(target, shared=False)
+                locked_any = True
+        elif op in {'copy', 'move'}:
+            src = _resolve_tool_target(arguments.get('source'), workspace_dir)
+            dst = _resolve_tool_target(arguments.get('destination'), workspace_dir)
+            if src is not None:
+                lock_path(src, shared=(op == 'copy'))
+                locked_any = True
+            if dst is not None:
+                lock_path(dst, shared=False)
+                locked_any = True
+        if not locked_any:
+            for raw_scope in roots:
+                lock_path(Path(raw_scope), shared=False)
     else:
-        for raw_scope in roots:
-            path = Path(raw_scope)
-            for parent in path.parents:
-                scope(parent, True)
-            scope(path, False)
+        command = str(arguments.get('command') or '')
+        readonly_shell = _is_strictly_readonly_shell_command(command)
+        for target_root in _shell_lock_targets(registry, arguments, roots):
+            lock_path(target_root, shared=readonly_shell)
+
     groups = [(key, 1, shared) for key, shared in scopes.items()]
-    async with leases(Path(root)/'state'/'instance',groups) as elapsed:
+    async with leases(Path(root) / 'state' / 'instance', groups) as elapsed:
         yield elapsed

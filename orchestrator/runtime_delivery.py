@@ -1848,14 +1848,18 @@ async def send_long_message(
             frontend_session_id=frontend_session_id,
             frontend_owner_id=frontend_owner_id,
         )
-    if claim_result.get("state") != "claimed":
+    claim = claim_result.get("claim")
+    if claim_result.get("state") != "claimed" or not isinstance(claim, Mapping):
+        outbox_state = (
+            "already_claimed"
+            if claim_result.get("state") == "claimed"
+            else claim_result.get("state")
+        )
         runtime.logger.info(
             f"Frontend delivery not sent for {request_id} "
-            f"(outbox state={claim_result.get('state')})"
+            f"(outbox state={outbox_state})"
         )
         return 0.0, 0
-
-    claim = claim_result["claim"]
     store = ensure_store(runtime)
     return await dispatch_claimed_telegram_event(
         runtime,
