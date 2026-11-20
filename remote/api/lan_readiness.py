@@ -67,6 +67,30 @@ def _bounded_string(value: Any) -> str:
     return text.encode("utf-8")[:MAX_STRING_BYTES].decode("utf-8", "ignore")
 
 
+def _schema_version(value: Any) -> int | None:
+    """Best-effort schema version read that can never raise.
+
+    A corrupted checkpoint or report may carry any JSON value in
+    ``schema_version`` (a string like ``"invalid"``, a list, a float, ...).
+    ``int(...)`` on those raises ValueError, which previously escaped
+    ``_load()`` during cache initialisation and could take the Remote down at
+    startup. This helper returns None for anything unreadable so the caller
+    degrades diagnostics instead of crashing.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _normalize_state(value: Any, default: str = "unknown") -> str:
     text = _bounded_string(value).lower()
     return text if text in KNOWN_STATES else default
@@ -129,7 +153,9 @@ class LanReadinessCache:
             data = json.loads(raw.decode("utf-8-sig"))
         except (UnicodeError, json.JSONDecodeError):
             return
-        if not isinstance(data, dict) or int(data.get("schema_version") or 0) != SCHEMA_VERSION:
+        if not isinstance(data, dict):
+            return
+        if _schema_version(data.get("schema_version")) != SCHEMA_VERSION:
             return
         if str(data.get("instance_id") or "").strip().upper() != self._instance_id:
             return
@@ -192,7 +218,7 @@ class LanReadinessCache:
         *,
         reported_instance: str | None,
     ) -> dict[str, Any] | None:
-        if int(report.get("schema_version") or 0) != SCHEMA_VERSION:
+        if _schema_version(report.get("schema_version")) != SCHEMA_VERSION:
             return None
         instance_id = str(report.get("instance_id") or reported_instance or "").strip().upper()
         if instance_id != self._instance_id:

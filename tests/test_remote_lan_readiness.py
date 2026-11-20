@@ -277,3 +277,123 @@ def test_report_endpoint_requires_authentication(tmp_path):
 def test_checkpoint_min_seconds_is_sane():
     assert CHECKPOINT_MIN_SECONDS >= 60
 # HASHI-Fingerprint: hfp_cca85abb5a48466094762d3c8a45d39f
+
+
+def _write_checkpoint(tmp_path, text):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "lan_readiness.json").write_text(text, encoding="utf-8")
+    return state_dir / "lan_readiness.json"
+
+
+def test_corrupt_schema_string_checkpoint_does_not_crash(tmp_path):
+    # A valid JSON file whose schema_version cannot be converted (the string
+    # "invalid") previously raised ValueError from int() during cache
+    # initialisation and could take the Remote down at startup.
+    _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": "invalid",
+        "instance_id": "LANLAB1",
+        "state": "degraded",
+    }))
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    projection = cache.projection()
+    assert projection["state"] == "unknown"
+    assert projection["reason_codes"] == ["lan_reachability_unverified"]
+
+
+def test_invalid_json_checkpoint_is_ignored_and_preserved(tmp_path):
+    sibling = tmp_path / "state" / "unrelated.json"
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    sibling.write_text('{"keep": true}', encoding="utf-8")
+    checkpoint = _write_checkpoint(tmp_path, "{not-json")
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.projection()["state"] == "unknown"
+    # Corrupted optional diagnostics never delete unrelated state files.
+    assert checkpoint.exists()
+    assert sibling.exists()
+
+
+def test_null_schema_checkpoint_is_ignored(tmp_path):
+    _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": None,
+        "instance_id": "LANLAB1",
+        "state": "ok",
+    }))
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.projection()["state"] == "unknown"
+
+
+@pytest.mark.parametrize("schema_value", [[], {}, 1.5, True, "not-a-number"])
+def test_unexpected_schema_shapes_are_ignored(tmp_path, schema_value):
+    _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": schema_value,
+        "instance_id": "LANLAB1",
+        "state": "ok",
+    }))
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.projection()["state"] == "unknown"
+
+
+def test_schema_version_string_one_checkpoint_still_loads(tmp_path):
+    # Historical leniency: the old int("1") parse accepted a string version.
+    cache = _make_cache(tmp_path)
+    cache.update(_valid_report())
+    payload = json.loads((tmp_path / "state" / "lan_readiness.json").read_text(encoding="utf-8"))
+    payload["schema_version"] = "1"
+    (tmp_path / "state" / "lan_readiness.json").write_text(json.dumps(payload), encoding="utf-8")
+    reloaded = LanReadinessCache(tmp_path, "LANLAB1")
+    assert reloaded.projection()["state"] == "degraded"
+
+
+def test_wrong_instance_checkpoint_is_ignored(tmp_path):
+    _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "instance_id": "HASHI6",
+        "state": "ok",
+    }))
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.projection()["state"] == "unknown"
+
+
+def test_oversized_checkpoint_is_ignored_and_preserved(tmp_path):
+    checkpoint = _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "instance_id": "LANLAB1",
+        "state": "ok",
+        "blob": "x" * (MAX_REPORT_BYTES + 1024),
+    }))
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.projection()["state"] == "unknown"
+    assert checkpoint.exists()
+
+
+def test_checkpoint_read_failure_is_ignored(tmp_path, monkeypatch):
+    import pathlib
+    _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "instance_id": "LANLAB1",
+        "state": "ok",
+    }))
+    original_read_bytes = pathlib.Path.read_bytes
+
+    def raise_permission_error(self, *args, **kwargs):
+        if self.name == "lan_readiness.json":
+            raise PermissionError("simulated read failure")
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", raise_permission_error)
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.projection()["state"] == "unknown"
+
+
+def test_corrupt_checkpoint_never_blocks_remote_startup(tmp_path):
+    # The cache is constructed during Remote startup; corruption must yield
+    # a healthy empty projection instead of raising.
+    _write_checkpoint(tmp_path, json.dumps({
+        "schema_version": "invalid",
+        "instance_id": "LANLAB1",
+        "state": "ok",
+    }))
+    cache = LanReadinessCache(tmp_path, "LANLAB1")
+    assert cache.activity()["snapshot_updates"] == 0
+    assert cache.projection()["diagnostics_available"] is False

@@ -723,4 +723,83 @@ def test_repair_leaves_unrelated_rules_unchanged(tmp_path):
     assert others[0]["Description"] == "keep-me"
     assert "tcp_rule_created" in outcome["Outcome"]["changes"]
 
+
+
+
+def test_doctor_combined_profile_string_is_compliant(tmp_path):
+    # A real multi-profile rule surfaces as a single combined string
+    # "Domain, Private" (PowerShell 5.1 NetSecurity Profile is a scalar flags
+    # enum; 15 rules on this machine use that exact representation).
+    scenario = _owned_rule_scenario('"Domain, Private"', "8767", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert result.returncode == 0, result.stderr
+    assert parsed["firewall"]["state"] == "ok"
+    assert parsed["firewall"]["reason_code"] == ""
+    assert sorted(parsed["firewall"]["tcp_rule"]["profile"]) == ["Domain", "Private"]
+
+
+def test_doctor_profile_enum_flags_value_3_is_compliant(tmp_path):
+    # GpoProfile-style flags value Domain|Private = 3 stringifies as
+    # "Domain, Private" through the real Cmdletization enum; the exact narrow
+    # template must accept it instead of reporting a false mismatch.
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="HashiRemote_DOCTOR-CONTRACT_TCP_8767"; '
+        "DisplayName='HASHI Remote MSI TCP 8767'; Description='{\"purpose\":\"hashi-remote-msi-tcp\"}'; "
+        'Direction="Inbound"; Action="Allow"; Enabled=$true; '
+        'Profile=[Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetSecurity.Profile]3 }); '
+        '$global:PortFilters["HashiRemote_DOCTOR-CONTRACT_TCP_8767"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="8767" }; '
+        '$global:AddressFilters["HashiRemote_DOCTOR-CONTRACT_TCP_8767"] = [pscustomobject]@{ RemoteAddress="LocalSubnet" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert result.returncode == 0, result.stderr
+    assert parsed["firewall"]["state"] == "ok"
+    assert parsed["firewall"]["reason_code"] == ""
+    assert sorted(parsed["firewall"]["tcp_rule"]["profile"]) == ["Domain", "Private"]
+
+
+def test_doctor_combined_profile_with_public_is_rejected(tmp_path):
+    # "Private, Public" (value 6) is a real representation; it must never be
+    # accepted as the narrow Domain/Private template.
+    scenario = _owned_rule_scenario('"Private, Public"', "8767", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_profile_mismatch"
+    assert "profile_includes_public_or_any" in parsed["firewall"]["tcp_rule_issues"]
+
+
+def test_doctor_profile_any_is_rejected(tmp_path):
+    scenario = _owned_rule_scenario('"Any"', "8767", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_profile_mismatch"
+    assert "profile_includes_public_or_any" in parsed["firewall"]["tcp_rule_issues"]
+
+
+def test_doctor_profile_not_applicable_is_not_green(tmp_path):
+    # NotApplicable (65535) is a real enum member; it is not the narrow
+    # Domain/Private configuration and must stay degraded, never green.
+    scenario = _owned_rule_scenario('"NotApplicable"', "8767", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_profile_mismatch"
+
+
+def test_doctor_unreadable_profile_value_is_not_green(tmp_path):
+    # An unexpected representation is preserved verbatim and reported as
+    # non-compliant evidence (degraded), never silently accepted as green.
+    scenario = _owned_rule_scenario('"GarbageValue"', "8767", "LocalSubnet", True)
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["state"] == "degraded"
+    assert "profile_includes_public_or_any" in parsed["firewall"]["tcp_rule_issues"]
+
+
+def test_doctor_block_rule_with_combined_profile_is_evidence(tmp_path):
+    # Broad explicit Block rules keep coverage semantics; the combined profile
+    # representation must not break Block-rule detection.
+    scenario = (
+        '$global:FirewallRules = @([pscustomobject]@{ Name="combined-block"; DisplayName="combined-block"; '
+        'Direction="Inbound"; Action="Block"; Enabled=$true; Profile=@("Domain, Private") }); '
+        '$global:PortFilters["combined-block"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="8767" }'
+    )
+    result, parsed = _run_doctor(tmp_path, scenario, "-Json")
+    assert parsed["firewall"]["reason_code"] == "firewall_explicitly_blocked"
+    assert len(parsed["firewall"]["explicit_block_evidence"]) == 1
+    assert sorted(parsed["firewall"]["explicit_block_evidence"][0]["profile"]) == ["Domain", "Private"]
 # HASHI-Fingerprint: hfp_f1f79ab5af79464d832ec1716f44a388

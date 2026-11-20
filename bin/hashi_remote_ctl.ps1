@@ -529,7 +529,20 @@ function Convert-RemoteGpoStringList {
     # Profile/Direction/Action are enum-valued in PS 5.1 (GpoProfile/GpoDirection/
     # GpoAction) and plain strings in later shells and stubs. Render canonical
     # names so every downstream -eq / -notin comparison is type-stable.
-    return @(@($Value) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    # A multi-profile rule surfaces as a flags enum or a combined string such
+    # as "Domain, Private"; those must be split into individual tokens or a
+    # valid Domain/Private rule would be falsely reported as mismatched.
+    # Unknown/unreadable values are preserved verbatim so downstream checks
+    # report them as non-compliant evidence instead of inventing a green.
+    $Names = @(
+        foreach ($Item in @($Value)) {
+            foreach ($Part in ([string]$Item) -split '[,\s]+') {
+                $Trimmed = $Part.Trim()
+                if ($Trimmed) { $Trimmed }
+            }
+        }
+    )
+    return $Names
 }
 function Get-RemoteFirewallDiagnostics {
     param([int]$EffectivePort, [string]$InstanceId, [string]$ListenerProcessPath = "")
