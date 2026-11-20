@@ -232,6 +232,13 @@ class HERv2Adapter(BaseBackend):
         self._audit_log: DurableAuditLog | None = None
         self._wip_journal: WIPJournal | None = None
         self._wip_active_journals: dict[str, WIPJournal] = {}
+        # Requests whose fixed-session binding was adopted from a /steer
+        # continuation receipt. Their interrupted pending Tool batch is closed
+        # with synthetic results instead of being resumed.
+        self._steer_continuation_requests: set[str] = set()
+        # Verified canonical PAO source Run claims for adopted /steer
+        # requests; popped when the successor consumes its recovery context.
+        self._steer_source_run_claims: dict[str, dict[str, Any]] = {}
         self._wip_journal_cache: dict[str, WIPJournal] = {}
         self._learning: HERv2Learning | None = None
         self._active_runtimes: dict[str, HERv2Runtime] = {}
@@ -1287,11 +1294,40 @@ class HERv2Adapter(BaseBackend):
             ),
         }
 
+    def _steer_continuation_tracking(self) -> set[str]:
+        """Request IDs whose fixed-session binding came from a /steer receipt.
+
+        Materialised lazily because HCC and runtime integration tests build
+        partial adapters with ``__new__`` without ``__init__`` and those
+        instances must stay usable. The set is per-instance request-scoped
+        tracking, never shared state.
+        """
+
+        tracking = getattr(self, "_steer_continuation_requests", None)
+        if tracking is None:
+            tracking = set()
+            self._steer_continuation_requests = tracking
+        return tracking
+
+    def _steer_source_run_claims_map(self) -> dict[str, dict[str, Any]]:
+        """Per-request verified canonical PAO source Run claims for /steer
+        adoptions. Lazily materialised for partial adapters built with
+        ``__new__`` without ``__init__``."""
+
+        claims = getattr(self, "_steer_source_run_claims", None)
+        if claims is None:
+            claims = {}
+            self._steer_source_run_claims = claims
+        return claims
+
     def _adopt_verified_steer_session(
         self, request_meta: Mapping[str, Any]
     ) -> None:
         """Restore the interrupted HER Session before opening a successor Turn."""
 
+        self._steer_continuation_tracking().discard(
+            str(request_meta.get("request_id") or "")
+        )
         request_metadata = request_meta.get("request_metadata")
         if not isinstance(request_metadata, Mapping):
             return
@@ -1369,9 +1405,16 @@ class HERv2Adapter(BaseBackend):
         if not session_id:
             raise HerFixedProtocolError(
                 "invalid_steer_continuation",
-                "The /steer continuation receipt is invalid or no longer resumable.",
+                "The /steer continuation receipt does not resolve to a "
+                "steerable terminated HERV3 Turn under this binding.",
             )
         self._session_id = session_id
+        self._steer_continuation_tracking().add(
+            str(request_meta.get("request_id") or "")
+        )
+        self._steer_source_run_claims_map()[
+            str(request_meta.get("request_id") or "")
+        ] = dict(source_run)
 
     def can_resume_fixed_session(self) -> bool:
         """Confirm that an outer HASHI binding has durable HER state behind it."""
@@ -2008,11 +2051,17 @@ class HERv2Adapter(BaseBackend):
                     error_retryable=False,
                 )
             prompt = fixed_turn.materialized_prompt
+            steer_source_run_claim = None
+            if str(request_id or "") in self._steer_continuation_tracking():
+                steer_source_run_claim = self._steer_source_run_claims_map().pop(
+                    str(request_id or ""), None
+                )
             try:
                 canonical_recovery_context = (
                     self._session_coordinator.store.consume_recovery_context(
                         session_id=fixed_turn.session_id,
                         current_turn_id=fixed_turn.turn_id,
+                        source_run_claim=steer_source_run_claim,
                     )
                 )
             except Exception as exc:
@@ -2253,6 +2302,10 @@ class HERv2Adapter(BaseBackend):
                     "request=%s; continuation evidence will remain unavailable",
                     str(request_id or ""),
                 )
+            steer_adopted = (
+                str(request_id or "") in self._steer_continuation_tracking()
+            )
+            self._steer_continuation_tracking().discard(str(request_id or ""))
             provider.bind_provider_context(
                 observer=lambda checkpoint: (
                     self._session_coordinator.record_provider_context_checkpoint(
@@ -2265,6 +2318,7 @@ class HERv2Adapter(BaseBackend):
                     )
                 ),
                 recovery=private_provider_context,
+                resume_pending_tools=not steer_adopted,
             )
         if permission_execution is not None:
             permission_execution.bind_provider(provider)
