@@ -488,40 +488,9 @@ class CodexCLIAdapter(BaseBackend):
     def should_bootstrap_on_startup(self) -> bool:
         return False
 
-    # Patterns that Codex CLI's internal chunker may misinterpret as chunk
-    # separators, causing "Separator is not found, and chunk exceed the limit".
-    # We replace them with visually similar but parser-safe alternatives.
-    _SEPARATOR_SUBS = [
-        # 3+ dashes on a line (markdown HR / YAML front-matter)
-        (r"^-{3,}$",   lambda m: "- " * (len(m.group()) // 2)),
-        # 3+ equals on a line (markdown heading underline)
-        (r"^={3,}$",   lambda m: "= " * (len(m.group()) // 2)),
-        # 3+ asterisks on a line (markdown HR)
-        (r"^\*{3,}$",  lambda m: "* " * (len(m.group()) // 2)),
-        # 3+ underscores on a line (markdown HR)
-        (r"^_{3,}$",   lambda m: "_ " * (len(m.group()) // 2)),
-        # 3+ tildes on a line (code fences — keep content but break pattern)
-        (r"^~{3,}$",   lambda m: "~ " * (len(m.group()) // 2)),
-    ]
-
     def _sanitize_for_codex(self, prompt: str) -> str:
-        """Replace separator-like patterns that confuse Codex's internal chunker."""
-        import re
-        lines = prompt.split("\n")
-        out = []
-        for line in lines:
-            stripped = line.strip()
-            replaced = False
-            for pattern, repl in self._SEPARATOR_SUBS:
-                if re.match(pattern, stripped):
-                    # Preserve leading whitespace
-                    indent = line[: len(line) - len(line.lstrip())]
-                    out.append(indent + re.sub(pattern, repl, stripped))
-                    replaced = True
-                    break
-            if not replaced:
-                out.append(line)
-        return "\n".join(out)
+        """Preserve caller prompts verbatim without mangling Markdown or diffs."""
+        return prompt
 
     def _emit_stream_event(self, event: StreamEvent | None, on_stream_event: StreamCallback) -> None:
         if event is None or on_stream_event is None:
@@ -1318,6 +1287,7 @@ class CodexCLIAdapter(BaseBackend):
                 stdin=asyncio.subprocess.PIPE if stdin_data is not None or interactive is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=16 * 1024 * 1024,
                 cwd=str(effective_workdir),
                 **process_group_kwargs(),
             )
