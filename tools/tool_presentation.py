@@ -14,8 +14,8 @@ from tools.developer_toolkit import _tool_find_selections
 
 _STARTER_TOOLS = (
     "tool_find", "project_locate", "code_search", "git_inspect",
-    "file_manage", "text_replace", "data_inspect", "file_read", "shell",
-    "ask_user", "get_user_answer",
+    "file_manage", "text_replace", "data_inspect", "file_read", "file_write",
+    "shell", "ask_user", "get_user_answer",
 )
 
 # Bounded request-local presentation: later tool_find discoveries accumulate
@@ -101,14 +101,25 @@ class OnDemandToolView:
         return result
 
 
+_ON_DEMAND_DISABLED_MODES = frozenset({"full", "off", "disabled", "none", "false"})
+_GUIDANCE_DISABLED_MODES = frozenset({"off", "disabled", "none", "false"})
+
+
 def on_demand_requested(
     tool_options: dict | None, *, model: str, is_herv3: bool,
 ) -> bool:
-    """Explicit non-production opt-in. No model changes without configuration."""
-    if not is_herv3 or not isinstance(tool_options, dict):
+    """Default ON for HERV3; opt out with herv3_tool_presentation.mode='full'|'off'."""
+    if not is_herv3:
         return False
-    options = tool_options.get("herv3_tool_presentation")
-    return isinstance(options, dict) and options.get("mode") == "on_demand"
+    if isinstance(tool_options, dict):
+        options = tool_options.get("herv3_tool_presentation")
+        if isinstance(options, dict):
+            mode = str(options.get("mode") or "").strip().casefold()
+            if mode in _ON_DEMAND_DISABLED_MODES:
+                return False
+            if mode == "on_demand":
+                return True
+    return True
 
 
 def developer_toolkit_guidance_enabled(
@@ -118,7 +129,7 @@ def developer_toolkit_guidance_enabled(
     model: str,
     is_herv3: bool,
 ) -> bool:
-    """Enable optional HERV3 Developer Toolkit guidance only on explicit opt-in."""
+    """Enable HERV3 Developer Toolkit guidance whenever toolkit tools are present."""
     if not is_herv3:
         return False
     options = (
@@ -128,10 +139,8 @@ def developer_toolkit_guidance_enabled(
     )
     if isinstance(options, dict):
         mode = str(options.get("mode") or "").strip().casefold()
-        if mode in {"off", "disabled", "none", "false"}:
+        if mode in _GUIDANCE_DISABLED_MODES:
             return False
-    if on_demand_requested(tool_options, model=model, is_herv3=is_herv3):
-        return True
     from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES
 
     return bool(set(tool_names) & set(TOOLKIT_TOOL_NAMES))

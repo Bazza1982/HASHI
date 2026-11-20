@@ -117,8 +117,8 @@ def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_developer_toolkit_prompt_guidance_is_strictly_opt_in_and_idempotent(tmp_path):
-    # 1. No toolkit configuration -> original baseline prompt.
+def test_developer_toolkit_prompt_guidance_is_default_for_wildcard_and_respects_narrow_or_off(tmp_path):
+    # 1. Baseline compile_main_prompt without flag preserves frozen L0 baseline.
     base_sys, _ = compile_main_prompt(
         pcm_input={"sections": [], "current_request": "fix bug"},
         fallback_request="fix bug",
@@ -128,33 +128,20 @@ def test_developer_toolkit_prompt_guidance_is_strictly_opt_in_and_idempotent(tmp
     assert DEVELOPER_TOOLKIT_CONTRACT not in base_sys
     assert "text_replace" not in base_sys
 
-    # 2. Wildcard registry alone does NOT opt into toolkit or guidance.
-    wildcard_reg = ToolRegistry(["*"], tmp_path, tmp_path, {})
-    wildcard_names = {d["function"]["name"] for d in wildcard_reg.get_tool_definitions()}
-    assert "text_replace" not in wildcard_names
+    # 2. Narrow allowlist without toolkit tools does NOT enable guidance.
+    narrow_reg = ToolRegistry(["file_read", "file_write", "file_list"], tmp_path, tmp_path, {})
+    narrow_names = {d["function"]["name"] for d in narrow_reg.get_tool_definitions()}
+    assert "text_replace" not in narrow_names
     assert not developer_toolkit_guidance_enabled(
-        wildcard_reg.tool_options, wildcard_names, model="deepseek-v4-pro", is_herv3=True
+        narrow_reg.tool_options, narrow_names, model="deepseek-v4-pro", is_herv3=True
     )
 
-    # 3. Explicit toolkit opt-in -> guidance appears exactly once.
-    explicit = [
-        "*",
-        "tool_find",
-        "project_locate",
-        "code_search",
-        "git_inspect",
-        "file_manage",
-        "text_replace",
-    ]
-    optin_reg = ToolRegistry(
-        explicit,
-        tmp_path,
-        tmp_path,
-        {"herv3_tool_presentation": {"mode": "on_demand"}},
-    )
-    optin_names = {d["function"]["name"] for d in optin_reg.get_tool_definitions()}
+    # 3. Default wildcard registry enables Developer Toolkit, on-demand view, and guidance out of the box.
+    wildcard_reg = ToolRegistry(["*"], tmp_path, tmp_path, {})
+    wildcard_names = {d["function"]["name"] for d in wildcard_reg.get_tool_definitions()}
+    assert {"text_replace", "code_search", "git_inspect", "tool_find"} <= wildcard_names
     assert developer_toolkit_guidance_enabled(
-        optin_reg.tool_options, optin_names, model="deepseek-v4-pro", is_herv3=True
+        wildcard_reg.tool_options, wildcard_names, model="deepseek-v4-pro", is_herv3=True
     )
     optin_sys, _ = compile_main_prompt(
         pcm_input={"sections": [], "current_request": "fix bug"},
@@ -186,16 +173,16 @@ def test_developer_toolkit_prompt_guidance_is_strictly_opt_in_and_idempotent(tmp
     assert optin_sys_repeat.count(DEVELOPER_TOOLKIT_CONTRACT) == 1
     assert optin_sys_repeat == optin_sys
 
-    # 5. Disabled / on-demand-off toolkit -> no unnecessary guidance.
+    # 5. Explicit opt-out (`mode: "off"` / `"disabled"`) disables guidance and on-demand view.
     assert not developer_toolkit_guidance_enabled(
         {"herv3_tool_presentation": {"mode": "off"}},
-        optin_names,
+        wildcard_names,
         model="deepseek-v4-pro",
         is_herv3=True,
     )
     assert not developer_toolkit_guidance_enabled(
         {"herv3_tool_presentation": {"mode": "disabled"}},
-        optin_names,
+        wildcard_names,
         model="deepseek-v4-pro",
         is_herv3=True,
     )
@@ -208,11 +195,11 @@ def test_developer_toolkit_prompt_guidance_is_strictly_opt_in_and_idempotent(tmp
     )
     assert DEVELOPER_TOOLKIT_CONTRACT not in no_tools_sys
 
-    # 6. On-demand tool view still compacts initial schemas.
-    view = OnDemandToolView(optin_reg)
+    # 6. On-demand tool view compacts initial schemas (including file_write + text_replace + code_search).
+    view = OnDemandToolView(wildcard_reg)
     starter_names = {d["function"]["name"] for d in view.get_tool_definitions()}
-    assert {"text_replace", "code_search", "tool_find"} <= starter_names
-    assert len(starter_names) < len(optin_names)
+    assert {"text_replace", "code_search", "tool_find", "file_write", "file_read"} <= starter_names
+    assert len(starter_names) < len(wildcard_names)
 
 
 # ---------------------------------------------------------------------------
