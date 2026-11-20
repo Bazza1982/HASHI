@@ -5756,9 +5756,22 @@ class HashiStageProvider(StageProvider):
                             else []
                         )
                         if request.context.get("her_v3"):
+                            from tools.tool_presentation import developer_toolkit_guidance_enabled
+
                             pcm_input = request.context.get("pcm_input")
                             pcm_input = (
                                 dict(pcm_input) if isinstance(pcm_input, Mapping) else {}
+                            )
+                            catalogue_tool_names = {
+                                str((item.get("function") or {}).get("name") or "")
+                                for item in tool_catalogue
+                                if isinstance(item, Mapping)
+                            }
+                            toolkit_guidance = developer_toolkit_guidance_enabled(
+                                getattr(self.tool_registry, "tool_options", None),
+                                catalogue_tool_names,
+                                model=profile.model,
+                                is_herv3=True,
                             )
                             system_prompt, stage_prompt = compile_main_prompt(
                                 pcm_input=pcm_input,
@@ -5766,6 +5779,7 @@ class HashiStageProvider(StageProvider):
                                 context=request.context,
                                 fallback_persona=(source.guidance if source.usable else ""),
                                 tools_available=request.allow_tools,
+                                developer_toolkit_enabled=toolkit_guidance,
                                 reference_projector=getattr(
                                     backend, "project_main_references", None
                                 ),

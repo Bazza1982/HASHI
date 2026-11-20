@@ -3394,105 +3394,22 @@ class OpenRouterAdapter(BaseBackend):
             )
 
         claimed: list[tuple[str, tuple[str, str]]] = []
-        with self._tool_replay_lock:
-            try:
-                for item in prepared:
-                    claim_id = item["tc_id"]
-                    binding = item["binding"]
-                    inflight = self._inflight_tool_bindings.get(claim_id)
-                    if inflight is not None:
-                        raise ProviderToolReplayError(
-                            "Tool call ID is already executing"
-                            if inflight == binding
-                            else "Tool call ID is already bound to another request"
-                        )
-                    self._inflight_tool_bindings[claim_id] = binding
-                    claimed.append((claim_id, binding))
-            except BaseException:
-                for claim_id, binding in claimed:
-                    if self._inflight_tool_bindings.get(claim_id) == binding:
-                        self._inflight_tool_bindings.pop(claim_id, None)
-                raise
-
-        for item in prepared:
-            await self._emit(
-                on_stream_event,
-                item["evt_kind"],
-                f"{item['tool_name']}: {item['raw_args'][:120]}",
-                tool_name=item["tool_name"],
-                file_path=item["event_path"],
-                metadata={**item["event_metadata"], **item["correlation"]},
-            )
-
-        limit = max(1, int(getattr(self, "PARALLEL_READONLY_TOOL_CONCURRENCY", 4)))
-        semaphore = asyncio.Semaphore(limit)
-
-        async def _execute_one(item: dict[str, Any]):
-            async with semaphore:
-                return await self.tool_registry.execute(
-                    item["tool_name"],
-                    item["arguments"],
-                    tool_call_id=item["tc_id"],
-                )
-
-        tasks = [asyncio.create_task(_execute_one(item)) for item in prepared]
-        try:
-            results = await asyncio.gather(*tasks)
-        except asyncio.CancelledError as exc:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            details = dict(getattr(exc, "hashi_tool_details", {}) or {})
-            for item in prepared:
-                await self._emit(
-                    on_stream_event,
-                    KIND_TOOL_END,
-                    f"{item['tool_name']}: cancelled after cleanup",
-                    tool_name=item["tool_name"],
-                    metadata={
-                        **item["correlation"],
-                        "is_error": True,
-                        "tool_result_details": details,
-                    },
-                )
-            raise
-        except BaseException:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-        finally:
-            with self._tool_replay_lock:
-                for claim_id, binding in claimed:
-                    if self._inflight_tool_bindings.get(claim_id) == binding:
-                        self._inflight_tool_bindings.pop(claim_id, None)
-
+        tasks: list[asyncio.Task] = []
         effect_facts: list[dict[str, Any]] = []
         deferred_tool_result_messages: list[dict[str, Any]] = []
-        for item, result in zip(prepared, results):
+
+        def _record_result(item: dict[str, Any], result: Any) -> None:
             tool_name = item["tool_name"]
             tc_id = item["tc_id"]
             binding = item["binding"]
-            output_preview = result.output[:100].replace("\n", " ")
+            if tc_id in completed_bindings:
+                return
             effect_facts.append(
                 _verified_read_effect_fact(
                     tool_name=tool_name,
                     tool_call_id=tc_id,
                     result=result,
                 )
-            )
-            await self._emit(
-                on_stream_event,
-                KIND_TOOL_END,
-                f"{tool_name}: {output_preview}",
-                tool_name=tool_name,
-                metadata={
-                    **item["correlation"],
-                    "is_error": bool(getattr(result, "is_error", False)),
-                    "tool_result_details": dict(result.details or {}),
-                },
             )
             translated_messages = self._tool_result_messages(
                 tool_name=tool_name,
@@ -3515,8 +3432,113 @@ class OpenRouterAdapter(BaseBackend):
                 binding[1],
                 copy.deepcopy(result.output),
             )
-        messages.extend(deferred_tool_result_messages)
-        return tuple(effect_facts)
+
+        try:
+            with self._tool_replay_lock:
+                for item in prepared:
+                    claim_id = item["tc_id"]
+                    binding = item["binding"]
+                    inflight = self._inflight_tool_bindings.get(claim_id)
+                    if inflight is not None:
+                        raise ProviderToolReplayError(
+                            "Tool call ID is already executing"
+                            if inflight == binding
+                            else "Tool call ID is already bound to another request"
+                        )
+                    self._inflight_tool_bindings[claim_id] = binding
+                    claimed.append((claim_id, binding))
+
+            for item in prepared:
+                await self._emit(
+                    on_stream_event,
+                    item["evt_kind"],
+                    f"{item['tool_name']}: {item['raw_args'][:120]}",
+                    tool_name=item["tool_name"],
+                    file_path=item["event_path"],
+                    metadata={**item["event_metadata"], **item["correlation"]},
+                )
+
+            limit = max(1, int(getattr(self, "PARALLEL_READONLY_TOOL_CONCURRENCY", 4)))
+            semaphore = asyncio.Semaphore(limit)
+
+            async def _execute_one(item: dict[str, Any]):
+                async with semaphore:
+                    return await self.tool_registry.execute(
+                        item["tool_name"],
+                        item["arguments"],
+                        tool_call_id=item["tc_id"],
+                    )
+
+            tasks = [asyncio.create_task(_execute_one(item)) for item in prepared]
+            try:
+                results = await asyncio.gather(*tasks)
+            except asyncio.CancelledError as exc:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                # Ensure every started task has settled before releasing claims.
+                await asyncio.gather(*tasks, return_exceptions=True)
+                details = dict(getattr(exc, "hashi_tool_details", {}) or {})
+                for item, task in zip(prepared, tasks):
+                    if not task.cancelled() and task.exception() is None:
+                        _record_result(item, task.result())
+                    else:
+                        await self._emit(
+                            on_stream_event,
+                            KIND_TOOL_END,
+                            f"{item['tool_name']}: cancelled after cleanup",
+                            tool_name=item["tool_name"],
+                            metadata={
+                                **item["correlation"],
+                                "is_error": True,
+                                "tool_result_details": details,
+                            },
+                        )
+                raise
+            except BaseException:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+            # Record all completed tool results in original order before
+            # emitting KIND_TOOL_END so interruption during event publication
+            # never drops or replays already-executed tools.
+            for item, result in zip(prepared, results):
+                _record_result(item, result)
+            if deferred_tool_result_messages:
+                messages.extend(deferred_tool_result_messages)
+                deferred_tool_result_messages.clear()
+
+            for item, result in zip(prepared, results):
+                tool_name = item["tool_name"]
+                output_preview = result.output[:100].replace("\n", " ")
+                await self._emit(
+                    on_stream_event,
+                    KIND_TOOL_END,
+                    f"{tool_name}: {output_preview}",
+                    tool_name=tool_name,
+                    metadata={
+                        **item["correlation"],
+                        "is_error": bool(getattr(result, "is_error", False)),
+                        "tool_result_details": dict(result.details or {}),
+                    },
+                )
+            return tuple(effect_facts)
+        finally:
+            pending = [task for task in tasks if not task.done()]
+            if pending:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            if deferred_tool_result_messages:
+                messages.extend(deferred_tool_result_messages)
+                deferred_tool_result_messages.clear()
+            with self._tool_replay_lock:
+                for claim_id, binding in claimed:
+                    if self._inflight_tool_bindings.get(claim_id) == binding:
+                        self._inflight_tool_bindings.pop(claim_id, None)
 
     async def _run_tool_calls(
         self,
