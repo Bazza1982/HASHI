@@ -90,6 +90,7 @@ async def leases(root, groups, *, on_wait=None, timeout=600):
     acquired = []
     started = time.monotonic()
     waiting = None
+    attempt = 0
     try:
         while True:
             failed = None
@@ -114,9 +115,12 @@ async def leases(root, groups, *, on_wait=None, timeout=600):
                 if inspect.isawaitable(result):
                     await result
                 waiting = failed
-            if time.monotonic()-started >= timeout:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
                 raise TimeoutError('execution_resource_wait_timeout')
-            await asyncio.sleep(0.05)
+            delay = min(remaining, 0.5, 0.05 * (1.5 ** min(attempt, 8)))
+            attempt += 1
+            await asyncio.sleep(delay)
         if on_wait is not None:
             result = on_wait(None)
             if inspect.isawaitable(result):
@@ -133,6 +137,10 @@ def instance_state(runtime):
     return Path(root) / 'state' / 'instance'
 
 
+DEFAULT_INSTANCE_SESSIONS = 24
+DEFAULT_ENGINE_SESSIONS = 12
+
+
 def execution_configuration(settings, extra):
     """Validate resource opt-ins before advertising a ready Worker."""
     settings = {} if settings is None else settings
@@ -147,9 +155,9 @@ def execution_configuration(settings, extra):
     if not isinstance(engines, dict):
         raise ValueError('execution_limits.engines must be an object')
     limit((extra or {}).get('max_concurrent_sessions'), 'max_concurrent_sessions', 2, 8)
-    limit(raw.get('instance_sessions'), 'instance_sessions', 8)
+    limit(raw.get('instance_sessions'), 'instance_sessions', DEFAULT_INSTANCE_SESSIONS)
     for engine, value in engines.items():
-        limit(value, 'execution_limits.engines.'+str(engine), 4)
+        limit(value, 'execution_limits.engines.'+str(engine), DEFAULT_ENGINE_SESSIONS)
     return raw
 
 
@@ -158,8 +166,8 @@ async def execution_budget(runtime, item, frozen):
     raw = execution_configuration(frozen['settings'].get('_agents_json_global'), frozen['config'].extra)
     engine = str(frozen['config'].active_backend)
     engines = raw.get('engines') or {}
-    groups = [('instance-sessions',limit(raw.get('instance_sessions'),'instance_sessions',8),False),
-              ('session-engine:'+engine,limit(engines.get(engine),'execution_limits.engines.'+engine,4),False)]
+    groups = [('instance-sessions',limit(raw.get('instance_sessions'),'instance_sessions',DEFAULT_INSTANCE_SESSIONS),False),
+              ('session-engine:'+engine,limit(engines.get(engine),'execution_limits.engines.'+engine,DEFAULT_ENGINE_SESSIONS),False)]
     reasons = runtime.__dict__.setdefault('_execution_queue_reasons',{})
     async def waiting(reason):
         if reason is None:

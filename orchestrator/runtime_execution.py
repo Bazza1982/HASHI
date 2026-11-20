@@ -224,8 +224,10 @@ async def process_sessions(runtime, process_item):
                         generation = getattr(runtime, "_generation_tasks_by_request", {}).get(item.request_id)
                         if isinstance(generation, asyncio.Task):
                             await asyncio.shield(generation)
+                        poll_delay = 0.05
                         while item.request_id in getattr(runtime, "_background_request_ids", set()):
-                            await asyncio.sleep(0.05)
+                            await asyncio.sleep(poll_delay)
+                            poll_delay = min(0.5, poll_delay * 1.5)
         except asyncio.CancelledError:
             if not pipeline_owns_queue:
                 from orchestrator import runtime_cancel
@@ -234,10 +236,12 @@ async def process_sessions(runtime, process_item):
         except Exception as exc:
             runtime.error_logger.exception("Session execution failed: %s", exc)
             if execution is None:
+                is_capacity_timeout = isinstance(exc, TimeoutError) or "execution_resource_wait_timeout" in str(exc)
                 await runtime._notify_request_listeners(item.request_id, {
                     "request_id": item.request_id, "success": False, "text": None,
-                    "error": str(exc), "error_code": "session_execution_unavailable",
-                    "error_retryable": False, "source": item.source, "summary": item.summary,
+                    "error": str(exc),
+                    "error_code": "capacity_busy" if is_capacity_timeout else "session_execution_unavailable",
+                    "error_retryable": is_capacity_timeout, "source": item.source, "summary": item.summary,
                 })
         finally:
             if not pipeline_owns_queue:

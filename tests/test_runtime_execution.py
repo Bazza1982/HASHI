@@ -181,3 +181,74 @@ async def test_cancel_while_waiting_instance_budget_cleans_queue_without_startin
             assert not runtime._session_execution_tasks and not runtime._execution_queue_reasons
         finally:
             dispatcher.cancel();await asyncio.gather(dispatcher,return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_execution_capacity_defaults_and_retryable_timeout(tmp_path, monkeypatch):
+    from orchestrator import execution_resources
+
+    cfg = execution_resources.execution_configuration({}, {})
+    assert isinstance(cfg, dict)
+    assert execution_resources.DEFAULT_INSTANCE_SESSIONS >= 24
+    assert execution_resources.DEFAULT_ENGINE_SESSIONS >= 12
+
+    delays = []
+    orig_sleep = asyncio.sleep
+
+    async def tracked_sleep(delay):
+        delays.append(delay)
+        await orig_sleep(0)
+
+    monkeypatch.setattr(execution_resources.asyncio, "sleep", tracked_sleep)
+    t_now = [0.0]
+    monkeypatch.setattr(execution_resources.time, "monotonic", lambda: t_now[0])
+    async def tracked_sleep_bump(delay):
+        delays.append(delay)
+        t_now[0] += max(delay, 0.01)
+        await orig_sleep(0)
+    monkeypatch.setattr(execution_resources.asyncio, "sleep", tracked_sleep_bump)
+    root = tmp_path / "state" / "instance"
+    async with execution_resources.leases(root, [("busy-key", 1, False)]):
+        with pytest.raises(TimeoutError, match="execution_resource_wait_timeout"):
+            async with execution_resources.leases(root, [("busy-key", 1, False)], timeout=0.4):
+                pass
+    assert len(delays) >= 3
+    assert max(delays) > delays[0]
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "cap-agent"
+    runtime.config = SimpleNamespace(extra={}, active_backend="codex-cli", project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.backend_manager = SimpleNamespace(current_backend=None)
+    runtime.queue = execution.SessionQueue()
+    runtime.current_request_meta = None
+    runtime.is_generating = False
+    runtime._publish_worker_metadata = AsyncMock()
+    runtime.error_logger = SimpleNamespace(exception=lambda *a: None)
+    notifications = []
+
+    async def notify(req_id, payload):
+        notifications.append((req_id, payload))
+
+    runtime._notify_request_listeners = notify
+    runtime._execution_admissions = {"req-timeout": {"config": runtime.config, "settings": {"_agents_json_global": {}}}}
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def timeout_budget(*_a, **_kw):
+        raise TimeoutError("execution_resource_wait_timeout")
+        yield 0
+
+    monkeypatch.setattr(execution, "execution_budget", timeout_budget)
+    process = AsyncMock()
+    await runtime.queue.put(SimpleNamespace(request_id="req-timeout", session_id="S1", source="api", summary="s"))
+    dispatcher = asyncio.create_task(execution.process_sessions(runtime, process))
+    try:
+        await asyncio.wait_for(runtime.queue.join(), 1.0)
+        assert len(notifications) == 1
+        assert notifications[0][1]["error_code"] == "capacity_busy"
+        assert notifications[0][1]["error_retryable"] is True
+    finally:
+        dispatcher.cancel()
+        await asyncio.gather(dispatcher, return_exceptions=True)
