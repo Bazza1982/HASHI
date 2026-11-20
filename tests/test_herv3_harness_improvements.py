@@ -226,6 +226,8 @@ def test_developer_toolkit_prompt_guidance_is_strictly_opt_in_and_idempotent(tmp
         "git status",
         "git status --short",
         "git diff --stat",
+        "git diff -- \"file with spaces.py\"",
+        "git diff -- '--literal-file.txt'",
         "git log -5",
         "git log --oneline -n 10",
         "git -C C:\\repo\\project diff --name-only",
@@ -234,9 +236,12 @@ def test_developer_toolkit_prompt_guidance_is_strictly_opt_in_and_idempotent(tmp
         "git rev-parse --short HEAD",
         "git remote -v",
         "rg -n pattern src/",
+        "rg -n \"some search pattern\" src/",
+        "rg -n \"foo\"'bar' src/",
         "rg -n --glob *.py 'def execute' C:\\repo\\src",
         "Get-ChildItem -Path C:\\repo\\src -Name",
         "Get-Content -LiteralPath 'C:\\repo\\app.py' -TotalCount 50",
+        'Get-Content -LiteralPath "C:\\Projects\\my project\\file.txt"',
         "Select-String -Pattern 'def foo' -Path C:\\repo\\src\\app.py",
         "Test-Path -LiteralPath C:\\repo\\src\\app.py",
     ],
@@ -250,13 +255,30 @@ def test_readonly_shell_classifier_accepts_proven_readonly_commands(command):
     [
         "git diff --output=file.txt",
         "git diff --output file.txt",
+        "git diff '--output=shared.py'",
+        'git diff "--output=shared.py"',
+        "git diff '--output' shared.py",
+        'git diff "--output" shared.py',
+        "git diff '--out'\"put=shared.py\"",
+        "git diff '--' '--output=shared.py'",
         "git diff --ext-diff",
         "git -c core.fsmonitor=evil status",
+        "git '-c' core.fsmonitor=evil status",
+        'git "-c" diff.external=python diff',
         "git -c diff.external=python diff",
         "rg --pre=python pattern .",
         "rg --pre python pattern .",
+        "rg '--pre=python' pattern .",
+        'rg "--pre" python pattern .',
         "rg --pre-glob=*.md --pre=cat pattern .",
         "rg --unknown-flag pattern .",
+        "rg '--unknown-flag' pattern .",
+        'rg -n "foo \\"bar\\"" src/',
+        'git diff "unclosed.py',
+        "rg -n 'unclosed src/",
+        'rg -n "a;b" src/',
+        'rg -n "a|b" src/',
+        'git diff "a>b"',
         "git branch new-branch",
         "git branch -D old-branch",
         "git tag new-tag",
@@ -1208,6 +1230,267 @@ async def test_parallel_readonly_batch_registry_exception_cancels_siblings_and_c
 
     assert adapter._inflight_tool_bindings == {}
     assert running == 0
+
+
+@pytest.mark.asyncio
+async def test_real_git_quoted_diff_output_writes_file_and_serializes_with_text_replace(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+    tracked = repo / "app.py"
+    tracked.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    tracked.write_text("x = 2\n", encoding="utf-8")
+
+    quoted_cmd = "git diff '--output=shared.py'"
+    if sys.platform == "win32":
+        run = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", quoted_cmd],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        run = subprocess.run(["sh", "-c", quoted_cmd], cwd=repo, capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    written = repo / "shared.py"
+    assert written.exists() and "+x = 2" in written.read_text(encoding="utf-8")
+    assert _is_strictly_readonly_shell_command(quoted_cmd) is False
+
+    # Concurrency acceptance: holding text_replace on shared.py must block quoted git diff --output
+    # (both in-process and cross-process), while ordinary git status still overlaps.
+    ctx = lambda: {"global_config": SimpleNamespace(bridge_home=tmp_path)}
+    reg = SimpleNamespace(workspace_dir=repo, access_roots=[repo], _effective_audit_context=ctx)
+    entered = asyncio.Event()
+
+    async def run_quoted_diff():
+        async with tool_resource(reg, "shell", {"command": quoted_cmd}):
+            entered.set()
+
+    async with tool_resource(reg, "text_replace", {"path": "shared.py", "find": "x = 2", "replace": "x = 3"}):
+        # Ordinary read-only git status still overlaps with the independent edit.
+        async with tool_resource(reg, "shell", {"command": "git status --short"}):
+            pass
+        task = asyncio.create_task(run_quoted_diff())
+        await asyncio.sleep(0.08)
+        assert not entered.is_set(), "quoted git diff --output must wait for text_replace lease"
+    await asyncio.wait_for(task, timeout=2.0)
+    assert entered.is_set()
+
+    # Cross-process confirmation on Windows/OS file leases.
+    ready = tmp_path / "tr_ready"
+    release = tmp_path / "tr_release"
+    proc = _spawn_lease_holder(
+        bridge_home=tmp_path,
+        workspace_dir=repo,
+        access_roots=[repo],
+        tool_name="text_replace",
+        arguments={"path": "shared.py", "find": "x = 2", "replace": "x = 3"},
+        ready_file=ready,
+        release_file=release,
+    )
+    try:
+        _wait_for_file(ready)
+        entered_xp = asyncio.Event()
+
+        async def run_quoted_diff_xp():
+            async with tool_resource(reg, "shell", {"command": quoted_cmd}):
+                entered_xp.set()
+
+        t_xp = asyncio.create_task(run_quoted_diff_xp())
+        await asyncio.sleep(0.15)
+        assert not entered_xp.is_set(), "cross-process text_replace must block quoted git diff --output"
+        release.write_text("go", encoding="utf-8")
+        await asyncio.wait_for(t_xp, timeout=4.0)
+        assert entered_xp.is_set()
+    finally:
+        release.write_text("go", encoding="utf-8")
+        _out, err = proc.communicate(timeout=5)
+    assert proc.returncode == 0, err.decode(errors="replace")
+
+
+@pytest.mark.asyncio
+async def test_parallel_readonly_batch_preserves_completed_result_on_sibling_exception_and_recovery(tmp_path):
+    """Test A + Test E: A completes, B raises, C & D cancelled; A survives & is never replayed."""
+    adapter = _deepseek_adapter(tmp_path)
+    tool_calls = _four_read_calls()
+    running = 0
+    a_done = asyncio.Event()
+
+    class RegistryA:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            nonlocal running
+            running += 1
+            try:
+                if tool_call_id == "tc-0":
+                    res = ToolResult(tool_call_id=tool_call_id, output="saved:f0.py")
+                    a_done.set()
+                    return res
+                if tool_call_id == "tc-1":
+                    await a_done.wait()
+                    await asyncio.sleep(0.02)
+                    raise RuntimeError("tool B exploded")
+                await asyncio.sleep(5.0)
+                return ToolResult(tool_call_id=tool_call_id, output="never")
+            finally:
+                running -= 1
+
+    adapter.tool_registry = RegistryA()
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+    with pytest.raises(RuntimeError, match="tool B exploded"):
+        await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert adapter._inflight_tool_bindings == {}
+    assert running == 0
+    recorded = [m for m in messages if m.get("role") == "tool"]
+    assert [(m["tool_call_id"], m["content"]) for m in recorded] == [("tc-0", "saved:f0.py")]
+
+    # Recovery re-invocation: A reuses its preserved result, only B/C/D execute, zero duplicate messages.
+    re_executed: list[str] = []
+
+    class RecoveryRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            re_executed.append(tool_call_id)
+            return ToolResult(tool_call_id=tool_call_id, output=f"recovered:{arguments['path']}")
+
+    adapter.tool_registry = RecoveryRegistry()
+    await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert re_executed == ["tc-1", "tc-2", "tc-3"]
+    assert adapter._inflight_tool_bindings == {}
+    final_tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(final_tool_msgs) == 4
+    assert [m["tool_call_id"] for m in final_tool_msgs] == ["tc-0", "tc-1", "tc-2", "tc-3"]
+    assert final_tool_msgs[0]["content"] == "saved:f0.py"
+
+
+@pytest.mark.asyncio
+async def test_parallel_readonly_batch_preserves_multiple_completed_results_in_original_order(tmp_path):
+    """Test B + Test E: A and C complete, B fails, D cancelled; A and C survive in order."""
+    adapter = _deepseek_adapter(tmp_path)
+    tool_calls = _four_read_calls()
+    a_done = asyncio.Event()
+    c_done = asyncio.Event()
+    running = 0
+
+    class RegistryAC:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            nonlocal running
+            running += 1
+            try:
+                if tool_call_id == "tc-2":
+                    res = ToolResult(tool_call_id=tool_call_id, output="saved:f2.py")
+                    c_done.set()
+                    return res
+                if tool_call_id == "tc-0":
+                    await c_done.wait()
+                    res = ToolResult(tool_call_id=tool_call_id, output="saved:f0.py")
+                    a_done.set()
+                    return res
+                if tool_call_id == "tc-1":
+                    await a_done.wait()
+                    await asyncio.sleep(0.02)
+                    raise RuntimeError("tool B failed")
+                await asyncio.sleep(5.0)
+                return ToolResult(tool_call_id=tool_call_id, output="never")
+            finally:
+                running -= 1
+
+    adapter.tool_registry = RegistryAC()
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+    with pytest.raises(RuntimeError, match="tool B failed"):
+        await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert adapter._inflight_tool_bindings == {}
+    assert running == 0
+    recorded = [m for m in messages if m.get("role") == "tool"]
+    # Even though C finished before A, recorded order must match original tool_calls order: A then C.
+    assert [(m["tool_call_id"], m["content"]) for m in recorded] == [
+        ("tc-0", "saved:f0.py"),
+        ("tc-2", "saved:f2.py"),
+    ]
+
+    re_executed: list[str] = []
+
+    class RecoveryRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            re_executed.append(tool_call_id)
+            return ToolResult(tool_call_id=tool_call_id, output=f"recovered:{arguments['path']}")
+
+    adapter.tool_registry = RecoveryRegistry()
+    await adapter._run_tool_calls(tool_calls, messages, None)
+    assert re_executed == ["tc-1", "tc-3"]
+    assert adapter._inflight_tool_bindings == {}
+    final_ids = [m["tool_call_id"] for m in messages if m.get("role") == "tool"]
+    assert len(final_ids) == 4 and set(final_ids) == {"tc-0", "tc-1", "tc-2", "tc-3"}
+
+
+@pytest.mark.asyncio
+async def test_parallel_readonly_batch_result_recording_exception_keeps_bindings_consistent(tmp_path, monkeypatch):
+    """Test C: exception while translating result 2 leaves result 1 consistent and un-replayed."""
+    from adapters.openrouter_api import _completed_tool_bindings
+
+    adapter = _deepseek_adapter(tmp_path)
+    tool_calls = _four_read_calls()
+
+    class FastRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            return ToolResult(tool_call_id=tool_call_id, output=f"ok:{arguments['path']}")
+
+    adapter.tool_registry = FastRegistry()
+    orig = adapter._tool_result_messages
+    calls = 0
+
+    def fail_on_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("translation failure on second result")
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(adapter, "_tool_result_messages", fail_on_second)
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+    with pytest.raises(ValueError, match="translation failure on second result"):
+        await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert adapter._inflight_tool_bindings == {}
+    bindings = _completed_tool_bindings(messages)
+    assert set(bindings.keys()) == {"tc-0"}
+    assert [(m["tool_call_id"], m["content"]) for m in messages if m.get("role") == "tool"] == [
+        ("tc-0", "ok:f0.py")
+    ]
+
+    # Restore translator; re-invoking must NOT replay tc-0.
+    monkeypatch.setattr(adapter, "_tool_result_messages", orig)
+    re_executed: list[str] = []
+
+    class RecoveryRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            re_executed.append(tool_call_id)
+            return ToolResult(tool_call_id=tool_call_id, output=f"rec:{arguments['path']}")
+
+    adapter.tool_registry = RecoveryRegistry()
+    await adapter._run_tool_calls(tool_calls, messages, None)
+    assert "tc-0" not in re_executed
+    assert re_executed == ["tc-1", "tc-2", "tc-3"]
+    assert adapter._inflight_tool_bindings == {}
+    final_ids = [m["tool_call_id"] for m in messages if m.get("role") == "tool"]
+    assert len(final_ids) == 4 and len(set(final_ids)) == 4
 
 
 # ---------------------------------------------------------------------------

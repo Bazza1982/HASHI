@@ -3404,29 +3404,30 @@ class OpenRouterAdapter(BaseBackend):
             binding = item["binding"]
             if tc_id in completed_bindings:
                 return
-            effect_facts.append(
-                _verified_read_effect_fact(
-                    tool_name=tool_name,
-                    tool_call_id=tc_id,
-                    result=result,
-                )
-            )
             translated_messages = self._tool_result_messages(
                 tool_name=tool_name,
                 tool_call_id=tc_id,
                 output=result.output,
                 content=getattr(result, "content", None),
             )
-            messages.extend(
+            tool_msgs = [
                 message
                 for message in translated_messages
                 if message.get("role") == "tool"
-            )
-            deferred_tool_result_messages.extend(
+            ]
+            deferred_msgs = [
                 message
                 for message in translated_messages
                 if message.get("role") != "tool"
+            ]
+            fact = _verified_read_effect_fact(
+                tool_name=tool_name,
+                tool_call_id=tc_id,
+                result=result,
             )
+            messages.extend(tool_msgs)
+            deferred_tool_result_messages.extend(deferred_msgs)
+            effect_facts.append(fact)
             completed_bindings[tc_id] = (
                 binding[0],
                 binding[1],
@@ -3500,6 +3501,12 @@ class OpenRouterAdapter(BaseBackend):
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # Preserve every sibling result that actually completed before
+                # the failure, in original tool-call order, without fabricating
+                # results for failed or cancelled tasks.
+                for item, task in zip(prepared, tasks):
+                    if task.done() and not task.cancelled() and task.exception() is None:
+                        _record_result(item, task.result())
                 raise
 
             # Record all completed tool results in original order before
@@ -3565,6 +3572,17 @@ class OpenRouterAdapter(BaseBackend):
             return parallel_facts
         effect_facts: list[dict[str, Any]] = []
         deferred_tool_result_messages: list[dict[str, Any]] = []
+        current_batch_tool_ids: set[str] = set()
+        for existing_msg in reversed(messages):
+            if not isinstance(existing_msg, Mapping):
+                continue
+            role = existing_msg.get("role")
+            if role == "assistant":
+                break
+            if role == "tool":
+                existing_id = str(existing_msg.get("tool_call_id") or "")
+                if existing_id:
+                    current_batch_tool_ids.add(existing_id)
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
@@ -3632,22 +3650,25 @@ class OpenRouterAdapter(BaseBackend):
                         tool_call_id=tc_id,
                     )
                 )
-                translated_messages = self._tool_result_messages(
-                    tool_name=tool_name,
-                    tool_call_id=tc_id,
-                    output=copy.deepcopy(completed[2]),
-                    content=None,
-                )
-                messages.extend(
-                    message
-                    for message in translated_messages
-                    if message.get("role") == "tool"
-                )
-                deferred_tool_result_messages.extend(
-                    message
-                    for message in translated_messages
-                    if message.get("role") != "tool"
-                )
+                if str(tc_id or "") not in current_batch_tool_ids:
+                    translated_messages = self._tool_result_messages(
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                        output=copy.deepcopy(completed[2]),
+                        content=None,
+                    )
+                    messages.extend(
+                        message
+                        for message in translated_messages
+                        if message.get("role") == "tool"
+                    )
+                    deferred_tool_result_messages.extend(
+                        message
+                        for message in translated_messages
+                        if message.get("role") != "tool"
+                    )
+                    if tc_id:
+                        current_batch_tool_ids.add(str(tc_id))
                 await self._emit(
                     on_stream_event,
                     KIND_TOOL_END,

@@ -299,9 +299,15 @@ _FINDSTR_BOOL_FLAGS = frozenset({'/s', '/i', '/n', '/r', '/c', '/l', '/m', '/v',
 def _tokenize_readonly_shell(text: str) -> list[tuple[str, bool]] | None:
     """Conservatively tokenize a single shell command preserving Windows paths.
 
-    Returns a list of ``(token, was_quoted)`` tuples, or ``None`` if the
-    command contains any chaining, redirection, substitution, backtick escape,
-    unbalanced quote, or ambiguous PowerShell syntax.
+    Returns a list of ``(effective_token, was_quoted)`` tuples, or ``None`` if
+    the command contains any chaining, redirection, substitution, backtick
+    escape, backslash-escaped quote (which parses differently across
+    PowerShell 5.1, Bash, and Win32 argv), unbalanced quote, or ambiguous
+    PowerShell syntax.
+
+    Note: ``was_quoted`` is tracked ONLY so a quoted ``'--'`` cannot act as an
+    option terminator; quoted flags (e.g. ``'--output=file'``) are ALWAYS
+    validated against the command's real option grammar.
     """
     if not text or _SHELL_METACHARS.search(text):
         return None
@@ -314,6 +320,10 @@ def _tokenize_readonly_shell(text: str) -> list[tuple[str, bool]] | None:
     while i < n:
         ch = text[i]
         if in_quote is not None:
+            if ch == '\\' and i + 1 < n and text[i + 1] in {'"', "'"}:
+                # Backslash-escaped quotes parse inconsistently across
+                # PowerShell 5.1, Bash, and Win32 argv; classify conservatively.
+                return None
             if ch == in_quote:
                 in_quote = None
             elif in_quote == '"' and ch == '$':
@@ -322,6 +332,8 @@ def _tokenize_readonly_shell(text: str) -> list[tuple[str, bool]] | None:
             else:
                 buf.append(ch)
         else:
+            if ch == '\\' and i + 1 < n and text[i + 1] in {'"', "'"}:
+                return None
             if ch in {'"', "'"}:
                 in_quote = ch
                 was_quoted = True
@@ -353,17 +365,24 @@ def _validate_flag_stream(
     case_insensitive_flags: bool = False,
     slash_flags: frozenset[str] = frozenset(),
 ) -> list[str] | None:
-    """Validate every flag against explicit allowlists; return positional args or None."""
+    """Validate every effective argument against explicit option allowlists.
+
+    Quotation marks group shell arguments but never exempt an option from
+    grammar validation: quoted flags such as ``'--output=file'`` or
+    ``'--pre=python'`` are validated identically to unquoted flags. Only a
+    genuine unquoted ``--`` option terminator switches subsequent tokens to
+    positional-only parsing.
+    """
     positionals: list[str] = []
     after_double_dash = False
     i = 0
     while i < len(args):
         tok, quoted = args[i]
-        if after_double_dash or quoted:
+        if after_double_dash:
             positionals.append(tok)
             i += 1
             continue
-        if tok == '--':
+        if tok == '--' and not quoted:
             after_double_dash = True
             i += 1
             continue
@@ -397,9 +416,7 @@ def _validate_flag_stream(
 def _validate_readonly_git(args: list[tuple[str, bool]]) -> bool:
     idx = 0
     while idx < len(args):
-        tok, quoted = args[idx]
-        if quoted:
-            return False
+        tok, _quoted = args[idx]
         if tok in _GIT_GLOBAL_VALUE_FLAGS:
             if idx + 1 >= len(args):
                 return False
@@ -412,7 +429,7 @@ def _validate_readonly_git(args: list[tuple[str, bool]]) -> bool:
             idx += 1
             continue
         if tok.startswith('-'):
-            # Explicitly rejects `-c`, `--config-env`, and unknown global flags.
+            # Explicitly rejects `-c`, `--config-env`, quoted `'-c'`, and unknown global flags.
             return False
         sub = tok.casefold()
         rest = args[idx + 1:]
@@ -459,7 +476,7 @@ def _validate_readonly_git(args: list[tuple[str, bool]]) -> bool:
             )
             if pos is None:
                 return False
-            has_list = any(not q and t == '--list' for t, q in rest)
+            has_list = any(t == '--list' for t, _q in rest)
             return has_list or len(pos) == 0
         if sub == 'tag':
             pos = _validate_flag_stream(
@@ -470,16 +487,15 @@ def _validate_readonly_git(args: list[tuple[str, bool]]) -> bool:
             )
             if pos is None:
                 return False
-            has_list = any(not q and t in {'-l', '--list'} for t, q in rest)
+            has_list = any(t in {'-l', '--list'} for t, _q in rest)
             return has_list or len(pos) == 0
         if sub == 'remote':
             if not rest:
                 return True
-            if len(rest) == 1 and not rest[0][1] and rest[0][0] in {'-v', '--verbose'}:
+            if len(rest) == 1 and rest[0][0] in {'-v', '--verbose'}:
                 return True
             if (
                 len(rest) == 2
-                and not rest[0][1]
                 and rest[0][0].casefold() in {'show', 'get-url'}
                 and not rest[1][0].startswith('-')
             ):
