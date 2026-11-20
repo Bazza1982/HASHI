@@ -659,5 +659,169 @@ class HLICapacityDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile.context_window_tokens, 4096)
 
 
+class HLIReplaySafetyTests(unittest.IsolatedAsyncioTestCase):
+    """llama.cpp accepts a request before any output exists; an outcome-
+    uncertain failure must never be implicitly re-submitted."""
+
+    def _backend(self, handler):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = AgentConfig(
+                name="herv3-hli", engine="hli-api", workspace_dir=root,
+                system_md=root / "agent.md", model="qwen-local", is_active=True,
+                extra={},
+            )
+            backend = HLIAdapter(agent, GlobalConfig(authorized_id=1), api_key=None)
+            backend.client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handler))
+            backend.tool_registry = None
+            backend.TRANSIENT_PROVIDER_CALL_RETRIES = 1
+            backend.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+            return backend
+
+    async def _run(self, backend):
+        return await backend.continue_generation(
+            [{"role": "user", "content": "hello"}],
+            "req-hli-replay-safety",
+            on_stream_event=None,
+        )
+
+    async def test_native_accepted_then_network_failed_is_never_replayed(self):
+        posts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(request)
+            # The native slot accepted the prompt; the network then fails
+            # before any output byte is produced.
+            raise httpx.ReadError("connection lost after accept")
+
+        backend = self._backend(handler)
+        try:
+            result = await self._run(backend)
+        finally:
+            await backend.client.aclose()
+        self.assertEqual(len(posts), 1)
+        self.assertFalse(result.is_success)
+        self.assertFalse(result.error_retryable)
+        self.assertEqual(result.error_code, "PROVIDER_CONNECTION_FAILED")
+
+    async def test_http_server_error_is_never_replayed(self):
+        posts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(request)
+            return httpx.Response(
+                502, json={"error": {"message": "Loading model"}},
+                request=request)
+
+        backend = self._backend(handler)
+        try:
+            result = await self._run(backend)
+        finally:
+            await backend.client.aclose()
+        self.assertEqual(len(posts), 1)
+        self.assertFalse(result.is_success)
+        self.assertFalse(result.error_retryable)
+        self.assertEqual(result.error_code, "PROVIDER_SERVER_ERROR")
+
+    async def test_capacity_unavailable_response_is_never_replayed(self):
+        posts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(request)
+            return httpx.Response(
+                503,
+                json={"error": {
+                    "message": "temporarily unavailable due to high demand"}},
+                request=request)
+
+        backend = self._backend(handler)
+        try:
+            result = await self._run(backend)
+        finally:
+            await backend.client.aclose()
+        self.assertEqual(len(posts), 1)
+        self.assertFalse(result.is_success)
+        self.assertFalse(result.error_retryable)
+
+    async def test_proven_pre_delivery_connect_error_may_resubmit_once(self):
+        posts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(request)
+            raise httpx.ConnectError("All connection attempts failed")
+
+        backend = self._backend(handler)
+        try:
+            result = await self._run(backend)
+        finally:
+            await backend.client.aclose()
+        # Exactly one bounded re-submission: the connect never completed,
+        # so nothing was ever delivered to the native slot.
+        self.assertEqual(len(posts), 2)
+        self.assertFalse(result.is_success)
+        self.assertTrue(result.error_retryable)
+        self.assertEqual(result.error_code, "PROVIDER_CONNECTION_FAILED")
+
+    def test_replay_hook_only_trusts_proven_pre_delivery(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = AgentConfig(
+                name="herv3-hli", engine="hli-api", workspace_dir=root,
+                system_md=root / "agent.md", model="qwen-local", is_active=True,
+                extra={},
+            )
+            backend = HLIAdapter(agent, GlobalConfig(authorized_id=1), api_key=None)
+            request = httpx.Request("POST", "http://127.0.0.1/v1/chat/completions")
+            http_error = httpx.HTTPStatusError(
+                "server error", request=request,
+                response=httpx.Response(502, request=request))
+            uncertain = [
+                http_error,
+                httpx.ReadError("connection reset"),
+                httpx.ReadTimeout("timed out"),
+                httpx.RemoteProtocolError("incomplete message"),
+                json.JSONDecodeError("bad sse", "{", 1),
+                RuntimeError("native host crashed"),
+            ]
+            for error in uncertain:
+                self.assertFalse(
+                    backend._implicit_provider_resubmission_allowed(error))
+                self.assertFalse(
+                    backend._implicit_provider_resubmission_allowed(
+                        error, checkpoint_backed=True))
+                self.assertFalse(
+                    backend._provider_failure_advertises_retry(error))
+            refused = httpx.ConnectError("connection refused")
+            self.assertTrue(
+                backend._implicit_provider_resubmission_allowed(refused))
+            self.assertTrue(
+                backend._provider_failure_advertises_retry(refused))
+            tls = httpx.ConnectError("certificate verify failed")
+            self.assertFalse(
+                backend._implicit_provider_resubmission_allowed(tls))
+            self.assertFalse(
+                backend._provider_failure_advertises_retry(tls))
+
+    async def test_base_adapter_keeps_generic_transient_policy(self):
+        from adapters.openrouter_api import OpenRouterAdapter
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = AgentConfig(
+                name="or-test", engine="openrouter", workspace_dir=root,
+                system_md=root / "agent.md", model="some/model", is_active=True,
+            )
+            backend = OpenRouterAdapter(
+                agent, GlobalConfig(authorized_id=1), api_key="x")
+            read_error = httpx.ReadError("reset")
+            self.assertTrue(
+                backend._implicit_provider_resubmission_allowed(read_error))
+            self.assertTrue(
+                backend._implicit_provider_resubmission_allowed(
+                    read_error, checkpoint_backed=True))
+            self.assertTrue(
+                backend._provider_failure_advertises_retry(read_error))
+
+
 if __name__ == "__main__":
     unittest.main()

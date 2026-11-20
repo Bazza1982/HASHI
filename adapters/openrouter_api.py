@@ -1867,6 +1867,31 @@ class OpenRouterAdapter(BaseBackend):
     TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.0
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 5.0
 
+    def _implicit_provider_resubmission_allowed(
+        self, error: Exception, *, checkpoint_backed: bool = False,
+    ) -> bool:
+        """Whether one failed Provider HTTP call may be implicitly re-submitted.
+
+        The default mirrors the generic transient policy: bounded transport
+        retries for errors that carry no response, plus checkpoint-backed
+        stream-inactivity continuation. A backend whose host can accept a
+        request before any output exists (local llama.cpp) overrides this to
+        only allow failures positively proven to precede delivery, because
+        generic HTTP failures, timeouts, resets, missing first tokens and
+        incomplete SSE never prove the original request was not accepted.
+        """
+        if checkpoint_backed:
+            return True
+        return _transient_provider_call_error(error)
+
+    def _provider_failure_advertises_retry(self, error: Exception) -> bool:
+        """Whether the typed failure response may advertise retryability.
+
+        ``error_retryable`` feeds outer stage-level policy retries. An
+        uncertain-outcome local backend overrides this to False so no outer
+        policy ever replays an inference that may already be accepted.
+        """
+        return True
     async def _prepare_payload_capacity(
         self,
         payload: dict,
@@ -4453,8 +4478,10 @@ class OpenRouterAdapter(BaseBackend):
                                 or provider_attempt_serial < int(provider_call_limit)
                             )
                             and (
-                                stream_inactivity_continuation
-                                or _transient_provider_call_error(exc)
+                                self._implicit_provider_resubmission_allowed(
+                                    exc,
+                                    checkpoint_backed=stream_inactivity_continuation,
+                                )
                             )
                             and (
                                 current_call_continuation
@@ -5194,6 +5221,10 @@ class OpenRouterAdapter(BaseBackend):
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
             )
+            if not self._provider_failure_advertises_retry(e):
+                # An outcome-uncertain backend never advertises the failure
+                # as retryable to outer stage policies.
+                failure.error_retryable = False
             metadata = dict(failure.stream_metadata or {})
             metadata["provider_transport_retry_count"] = (
                 provider_transport_retry_count
@@ -5268,8 +5299,10 @@ class OpenRouterAdapter(BaseBackend):
         )
 
         if not (
-            _transient_provider_call_error(exc)
-            or isinstance(exc, _ProviderStreamInactivityTimeout)
+            self._implicit_provider_resubmission_allowed(
+                exc,
+                checkpoint_backed=isinstance(exc, _ProviderStreamInactivityTimeout),
+            )
         ):
             setattr(
                 exc,

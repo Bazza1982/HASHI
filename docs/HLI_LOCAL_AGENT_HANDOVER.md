@@ -95,3 +95,31 @@ Add **only** directly relevant regression tests for observed failures; do not
 trigger GitHub Actions. Push fixes to the same two feature branches and
 report each PR URL/SHA, passes/failures and unresolved issues. Leave both PRs
 Draft and both production instances untouched for my review.
+
+## Small-model context envelope: measured, not fixed by these PRs
+
+Measured 2026-11-20 on DESKTOP-VN0AMD7 with a minimal `hli8k` agent and a
+fresh session (calibrated 1.37 native tokens/character):
+
+- tool definitions: 13,032 chars (10 default core tool schemas)
+- tools_catalogue PCM block: 14,413 chars
+- skills_catalogue 1,820 + message_context 1,652 + rest ~740 chars
+- system contracts (v3 MAIN/QUESTION + persona + /sys): ~8,500 chars
+- total fixed envelope: >= ~40,000 chars == ~55,000-63,000 native tokens
+
+An 8K native slot (8192 tokens minus 2048 response headroom = 6144 usable
+input) therefore cannot accept a full HERV3 turn before any history or tool
+results are added. Automatic Compact reduces the managed-history section and
+the tool schemas, but it cannot shrink this fixed envelope below the slot,
+so these PRs do NOT claim that Compact makes an 8K turn workable.
+
+What these PRs do keep:
+
+- proactive Compact that rebuilds the payload actually sent;
+- typed `CONTEXT_CAPACITY_REJECTED` mapping for native overflow;
+- no new estimator-based hard rejection.
+
+Making a real 8K turn work requires a Core-level compact envelope (a small
+fixed system/tool-catalogue projection), which touches protected Core and is
+therefore a separate design/review item with its own approval. It is
+intentionally NOT part of these two PRs.

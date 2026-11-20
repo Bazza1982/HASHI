@@ -72,6 +72,22 @@ def _hli_endpoint_key(endpoint: str, model: str) -> str:
     return f"{endpoint}|{model}"
 
 
+def _hli_pre_delivery_failure(error: Exception) -> bool:
+    """True only when delivery of the request is positively proven impossible.
+
+    llama.cpp / HLI keeps no request receipts: an HTTP error response, a
+    timeout, a connection reset, a missing first token or an incomplete SSE
+    can all occur after the native slot accepted the prompt. A non-TLS local
+    TCP connection error means the connect never completed, so nothing was
+    ever delivered. Everything else stays outcome-uncertain and must never
+    be implicitly re-submitted.
+    """
+    if isinstance(getattr(error, "response", None), httpx.Response):
+        return False
+    if isinstance(error, httpx.ConnectError):
+        lowered = str(error).casefold()
+        return not any(token in lowered for token in ("certificate", "ssl", "tls"))
+    return False
 def normalized_hli_effort(value: object) -> str | None:
     """Translate HERV3 reasoning labels to llama.cpp's request vocabulary."""
     if value is None:
@@ -158,6 +174,20 @@ class HLIAdapter(OpenAICompatibleAdapter):
 
     def _request_headers(self) -> dict[str, str]:
         return {"Content-Type": "application/json"}
+
+    def _implicit_provider_resubmission_allowed(
+        self, error: Exception, *, checkpoint_backed: bool = False,
+    ) -> bool:
+        """Local inference has no request receipts: a local checkpoint proves
+        nothing about whether the native slot took the previous submission.
+        Only a positively proven pre-delivery failure may be re-submitted."""
+        return _hli_pre_delivery_failure(error)
+
+    def _provider_failure_advertises_retry(self, error: Exception) -> bool:
+        """Never advertise uncertain local failures as retryable to outer
+        stage policies; a policy retry would blindly replay a request the
+        native slot may already have accepted."""
+        return _hli_pre_delivery_failure(error)
 
     def _ensure_client(self) -> None:
         """Direct local/LAN Compute connection without proxies or read deadline.
