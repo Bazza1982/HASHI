@@ -893,9 +893,14 @@ class ToolRegistry:
         )
         if smart_admission is not None:
             admission_data = smart_admission.as_dict()
+            message = f"Error: Smart Tool requires replanning: {smart_admission.message}"
+            if smart_admission.suggested_tool:
+                message += (
+                    f" Recommended alternative: use the '{smart_admission.suggested_tool}' tool."
+                )
             return ToolResult(
                 tool_call_id=tool_call_id,
-                output=f"Error: Smart Tool requires replanning: {smart_admission.message}",
+                output=message,
                 is_error=True,
                 details={
                     "control_disposition": "needs_replan",
@@ -1399,7 +1404,9 @@ class ToolRegistry:
         return ToolResult(
             tool_call_id=result.tool_call_id,
             output=result.output,
-            is_error=outcome.status in {"failed", "unavailable", "needs_replan"},
+            # Preserve the native execution truth: a genuine failure must never
+            # be reclassified as success by an inconsistent smart envelope.
+            is_error=result.is_error or outcome.status in {"failed", "unavailable", "needs_replan"},
             content=result.content,
             details=details,
         )

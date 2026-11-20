@@ -34,7 +34,7 @@ def test_every_registered_tool_has_explicit_non_generic_profile() -> None:
     assert set(ALL_TOOL_NAMES).issubset(non_generic)
 
 
-def test_smart_tools_unscoped_uses_request_or_default_key_for_repeat_detection(tmp_path) -> None:
+def test_smart_tools_unscoped_uses_request_key_for_repeat_detection(tmp_path) -> None:
     runtime = SmartToolRuntime(tmp_path, {"repeat_threshold": 2})
     for call_id in ("c1", "c2"):
         outcome, _, _ = runtime.complete(
@@ -100,6 +100,24 @@ def test_on_demand_tool_view_keeps_recent_and_in_use_tools_beyond_48() -> None:
         )
     visible = {d["function"]["name"] for d in view.get_tool_definitions()}
     assert "z_target_tool" in visible
+
+
+def test_on_demand_tool_view_bounds_in_use_tools() -> None:
+    names = [f"tool_{i:03d}" for i in range(60)]
+    fake_base = SimpleNamespace(
+        get_tool_definitions=lambda tiers=None: [
+            {"type": "function", "function": {"name": n, "description": n}}
+            for n in names
+        ]
+    )
+    view = OnDemandToolView(fake_base)
+    for n in names:
+        view._activate_after_success(n, {}, SimpleNamespace(is_error=False, output="ok"))
+    # A very long tool-enabled turn must not grow the in-use set without limit.
+    assert len(view._in_use) <= 48
+    visible = {d["function"]["name"] for d in view.get_tool_definitions()}
+    assert "tool_059" in visible  # most recently used is retained
+    assert "tool_000" not in visible  # least recently used was evicted
 
 
 @pytest.mark.asyncio

@@ -1120,3 +1120,49 @@ async def test_tool_free_stage_receives_same_task_state_without_control_tool():
         response.cognitive_control["task_state"]["goal"]
         == task_state.snapshot()["goal"]
     )
+
+
+class _WarningRegistry(_Registry):
+    async def execute(self, name, arguments, tool_call_id=""):
+        del name, arguments
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="same search result",
+            is_error=False,
+            details={
+                "smart_warning": {
+                    "code": "same_result_repeated",
+                    "message": "This result is identical to the previous two calls.",
+                    "suggested_action": "Continue only if another identical observation is necessary.",
+                },
+            },
+        )
+
+
+def test_smart_guidance_text_is_narrow():
+    from adapters.her_v2_provider import _smart_guidance_text
+
+    assert _smart_guidance_text(None) == ""
+    assert _smart_guidance_text({}) == ""
+    assert _smart_guidance_text({"smart_warning": {"code": "not_actionable"}}) == ""
+    text = _smart_guidance_text(
+        {
+            "smart_warning": {
+                "code": "same_result_repeated",
+                "message": "This result is identical.",
+                "suggested_action": "Try a different query.",
+            }
+        }
+    )
+    assert "HASHI_SMART_GUIDANCE" in text
+    assert "Try a different query." in text
+
+
+@pytest.mark.asyncio
+async def test_smart_warning_guidance_reaches_model_followup():
+    registry = _CognitiveControlToolRegistry(_WarningRegistry(), _request(Stage.EXECUTION))
+    result = await registry.execute("file_search", {"query": "x"}, "call-1")
+    # Native output is preserved, and the actionable warning is model-visible.
+    assert "same search result" in result.output
+    assert "HASHI_SMART_GUIDANCE" in result.output
+    assert "identical" in result.output

@@ -1010,16 +1010,21 @@ class SmartToolRuntime:
             repeat_hash = _sha256({"status": outcome.status, "data": evidence,
                                   "error_code": outcome.error.code if outcome.error else None})
         fingerprint = _sha256([tool_name, args_hash, repeat_hash])
-        scope_fallback = (
-            str(
-                context.get("request_id")
-                or context.get("session_id")
-                or context.get("conversation_id")
-                or "default"
-            ).strip()
-            or "default"
+        scope_value = (
+            context.get("request_id")
+            or context.get("session_id")
+            or context.get("conversation_id")
         )
-        state_key = task_id if task_id != "unscoped" else f"unscoped:{scope_fallback}"
+        scope_fallback = str(scope_value).strip() if scope_value else ""
+        if task_id != "unscoped":
+            state_key = task_id
+        elif scope_fallback:
+            state_key = f"unscoped:{scope_fallback}"
+        else:
+            # No authoritative task/request/session identity: isolate per call
+            # so an independent unscoped request never inherits another's
+            # repeat history (and never earns an invented repeat warning).
+            state_key = f"call:{call_id}"
 
         with self._lock:
             state = self._tasks.get(state_key)

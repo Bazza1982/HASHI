@@ -479,6 +479,9 @@ async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidanc
     assert admission["code"] == "unsafe_text_search"
     assert admission["suggested_tool"] == "log_query"
     assert admission["record_over_limit"] is True
+    # The model-visible output names the recommended alternative so HER can
+    # actually choose it on the next attempt.
+    assert "log_query" in result.output
 
 
 @pytest.mark.asyncio

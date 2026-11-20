@@ -242,6 +242,8 @@ class Scanner:
         item['text_state'] = result['continuation']
         if result['encoding_warning'] and 'UTF-8 replacement characters observed' not in self.state['warnings']:
             self.state['warnings'].append('UTF-8 replacement characters observed')
+        if result.get('coverage_warning') and result['coverage_warning'] not in self.state['warnings']:
+            self.state['warnings'].append(result['coverage_warning'])
         if signature(path) != item['signature']:
             raise StaleCursor(str(path))
         # A bounded queue preserves every unreturned match if serialization stops.

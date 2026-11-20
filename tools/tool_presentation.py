@@ -23,6 +23,9 @@ _STARTER_TOOLS = (
 # onto earlier ones (never silently drop an already-revealed, still-authorised
 # schema), capped so the model payload stays compact for small models.
 _MAX_DISCOVERED = 48
+# In-use tools are also bounded with the same LRU strategy so a very long
+# tool-enabled turn cannot grow the exposed schemas without limit.
+_MAX_IN_USE = 48
 
 
 class OnDemandToolView:
@@ -34,7 +37,7 @@ class OnDemandToolView:
         # Ordered LRU map so tools are retained by recency/usage rather than
         # alphabetically evicting names like 'windows_*' / 'z*' above 48.
         self._discovered: OrderedDict[str, bool] = OrderedDict()
-        self._in_use: set[str] = set()
+        self._in_use: OrderedDict[str, bool] = OrderedDict()
         # Relevance hints are advisory, not new immutable capability state.
         available = tuple(
             str((schema.get("function") or {}).get("name") or "")
@@ -57,7 +60,7 @@ class OnDemandToolView:
         # Ignore Ollama's historical ["core"] presentation tier *only* in
         # this opt-in view; the original registry still validates permission.
         all_definitions = self._base.get_tool_definitions(tiers=None)
-        visible = self._starter | set(self._discovered.keys()) | self._in_use
+        visible = self._starter | set(self._discovered.keys()) | set(self._in_use.keys())
         return [
             item for item in all_definitions
             if str((item.get("function") or {}).get("name") or "") in visible
@@ -65,9 +68,16 @@ class OnDemandToolView:
 
     def _note_used(self, tool_name: str) -> None:
         if tool_name and tool_name not in self._starter:
-            self._in_use.add(tool_name)
+            self._in_use[tool_name] = True
+            self._in_use.move_to_end(tool_name)
             if tool_name in self._discovered:
                 self._discovered.move_to_end(tool_name)
+            # Bounded LRU: evict the least-recently-used in-use tool so a long
+            # turn never expands the exposed schemas indefinitely. The just-used
+            # tool sits at the MRU end and is never the eviction victim.
+            while len(self._in_use) > _MAX_IN_USE:
+                evict = next(iter(self._in_use))
+                del self._in_use[evict]
 
     def _activate_after_success(self, tool_name: str, arguments: dict, result: Any) -> None:
         self._note_used(tool_name)

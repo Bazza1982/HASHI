@@ -50,29 +50,42 @@ Each tool has a name, semantic version, profile, and short natural-language
 description. A legacy adapter is declared only when deterministic translation
 is required.
 
-## Executor-visible result
+## Result contract
 
-When enabled, every completed call returns exactly five top-level fields:
+The original consumer-facing tool output is never replaced. Every completed
+call keeps `result.output` as the native tool text (a JSON envelope for JSON
+tools, plain text otherwise), preserving search-result schemas, tool-call IDs,
+error semantics, receipts and canonical audit metadata.
 
-```json
-{
-  "status": "success",
-  "effect": "observed",
-  "data": {},
-  "error": null,
-  "warning": null
-}
+Smart classification is recorded as structured advisory metadata on
+`ToolResult.details`, not as a replacement for the output:
+
+```text
+smart_status   success | failed | unavailable | partial | needs_replan
+smart_effect   observed | changed | no_change | unknown
+smart_warning  optional {code, message, suggested_action}
+smart_error    optional {code, message, retryable}
+smart_admission optional {code, message, suggested_tool, data}
 ```
 
-`status` is one of `success`, `failed`, `unavailable`, `partial`, or
-`needs_replan`. The latter proves that the requested Tool was not executed and
-that HER should choose the typed safer alternative. `effect` is one of
-`observed`, `changed`, `no_change`, or `unknown`. Hashes, versions, timestamps,
-and repeat counters stay out of the Executor context.
+`needs_replan` means the requested Tool was not executed and HER should choose
+the typed safer alternative. `effect` defaults to `unknown` for a failed action
+unless the adapter can prove no change occurred (for example, a rejected patch
+or a missing Scheduler gateway are deterministic `no_change` outcomes).
 
-A failed action defaults to `effect: unknown` unless the adapter can prove that
-no change occurred. For example, a rejected patch and a missing Scheduler
-gateway are deterministic `no_change` outcomes.
+`is_error` always preserves the native execution truth: a genuine tool failure
+cannot be reclassified as success by an inconsistent smart envelope, while an
+admission denial (`needs_replan`) or unavailable tool is still reported as an
+error. A structured search partial result is not an error.
+
+### Model-visible guidance
+
+Guidance is narrow and only appears when it is actionable. An admission denial
+names the suggested tool directly in its error message (for example,
+`log_query`). Repeat/poll/side-effect warnings append a short
+`HASHI_SMART_GUIDANCE` note to the model-facing follow-up message so HER can
+change its next attempt; ordinary calls receive no added text. The native
+`result.output` and audit records are unchanged.
 
 ## Ledger
 
@@ -84,9 +97,9 @@ args_hash, status, effect, error_code, duration_ms, result_hash, repeat_count
 ```
 
 There are no requested/started/classified sub-events. Composite tools remain a
-single top-level call. Existing canonical security audit evidence is retained;
-the older duplicate tool-action log is disabled while Smart Tool Registry is
-enabled.
+single top-level call. Existing canonical security audit evidence is retained,
+and the standard Tool Action Audit is recorded on every call; SmartTools does
+not disable it.
 
 ## Repeat rules
 
@@ -115,7 +128,8 @@ contribution, task success, or evidence quality.
 }
 ```
 
-The feature is compatibility-gated and disabled when this block is absent.
+SmartTools is on by default under the default configuration; the block above
+lists the tunable knobs and omitting it does not disable the feature.
 `foreground_timeout_seconds` is an explicit instance safety fuse for one
 foreground subprocess; it is deliberately generous and does not bound a HER
 Turn, stage, Tool loop, or managed background job. When absent, omission of a
