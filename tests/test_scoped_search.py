@@ -339,12 +339,12 @@ async def test_repeat_advisory_uses_search_evidence_not_operation_identity(tmp_p
                            audit_context={'task_id': 'repeat', 'request_id': 'repeat'})
     envelope = json.loads(result.output)
     assert envelope['status'] == 'success' and envelope['data']['coverage_complete']
-    assert envelope['warning']['code'] == 'same_result_repeated'
+    assert result.details['smart_warning']['code'] == 'same_result_repeated'
     # A genuinely changed tree is new evidence; the warning never blocks.
     (repo / 'new.txt').touch()
     changed = await registry.execute_with_audit_context('file_search', args,
                         audit_context={'task_id': 'repeat', 'request_id': 'repeat'})
-    assert json.loads(changed.output)['warning'] is None and not changed.is_error
+    assert changed.details.get('smart_warning') is None and not changed.is_error
 
 
 @pytest.mark.asyncio

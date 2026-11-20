@@ -1392,9 +1392,13 @@ class ToolRegistry:
                 "smart_effect": outcome.effect,
             }
         )
+        if outcome.warning is not None:
+            details["smart_warning"] = outcome.warning.as_dict()
+        if outcome.error is not None:
+            details["smart_error"] = outcome.error.as_dict()
         return ToolResult(
             tool_call_id=result.tool_call_id,
-            output=outcome.model_output(),
+            output=result.output,
             is_error=outcome.status in {"failed", "unavailable", "needs_replan"},
             content=result.content,
             details=details,
@@ -1620,8 +1624,6 @@ class ToolRegistry:
                     "Failed to persist canonical Tool audit evidence: %s", exc
                 )
                 raise
-        if self.smart_tools.enabled:
-            return
         try:
             from tools.tool_audit import record_tool_action
 
