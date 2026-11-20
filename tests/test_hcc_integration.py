@@ -57,7 +57,8 @@ async def test_real_local_command_dispatch_persists_flag_and_status(tmp_path):
     before = (home / "agent.md").read_bytes()
     initial = await execute_local_command(runtime, "/hcc", session_metadata={"ui_locale": "zh-CN"})
     assert initial["ok"] and initial["messages"]
-    assert not is_hcc_enabled(home)
+    # Cached HCC content is present in the fixture, so it is available by default.
+    assert is_hcc_enabled(home)
     result = await execute_local_command(runtime, "/hcc on", session_metadata={"ui_locale": "zh-CN"})
     assert result["ok"], result
     assert WorkspaceStateStore(home).read()["hcc_enabled"] is True
@@ -85,7 +86,9 @@ async def test_command_reports_write_failure_without_overwriting_corrupt_state(t
     text = "\n".join(message["text"] for message in result["messages"])
     assert "could not be confirmed" in text.lower(), text
     assert state.read_text() == "{broken"
-    assert not is_hcc_enabled(home)
+    # The failed write must not persist an explicit enable flag (cached content
+    # still exists, but no opt-in flag may be fabricated by a failed command).
+    assert WorkspaceStateStore(home).read().get("hcc_enabled") is not True
 
 
 @pytest.mark.asyncio
@@ -94,7 +97,9 @@ async def test_unauthorized_command_does_not_mutate(tmp_path):
     runtime = runtime_fixture(home)
     update = SimpleNamespace(effective_user=SimpleNamespace(id=7), message=SimpleNamespace(reply_text=AsyncMock()))
     await runtime.cmd_hcc(update, SimpleNamespace(args=["on"]))
-    assert not is_hcc_enabled(home)
+    # Unauthorised command must not persist an explicit enable flag (no opt-in
+    # may be fabricated by an unauthenticated caller).
+    assert WorkspaceStateStore(home).read().get("hcc_enabled") is not True
     update.message.reply_text.assert_not_awaited()
 
 
@@ -249,7 +254,9 @@ async def test_actual_scheduler_and_skill_manager_use_existing_job_path(tmp_path
     assert call["scheduler_context"]["task_id"] == "weather"
     assert _resolve_session_scope(SimpleNamespace(scheduler_context=call["scheduler_context"])) == SESSION_SCOPE_ISOLATED
     assert runtime.config.active_backend == "her-v2"
-    assert not is_hcc_enabled(home), "a refresh job must not enable HCC injection"
+    # Enqueueing a refresh must not fabricate an explicit enable flag (cached
+    # content availability is driven by content + the user's opt-out preference).
+    assert WorkspaceStateStore(home).read().get("hcc_enabled") is not True, "enqueue must not set an explicit enable flag"
     assert (home / "agent.md").read_bytes() == before, "enqueue itself must not mutate source cache"
 
 
