@@ -306,8 +306,14 @@ Changes (all in Functions territory; protected Core untouched):
   `resolve_search_budget` (per-call request > configured > default, optional
   `timeout_max_seconds` cap), parent cleanup grace window before emergency
   process-tree termination, explicit `continuation_lost` reporting and
-  actionable deadline warnings. Backward compatible: existing configured
-  timeouts keep their exact semantics.
+  actionable deadline warnings. Guidance uses the actual allocated continuation:
+  it offers resumption only when the scan state is retained. If the scan state
+  was lost, a cursor that only pages buffered matches is described as such,
+  and the remaining coverage requires a fresh scan. Regex content searches
+  report incomplete coverage for unbounded repeated literal alternatives where
+  one alternative prefixes another; disjoint alternatives and finite repeats
+  remain available. Other costly expressions may still reach the deadline.
+  Backward compatible: existing configured timeouts keep their exact semantics.
 - `tools/search_worker.py`: one `DirEntry.stat` per entry, physical-prefix
   authorization for ordinary descendants (`resolve` only at roots/links and
   cursor frame validation), cycle checks for linked directories against all

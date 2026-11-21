@@ -408,12 +408,7 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                                     'cleanup_grace_seconds': config.get('cleanup_grace_seconds')},
                   effective_policy={key: config[key] for key in (
                       'profile', 'include', 'exclude', 'include_hidden', 'follow_links', 'cross_filesystems')})
-    if result['stop_reason'] == 'deadline':
-        result['warnings'].append(
-            'Execution budget reached; coverage is incomplete. You may continue '
-            'this scan with next_cursor, narrow the roots, refine the query, switch '
-            'tools, or stop when you have enough evidence. A deadline is not a '
-            'command to abandon the task.')
+    deadline_reached = result['stop_reason'] == 'deadline'
     result['coverage']['excluded_content'] = 'Containers/media/binary; ordinary UTF-8 text only' if config['mode'] == 'content' else 'No file bodies read'
     from tools.search_worker import PROJECT_EXCLUDED_DIRS, PROJECT_EXCLUDED_FILES, CONTAINER_SUFFIXES
     result['coverage']['default_directory_exclusions'] = (
@@ -461,6 +456,18 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
     result.update(can_continue=next_cursor is not None, next_cursor=next_cursor)
     if state and next_cursor is None:
         result['warnings'].append('Continuation capacity exceeded; no automatic restart')
+    if deadline_reached:
+        if result.get('continuation_lost') and next_cursor:
+            guidance = ('The next_cursor returns buffered matches only; the scan '
+                        'cannot be resumed. Narrow the roots or refine the query '
+                        'and run a fresh scan.')
+        elif next_cursor:
+            guidance = ('You may continue this scan with next_cursor, narrow the '
+                        'roots, or refine the query.')
+        else:
+            guidance = ('No continuation cursor is available. Narrow the roots '
+                        'or refine the query and run a fresh scan.')
+        result['warnings'].append('Execution budget reached; coverage is incomplete. ' + guidance)
     output = outcome(status, result, error=error)
     return BuiltinExecutionResult(output, {'search_outcome': status,
                                           'foreground_cleanup': result['cleanup'],

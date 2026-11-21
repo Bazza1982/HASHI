@@ -87,6 +87,9 @@ async def test_cooperative_deadline_returns_partial_result_with_working_cursor(t
         if data["can_continue"]:
             assert envelope["status"] == "partial"
             assert data["next_cursor"] and data["next_cursor"] != "x" * 43
+            if data["stop_reason"] == "deadline":
+                assert any("continue this scan with next_cursor" in warning.lower()
+                           for warning in data["warnings"])
             cursor = data["next_cursor"]
         else:
             break
@@ -124,6 +127,9 @@ async def test_pagination_and_deadline_continue_without_duplicate_or_lost_matche
         if data["can_continue"]:
             assert envelope["status"] == "partial"
             assert data["next_cursor"] and data["next_cursor"] != "x" * 43
+            if data["stop_reason"] == "deadline":
+                assert any("continue this scan with next_cursor" in warning.lower()
+                           for warning in data["warnings"])
             cursor = data["next_cursor"]
         else:
             break
@@ -150,7 +156,9 @@ async def test_emergency_cleanup_reports_lost_continuation_and_reaps_worker(tmp_
     assert data["coverage_complete"] is False and data["scope_exhausted"] is False
     assert data["can_continue"] is False and data["next_cursor"] is None
     assert data.get("continuation_lost") is True
-    assert any("no continuation cursor" in warning for warning in data["warnings"])
+    assert any("no continuation cursor" in warning.lower() for warning in data["warnings"])
+    assert not any("continue this scan with next_cursor" in warning.lower()
+                   for warning in data["warnings"])
     cleanup = result.details["foreground_cleanup"]
     assert cleanup["process_reaped"] and cleanup["status"] != "cleanup_failed"
     assert elapsed < 5
@@ -227,5 +235,48 @@ async def test_deadline_result_warnings_offer_actionable_next_steps(tmp_path):
     data = payload(await registry.execute(
         "file_search", {"query": "needle", "roots": [str(repo)], "max_results": 200}))
     assert data["stop_reason"] == "deadline"
-    assert any("continue" in warning and "narrow" in warning
-               for warning in data["warnings"])
+    if data["can_continue"]:
+        assert any("continue this scan with next_cursor" in warning.lower()
+                   for warning in data["warnings"])
+    else:
+        assert not any("continue this scan with next_cursor" in warning.lower()
+                       for warning in data["warnings"])
+        assert any("fresh scan" in warning.lower() for warning in data["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_lost_scan_with_buffered_matches_offers_only_page_continuation(tmp_path, monkeypatch):
+    """A page of retained matches is not a cursor for lost scan state."""
+    from tools.file_search import Continuations, execute_file_search
+
+    matches = [{"path": str(tmp_path / f"item-{index}.txt"), "excerpt": "x" * 2000}
+               for index in range(12)]
+
+    async def stopped_worker(_config):
+        return {
+            "matches": matches,
+            "counters": {"matches": len(matches)},
+            "coverage": {"roots": [{"path": str(tmp_path), "failed": False}], "errors": []},
+            "scope_exhausted": False,
+            "coverage_complete": False,
+            "stop_reason": "deadline",
+            "state": None,
+            "continuation_lost": True,
+            "warnings": [],
+            "cleanup": {"status": "terminated", "process_reaped": True, "errors": []},
+        }
+
+    monkeypatch.setattr("tools.file_search.run_worker", stopped_worker)
+    result = await execute_file_search(
+        {"query": "needle", "roots": [str(tmp_path)]},
+        read_roots=[tmp_path], cwd=tmp_path,
+        search_scope={"owner_id": "fixture"},
+        audit_context={"agent_name": "fixture", "request_id": "buffered"},
+        continuations=Continuations(),
+    )
+    data = json.loads(result.output)["data"]
+    assert data["can_continue"] and data["next_cursor"]
+    assert data["continuation_lost"] and not data["coverage_complete"]
+    assert any("buffered matches only" in warning.lower() for warning in data["warnings"])
+    assert not any("continue this scan with next_cursor" in warning.lower()
+                   for warning in data["warnings"])

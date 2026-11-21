@@ -81,6 +81,33 @@ def test_regex_nested_quantifier_is_refused_honestly(tmp_path):
     assert "nested_quantifiers" in (r["coverage_warning"] or "")
 
 
+def test_repeated_overlapping_alternatives_are_bounded_without_blocking_safe_regex(tmp_path):
+    path = _write(tmp_path, "alternatives.txt", "a" * 38 + "!\ncatdog\n")
+    for pattern in ("(a|aa)+$", "(?:a|aa)*$", "(a|aa){2,}$"):
+        result = scan_literal(path, terms=(pattern,), case_sensitive=True, max_results=10,
+                              context_chars=4, chunk_chars=16, regex=True)
+        assert result["matches"] == []
+        assert result["coverage_complete"] is False
+        assert result["continuation"] is None
+        assert "overlapping_repeated_alternation" in result["coverage_warning"]
+
+    insensitive = scan_literal(path, terms=("(a|A)+$",), case_sensitive=False,
+                               max_results=10, context_chars=4, regex=True)
+    assert not insensitive["coverage_complete"]
+    assert "overlapping_repeated_alternation" in insensitive["coverage_warning"]
+
+    for pattern in ("(?:cat|dog)+", "(a|aa){2}", r"[(a|aa)+]"):
+        result = scan_literal(path, terms=(pattern,), case_sensitive=True, max_results=100,
+                              context_chars=4, chunk_chars=16, regex=True)
+        assert result["matches"]
+        assert result["coverage_complete"] is True
+
+    literal = _write(tmp_path, "literal.txt", "(a|aa)+")
+    result = scan_literal(literal, terms=(r"\(a\|aa\)\+",), case_sensitive=True,
+                          max_results=10, context_chars=4, regex=True)
+    assert result["matches"] and result["coverage_complete"]
+
+
 def test_regex_character_budget_is_partial_and_resumable(tmp_path):
     f = _write(tmp_path, "budget.txt", "line one\ntarget\nline three\ntarget\n")
     r1 = scan_literal(f, terms=("target",), case_sensitive=True, max_results=10,

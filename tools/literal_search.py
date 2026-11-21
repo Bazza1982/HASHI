@@ -26,7 +26,7 @@ _OVERLONG_MESSAGE = (
 )
 
 
-def _regex_guard(pattern_text: str) -> str | None:
+def _regex_guard(pattern_text: str, *, ignore_case: bool = False) -> str | None:
     """Return a reason when a regex cannot be safely bounded to a record.
 
     ``re`` has no timeout, so nested quantifiers (``(.+)+``) can show
@@ -35,6 +35,33 @@ def _regex_guard(pattern_text: str) -> str | None:
     """
     if re.search(r"\([^()]*[+*{][^()]*\)[+*{?]", pattern_text):
         return 'nested_quantifiers'
+    # Repeating literal alternatives where one is a prefix of another can
+    # backtrack exponentially (for example, a failing search for (a|aa)+).
+    # Keep disjoint alternatives and finite repetitions available.
+    group_starts = set()
+    escaped = in_class = False
+    for index, char in enumerate(pattern_text):
+        if escaped:
+            escaped = False
+        elif char == '\\':
+            escaped = True
+        elif char == '[' and not in_class:
+            in_class = True
+        elif char == ']' and in_class:
+            in_class = False
+        elif char == '(' and not in_class:
+            group_starts.add(index)
+    repeated = r"\((?:\?:)?(\w+(?:\|\w+)+)\)(?:[+*]|\{\d+,\})"
+    for group in re.finditer(repeated, pattern_text):
+        if group.start() not in group_starts:
+            continue
+        alternatives = group.group(1).split('|')
+        if ignore_case:
+            alternatives = [item.lower() for item in alternatives]
+        if any(left.startswith(right) or right.startswith(left)
+               for i, left in enumerate(alternatives)
+               for right in alternatives[i + 1:]):
+            return 'overlapping_repeated_alternation'
     return None
 
 
@@ -207,8 +234,8 @@ def scan_literal(path: Path, *, terms: tuple[str, ...], case_sensitive: bool,
         for term in terms
     ]
     if regex:
-        for term in terms:
-            reason = _regex_guard(term)
+        for term, pattern in patterns:
+            reason = _regex_guard(term, ignore_case=bool(pattern.flags & re.IGNORECASE))
             if reason:
                 return {
                     'path': str(path),
