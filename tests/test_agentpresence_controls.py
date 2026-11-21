@@ -155,3 +155,26 @@ async def test_effort_control_executes_real_command_and_survives_reload(tmp_path
     assert manager.current_backend.effort == "low"
     reloaded = _make_manager(manager.config.workspace_dir)
     assert reloaded.config.allowed_backends[0]["effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_controls_degrade_gracefully_when_instance_registry_errors(tmp_path, monkeypatch):
+    from orchestrator.agent_presence_control_api import AgentPresenceControls
+    from tools.instance_registry import InstanceRegistry, InstanceRegistryError
+
+    async def worker(self, name, body):
+        return {"ok": True, "agent_id": name, "configuration": {"engine": "codex-cli"},
+                "configuration_version": "version", "online": True}
+
+    def broken_records(self):
+        raise InstanceRegistryError("Instance registry schema/environment mismatch")
+
+    monkeypatch.setattr(AgentPresenceControls, "worker", worker)
+    monkeypatch.setattr(InstanceRegistry, "records", broken_records)
+    api = server_at(tmp_path)
+    async with TestClient(TestServer(api.app)) as client:
+        response = await client.get("/api/agentpresence/controls?instance_id=TEST")
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["ok"] is True
+        assert payload["instances"] == []

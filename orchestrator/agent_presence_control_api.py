@@ -48,14 +48,14 @@ class AgentPresenceControls:
 
     def instances(self):
         # Read the existing public registry owner. Never infer roots/ports or register instances.
-        from tools.instance_registry import InstanceRegistry
         try:
+            from tools.instance_registry import InstanceRegistry, InstanceRegistryError
             records = InstanceRegistry(program_root=Path(self.api.config_path).parent,
                                        program_version="").records()
             return [{"id": str(r["instance_id"]).upper(), "name": str(r["name"]),
                      "base_url": f"http://127.0.0.1:{int(r['api_port'])}"}
                     for r in records if 1 <= int(r.get("api_port") or 0) <= 65535]
-        except (OSError, ValueError, TypeError, KeyError):
+        except (ImportError, OSError, ValueError, TypeError, KeyError, RuntimeError):
             return []
 
     def route(self):
