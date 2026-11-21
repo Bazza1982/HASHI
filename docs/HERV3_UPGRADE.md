@@ -1,5 +1,15 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+## 2026-11-21 Compact follows the current HERV3 target
+
+Manual and automatic conversation Compact resolve the Provider and model from
+the initiating Agent's current HERV3 main target. A legacy Quick/Pro selection
+does not override that target, and a configuration containing only HERV3 main
+and auxiliary models does not require legacy profiles. Capacity calculations
+use the same effective HERV3 configuration; HLI's existing small-context
+trigger follows the current main target. When a safe typed capacity rejection
+has no eligible history to compact, the original capacity failure is retained.
+
 ## 2026-10-19 long-running execution invariant
 
 HERV3 foreground work has no HASHI total token, message, Turn, model-call,

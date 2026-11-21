@@ -931,6 +931,17 @@ def preflight_route_context_fit(
 
 def _effective_her_config(runtime: Any) -> Mapping[str, Any]:
     manager = getattr(runtime, "backend_manager", None)
+    v3_target = getattr(manager, "get_her_v3_target", None)
+    v3_base = getattr(manager, "_her_v3_base_config", None)
+    if callable(v3_target) and callable(v3_base):
+        # Capacity follows the same live main/auxiliary configuration used by
+        # HERV3, not a persisted legacy Quick/Pro selection.
+        from orchestrator.her_v2.v3_config import apply_v3_target
+
+        try:
+            return apply_v3_target(v3_base(), v3_target())
+        except (AttributeError, TypeError, ValueError):
+            return {}
     getter = getattr(manager, "_effective_her_v2_config", None)
     if callable(getter):
         with contextlib.suppress(Exception):
@@ -968,6 +979,24 @@ def resolve_target_capacity(runtime: Any) -> CapacityProfile | None:
     return min(resolved, key=lambda item: item.usable_input_tokens)
 
 
+def _selected_compact_main(runtime: Any) -> tuple[Any, str, str]:
+    """Resolve the current HERV3 main; retain legacy runtime compatibility."""
+
+    manager = runtime.backend_manager
+    get_v3_target = getattr(manager, "get_her_v3_target", None)
+    if callable(get_v3_target):
+        selected = get_v3_target()
+        provider = canonical_backend_engine(str(getattr(selected, "provider", "") or ""))
+        model = str(getattr(selected, "model", "") or "").strip()
+    else:
+        selected = manager.get_her_v2_configuration()
+        provider = canonical_backend_engine(
+            str(getattr(selected, "fast_provider", None) or getattr(selected, "provider", ""))
+        )
+        model = str(getattr(selected, "fast_model", "") or "").strip()
+    return selected, provider, model
+
+
 def resolve_trigger_budget(
     runtime: Any,
     *,
@@ -983,9 +1012,7 @@ def resolve_trigger_budget(
     effective_policy = policy or load_policy(runtime)
     target = resolve_target_capacity(runtime)
     try:
-        selection = runtime.backend_manager.get_her_v2_configuration()
-        main_provider = canonical_backend_engine(str(getattr(selection, "fast_provider", "") or ""))
-        main_model = str(getattr(selection, "fast_model", "") or "")
+        _selection, main_provider, main_model = _selected_compact_main(runtime)
     except (AttributeError, ValueError, TypeError):
         main_provider, main_model = "", ""
     if main_provider == "hli-api" and main_model:
@@ -1057,12 +1084,7 @@ def resolve_compact_route(runtime: Any) -> ResolvedCompactRoute:
     """
 
     config = load_route_config(runtime)
-    selected = runtime.backend_manager.get_her_v2_configuration()
-
-    provider = canonical_backend_engine(
-        str(getattr(selected, "fast_provider", None) or getattr(selected, "provider", ""))
-    )
-    model = str(getattr(selected, "fast_model", "") or "").strip()
+    selected, provider, model = _selected_compact_main(runtime)
     reasoning = _compact_provider_reasoning(provider, model)
     capacity = resolve_capacity_profile(runtime, provider, model)
     timeout_tier = "tier_2" if config.timeout_tier == "auto" else config.timeout_tier
