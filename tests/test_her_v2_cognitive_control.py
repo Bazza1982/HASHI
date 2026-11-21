@@ -1130,6 +1130,7 @@ class _WarningRegistry(_Registry):
             output="same search result",
             is_error=False,
             details={
+                "smart_repeat_warning": "same_result_repeated",
                 "smart_warning": {
                     "code": "same_result_repeated",
                     "message": "This result is identical to the previous two calls.",
@@ -1140,13 +1141,15 @@ class _WarningRegistry(_Registry):
 
 
 def test_smart_guidance_text_is_narrow():
-    from adapters.her_v2_provider import _smart_guidance_text
+    from tools.smart_tools import smart_warning_guidance as _smart_guidance_text
 
     assert _smart_guidance_text(None) == ""
     assert _smart_guidance_text({}) == ""
-    assert _smart_guidance_text({"smart_warning": {"code": "not_actionable"}}) == ""
+    assert _smart_guidance_text({"smart_repeat_warning": "not_actionable"}) == ""
+    assert _smart_guidance_text({"smart_repeat_warning": []}) == ""
     text = _smart_guidance_text(
         {
+            "smart_repeat_warning": "same_result_repeated",
             "smart_warning": {
                 "code": "same_result_repeated",
                 "message": "This result is identical.",
@@ -1155,14 +1158,136 @@ def test_smart_guidance_text_is_narrow():
         }
     )
     assert "HASHI_SMART_GUIDANCE" in text
-    assert "Try a different query." in text
+    assert "another identical observation" in text
+    assert "Try a different query." not in text  # Tool-supplied prose is not elevated.
 
 
 @pytest.mark.asyncio
 async def test_smart_warning_guidance_reaches_model_followup():
     registry = _CognitiveControlToolRegistry(_WarningRegistry(), _request(Stage.EXECUTION))
     result = await registry.execute("file_search", {"query": "x"}, "call-1")
-    # Native output is preserved, and the actionable warning is model-visible.
-    assert "same search result" in result.output
-    assert "HASHI_SMART_GUIDANCE" in result.output
-    assert "identical" in result.output
+    # The provider receives the native output and a separate advisory.
+    assert result.output == "same search result"
+    from tools.smart_tools import smart_warning_guidance
+    guidance = smart_warning_guidance(result.details)
+    assert "HASHI_SMART_GUIDANCE" in guidance
+    assert "identical" in guidance
+
+
+@pytest.mark.asyncio
+async def test_provider_followup_preserves_json_and_receives_separate_smart_guidance(
+    monkeypatch, tmp_path,
+):
+    class JsonWarningRegistry(_WarningRegistry):
+        async def execute(self, name, arguments, tool_call_id=""):
+            result = await super().execute(name, arguments, tool_call_id)
+            result.output = '{"status":"success","data":{"results":[]},"error":null}'
+            return result
+
+    config = SimpleNamespace(
+        name="agent1", engine="hashi-api", model="gpt-5.6-luna",
+        workspace_dir=tmp_path, system_md=None, extra={"effort": "low"},
+    )
+    global_config = SimpleNamespace(her_providers={
+        "providers": {"hashi": {"base_url": "http://127.0.0.1:18805/v1"}}
+    })
+    adapter = HashiApiAdapter(config, global_config)
+    adapter.tool_registry = _CognitiveControlToolRegistry(
+        JsonWarningRegistry(("file_search",)), _request(Stage.EXECUTION),
+    )
+    monkeypatch.setattr(adapter, "_ensure_client", lambda: None)
+    payloads = []
+
+    async def call_api_once(payload, headers, on_stream_event):
+        del headers, on_stream_event
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _APIResult(
+                text="", finish_reason="tool_calls",
+                tool_calls=[{"id": "json-call", "type": "function", "function": {
+                    "name": "file_search", "arguments": '{"query":"x"}',
+                }}],
+            )
+        return _APIResult(text="complete", tool_calls=None, finish_reason="stop")
+
+    monkeypatch.setattr(adapter, "_call_api_once", call_api_once)
+    response = await adapter.generate_response("inspect", "request-json-guidance")
+    assert response.is_success is True
+    messages = payloads[1]["messages"]
+    tool_message = next(message for message in messages if message.get("tool_call_id") == "json-call")
+    assert tool_message["content"] == '{"status":"success","data":{"results":[]},"error":null}'
+    assert json.loads(tool_message["content"])["data"]["results"] == []
+    assert any(
+        "HASHI_SMART_GUIDANCE" in str(message.get("content") or "")
+        and "identical" in str(message.get("content") or "")
+        and message.get("role") != "tool"
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_registry_repeat_guidance_reaches_real_provider_followup(
+    monkeypatch, tmp_path,
+):
+    from copy import deepcopy
+    from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
+    from tools.registry import ToolRegistry
+
+    (tmp_path / "unique-result.txt").write_text("safe", encoding="utf-8")
+    request = _request(Stage.EXECUTION)
+    base = ToolRegistry(["file_search"], tmp_path, tmp_path, {})
+    assert base.smart_tools.enabled
+    evidence = _EvidenceRecordingToolRegistry(
+        base, request, model="fixture", provider="hashi-api",
+    )
+    control = _CognitiveControlToolRegistry(evidence, request)
+    config = SimpleNamespace(
+        name="agent1", engine="hashi-api", model="gpt-5.6-luna",
+        workspace_dir=tmp_path, system_md=None, extra={"effort": "low"},
+    )
+    global_config = SimpleNamespace(her_providers={
+        "providers": {"hashi": {"base_url": "http://127.0.0.1:18805/v1"}}
+    })
+    adapter = HashiApiAdapter(config, global_config)
+    adapter.tool_registry = control
+    monkeypatch.setattr(adapter, "_ensure_client", lambda: None)
+    payloads = []
+
+    async def call_api_once(payload, headers, on_stream_event):
+        del headers, on_stream_event
+        payloads.append(deepcopy(payload))
+        if len(payloads) <= 3:
+            return _APIResult(
+                text="", finish_reason="tool_calls",
+                tool_calls=[{"id": f"search-{len(payloads)}", "type": "function",
+                    "function": {"name": "file_search",
+                                 "arguments": '{"query":"unique-result"}'}}],
+            )
+        return _APIResult(text="complete", tool_calls=None, finish_reason="stop")
+
+    monkeypatch.setattr(adapter, "_call_api_once", call_api_once)
+    response = await adapter.generate_response("inspect", "request-real-registry")
+    assert response.is_success is True
+    assert len(payloads) == 4
+    assert not any("HASHI_SMART_GUIDANCE" in str(message.get("content") or "")
+                   for message in payloads[2]["messages"])
+    final = payloads[3]["messages"]
+    for index in range(1, 4):
+        result = next(message for message in payloads[index]["messages"]
+                      if message.get("tool_call_id") == f"search-{index}")
+        native = json.loads(result["content"])
+        assert native["status"] == "success"
+        assert native["data"]["matches"][0]["path"].endswith("unique-result.txt")
+        assert native["data"]["evidence_ref"]
+    guidance = [message for message in final
+                if message.get("role") != "tool"
+                and "HASHI_SMART_GUIDANCE" in str(message.get("content") or "")]
+    assert len(guidance) == 1
+    assert "search-3" in guidance[0]["content"]
+    assert "not a user request" in guidance[0]["content"]
+    assert len(evidence.receipts) == 3
+    audit = tmp_path / "tool_action_audit.jsonl"
+    records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    for index in range(1, 4):
+        assert [record["status"] for record in records
+                if record["tool_call_id"] == f"search-{index}"] == ["started", "success"]

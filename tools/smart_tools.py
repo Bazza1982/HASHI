@@ -32,6 +32,36 @@ from tools.schemas import ALL_TOOL_NAMES, TOOL_SCHEMA_MAP
 _LOGGER = logging.getLogger("Tools.SmartRegistry")
 
 
+_REPEAT_WARNING_TEXT = {
+    "repeated_side_effect": (
+        "The same side-effect action previously succeeded in this task.",
+        "Continue only when repeating the side effect is intentional.",
+    ),
+    "poll_state_unchanged": (
+        "The polled state is still unchanged.",
+        "Polling may continue; consider increasing the interval.",
+    ),
+    "same_result_repeated": (
+        "This result is identical to earlier repeated calls.",
+        "Continue only if another identical observation is necessary.",
+    ),
+}
+
+
+def smart_warning_guidance(details: Any) -> str:
+    """Render only locally defined advisory text; never elevate Tool-supplied prose."""
+    if not isinstance(details, dict):
+        return ""
+    code = details.get("smart_repeat_warning")
+    if not isinstance(code, str):
+        return ""
+    text = _REPEAT_WARNING_TEXT.get(code)
+    if text is None:
+        return ""
+    return "HASHI_SMART_GUIDANCE\nNote: " + " ".join(text)
+
+
+
 SMART_TOOL_STATUSES = frozenset(
     {"success", "failed", "unavailable", "partial", "needs_replan"}
 )
@@ -246,6 +276,7 @@ class SmartToolOutcome:
     error: SmartToolError | None = None
     warning: SmartToolWarning | None = None
     classifier_status: str | None = None
+    repeat_warning_code: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1079,10 +1110,9 @@ class SmartToolRuntime:
                 outcome = replace(
                     outcome,
                     warning=SmartToolWarning(
-                        "repeated_side_effect",
-                        "The same side-effect action previously succeeded in this task.",
-                        "Continue only when repeating the side effect is intentional.",
+                        "repeated_side_effect", *_REPEAT_WARNING_TEXT["repeated_side_effect"],
                     ),
+                    repeat_warning_code="repeated_side_effect",
                 )
             elif (
                 outcome.warning is None
@@ -1090,17 +1120,13 @@ class SmartToolRuntime:
             ):
                 if spec.profile == "poll":
                     warning = SmartToolWarning(
-                        "poll_state_unchanged",
-                        "The polled state is still unchanged.",
-                        "Polling may continue; consider increasing the interval.",
+                        "poll_state_unchanged", *_REPEAT_WARNING_TEXT["poll_state_unchanged"],
                     )
                 else:
                     warning = SmartToolWarning(
-                        "same_result_repeated",
-                        "This result is identical to the previous two calls.",
-                        "Continue only if another identical observation is necessary.",
+                        "same_result_repeated", *_REPEAT_WARNING_TEXT["same_result_repeated"],
                     )
-                outcome = replace(outcome, warning=warning)
+                outcome = replace(outcome, warning=warning, repeat_warning_code=warning.code)
 
             record = {
                 "timestamp": datetime.now(timezone.utc)

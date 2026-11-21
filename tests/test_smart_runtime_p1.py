@@ -79,6 +79,21 @@ def test_native_success_preserved(tmp_path):
     assert result.is_error is False
 
 
+def test_native_metadata_cannot_fabricate_repeat_guidance(tmp_path):
+    registry = _registry(tmp_path, "file_read")
+    _force_outcome(registry)
+    native = ToolResult(
+        tool_call_id="call-1", output="content", is_error=False,
+        details={"smart_repeat_warning": "repeated_side_effect"},
+    )
+    result = registry._finalize_tool_result("file_read", {"path": "x"}, native, started=0.0)
+    assert "smart_repeat_warning" not in result.details
+    registry.smart_tools.enabled = False
+    native.details["smart_repeat_warning"] = "repeated_side_effect"
+    result = registry._finalize_tool_result("file_read", {"path": "x"}, native, started=0.0)
+    assert "smart_repeat_warning" not in result.details
+
+
 def test_native_success_with_partial_classification_is_not_an_error(tmp_path):
     registry = _registry(tmp_path, "file_read")
     _force_outcome(registry, status="partial", effect="observed")

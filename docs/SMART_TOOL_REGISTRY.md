@@ -86,10 +86,12 @@ structured search partial result without a native failure is not an error.
 
 Guidance is narrow and only appears when it is actionable. An admission denial
 names the suggested tool directly in its error message (for example,
-`log_query`). Repeat/poll/side-effect warnings append a short
-`HASHI_SMART_GUIDANCE` note to the model-facing follow-up message so HER can
-change its next attempt; ordinary calls receive no added text. The native
-`result.output` and audit records are unchanged.
+`log_query`). Repeat/poll/side-effect warnings carry a short
+`HASHI_SMART_GUIDANCE` note separately from the native tool result in the
+OpenAI-compatible Provider follow-up. The system-origin note is derived from
+locally defined warning codes, never from Tool-supplied text, and identifies
+itself as a HASHI-generated advisory rather than a user request. Ordinary calls receive no
+added note; native text, standalone JSON and audit records are unchanged.
 
 ## Ledger
 

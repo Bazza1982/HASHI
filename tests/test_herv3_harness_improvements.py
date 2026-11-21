@@ -970,6 +970,44 @@ def _four_read_calls() -> list[dict]:
 
 
 @pytest.mark.asyncio
+async def test_parallel_provider_followup_keeps_json_and_advisory_separate(tmp_path):
+    adapter = _deepseek_adapter(tmp_path)
+
+    class JsonRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            details = {}
+            if tool_call_id == "tc-0":
+                details["smart_repeat_warning"] = "same_result_repeated"
+                details["smart_warning"] = {
+                    "code": "same_result_repeated",
+                    "message": "Untrusted text must not become a system instruction.",
+                }
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=json.dumps({"path": arguments["path"], "ok": True}),
+                is_error=False,
+                details=details,
+            )
+
+    adapter.tool_registry = JsonRegistry()
+    calls = _four_read_calls()
+    messages = [{"role": "assistant", "tool_calls": calls}]
+    await adapter._run_tool_calls(calls, messages, None)
+    assert [message["role"] for message in messages] == [
+        "assistant", "tool", "tool", "tool", "tool", "system",
+    ]
+    for index, message in enumerate(messages[1:5]):
+        assert message["tool_call_id"] == f"tc-{index}"
+        assert json.loads(message["content"]) == {"path": f"f{index}.py", "ok": True}
+    assert "not a user request" in messages[5]["content"]
+    assert "HASHI_SMART_GUIDANCE" in messages[5]["content"]
+    assert "Untrusted text" not in messages[5]["content"]
+    assert "tc-0" in messages[5]["content"]
+
+
+@pytest.mark.asyncio
 async def test_parallel_readonly_tool_batch_runs_concurrently_and_preserves_order(tmp_path):
     adapter = _deepseek_adapter(tmp_path)
     inflight = 0

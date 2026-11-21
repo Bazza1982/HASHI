@@ -846,33 +846,6 @@ def _review_system_prompt(
     )
 
 
-def _smart_guidance_text(details: Any) -> str:
-    """Return a compact, model-visible advisory for actionable SmartTool warnings.
-
-    The native ``result.output`` is never modified; this text is appended only
-    to the model-facing tool message.  It stays silent for ordinary calls and
-    only surfaces repeat/poll/side-effect warnings that invite a recovery
-    action, so the model can actually choose a different next attempt.
-    """
-    if not isinstance(details, dict):
-        return ""
-    warning = details.get("smart_warning")
-    if not isinstance(warning, dict):
-        return ""
-    if warning.get("code") not in {
-        "same_result_repeated",
-        "poll_state_unchanged",
-        "repeated_side_effect",
-    }:
-        return ""
-    message = str(warning.get("message") or "").strip()
-    action = str(warning.get("suggested_action") or "").strip()
-    text = " ".join(part for part in (message, action) if part).strip()
-    if not text:
-        return ""
-    return "\n\nHASHI_SMART_GUIDANCE\nNote: " + text
-
-
 class _DelegatedToolRegistry:
     """Narrow a HASHI ToolRegistry without copying secrets or policy logic."""
 
@@ -2136,7 +2109,7 @@ class _CognitiveControlToolRegistry:
             progress_boundary=delta_application.status not in {"missing", "duplicate"},
         )
         task_snapshot = self.task_state.prompt_snapshot()
-        output = str(getattr(result, "output", "") or "").rstrip()
+        output = str(getattr(result, "output", "") or "")
         if delta_application.status != "missing":
             output += "\n\nHASHI_TASK_STATE: " + json.dumps(
                 task_snapshot,
@@ -2172,9 +2145,6 @@ class _CognitiveControlToolRegistry:
                     "cognitive_control": self.controller.snapshot(),
                 }
             )
-        smart_guidance = _smart_guidance_text(details)
-        if smart_guidance:
-            output += smart_guidance
         if self._turn_services is not None:
             self._turn_services.tool_completed(
                 name,

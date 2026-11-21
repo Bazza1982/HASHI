@@ -1377,6 +1377,11 @@ class ToolRegistry:
             receipt = None
         if receipt is not None:
             result.details = {**(result.details or {}), "effect_receipt": receipt}
+        # This marker is reserved for the local repeat detector even when the
+        # Smart Registry is disabled. Native Tool metadata cannot create it.
+        if "smart_repeat_warning" in (result.details or {}):
+            result.details = {key: value for key, value in result.details.items()
+                              if key != "smart_repeat_warning"}
         if not self.smart_tools.enabled:
             return result
         outcome, _spec, _record = self.smart_tools.complete(
@@ -1391,6 +1396,10 @@ class ToolRegistry:
         )
         outcome = reconcile_native_failure(outcome, result.is_error)
         details = dict(result.details or {})
+        # Repeat advice belongs to this runtime, not to Tool-supplied metadata.
+        details.pop("smart_repeat_warning", None)
+        if outcome.repeat_warning_code is not None:
+            details["smart_repeat_warning"] = outcome.repeat_warning_code
         if outcome.classifier_status is not None:
             details["smart_classifier_status"] = outcome.classifier_status
         details.update(
