@@ -74,9 +74,10 @@ class AgentPresenceCallVideo:
         if not path.startswith("/v1/") or path.startswith("//") or "\\" in path:
             raise CallError("call_video_connector_response_invalid", 502)
         headers = {
-            "X-AP-Token": self.token,
             "Accept": "image/png" if binary else "application/json",
         }
+        if self.token:
+            headers["X-AP-Token"] = self.token
         if mime:
             headers["Content-Type"] = mime
         try:

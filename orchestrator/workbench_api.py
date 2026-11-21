@@ -11682,6 +11682,16 @@ class WorkbenchApiServer:
         )
         return web.json_response(result, status=409)
 
+    @staticmethod
+    def _is_direct_loopback_request(request) -> bool:
+        if not is_request_loopback(request):
+            return False
+        headers = getattr(request, "headers", None) or {}
+        return not any(
+            name in headers
+            for name in ("Forwarded", "X-Forwarded-For", "X-Real-IP")
+        )
+
     def _agentpresence_ingress_rejection(
         self,
         request,
@@ -11690,12 +11700,22 @@ class WorkbenchApiServer:
         surface: Any,
         instance_id: Any,
     ):
-        """Authenticate the reserved AP source before any Run is admitted."""
+        """Scope local AP ingress strictly to direct loopback and exact instance."""
         source_norm = str(source or "").strip().casefold()
         surface_norm = str(surface or "").strip().casefold()
         claims_agentpresence = "agentpresence" in {source_norm, surface_norm}
         if not claims_agentpresence:
             return None
+        if not self._is_direct_loopback_request(request):
+            return web.json_response(
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "Agent Presence is restricted to direct localhost requests",
+                    "error_code": "agentpresence_local_control_required",
+                },
+                status=403,
+            )
         if source_norm != "agentpresence" or surface_norm != "agentpresence":
             return web.json_response(
                 {
@@ -11719,18 +11739,6 @@ class WorkbenchApiServer:
                     "error_code": "agentpresence_instance_mismatch",
                 },
                 status=409,
-            )
-        from orchestrator.agent_presence_notify import token_matches
-
-        if not token_matches(request.headers.get("X-AP-Token")):
-            return web.json_response(
-                {
-                    "ok": False,
-                    "accepted": False,
-                    "error": "Agent Presence authentication is required",
-                    "error_code": "agentpresence_auth_required",
-                },
-                status=401,
             )
         return None
 

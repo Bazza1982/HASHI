@@ -27,14 +27,22 @@ def server_at(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_controls_reject_untrusted_and_wrong_instance_before_read(tmp_path, monkeypatch):
+async def test_controls_reject_forwarded_and_wrong_instance_before_read(tmp_path, monkeypatch):
+    from orchestrator.agent_presence_control_api import AgentPresenceControls
+    async def worker(self, name, body):
+        return {"ok": True, "agent_id": name, "configuration": {"engine": "codex-cli"},
+                "configuration_version": "version", "online": True}
+    monkeypatch.setattr(AgentPresenceControls, "worker", worker)
     api = server_at(tmp_path)
-    monkeypatch.setattr(agent_presence_notify, "token_matches", lambda value: value == "secret")
     async with TestClient(TestServer(api.app)) as client:
+        response = await client.get("/api/agentpresence/controls?instance_id=TEST",
+            headers={"X-Forwarded-For": "203.0.113.10"})
+        assert response.status == 403
+        assert (await response.json())["error_code"] == "agentpresence_local_control_required"
         response = await client.get("/api/agentpresence/controls?instance_id=TEST")
-        assert response.status == 401
-        response = await client.get("/api/agentpresence/controls?instance_id=OTHER",
-            headers={"X-AP-Token": "secret"})
+        assert response.status == 200
+        assert (await response.json())["instance_id"] == "TEST"
+        response = await client.get("/api/agentpresence/controls?instance_id=OTHER")
         assert response.status == 409
 
 
@@ -147,3 +155,26 @@ async def test_effort_control_executes_real_command_and_survives_reload(tmp_path
     assert manager.current_backend.effort == "low"
     reloaded = _make_manager(manager.config.workspace_dir)
     assert reloaded.config.allowed_backends[0]["effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_controls_degrade_gracefully_when_instance_registry_errors(tmp_path, monkeypatch):
+    from orchestrator.agent_presence_control_api import AgentPresenceControls
+    from tools.instance_registry import InstanceRegistry, InstanceRegistryError
+
+    async def worker(self, name, body):
+        return {"ok": True, "agent_id": name, "configuration": {"engine": "codex-cli"},
+                "configuration_version": "version", "online": True}
+
+    def broken_records(self):
+        raise InstanceRegistryError("Instance registry schema/environment mismatch")
+
+    monkeypatch.setattr(AgentPresenceControls, "worker", worker)
+    monkeypatch.setattr(InstanceRegistry, "records", broken_records)
+    api = server_at(tmp_path)
+    async with TestClient(TestServer(api.app)) as client:
+        response = await client.get("/api/agentpresence/controls?instance_id=TEST")
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["ok"] is True
+        assert payload["instances"] == []

@@ -10,15 +10,13 @@ from tests.test_agentpresence_controls import server_at
 
 
 @pytest.mark.asyncio
-async def test_local_desktop_context_is_primary_and_follows_route(tmp_path, monkeypatch):
+async def test_local_desktop_context_is_primary_and_follows_route(tmp_path):
     api = server_at(tmp_path)
-    monkeypatch.setattr(agent_presence_notify, "token_matches", lambda token: token == "secret")
-    headers = {"X-AP-Token": "secret"}
     async with TestClient(TestServer(api.app)) as client:
         path = "/api/agentpresence/desktop-context?instance_id=TEST"
-        assert (await client.get(path)).status == 401
-        assert (await client.get(path.replace("TEST", "OTHER"), headers=headers)).status == 409
-        first = await client.get(path, headers=headers)
+        assert (await client.get(path, headers={"X-Forwarded-For": "203.0.113.10"})).status == 403
+        assert (await client.get(path.replace("TEST", "OTHER"))).status == 409
+        first = await client.get(path)
         assert first.status == 200
         body = await first.json()
         primary = api.session_store.resolve_primary_session(owner_id="user:7", agent_id="agent1", establish=True)
@@ -27,9 +25,9 @@ async def test_local_desktop_context_is_primary_and_follows_route(tmp_path, monk
         assert body["context_generation"] == primary["context_generation"]
         next_session = api.session_store.create_session(owner_id="user:7", agent_id="agent1")
         api.session_store.bind_primary_session(owner_id="user:7", agent_id="agent1", session_id=next_session["session_id"])
-        assert (await (await client.get(path, headers=headers)).json())["session_id"] == next_session["session_id"]
+        assert (await (await client.get(path)).json())["session_id"] == next_session["session_id"]
         agent_presence_settings.set_default_agent(tmp_path, "agent2")
-        changed = await (await client.get(path, headers=headers)).json()
+        changed = await (await client.get(path)).json()
         assert changed["agent_id"] == "agent2"
         assert changed["route_revision"] > body["route_revision"]
 

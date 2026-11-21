@@ -59,16 +59,15 @@ def _json_request(
     path: str,
     payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """One bounded token-authenticated AP settings request; never raises."""
+    """One bounded localhost AP settings request; never raises."""
     token = _token()
-    if not token:
-        return None
     data = None
     headers = {
-        "X-AP-Token": token,
         "User-Agent": "hashi-agent-presence/1",
         "Accept": "application/json",
     }
+    if token:
+        headers["X-AP-Token"] = token
     if payload is not None:
         try:
             data = json.dumps(dict(payload)).encode("utf-8")
@@ -98,8 +97,8 @@ def _json_request(
 
 
 async def call_video_output(bridge_home, owner_id, binding, *, instance_id, generation):
-    """Negotiate the scoped AV port using this Connector's credential owner."""
-    if not mirror_enabled(bridge_home, owner_id) or not _token():
+    """Negotiate the scoped AV port using this Connector's local endpoint."""
+    if not mirror_enabled(bridge_home, owner_id):
         return None
     from orchestrator.agent_presence_call_video import AgentPresenceCallVideo
     import hashlib
@@ -144,12 +143,11 @@ def _post(path: str, *, data: bytes | None = None, content_type: str = "",
           caption_id: str = "", caption_producer: str = "") -> bool:
     """POST to the companion; True only on an accepted response.  Never raises."""
     token = _token()
-    if not token:
-        return False
     headers = {
-        "X-AP-Token": token,
         "User-Agent": "hashi-agent-presence/1",
     }
+    if token:
+        headers["X-AP-Token"] = token
     if content_type:
         headers["Content-Type"] = content_type
     if caption_id and caption_producer:
@@ -256,7 +254,7 @@ class AgentPresenceConnectorAdapter:
         from orchestrator.frontend_connector_registry import require_connector_event
 
         require_connector_event(self.connector_id, event)
-        if not self.enabled or not _token():
+        if not self.enabled:
             return _receipt(event, endpoint_id, "skipped")
 
         semantic_kind = str(event.get("semantic_kind") or "").strip().casefold()

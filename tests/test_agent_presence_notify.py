@@ -85,17 +85,21 @@ def test_owner_enabled_notifications_use_token_authenticated_local_api(
     assert dict(requests[3][0].header_items())["Content-type"] == "audio/ogg"
 
 
-def test_missing_companion_or_token_is_fail_open(tmp_path, monkeypatch):
+def test_missing_companion_is_fail_open_and_missing_token_still_notifies_local_ap(tmp_path, monkeypatch):
     bridge_home = tmp_path / "bridge"
     set_connector_preference(bridge_home, "owner-a", "agentpresence", "mirror", True)
     monkeypatch.delenv("APPDATA", raising=False)
-    assert agent_presence_notify.call_started(bridge_home, "owner-a") is False
+    monkeypatch.setenv("AGENT_PRESENCE_URL", "http://127.0.0.1:7740/")
+    seen = []
 
-    appdata = tmp_path / "appdata"
-    token_dir = appdata / "AgentPresence"
-    token_dir.mkdir(parents=True)
-    (token_dir / "ap-token").write_text("local-token", encoding="utf-8")
-    monkeypatch.setenv("APPDATA", str(appdata))
+    def _local_ok(request, *, timeout):
+        seen.append((request.full_url, dict(request.header_items())))
+        return _Response()
+
+    monkeypatch.setattr(agent_presence_notify.urllib.request, "urlopen", _local_ok)
+    assert agent_presence_notify.call_started(bridge_home, "owner-a") is True
+    assert len(seen) == 1
+    assert "X-ap-token" not in seen[0][1]
 
     def _unreachable(*_args, **_kwargs):
         raise OSError("companion unavailable")
