@@ -3427,6 +3427,9 @@ class OpenRouterAdapter(BaseBackend):
             )
             messages.extend(tool_msgs)
             deferred_tool_result_messages.extend(deferred_msgs)
+            advisory = self._smart_tool_guidance_message(result, tc_id)
+            if advisory is not None:
+                deferred_tool_result_messages.append(advisory)
             effect_facts.append(fact)
             completed_bindings[tc_id] = (
                 binding[0],
@@ -3847,6 +3850,9 @@ class OpenRouterAdapter(BaseBackend):
                 for message in translated_messages
                 if message.get("role") != "tool"
             )
+            advisory = self._smart_tool_guidance_message(result, tc_id)
+            if advisory is not None:
+                deferred_tool_result_messages.append(advisory)
             if claim_id:
                 completed_bindings[claim_id] = (
                     binding[0],
@@ -3897,6 +3903,23 @@ class OpenRouterAdapter(BaseBackend):
         if policy.decision.value == "approval_required":
             return f"Error: tool call requires approval by enterprise policy: {tool_name}"
         return f"Error: tool call blocked by enterprise policy: {tool_name}"
+
+    @staticmethod
+    def _smart_tool_guidance_message(result: Any, tool_call_id: str) -> dict[str, str] | None:
+        """Keep the native tool result intact while presenting actionable advice."""
+        from tools.smart_tools import smart_warning_guidance
+
+        guidance = smart_warning_guidance(getattr(result, "details", None))
+        if not guidance:
+            return None
+        return {
+            "role": "system",
+            "content": (
+                "[HASHI-generated tool advisory, not a user request; "
+                f"tool_call_id={json.dumps(str(tool_call_id or ''), ensure_ascii=False)}]\n"
+                + guidance
+            ),
+        }
 
     def _tool_result_messages(
         self,

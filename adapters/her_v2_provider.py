@@ -2109,7 +2109,7 @@ class _CognitiveControlToolRegistry:
             progress_boundary=delta_application.status not in {"missing", "duplicate"},
         )
         task_snapshot = self.task_state.prompt_snapshot()
-        output = str(getattr(result, "output", "") or "").rstrip()
+        output = str(getattr(result, "output", "") or "")
         if delta_application.status != "missing":
             output += "\n\nHASHI_TASK_STATE: " + json.dumps(
                 task_snapshot,

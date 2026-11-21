@@ -87,6 +87,9 @@ async def test_cooperative_deadline_returns_partial_result_with_working_cursor(t
         if data["can_continue"]:
             assert envelope["status"] == "partial"
             assert data["next_cursor"] and data["next_cursor"] != "x" * 43
+            if data["stop_reason"] == "deadline":
+                assert any("continue this scan with next_cursor" in warning.lower()
+                           for warning in data["warnings"])
             cursor = data["next_cursor"]
         else:
             break
@@ -124,6 +127,9 @@ async def test_pagination_and_deadline_continue_without_duplicate_or_lost_matche
         if data["can_continue"]:
             assert envelope["status"] == "partial"
             assert data["next_cursor"] and data["next_cursor"] != "x" * 43
+            if data["stop_reason"] == "deadline":
+                assert any("continue this scan with next_cursor" in warning.lower()
+                           for warning in data["warnings"])
             cursor = data["next_cursor"]
         else:
             break
@@ -150,7 +156,9 @@ async def test_emergency_cleanup_reports_lost_continuation_and_reaps_worker(tmp_
     assert data["coverage_complete"] is False and data["scope_exhausted"] is False
     assert data["can_continue"] is False and data["next_cursor"] is None
     assert data.get("continuation_lost") is True
-    assert any("no continuation cursor" in warning for warning in data["warnings"])
+    assert any("no continuation cursor" in warning.lower() for warning in data["warnings"])
+    assert not any("continue this scan with next_cursor" in warning.lower()
+                   for warning in data["warnings"])
     cleanup = result.details["foreground_cleanup"]
     assert cleanup["process_reaped"] and cleanup["status"] != "cleanup_failed"
     assert elapsed < 5
@@ -227,5 +235,146 @@ async def test_deadline_result_warnings_offer_actionable_next_steps(tmp_path):
     data = payload(await registry.execute(
         "file_search", {"query": "needle", "roots": [str(repo)], "max_results": 200}))
     assert data["stop_reason"] == "deadline"
-    assert any("continue" in warning and "narrow" in warning
-               for warning in data["warnings"])
+    if data["can_continue"]:
+        assert any("continue this scan with next_cursor" in warning.lower()
+                   for warning in data["warnings"])
+    else:
+        assert not any("continue this scan with next_cursor" in warning.lower()
+                       for warning in data["warnings"])
+        assert any("fresh scan" in warning.lower() for warning in data["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_lost_scan_with_buffered_matches_offers_only_page_continuation(tmp_path, monkeypatch):
+    """A killed worker's progress can be paged, but its scan cannot resume."""
+    import sys
+
+    registry, repo, _ = registry_for(tmp_path, options={
+        "file_search": {"timeout_seconds": 0.3, "cleanup_grace_seconds": 0.2}})
+    matches = []
+    for index in range(12):
+        path = repo / f"item-{index}.txt"
+        path.write_text("needle", encoding="utf-8")
+        matches.append({"path": str(path), "type": "file", "root": str(repo),
+                        "term": "needle", "line": 1, "character_offset": 0,
+                        "excerpt": "x" * 2000})
+    event = {"kind": "progress", "matches": matches,
+             "counters": {"directories_enumerated": 1, "files_enumerated": 12,
+                          "text_files_checked": 12, "characters_read": 72,
+                          "bytes_read": None, "matches": 12, "skipped": 0, "errors": 0},
+             "coverage": {"roots": [{"path": str(repo), "exhausted": False, "failed": False}]}}
+    # The controlled child speaks the real progress protocol then stops
+    # responding, so the parent exercises its actual deadline and cleanup.
+    child_code = ("import sys,time\nsys.stdin.readline()\nprint("
+                  + repr(json.dumps(event)) + ",flush=True)\ntime.sleep(10)\n")
+    create_subprocess = asyncio.create_subprocess_exec
+
+    async def stalled_worker(*_args, **kwargs):
+        return await create_subprocess(sys.executable, "-u", "-c", child_code, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", stalled_worker)
+    args = {"query": "needle", "roots": [str(repo)], "max_results": 50}
+    audit = {"request_id": "buffered"}
+    first = await registry.execute_with_audit_context("file_search", args, audit_context=audit)
+    assert first.details["foreground_cleanup"]["process_reaped"]
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess)
+
+    pages = [json.loads(first.output)]
+    for _ in range(10):
+        data = pages[-1]["data"]
+        if not data["can_continue"]:
+            break
+        args["cursor"] = data["next_cursor"]
+        page = await registry.execute_with_audit_context("file_search", args, audit_context=audit)
+        pages.append(json.loads(page.output))
+    else:
+        pytest.fail("cached-match continuation did not terminate")
+
+    found = [item["path"] for page in pages for item in page["data"]["matches"]]
+    assert found == [item["path"] for item in matches]
+    assert len(found) == len(set(found))
+    for page in pages:
+        data = page["data"]
+        assert page["status"] == "partial" and data["continuation_lost"]
+        assert not data["coverage_complete"] and not data["scope_exhausted"]
+        assert all(not root["exhausted"] for root in data["coverage"]["roots"])
+        if data["next_cursor"]:
+            assert any("buffered matches only" in warning.lower() for warning in data["warnings"])
+            assert not any("no continuation cursor" in warning.lower() for warning in data["warnings"])
+        else:
+            assert data["stop_reason"] == "deadline"
+            assert any("fresh scan" in warning.lower() for warning in data["warnings"])
+            assert not any("next_cursor returns buffered" in warning.lower()
+                           for warning in data["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_regex_last_page_at_known_eof_does_not_offer_empty_continuation(tmp_path):
+    registry, repo, _ = registry_for(tmp_path)
+    path = repo / "last.txt"
+    path.write_text("aaa", encoding="utf-8")
+    args = {"query": "^a", "mode": "content", "match": "regex",
+            "roots": [str(path)], "max_results": 1}
+    audit = {"request_id": "eof-regex"}
+    result = await registry.execute_with_audit_context("file_search", args, audit_context=audit)
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert envelope["status"] == "success"
+    assert [item["character_offset"] for item in data["matches"]] == [0]
+    assert data["coverage_complete"] and data["scope_exhausted"]
+    assert data["stop_reason"] == "completed"
+    assert not data["can_continue"] and data["next_cursor"] is None
+
+    # A real zero-width match at EOF must still be delivered on the next page.
+    path.write_text("a", encoding="utf-8")
+    args["query"] = "a?"
+    offsets = []
+    for _ in range(4):
+        result = await registry.execute_with_audit_context("file_search", args, audit_context=audit)
+        data = json.loads(result.output)["data"]
+        offsets.extend(item["character_offset"] for item in data["matches"])
+        if not data["next_cursor"]:
+            break
+        args["cursor"] = data["next_cursor"]
+    else:
+        pytest.fail("zero-width EOF continuation did not terminate")
+    assert offsets == [0, 1]
+    assert data["coverage_complete"] and data["scope_exhausted"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pattern", "content"), [
+    ("(ab{2}){3}", "abbabbabb\n"),
+    ("^(ab+)?$", "abbb\n"),
+    ("^(ab+){1}$", "abbb\n"),
+])
+async def test_finite_regex_is_searchable_through_registry(tmp_path, pattern, content):
+    registry, repo, _ = registry_for(tmp_path)
+    path = repo / "finite.txt"
+    path.write_text(content, encoding="utf-8")
+    result = await registry.execute("file_search", {
+        "query": pattern, "mode": "content", "match": "regex",
+        "roots": [str(path)]})
+    envelope = json.loads(result.output)
+    assert envelope["status"] == "success"
+    assert [match["character_offset"] for match in envelope["data"]["matches"]] == [0]
+    assert envelope["data"]["coverage_complete"]
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_backtracking_regex_is_stopped_by_worker_budget(tmp_path):
+    registry, repo, _ = registry_for(tmp_path, options={
+        "file_search": {"timeout_seconds": 0.1, "cleanup_grace_seconds": 0.2}})
+    path = repo / "backtracking.txt"
+    path.write_text("a" * 38 + "!\n", encoding="utf-8")
+    start = asyncio.get_running_loop().time()
+    result = await registry.execute("file_search", {
+        "query": "(a|a?)+$", "mode": "content", "match": "regex", "roots": [str(path)]})
+    assert asyncio.get_running_loop().time() - start < 5
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert envelope["status"] == "partial"
+    assert not data["coverage_complete"] and data["stop_reason"] == "deadline"
+    assert data["continuation_lost"] and data["next_cursor"] is None
+    assert any("fresh scan" in warning.lower() for warning in data["warnings"])
+    assert result.details["foreground_cleanup"]["process_reaped"]
