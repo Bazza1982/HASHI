@@ -343,12 +343,17 @@ async def test_regex_last_page_at_known_eof_does_not_offer_empty_continuation(tm
 
 
 @pytest.mark.asyncio
-async def test_finite_regex_is_searchable_through_registry(tmp_path):
+@pytest.mark.parametrize(("pattern", "content"), [
+    ("(ab{2}){3}", "abbabbabb\n"),
+    ("^(ab+)?$", "abbb\n"),
+    ("^(ab+){1}$", "abbb\n"),
+])
+async def test_finite_regex_is_searchable_through_registry(tmp_path, pattern, content):
     registry, repo, _ = registry_for(tmp_path)
     path = repo / "finite.txt"
-    path.write_text("abbabbabb\n", encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     result = await registry.execute("file_search", {
-        "query": "(ab{2}){3}", "mode": "content", "match": "regex",
+        "query": pattern, "mode": "content", "match": "regex",
         "roots": [str(path)]})
     envelope = json.loads(result.output)
     assert envelope["status"] == "success"

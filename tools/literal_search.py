@@ -35,7 +35,7 @@ def _regex_guard(pattern_text: str, *, ignore_case: bool = False) -> str | None:
     """
     # This heuristic is not a proof of safety; the managed worker deadline
     # remains the boundary for patterns it does not recognize.
-    if re.search(r"\([^()]*(?:[+*]|\{\d+,\})[^()]*\)[+*{?]", pattern_text):
+    if re.search(r"\([^()]*(?:[+*]|\{\d+,\})[^()]*\)(?:[+*]|\{\d+,\})", pattern_text):
         return 'nested_quantifiers'
     # Repeating literal alternatives where one is a prefix of another can
     # backtrack exponentially (for example, a failing search for (a|aa)+).
