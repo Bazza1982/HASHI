@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.commands.compact import compact_command
 from orchestrator.context_compaction import (
     CAPSULE_FORMAT,
     ContextCompactionCoordinator,
@@ -96,7 +94,7 @@ async def _async_empty():
 
 
 @pytest.mark.asyncio
-async def test_t27_fixed_mode_installs_history_tracks_incremental_tokens_and_filters_compacted_turns(tmp_path):
+async def test_fixed_mode_retains_unverified_history_while_installing_capsule(tmp_path):
     runtime = _fixed_runtime(tmp_path)
     # Seed 12 older turns (beyond recent_exchanges guard) so compaction can summarize prefix.
     for i in range(12):
@@ -126,7 +124,7 @@ async def test_t27_fixed_mode_installs_history_tracks_incremental_tokens_and_fil
 
     inc_sections, _ = install_history_section(runtime, [], capsule_only_for_incremental=True)
     assert len(inc_sections) == 1
-    assert inc_sections[0][2]["compacted_through_ts"] == max_ts
+    assert len(inc_sections[0]) == 2  # No Run identity proves this separate history was compacted.
 
     class _FixedBackend:
         _session_id = "her-fixed-1"
@@ -157,7 +155,7 @@ async def test_t27_fixed_mode_installs_history_tracks_incremental_tokens_and_fil
 
     runtime.backend_manager.current_backend = _FixedBackend()
 
-    # Open session (Turn 1) with an early conversation_at covered by capsule.
+    # This separate session's timestamp overlaps the capsule but its Run is not covered.
     early_ts = max_ts
     payload1 = runtime.context_assembler.build_prompt_payload("Turn 1 prompt", "her-v2", extra_sections=[])
     enc1, audit1 = runtime.backend_manager.current_backend.prepare_fixed_turn_input(
@@ -178,8 +176,7 @@ async def test_t27_fixed_mode_installs_history_tracks_incremental_tokens_and_fil
     acc2 = session_coord.accept(enc2)
     session_coord.complete(acc2, assistant_text="Reply 2 fresh context")
 
-    # Turn 3 arrives after capsule synced: Turn 1 (<= max_ts) is excluded from LLM prompt history,
-    # Turn 2 (> max_ts) stays, while raw store retains BOTH turns for audit!
+    # Both unrelated Turns remain visible; a coincident timestamp is not proof of coverage.
     payload3 = runtime.context_assembler.build_prompt_payload("Turn 3 prompt", "her-v2", extra_sections=inc_sections)
     enc3, audit3 = runtime.backend_manager.current_backend.prepare_fixed_turn_input(
         prompt_payload=payload3, user_message="Turn 3 prompt", request_id="req-3", request_meta={"conversation_at": later_ts}
@@ -188,7 +185,7 @@ async def test_t27_fixed_mode_installs_history_tracks_incremental_tokens_and_fil
     acc3 = session_coord.accept(enc3)
     assert "Compacted historical summary." in acc3.materialized_prompt
     assert "Turn 2 prompt" in acc3.materialized_prompt
-    assert "Reply 1 early old history" not in acc3.materialized_prompt
+    assert "Reply 1 early old history" in acc3.materialized_prompt
     assert len(session_coord.store.recent_completed_turns("her-fixed-1")) == 2
 
 

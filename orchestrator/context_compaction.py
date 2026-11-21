@@ -1605,16 +1605,107 @@ def render_history(
     return "\n\n".join(blocks)
 
 
-def _covered_through_ts(snapshot: HistorySnapshot) -> str:
-    if snapshot.covered_through_turn_id <= 0:
-        return ""
-    latest = ""
-    for row in snapshot.all_turns:
-        if int(row.get("id") or 0) <= snapshot.covered_through_turn_id:
-            ts = str(row.get("ts") or "").strip()
-            if ts and ts > latest:
-                latest = ts
-    return latest
+def _fixed_history_coverage(
+    runtime: Any,
+    snapshot: HistorySnapshot,
+    *,
+    workspace_dir: Path | None,
+    memory_store: Any | None,
+) -> dict[str, Any]:
+    """Prove a contiguous HER prefix against PCM source hashes and PAO Run IDs."""
+    if workspace_dir is None or memory_store is None or snapshot.active_record is None:
+        return {}
+    backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
+    her_id = str(getattr(backend, "_session_id", "") or "")
+    her_store = getattr(getattr(backend, "_session_coordinator", None), "store", None)
+    pao_store = getattr(runtime, "session_store", None)
+    if not her_id or her_store is None or pao_store is None:
+        return {}
+    try:
+        session = her_store.session(her_id)
+        if not isinstance(session, Mapping):
+            return {}
+        conversation = str(session.get("hashi_conversation_id") or "")
+        owner = str(session.get("owner_id") or "")
+        agent = str(session.get("agent_id") or "")
+        generation = int(session.get("context_generation") or 0)
+        if (
+            not conversation or not owner or not agent or generation <= 0
+            or agent.casefold() != str(getattr(runtime, "name", "")).casefold()
+            or str(session.get("instance_id") or "").casefold()
+               != str(getattr(pao_store, "instance_id", "")).casefold()
+            or Path(workspace_dir).resolve()
+               != (Path(pao_store.workspaces_root) / conversation / f"generation_{generation}").resolve()
+            or Path(memory_store.db_path).parent.resolve() != Path(workspace_dir).resolve()
+            or Path(str(session.get("workzone_identity") or "")).resolve() != Path(workspace_dir).resolve()
+        ):
+            return {}
+        source_hashes = snapshot.active_record.get("source_hashes")
+        if not isinstance(source_hashes, Mapping):
+            return {}
+        rows_by_id = {int(row.get("id") or 0): row for row in snapshot.all_turns}
+        exchange_by_run: dict[str, Mapping[str, Any]] = {}
+        prefix = f"session:{conversation}:run:"
+        for exchange in memory_store.get_completed_exchanges(limit=max(1, len(rows_by_id))):
+            reference = str(exchange.get("origin_ref") or "")
+            if exchange.get("origin") != "session" or not reference.startswith(prefix):
+                continue
+            run_id = reference[len(prefix):]
+            user_id = int(exchange.get("user_turn_id") or 0)
+            assistant_id = int(exchange.get("assistant_turn_id") or 0)
+            if not run_id or not (0 < user_id <= snapshot.covered_through_turn_id):
+                continue
+            if not (0 < assistant_id <= snapshot.covered_through_turn_id):
+                continue
+            user_row, assistant_row = rows_by_id.get(user_id), rows_by_id.get(assistant_id)
+            if not user_row or not assistant_row:
+                continue
+            if (
+                source_hashes.get(f"turn:{user_id}") != _turn_segment(user_row).source_hash
+                or source_hashes.get(f"turn:{assistant_id}") != _turn_segment(assistant_row).source_hash
+                or str(user_row.get("role") or "").casefold() != "user"
+                or str(assistant_row.get("role") or "").casefold() != "assistant"
+                or str(user_row.get("text") or "").strip() != str(exchange.get("user_text") or "").strip()
+                or str(assistant_row.get("text") or "").strip() != str(exchange.get("assistant_text") or "").strip()
+            ):
+                continue
+            exchange_by_run[run_id] = exchange
+        request_by_run = pao_store.compaction_request_ids(
+            session_id=conversation, owner_id=owner, agent_id=agent,
+            context_generation=generation, run_ids=exchange_by_run,
+        )
+        exchange_by_request = {
+            request: exchange_by_run[run]
+            for run, request in request_by_run.items()
+        }
+        last: Mapping[str, Any] | None = None
+        covered_prefix: list[list[Any]] = []
+        for turn in her_store.recent_completed_turns(her_id):
+            exchange = exchange_by_request.get(str(turn.get("request_id") or ""))
+            if (
+                exchange is None
+                or str(turn.get("session_id") or "") != her_id
+                or str(turn.get("user_message") or "").strip() != str(exchange.get("user_text") or "").strip()
+                or str(turn.get("assistant_text") or "").strip() != str(exchange.get("assistant_text") or "").strip()
+            ):
+                break
+            last = turn
+            covered_prefix.append([
+                int(turn["sequence"]), str(turn["request_id"]),
+                _sha256_bytes(str(turn.get("user_message") or "").encode("utf-8")),
+                _sha256_bytes(str(turn.get("assistant_text") or "").encode("utf-8")),
+            ])
+        if last is None:
+            return {}
+        return {
+            "compacted_her_session_id": her_id,
+            "compacted_through_her_sequence": int(last["sequence"]),
+            "compacted_through_her_request_id": str(last["request_id"]),
+            "compacted_her_prefix_digest": _sha256_json(covered_prefix),
+        }
+    except (AttributeError, KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
+        logger.warning("Fixed history coverage could not be verified; retaining history: %s", type(exc).__name__)
+        return {}
 
 
 def install_history_section(
@@ -1667,10 +1758,9 @@ def install_history_section(
             eligible_turns=(),
             recent_turns=(),
         )
-        section_meta: dict[str, Any] = {}
-        covered_ts = _covered_through_ts(snapshot)
-        if covered_ts:
-            section_meta["compacted_through_ts"] = covered_ts
+        section_meta = _fixed_history_coverage(
+            runtime, snapshot, workspace_dir=workspace_dir, memory_store=memory_store
+        )
         section_body = render_history(
             capsule_snapshot,
             protected_only=protected_only,
@@ -1731,10 +1821,10 @@ def install_history_section(
         or cross_session_entries
         or primary_timeline_entries
     ):
-        section_meta = {}
-        covered_ts = _covered_through_ts(snapshot)
-        if snapshot.active_capsule is not None and covered_ts:
-            section_meta["compacted_through_ts"] = covered_ts
+        section_meta = (
+            _fixed_history_coverage(runtime, snapshot, workspace_dir=workspace_dir, memory_store=memory_store)
+            if snapshot.active_capsule is not None else {}
+        )
         rendered_body = render_history(
             snapshot,
             protected_only=protected_only,

@@ -671,49 +671,47 @@ class HerBackendSessionCoordinator:
         )
 
     @staticmethod
-    def _parse_utc_epoch(value: Any) -> float | None:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.timestamp()
-        except (TypeError, ValueError, OverflowError, OSError):
-            return None
-
-    @classmethod
     def _uncompacted_history(
-        cls,
         pcm: Mapping[str, Any],
         history: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
+        entries = [dict(item) for item in history if isinstance(item, Mapping)]
         section = pcm.get("extra:hashi_managed_conversation_history")
-        if not isinstance(section, Mapping):
-            return [dict(item) for item in history if isinstance(item, Mapping)]
-        metadata = section.get("metadata")
-        cutoff_raw = (
-            metadata.get("compacted_through_ts")
-            if isinstance(metadata, Mapping)
-            else None
-        )
-        cutoff_epoch = cls._parse_utc_epoch(cutoff_raw)
-        if cutoff_epoch is None:
-            return [dict(item) for item in history if isinstance(item, Mapping)]
-        filtered: list[dict[str, Any]] = []
-        for item in history:
-            if not isinstance(item, Mapping):
-                continue
-            item_epoch = cls._parse_utc_epoch(
-                item.get("conversation_at")
-                or item.get("completed_at")
-                or item.get("accepted_at")
-            )
-            if item_epoch is not None and item_epoch <= cutoff_epoch:
-                continue
-            filtered.append(dict(item))
-        return filtered
+        metadata = section.get("metadata") if isinstance(section, Mapping) else None
+        if not isinstance(metadata, Mapping):
+            return entries
+        session_id = str(metadata.get("compacted_her_session_id") or "")
+        boundary_request = str(metadata.get("compacted_through_her_request_id") or "")
+        expected_digest = str(metadata.get("compacted_her_prefix_digest") or "")
+        try:
+            boundary = int(metadata.get("compacted_through_her_sequence") or 0)
+        except (TypeError, ValueError):
+            return entries
+        if not session_id or not boundary_request or not expected_digest or boundary <= 0:
+            return entries
+        prefix: list[list[Any]] = []
+        previous = 0
+        for index, item in enumerate(entries):
+            try:
+                sequence = int(item.get("sequence") or 0)
+            except (TypeError, ValueError):
+                return entries
+            request_id = str(item.get("request_id") or "")
+            if str(item.get("session_id") or "") != session_id or sequence <= previous:
+                return entries
+            prefix.append([
+                sequence, request_id,
+                "sha256:" + hashlib.sha256(str(item.get("user_message") or "").encode("utf-8")).hexdigest(),
+                "sha256:" + hashlib.sha256(str(item.get("assistant_text") or "").encode("utf-8")).hexdigest(),
+            ])
+            if sequence == boundary:
+                if request_id == boundary_request and _digest(prefix) == expected_digest:
+                    return entries[index + 1:]
+                return entries
+            if sequence > boundary:
+                return entries
+            previous = sequence
+        return entries
 
     @staticmethod
     def _render_prompt(

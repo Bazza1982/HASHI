@@ -351,6 +351,14 @@ at an applicable bootstrap, rebase, or explicit continuation event such as
 cross-Session Context or `/handoff`. Engine Adapters that do not yet support the
 same delta contract must declare their full-projection behaviour explicitly.
 
+When a Compact capsule replaces fixed-Session history, PCM identifies a
+contiguous covered Engine-history prefix using the Session's completed PAO Runs
+and the capsule's verified source-turn hashes. HERV3 checks the exact Session,
+boundary and prefix digest before excluding those turns from the model context.
+Timestamps alone never establish coverage. If identity or content cannot be
+verified, HERV3 retains the original history; this can reduce the space saved
+until coverage is established. Compact does not delete the durable raw turns.
+
 #### Passive retrieval: stateless or per-turn Engine invocations
 
 When an Engine Adapter has no durable Engine Session, PCM sends the current user
