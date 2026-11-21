@@ -6,7 +6,6 @@ import base64
 import hmac
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -23,7 +22,43 @@ class DesktopSession:
     client: str
     binding: dict
     expires: float
+    last_touch: float
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+def _is_loopback(request) -> bool:
+    return (getattr(request, "remote", None) or "") in {"127.0.0.1", "::1", "localhost"}
+
+
+def _admit_and_resolve_owner(api, request) -> str:
+    """Admit a desktop caller and resolve its authenticated owner.
+
+    Trust boundary (host-level model, reviewed 2026-11-19):
+
+    * Loopback callers (the local Workbench on 127.0.0.1/::1) are exempt from
+      the HASHI admin token. Loopback reachability is a host-level boundary,
+      not a Windows-session boundary: on a multi-user Windows host, a process
+      in ANY OS user session can reach a service bound to 127.0.0.1, so
+      reachability alone does not prove the caller belongs to the interactive
+      user's own session. The supported deployment assumes a single trusted
+      OS user on this workstation; under that assumption the token only binds
+      the local entry to a rotatable HASHI secret and the exemption removes a
+      false gate, not a real one. Multi-user hosts need a per-session boundary
+      (see docs/HASHI_MANUAL_DESKTOP.md, "Multi-user hosts").
+    * Remote callers keep the existing admin-token requirement. A remote hop
+      with no configured admin token is always rejected.
+    * A loopback caller whose owner cannot be resolved falls back to the
+      reserved "workbench-local" identity; the resolved owner is pinned for
+      the lifetime of the session and is never derived from the client.
+    """
+    if not _is_loopback(request) and (not api.admin_token or not api._check_admin_auth(request)):
+        raise DesktopError("desktop_auth_required", 403)
+    owner = api._v1_owner_id(request)
+    if owner:
+        return owner
+    if _is_loopback(request):
+        return "workbench-local"
+    raise DesktopError("desktop_auth_required", 403)
 
 
 class DesktopSessionService:
@@ -37,6 +72,92 @@ class DesktopSessionService:
         if broker is None: raise DesktopError("desktop_worker_unavailable", 503)
         return broker
 
+    async def _evict_for_capacity(self):
+        """Never refuse the current user: drop the least recently touched session."""
+        while len(self.sessions) >= 8:
+            sid = min(self.sessions, key=lambda key: self.sessions[key].last_touch)
+            record = self.sessions.pop(sid)
+            try:
+                await self.broker().invoke_desktop(record.binding, actor_id=record.owner,
+                                                   session_id=sid, operation="desktop_close", args={})
+            except Exception:
+                pass  # Worker-side expiry remains authoritative on lost links.
+
+    @staticmethod
+    def _refresh_target(requested, targets):
+        """Resolve a requested target without ever substituting another session.
+
+        The stable identity of a desktop target is
+        (instance_id, device_id, user_session_id): one physical computer can
+        run several Windows interactive sessions, each with its own worker,
+        and matching by device alone can select the wrong session. A
+        same-device refresh is therefore only safe when the request pins the
+        same HASHI instance, device and Windows user session. A restarted
+        worker may advance worker_generation and re-register under a new
+        capability_id; those fields are allowed to change and are only used
+        to prefer the exact re-registration. Optional physical_host_id and
+        interactive_session_id identifiers are verified when both the request
+        and the live target provide them.
+
+        * An explicit request resolves to the requested session, or raises
+          desktop_target_changed when it no longer exists. It never falls
+          back to another user session or another HASHI instance that shares
+          device_id.
+        * A device-scoped request without a user session resolves only when
+          the device maps to exactly one live target; an ambiguous device is
+          reported as desktop_target_changed so the client re-discovers and
+          sends the full identity instead of guessing a session.
+        * A capability-only request resolves by unique capability identity.
+        * An absent/empty request keeps the no-target discovery behaviour and
+          selects the first registered target.
+        """
+        if not targets:
+            raise DesktopError("desktop_worker_unavailable", 503)
+        if not isinstance(requested, dict) or not requested:
+            return targets[0]
+
+        instance_id = requested.get("instance_id")
+        device_id = requested.get("device_id")
+        user_session_id = requested.get("user_session_id")
+        capability_id = requested.get("capability_id")
+        physical_host_id = requested.get("physical_host_id")
+        interactive_session_id = requested.get("interactive_session_id")
+        if not any((instance_id, device_id, user_session_id, capability_id,
+                    physical_host_id, interactive_session_id)):
+            return targets[0]
+
+        if capability_id and not any((instance_id, device_id, user_session_id,
+                                      physical_host_id, interactive_session_id)):
+            matches = [t for t in targets if t.get("capability_id") == capability_id]
+            if len(matches) == 1:
+                return matches[0]
+            raise DesktopError("desktop_target_changed", 409)
+
+        def _pins_session(target):
+            return (
+                (not instance_id or target.get("instance_id") == instance_id)
+                and (not device_id or target.get("device_id") == device_id)
+                and (not user_session_id or target.get("user_session_id") == user_session_id)
+                and (not physical_host_id or not target.get("physical_host_id")
+                     or target.get("physical_host_id") == physical_host_id)
+                and (not interactive_session_id or not target.get("interactive_session_id")
+                     or target.get("interactive_session_id") == interactive_session_id)
+            )
+
+        pinned = [t for t in targets if _pins_session(t)]
+        if not pinned:
+            raise DesktopError("desktop_target_changed", 409)
+        if capability_id:
+            for target in pinned:
+                if target.get("capability_id") == capability_id:
+                    return target
+        if len(pinned) == 1:
+            return pinned[0]
+        # Multiple live targets satisfy the request identity: guessing a user
+        # session or an instance is exactly the substitution this guard exists
+        # to prevent. The client re-discovers and sends the full identity.
+        raise DesktopError("desktop_target_changed", 409)
+
     async def run(self, owner, body):
         b = fields(body, {"operation", "client_id", "session_id", "target", "options", "after_frame", "refresh_profile", "mode", "lease_id", "event"}, {"operation", "client_id"})
         client = identifier(b["client_id"], "client")
@@ -47,15 +168,18 @@ class DesktopSessionService:
             return {"targets": self.broker().desktop_targets(), "protocol_version": 1}
         if op == "open":
             async with self.open_lock:
-                if len(self.sessions) >= 8: raise DesktopError("desktop_session_limit", 429)
-                target = b.get("target")
                 targets = self.broker().desktop_targets()
-                if not isinstance(target, dict) or target not in targets:
-                    raise DesktopError("desktop_target_changed", 409)
+                target = self._refresh_target(b.get("target"), targets)
                 sid = "desktop-"+uuid4().hex
+                # Validate the target and the open operation BEFORE evicting
+                # any existing session: a failed open must never disrupt an
+                # active viewer. Capacity eviction only runs after the worker
+                # has confirmed the new session.
                 info = await self.broker().invoke_desktop(target, actor_id=owner, session_id=sid,
                                                          operation="desktop_info", args={})
-                record = DesktopSession(owner, client, dict(target), self.clock()+SESSION_TTL)
+                await self._evict_for_capacity()
+                now = self.clock()
+                record = DesktopSession(owner, client, dict(target), now+SESSION_TTL, now)
                 self.sessions[sid] = record
                 return {"session_id": sid, "binding": target, **info}
         sid = identifier(b.get("session_id"), "session")
@@ -63,7 +187,9 @@ class DesktopSessionService:
         if record is None: raise DesktopError("desktop_session_expired", 410)
         if not hmac.compare_digest(owner, record.owner) or not hmac.compare_digest(client, record.client):
             raise DesktopError("desktop_session_forbidden", 403)
-        record.expires = self.clock()+SESSION_TTL
+        now = self.clock()
+        record.expires = now+SESSION_TTL
+        record.last_touch = now
         mapping = {"previews": "desktop_previews", "frame": "desktop_frame", "control": "desktop_control", "input": "desktop_input", "view": "desktop_view", "close": "desktop_close"}
         if op not in mapping: raise DesktopError("desktop_invalid_operation")
         if op == "frame":
@@ -126,16 +252,7 @@ def register_desktop_api(api):
         headers = {"Cache-Control": "no-store, private", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"}
         authenticated, dispatched, readonly, phase = False, False, False, "scope"
         try:
-            if not getattr(getattr(api, "global_config", None), "desktop_enabled", True) and os.environ.get("HASHI_DESKTOP_ENABLED") != "1":
-                raise DesktopError("desktop_disabled", 404)
-            # The personal local API must have its EXISTING admin token configured.
-            # HASHI Remote injects it on the authenticated loopback hop.
-            if api._is_governed_profile():
-                raise DesktopError("desktop_profile_unsupported", 501)
-            if not api.admin_token or not api._check_admin_auth(request):
-                raise DesktopError("desktop_auth_required", 403)
-            owner = api._v1_owner_id(request)
-            if not owner: raise DesktopError("desktop_auth_required", 403)
+            owner = _admit_and_resolve_owner(api, request)
             authenticated, phase = True, "parse"
             if request.content_type != "application/json": raise DesktopError("desktop_json_required", 415)
             raw = bytearray()

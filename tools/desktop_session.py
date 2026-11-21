@@ -15,7 +15,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from orchestrator.desktop_contract import CONTROL_TTL, SESSION_TTL, MAX_FRAME_BYTES, ULTRA_BYTES_PER_SECOND, ULTRA_FRAME_BYTES, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options, preview_options, PREVIEW_MAX_BYTES, PREVIEW_INTERVAL, PREVIEW_TTL_MS
+from orchestrator.desktop_contract import CONTROL_TTL, IDLE_RESET_SECONDS, SESSION_TTL, MAX_FRAME_BYTES, ULTRA_BYTES_PER_SECOND, ULTRA_FRAME_BYTES, DesktopError, fields, frame_interval_seconds, identifier, validate_input, view_options, preview_options, PREVIEW_MAX_BYTES, PREVIEW_INTERVAL, PREVIEW_TTL_MS
 from tools.windows_helper.desktop_capture import fit_size, jpeg_bytes
 
 
@@ -74,7 +74,7 @@ class DesktopController:
             now = self.clock()
             if self.owner and now >= self.deadline:
                 self._release()
-            elif self.owner and now - self.last_contact > 3:
+            elif self.owner and now - self.last_contact > IDLE_RESET_SECONDS:
                 try: self.native.reset()
                 except Exception: pass
             for sid, session in list(self.sessions.items()):
@@ -452,7 +452,14 @@ class DesktopController:
                     }
                     raise error
                 # Close the display-change race before mapping input coordinates.
-                rows, _ = self.native.displays()
+                try:
+                    rows, _ = self.native.displays()
+                except DesktopError:
+                    # A locked/secure desktop (or a display failure) cannot
+                    # receive this input; release the OS lock so that a later
+                    # acquisition after unlock succeeds immediately.
+                    self._release()
+                    raise
                 if self._display_revision(rows, sess.view) != sess.display_revision:
                     self._release()
                     raise DesktopError("desktop_display_changed", 409)

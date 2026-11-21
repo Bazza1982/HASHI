@@ -238,9 +238,27 @@ def test_human_control_holds_real_cross_process_lock(desktop,tmp_path):
     other=_DeviceLock(tmp_path/'input.lock')
     with pytest.raises(Exception,match='lock'): other.acquire()
     with pytest.raises(DesktopError,match='busy'): control(c,'session-b','owner-b','lease-b')
-    t[0]+=9; c.expire()
+    t[0]+=31; c.expire()
     assert c.owner is None and n.resets==1
     other.acquire(); other.release()
+
+
+def test_locked_display_failure_releases_os_lock_for_later_acquisition(desktop):
+    """A locked/secure desktop failing during display read must not leave the
+    OS control lock held until TTL: the next acquisition after unlock works."""
+    controller, native, _ = desktop
+    controller.frame('', 'session-a')
+    control(controller)
+    original_displays = native.displays
+    native.locked = True
+    with pytest.raises(DesktopError, match='desktop_locked'):
+        controller.input(event(controller), 'owner-a', 'session-a', 'lease-a')
+    assert controller.owner is None
+    # Unlock and re-acquire immediately succeeds (no 30-second busy wait).
+    native.locked = False
+    native.displays = original_displays
+    acquired = control(controller)
+    assert acquired['controlling'] is True
 
 
 def test_input_retains_typed_native_failure_and_releases_its_control(desktop):
@@ -351,6 +369,29 @@ async def test_service_binds_actor_and_target_without_agent_run(desktop,tmp_path
     assert c.owner is None and not b._leases
 
 
+async def test_releasing_an_already_dropped_lease_is_idempotent(desktop, tmp_path):
+    """A release for a lease the worker already dropped succeeds without
+    error instead of 409: control release is an idempotent operation."""
+    controller, _native, _now = desktop
+    broker, _ = make_broker(tmp_path, controller)
+    pin = broker.desktop_targets()[0]
+    acquired = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'},
+    )
+    lease_id = acquired['lease_id']
+    first = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'release', 'lease_id': lease_id},
+    )
+    assert first['controlling'] is False
+    second = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'release', 'lease_id': lease_id},
+    )
+    assert second['controlling'] is False
+
+
 async def test_stale_worker_input_keeps_manual_broker_lease(desktop, tmp_path):
     controller, native, now = desktop
     broker, _ = make_broker(tmp_path, controller)
@@ -403,7 +444,7 @@ async def test_pinned_worker_generation_never_reroutes(desktop,tmp_path):
     assert n.captures==0
 
 
-async def test_concurrent_opens_cannot_exceed_session_limit():
+async def test_concurrent_opens_evict_least_recently_used_instead_of_refusing():
     class SlowBroker:
         def desktop_targets(self): return [{'capability_id': 'cap-a'}]
         async def invoke_desktop(self, *_args, **_kwargs):
@@ -412,12 +453,11 @@ async def test_concurrent_opens_cannot_exceed_session_limit():
     service = DesktopSessionService(SlowBroker)
     target = service.broker().desktop_targets()[0]
     results = await asyncio.gather(*(service.run('owner-a', {'operation': 'open', 'client_id': f'client-{n}', 'target': target}) for n in range(9)), return_exceptions=True)
-    assert sum(isinstance(r, dict) for r in results) == 8
-    assert sum(isinstance(r, DesktopError) and r.code == 'desktop_session_limit' for r in results) == 1
+    assert all(isinstance(r, dict) for r in results)
     assert len(service.sessions) == 8
 
 
-async def test_http_api_defaults_ready_and_keeps_existing_auth(desktop,tmp_path,monkeypatch):
+async def test_http_api_local_loopback_needs_no_admin_token_or_global_switch(desktop,tmp_path,monkeypatch):
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
     from orchestrator.config import GlobalConfig
@@ -426,24 +466,38 @@ async def test_http_api_defaults_ready_and_keeps_existing_auth(desktop,tmp_path,
     config=GlobalConfig(authorized_id=0)
     api=SimpleNamespace(app=web.Application(),orchestrator=SimpleNamespace(capability_broker=broker),
                         global_config=config,admin_token='',_is_governed_profile=lambda:False,
-                        _check_admin_auth=lambda r:r.headers.get('X-Workbench-Token')=='existing-token',
+                        _check_admin_auth=lambda r:False,
                         _v1_owner_id=lambda r:'owner-a')
     register_desktop_api(api)
     async with TestClient(TestServer(api.app)) as client:
         payload={'operation':'targets','client_id':'client-a'}
         monkeypatch.delenv('HASHI_DESKTOP_ENABLED',raising=False)
         r=await client.post('/api/v1/desktop/operation',json=payload)
-        assert r.status==403
-        api.admin_token='existing-token'
-        r=await client.post('/api/v1/desktop/operation',json=payload)
-        assert r.status==403
-        assert 'no-store' in r.headers['Cache-Control']
-        r=await client.post('/api/v1/desktop/operation',json=payload,headers={'X-Workbench-Token':'existing-token'})
         assert r.status==200
+        assert 'no-store' in r.headers['Cache-Control']
         assert (await r.json())['targets']
+        # A HASHI global switch must never remove the local entry point.
         config.desktop_enabled=False
-        r=await client.post('/api/v1/desktop/operation',json=payload,headers={'X-Workbench-Token':'existing-token'})
-        assert r.status==404
+        r=await client.post('/api/v1/desktop/operation',json=payload)
+        assert r.status==200
+
+
+def test_admission_gates_remote_but_never_local():
+    from orchestrator.desktop_api import _admit_and_resolve_owner, _is_loopback
+    api = SimpleNamespace(admin_token='tok', _check_admin_auth=lambda r: r.headers.get('x-a')=='ok',
+                          _v1_owner_id=lambda r: 'owner-a')
+    local = SimpleNamespace(remote='127.0.0.1', headers={})
+    remote_ok = SimpleNamespace(remote='10.1.2.3', headers={'x-a':'ok'})
+    remote_bad = SimpleNamespace(remote='10.1.2.3', headers={})
+    assert _is_loopback(local) and not _is_loopback(remote_ok)
+    assert _admit_and_resolve_owner(api, local) == 'owner-a'
+    assert _admit_and_resolve_owner(api, remote_ok) == 'owner-a'
+    with pytest.raises(DesktopError, match='desktop_auth_required'):
+        _admit_and_resolve_owner(api, remote_bad)
+    fallback = SimpleNamespace(admin_token='', _check_admin_auth=lambda r: False, _v1_owner_id=lambda r: None)
+    assert _admit_and_resolve_owner(fallback, local) == 'workbench-local'
+    with pytest.raises(DesktopError, match='desktop_auth_required'):
+        _admit_and_resolve_owner(fallback, remote_bad)
 
 
 async def test_real_http_route_relays_frame_and_input_receipt(desktop,tmp_path,monkeypatch):
@@ -531,8 +585,51 @@ def test_abandoned_view_sessions_release_cached_frames(desktop):
         session_id = f'session-{index}'
         c.handle('desktop_view', {'display_id': 'monitor-1'}, 'owner-a', session_id)
         c.handle('desktop_frame', {}, 'owner-a', session_id)
-        now[0] += 61
+        now[0] += 601
         c.expire()
         assert len(c.sessions) == 0
     assert native.captures == 12
 # HASHI-Fingerprint: hfp_c59651ddac1849ff8beba460357f5277
+
+async def test_orphan_release_clears_the_worker_control_lock(desktop, tmp_path):
+    """A heartbeat transport failure drops the broker lease while the worker
+    still holds its OS-level control lock; the release that follows (even for
+    the already-dropped broker lease) must still reach the worker so a later
+    takeover is never blocked by the stale lock for the full TTL."""
+    controller, _native, _now = desktop
+    broker, _registration = make_broker(tmp_path, controller)
+    pin = broker.desktop_targets()[0]
+    acquired = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'})
+    lease_id = acquired['lease_id']
+    assert controller.owner == ('owner-a', 'session-a', lease_id)
+    # Inject one heartbeat transport failure: the broker drops the lease, but
+    # the worker never sees the heartbeat and keeps its OS-level lock.
+    original = broker._transport
+    fail_next = {'heartbeat': True}
+    async def flaky(reg, token, payload, timeout):
+        if (fail_next['heartbeat'] and payload['action'] == 'desktop_control'
+                and payload['args'].get('mode') == 'heartbeat'):
+            fail_next['heartbeat'] = False
+            raise DesktopError('desktop_worker_unavailable', 503)
+        return await original(reg, token, payload, timeout)
+    broker.set_transport_for_testing(flaky)
+    with pytest.raises(DesktopError, match='desktop_worker_unavailable'):
+        await broker.invoke_desktop(
+            pin, actor_id='owner-a', session_id='session-a',
+            operation='desktop_control', args={'mode': 'heartbeat', 'lease_id': lease_id})
+    assert not broker._leases
+    assert controller.owner == ('owner-a', 'session-a', lease_id)  # OS lock still held
+    # The client's release arrives for the already-dropped broker lease; it is
+    # still forwarded so the worker's OS-level lock is cleared.
+    released = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'release', 'lease_id': lease_id})
+    assert released['controlling'] is False
+    assert controller.owner is None
+    # The very next takeover succeeds immediately instead of busy for the TTL.
+    again = await broker.invoke_desktop(
+        pin, actor_id='owner-a', session_id='session-a',
+        operation='desktop_control', args={'mode': 'acquire'})
+    assert again['controlling'] is True
