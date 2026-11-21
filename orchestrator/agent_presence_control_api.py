@@ -25,11 +25,7 @@ class AgentPresenceControls:
         self.requests = {}
 
     def auth(self, request, instance):
-        try:
-            local = ipaddress.ip_address(request.remote or "").is_loopback
-        except ValueError:
-            local = False
-        if not local:
+        if not self.api._is_direct_loopback_request(request):
             raise ControlError("agentpresence_local_control_required", 403)
         rejection = self.api._agentpresence_ingress_rejection(
             request, source="agentpresence", surface="agentpresence", instance_id=instance)

@@ -36,52 +36,15 @@ def _base_url() -> str:
     return str(os.environ.get(BASE_URL_ENV) or DEFAULT_BASE_URL).rstrip("/")
 
 
-def _is_wsl() -> bool:
-    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
-        return True
-    try:
-        release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
-        return "microsoft" in release.casefold()
-    except OSError:
-        return False
-
-
-def _wsl_token_candidates(users_root: Path = Path("/mnt/c/Users")) -> list[Path]:
-    if not _is_wsl() or not users_root.is_dir():
-        return []
-    candidates: list[Path] = []
-    try:
-        entries = sorted(users_root.iterdir())
-    except OSError:
-        return []
-    for entry in entries:
-        if entry.name.casefold() in {"all users", "default", "default user", "public"}:
-            continue
-        try:
-            token_path = entry / "AppData" / "Roaming" / "AgentPresence" / "ap-token"
-            if token_path.is_file():
-                candidates.append(token_path)
-        except OSError:
-            continue
-    return candidates
-
-
 def _token() -> str:
     app_data = os.environ.get("APPDATA")
-    if app_data:
-        token_path = Path(app_data) / "AgentPresence" / "ap-token"
-        try:
-            return token_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
-    for token_path in _wsl_token_candidates():
-        try:
-            text = token_path.read_text(encoding="utf-8").strip()
-            if text:
-                return text
-        except OSError:
-            continue
-    return ""
+    if not app_data:
+        return ""
+    token_path = Path(app_data) / "AgentPresence" / "ap-token"
+    try:
+        return token_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def token_matches(candidate: Any) -> bool:
@@ -96,16 +59,15 @@ def _json_request(
     path: str,
     payload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """One bounded token-authenticated AP settings request; never raises."""
+    """One bounded localhost AP settings request; never raises."""
     token = _token()
-    if not token:
-        return None
     data = None
     headers = {
-        "X-AP-Token": token,
         "User-Agent": "hashi-agent-presence/1",
         "Accept": "application/json",
     }
+    if token:
+        headers["X-AP-Token"] = token
     if payload is not None:
         try:
             data = json.dumps(dict(payload)).encode("utf-8")
@@ -135,8 +97,8 @@ def _json_request(
 
 
 async def call_video_output(bridge_home, owner_id, binding, *, instance_id, generation):
-    """Negotiate the scoped AV port using this Connector's credential owner."""
-    if not mirror_enabled(bridge_home, owner_id) or not _token():
+    """Negotiate the scoped AV port using this Connector's local endpoint."""
+    if not mirror_enabled(bridge_home, owner_id):
         return None
     from orchestrator.agent_presence_call_video import AgentPresenceCallVideo
     import hashlib
@@ -181,12 +143,11 @@ def _post(path: str, *, data: bytes | None = None, content_type: str = "",
           caption_id: str = "", caption_producer: str = "") -> bool:
     """POST to the companion; True only on an accepted response.  Never raises."""
     token = _token()
-    if not token:
-        return False
     headers = {
-        "X-AP-Token": token,
         "User-Agent": "hashi-agent-presence/1",
     }
+    if token:
+        headers["X-AP-Token"] = token
     if content_type:
         headers["Content-Type"] = content_type
     if caption_id and caption_producer:
@@ -293,7 +254,7 @@ class AgentPresenceConnectorAdapter:
         from orchestrator.frontend_connector_registry import require_connector_event
 
         require_connector_event(self.connector_id, event)
-        if not self.enabled or not _token():
+        if not self.enabled:
             return _receipt(event, endpoint_id, "skipped")
 
         semantic_kind = str(event.get("semantic_kind") or "").strip().casefold()
