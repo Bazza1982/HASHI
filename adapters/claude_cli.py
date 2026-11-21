@@ -156,12 +156,23 @@ class ClaudeCLIAdapter(BaseBackend):
             # Capture real token usage and cost from CLI result
             usage = obj.get("usage")
             if isinstance(usage, dict):
+                cache_read = usage.get("cache_read_input_tokens")
+                cache_create = usage.get("cache_creation_input_tokens")
+                base_input = usage.get("input_tokens")
+                hit_tokens = int(cache_read) if cache_read is not None else None
+                miss_tokens = (
+                    max(0, int(base_input or 0) + int(cache_create or 0))
+                    if (cache_read is not None or cache_create is not None)
+                    else None
+                )
                 self._last_usage = TokenUsage(
-                    input_tokens=usage.get("input_tokens", 0)
-                                + usage.get("cache_creation_input_tokens", 0)
-                                + usage.get("cache_read_input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
+                    input_tokens=int(base_input or 0)
+                    + int(cache_create or 0)
+                    + int(cache_read or 0),
+                    output_tokens=int(usage.get("output_tokens") or 0),
                     thinking_tokens=0,
+                    prompt_cache_hit_tokens=hit_tokens,
+                    prompt_cache_miss_tokens=miss_tokens,
                 )
             cost = obj.get("total_cost_usd")
             if cost is not None:
@@ -330,6 +341,14 @@ class ClaudeCLIAdapter(BaseBackend):
         if use_streaming:
             cmd.append("--verbose")
             cmd.append("--include-partial-messages")
+        prompt_source = getattr(self, "system_prompt_source", None)
+        if prompt_source is not None and Path(prompt_source).is_file():
+            try:
+                system_text = Path(prompt_source).read_text(encoding="utf-8").strip()
+            except OSError:
+                system_text = ""
+            if system_text and "--append-system-prompt" not in cmd:
+                cmd.extend(["--append-system-prompt", system_text])
 
         try:
             started = time.perf_counter()
@@ -503,61 +522,6 @@ class ClaudeCLIAdapter(BaseBackend):
             text=result_text, duration_ms=duration_ms, is_success=True,
             usage=self._last_usage, cost_usd=self._last_cost_usd,
         )
-
-    # ------------------------------------------------------------------
-    # Blocking path: original communicate() for non-streaming
-    # ------------------------------------------------------------------
-
-    async def _read_blocking(
-        self,
-        proc,
-        request_id: str,
-        started: float,
-        stdin_data: bytes | None,
-        cmd: list[str],
-        is_retry: bool,
-        silent: bool,
-    ) -> BackendResponse:
-        """Original blocking communicate() path — used when no stream callback."""
-        stdout_data, stderr_data = await proc.communicate(stdin_data)
-
-        returncode = proc.returncode
-        self.current_proc = None
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        self.logger.info(
-            f"Claude request {request_id} exited "
-            f"(returncode={returncode}, duration_ms={duration_ms}, "
-            f"stdout_bytes={len(stdout_data)}, stderr_bytes={len(stderr_data)})"
-        )
-
-        if returncode != 0:
-            err_msg = stderr_data.decode(errors="replace").strip()
-            if (
-                "--no-session-persistence" in " ".join(cmd)
-                and "no-session-persistence" in err_msg.lower()
-                and not is_retry
-            ):
-                fallback_cmd = [c for c in cmd if c != "--no-session-persistence"]
-                self.logger.warning(
-                    f"Claude CLI did not accept --no-session-persistence for {request_id}; retrying once without it."
-                )
-                return await self._generate_without_flag(
-                    fallback_cmd,
-                    request_id,
-                    stdin_data,
-                    silent=silent,
-                )
-            return BackendResponse(
-                text="", duration_ms=duration_ms,
-                error=err_msg or f"Claude CLI exited with code {returncode} (no stderr)",
-                is_success=False,
-            )
-
-        response = stdout_data.decode(errors="replace").strip()
-        # if response and not silent:
-            # self.emit_console_text(response + "\n", self.logger)
-
-        return BackendResponse(text=response, duration_ms=duration_ms, is_success=True)
 
     # ------------------------------------------------------------------
     # Fallback: retry without --no-session-persistence

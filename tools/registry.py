@@ -313,21 +313,31 @@ class ToolRegistry:
             smart_options if isinstance(smart_options, dict) else {},
         )
 
+        self.config_warnings: list[dict[str, Any]] = []
         explicitly_allowed = set(allowed_tools) - {"*"}
-        if "*" in allowed_tools:
+        self._wildcard_allowed = "*" in allowed_tools
+        if self._wildcard_allowed:
             self._allowed = set(ALL_TOOL_NAMES)
-            # media_read is injected explicitly into the HER-only gateway
-            # context. A wildcard on other backends must not broaden their
-            # capabilities merely because the schema exists globally.
-            if "media_read" not in explicitly_allowed:
+            # media_read & vision_inspect are permitted under wildcard when the
+            # instance declares media roots or explicit vision configuration.
+            if "media_read" not in explicitly_allowed and not self.media_roots:
                 self._allowed.discard("media_read")
-            # Local vision is opt-in and requires explicit provider config.
-            if "vision_inspect" not in explicitly_allowed:
+            if (
+                "vision_inspect" not in explicitly_allowed
+                and not self.media_roots
+                and not self.tool_options.get("vision_inspect")
+            ):
                 self._allowed.discard("vision_inspect")
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
             unknown = set(allowed_tools) - set(ALL_TOOL_NAMES) - {"*"}
             if unknown:
+                self.config_warnings.append(
+                    {
+                        "code": "unknown_configured_tools",
+                        "unknown_tools": sorted(unknown),
+                    }
+                )
                 self.logger.warning(f"Unknown tool names in config (ignored): {unknown}")
 
         # ``bash`` remains executable for persisted/provider in-flight calls,
@@ -515,6 +525,14 @@ class ToolRegistry:
             available.intersection_update(normalized_allowlist)
         if not background_job_start_authorized(self._effective_audit_context()):
             available.discard("background_job_start")
+            if self._wildcard_allowed:
+                for bg_tool in (
+                    "background_job_status",
+                    "background_job_tail",
+                    "background_job_cancel",
+                    "background_job_list",
+                ):
+                    available.discard(bg_tool)
         if "shell" in available:
             available.discard("bash")
         unavailable_browser = False

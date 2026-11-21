@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.hashi_mcp import prepare_hashi_mcp
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     KIND_ERROR,
@@ -141,6 +142,8 @@ class AntigravityCLIAdapter(BaseBackend):
         self._output_format = "stream-json"
         self._result_payload: dict = {}
         self.access_root = str(self.config.resolve_access_root())
+        self.tool_registry = None
+        self._hashi_mcp_enabled = False
 
     # ------------------------------------------------------------------
     # conversation_id lifecycle
@@ -198,6 +201,9 @@ class AntigravityCLIAdapter(BaseBackend):
         except Exception as exc:
             self.logger.error(f"Antigravity CLI not accessible: {exc}")
             return False
+        descriptor = prepare_hashi_mcp(self, backend="antigravity-cli")
+        if descriptor is not None:
+            descriptor.close()
         return True
 
     async def handle_new_session(self) -> bool:

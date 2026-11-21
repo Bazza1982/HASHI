@@ -17,7 +17,7 @@ def _status(workspace_dir) -> tuple[bool, int]:
     return hcc.is_hcc_enabled(workspace_dir), estimate_tokens(body) if body else 0
 
 
-async def cmd_hcc(runtime: Any, update: Any, context: Any) -> None:
+async def cmd_hcc(runtime: Any, update: Any, context: Any) -> dict[str, Any] | None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     args = [str(arg).strip().casefold() for arg in (context.args or [])]
@@ -39,7 +39,11 @@ async def cmd_hcc(runtime: Any, update: Any, context: Any) -> None:
                 ui_language.tr("hcc.save_failed", error=html.escape(type(exc).__name__)),
                 parse_mode="HTML",
             )
-            return
+            return {
+                "ok": False,
+                "error_code": "hcc_save_unconfirmed",
+                "request_outcome": "unknown",
+            }
         notice = ui_language.tr("hcc.saved")
     try:
         enabled, tokens = await asyncio.to_thread(_status, runtime.workspace_dir)

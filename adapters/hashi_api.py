@@ -61,6 +61,7 @@ from adapters.openrouter_api import (
     _transient_provider_call_error,
     _utc_timestamp,
     _usage_cost_usd,
+    _usage_cache_tokens,
     _usage_thinking_tokens,
     compact_intra_turn_tool_messages,
 )
@@ -594,6 +595,7 @@ class HashiApiAdapter(OpenRouterAdapter):
 
         tool_calls = message.get("tool_calls") or None
         usage = data.get("usage") or {}
+        cache_hit, cache_miss = _usage_cache_tokens(usage)
         return _APIResult(
             text=ai_text,
             tool_calls=tool_calls,
@@ -603,6 +605,8 @@ class HashiApiAdapter(OpenRouterAdapter):
             thinking_tokens=_usage_thinking_tokens(usage),
             cost_usd=_usage_cost_usd(usage),
             reasoning_content=reasoning_text,
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             structured_data=_message_structured_data(message),
             raw_finish_reason=raw_finish_reason,
             finish_reason_present=finish_reason_present,
@@ -931,6 +935,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         full_text = "".join(text_chunks)
         tool_calls = list(tool_calls_acc.values()) if tool_calls_acc else None
         wire_evidence["transport_audit_refs"] = list(audit_refs)
+        cache_hit, cache_miss = _usage_cache_tokens(stream_usage)
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
@@ -940,6 +945,8 @@ class HashiApiAdapter(OpenRouterAdapter):
             thinking_tokens=_usage_thinking_tokens(stream_usage),
             cost_usd=_usage_cost_usd(stream_usage),
             reasoning_content="".join(reasoning_chunks),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             raw_finish_reason=(
                 finish_reason if finish_reason_present else raw_finish_reason
             ),

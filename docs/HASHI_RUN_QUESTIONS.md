@@ -99,6 +99,14 @@ The effective policy is their conjunction. `/askme` shows and changes both;
 changes this instance. Re-enabling the instance preserves Agent preferences.
 Changes are immediate and independent of presentation clients.
 
+HERV3 includes its question-card instruction only when both question tools
+are in the selected request's tool catalogue, the request permits them, and
+PAO's current Agent and instance preferences are enabled. Before composing a
+stage prompt it reads the original PAO owner; restricted hosts use a read-only
+port bound to their existing Run. If the policy cannot be read, the question
+instruction is omitted and the failure is logged. The actual question operation
+checks the authoritative policy again, including changes made after the prompt.
+
 PAO rejects a new card when either switch is off and cancels existing pending
 cards with an explicit non-answer. Both HERV3 and native Codex receive guidance
 to finish the current turn by asking the necessary question in ordinary final

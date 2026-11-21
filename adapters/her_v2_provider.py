@@ -1706,41 +1706,6 @@ class _CognitiveControlToolRegistry:
             normalized.update({"bash", "shell"})
         return frozenset(normalized)
 
-    @staticmethod
-    def _task_delta_schema() -> dict[str, Any]:
-        return {
-            "type": "object",
-            "description": (
-                "TaskState delta from prior evidence; use the system contract. "
-                "Removed before the real tool executes."
-            ),
-            "properties": {"delta_id": {"type": "string"}},
-            "required": ["delta_id"],
-            "additionalProperties": True,
-        }
-
-    @classmethod
-    def _with_task_delta(cls, definition: Mapping[str, Any]) -> dict[str, Any]:
-        item = copy.deepcopy(dict(definition))
-        function = item.get("function")
-        if not isinstance(function, Mapping):
-            return item
-        function = dict(function)
-        parameters = function.get("parameters")
-        parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
-        parameters.setdefault("type", "object")
-        properties = parameters.get("properties")
-        properties = dict(properties) if isinstance(properties, Mapping) else {}
-        properties[HASHI_TASK_DELTA_ARGUMENT] = cls._task_delta_schema()
-        parameters["properties"] = properties
-        required = [str(value) for value in parameters.get("required", [])]
-        if HASHI_TASK_DELTA_ARGUMENT not in required:
-            required.append(HASHI_TASK_DELTA_ARGUMENT)
-        parameters["required"] = required
-        function["parameters"] = parameters
-        item["function"] = function
-        return item
-
     def get_tool_definitions(self, tiers=None):
         if self.controller.awaiting_decision:
             return [self.controller.decision_schema()]
@@ -3174,6 +3139,7 @@ class HashiStageProvider(StageProvider):
         self.on_stream_event = on_stream_event
         self._commentary_port: CommentaryPort | None = None
         self._turn_services: Any | None = None
+        self._question_availability_port: Any | None = None
         self._provider_context_observer: (
             Callable[[Mapping[str, Any]], Any] | None
         ) = None
@@ -3250,6 +3216,33 @@ class HashiStageProvider(StageProvider):
         """Bind request-local HERV3 observability/liveness sidecars."""
 
         self._turn_services = services
+
+    def bind_question_availability_port(self, port: Any | None) -> None:
+        """Bind a read of this Run's current PAO question-card policy."""
+        self._question_availability_port = port if callable(port) else None
+
+    async def _question_cards_available(self) -> bool:
+        try:
+            if self._question_availability_port is not None:
+                value = self._question_availability_port()
+                if inspect.isawaitable(value):
+                    value = await value
+                if type(value) is not bool:
+                    raise ValueError("invalid question availability")
+                return value
+            runtime = self.runtime_context
+            store = getattr(runtime, "session_store", None)
+            agent_id = str(getattr(runtime, "name", "") or "").strip()
+            if store is None or not agent_id:
+                self.logger.warning("Question-card policy is unavailable for this stage")
+                return False
+            from orchestrator.run_questions import RunQuestions
+
+            policy = await asyncio.to_thread(RunQuestions(store).question_policy, agent_id)
+            return policy.get("enabled") is True
+        except Exception as error:
+            self.logger.warning("Question-card policy could not be read: %s", type(error).__name__)
+            return False
 
     def bind_provider_context(
         self,
@@ -5782,6 +5775,12 @@ class HashiStageProvider(StageProvider):
                                 model=profile.model,
                                 is_herv3=True,
                             )
+                            question_cards_available = (
+                                bool(request.context.get("question_cards_enabled", True))
+                                and bool(request.context.get("ask_user_available", True))
+                                and {"ask_user", "get_user_answer"} <= catalogue_tool_names
+                                and await self._question_cards_available()
+                            )
                             system_prompt, stage_prompt = compile_main_prompt(
                                 pcm_input=pcm_input,
                                 fallback_request=request.goal,
@@ -5789,6 +5788,7 @@ class HashiStageProvider(StageProvider):
                                 fallback_persona=(source.guidance if source.usable else ""),
                                 tools_available=request.allow_tools,
                                 developer_toolkit_enabled=toolkit_guidance,
+                                question_cards_enabled=question_cards_available,
                                 reference_projector=getattr(
                                     backend, "project_main_references", None
                                 ),
@@ -6015,7 +6015,7 @@ class HashiStageProvider(StageProvider):
                         task_state_contract(
                             lifecycle_task_state.prompt_snapshot(),
                             stage=request.stage.value,
-                            tool_enabled=cognitive_registry is not None,
+                            tool_enabled=False,
                         )
                     )
                 contract = "\n\n".join(contracts)

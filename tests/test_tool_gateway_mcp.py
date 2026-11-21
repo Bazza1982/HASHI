@@ -196,6 +196,22 @@ async def test_mcp_lists_hashi_browser_tools_and_validates_arguments(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mcp_lists_and_executes_real_file_read(tmp_path):
+    note = tmp_path / "note.txt"
+    note.write_text("MCP gateway 实际读取", encoding="utf-8")
+    gateway = ToolGateway(load_gateway_context(_write_context(_registry(tmp_path), tmp_path)))
+    listed = await _dispatch(gateway, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert "hashi_file_read" in {tool["name"] for tool in listed["result"]["tools"]}
+    result = await _dispatch(
+        gateway,
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "hashi_file_read", "arguments": {"path": str(note)}}},
+    )
+    assert result["result"].get("isError") is not True
+    assert "MCP gateway 实际读取" in result["result"]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_preserves_safe_authoritative_error_details(tmp_path, monkeypatch):
     gateway = ToolGateway(load_gateway_context(_write_context(_registry(tmp_path), tmp_path)))
 

@@ -113,14 +113,21 @@ def compile_main_prompt(
     fallback_persona: str = "",
     tools_available: bool = True,
     developer_toolkit_enabled: bool = False,
+    question_cards_enabled: bool | None = None,
     reference_projector: Callable[[dict], dict] | None = None,
 ) -> tuple[str, str]:
     """Compile one model request without adding another reasoning/router model call."""
     system = [MAIN_CONTRACT]
+    cards_active = (
+        bool(context.get("question_cards_enabled", True))
+        and bool(context.get("ask_user_available", True))
+        and (question_cards_enabled is not False)
+    )
     if not tools_available:
         system.append(NO_TOOLS_CONTRACT)
     else:
-        system.append(QUESTION_CONTRACT)
+        if cards_active:
+            system.append(QUESTION_CONTRACT)
         if developer_toolkit_enabled or bool(context.get("developer_toolkit_enabled")):
             if DEVELOPER_TOOLKIT_CONTRACT not in system:
                 system.append(DEVELOPER_TOOLKIT_CONTRACT)

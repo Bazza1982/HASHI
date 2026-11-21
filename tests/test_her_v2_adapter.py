@@ -4847,6 +4847,89 @@ async def test_her_v3_native_wire_renders_current_call_policy_without_quoting_da
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question_tools", "setting", "expect_cards"),
+    [(False, True, False), (True, True, True), (True, False, False)],
+)
+async def test_her_v3_question_guidance_follows_real_tool_catalogue(
+    question_tools, setting, expect_cards, tmp_path
+):
+    from orchestrator.her_v2.v3_prompt import QUESTION_CONTRACT
+    from orchestrator.session_store import SessionStore
+
+    class QuestionRegistry(_BaseToolRegistry):
+        def get_tool_definitions(self, tiers=None):
+            definitions = super().get_tool_definitions(tiers)
+            if question_tools:
+                definitions.extend(
+                    {"type": "function", "function": {"name": name}}
+                    for name in ("ask_user", "get_user_answer")
+                )
+            return definitions
+
+        def is_allowed(self, name):
+            return (question_tools and name in {"ask_user", "get_user_answer"}) or super().is_allowed(name)
+
+        def allowed_tool_names(self):
+            return super().allowed_tool_names() + (
+                ("ask_user", "get_user_answer") if question_tools else ()
+            )
+
+    manager = _FakeManager()
+    store = SessionStore(tmp_path / "sessions.sqlite", instance_id="fixture")
+    provider = HashiStageProvider(
+        backend_manager=manager, tool_registry=QuestionRegistry(),
+        runtime_context=SimpleNamespace(name="zelda", session_store=store),
+    )
+    base = _stage_request(Stage.DIRECT, allow_tools=True, allow_side_effects=True)
+    request = StageRequest(**{
+        **base.__dict__,
+        "context": {
+            "her_v3": True, "pcm_input": {"current_request": "Hello"},
+            "question_cards_enabled": setting,
+        },
+    })
+    await provider.invoke(ProviderProfile("main", "openrouter-api", "configured/model"), request)
+    assert (QUESTION_CONTRACT in manager.backends[-1].sys_prompt) is expect_cards
+
+
+@pytest.mark.asyncio
+async def test_her_v3_question_guidance_follows_persisted_pao_policy(tmp_path):
+    from types import SimpleNamespace
+    from orchestrator.her_v2.v3_prompt import QUESTION_CONTRACT
+    from orchestrator.run_questions import RunQuestions
+    from orchestrator.session_store import SessionStore
+
+    class QuestionRegistry(_BaseToolRegistry):
+        def get_tool_definitions(self, tiers=None):
+            return super().get_tool_definitions(tiers) + [
+                {"type": "function", "function": {"name": name}}
+                for name in ("ask_user", "get_user_answer")
+            ]
+
+        def is_allowed(self, name):
+            return name in {"ask_user", "get_user_answer"} or super().is_allowed(name)
+
+    store = SessionStore(tmp_path / "sessions.sqlite", instance_id="fixture")
+    questions = RunQuestions(store)
+    manager = _FakeManager()
+    provider = HashiStageProvider(
+        backend_manager=manager, tool_registry=QuestionRegistry(),
+        runtime_context=SimpleNamespace(name="zelda", session_store=store),
+    )
+    base = _stage_request(Stage.DIRECT, allow_tools=True, allow_side_effects=True)
+    request = StageRequest(**{
+        **base.__dict__,
+        "context": {"her_v3": True, "pcm_input": {"current_request": "Hello"}},
+    })
+    profile = ProviderProfile("main", "openrouter-api", "configured/model")
+    for enabled in (True, False, True):
+        questions.set_question_policy(scope="agent", agent_id="zelda", enabled=enabled)
+        await provider.invoke(profile, request)
+        assert (QUESTION_CONTRACT in manager.backends[-1].sys_prompt) is enabled
+
+
+@pytest.mark.asyncio
 async def test_her_v3_chat_only_model_omits_tools_from_provider():
     manager = _FakeManager(model_tool_support={"configured/model": False})
     provider = HashiStageProvider(

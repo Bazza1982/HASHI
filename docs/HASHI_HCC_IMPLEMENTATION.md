@@ -16,9 +16,17 @@ System remain required and non-empty; an included Memory block remains non-empty
 
 `/hcc` displays status and an approximate content token count. `/hcc on` and
 `/hcc off` persist the current Agent's `hcc_enabled` boolean in its existing
-`state.json` via `WorkspaceStateStore`. The default is **OFF**. Switching affects
-the next PCM assembly, not an already executing model request. It does not
-start/stop Cron, clear HCC, change the model, or change other Agents.
+`state.json` via `WorkspaceStateStore`. Without an explicit preference, a
+non-empty HCC is available by default; absent or empty content produces no HCC
+prompt. An explicit `/hcc off` persists across restart and takes precedence
+over newly cached content until the Agent is enabled again. Refreshing or
+enqueueing a refresh does not change this preference. Switching affects the
+next PCM assembly, not an already executing model request. It does not start or
+stop Cron, clear HCC, change the model, or change other Agents.
+If preference publication cannot be confirmed, the command reports a failed
+operation and an unknown outcome through both the reply and structured receipt.
+The caller must inspect the saved state before retrying: a durability error may
+occur after the new preference was published.
 
 When ON and non-empty, **each external turn reads the full latest HCC from disk**,
 including incremental and scheduled turns, independently of Memory/Memory+
@@ -150,7 +158,7 @@ the helper does not silently repair it or fall back to another filename.
 | File | Change |
 |---|---|
 | `orchestrator/pcm.py` | Optional HCC parsing/rendering/conversion; exact body spans; serialized validated mutation; permission work before publication. |
-| `orchestrator/hcc.py` | Opt-in flag access, trusted usage instruction, entry inspection and conflict-aware replacement. |
+| `orchestrator/hcc.py` | Content-based default and explicit preference, trusted usage instruction, entry inspection and conflict-aware replacement. |
 | `orchestrator/config_json.py` | Reuse the existing process/OS lock as a format-neutral context manager. |
 | `orchestrator/bridge_memory.py` | Whole HCC each assembly; typed authority, stable keys, removals, size/hash audit; no silent truncation. |
 | `adapters/her_v2.py` | Validate and forward explicit removed-section keys to the existing Fixed coordinator. |
@@ -225,8 +233,8 @@ python scripts/check_protected_core_changes.py
 Pull the feature branch, qualify the Functions generation using the existing
 workflow, and use the normal scoped hot `/reboot` for adoption. Do not cold
 restart Core. **Adopt the parser before adding HCC to live `agent.md`.** Configure
-only desired sources and Jobs; opt in with `/hcc on` and verify current-Agent
-status. Test V1 -> V2 refresh, next-turn visibility, then OFF in a disposable
+only desired sources and Jobs; verify current-Agent status. Use `/hcc off` to
+persist an opt-out or `/hcc on` to explicitly enable it. Test V1 -> V2 refresh, next-turn visibility, then OFF in a disposable
 local Agent before using personal data. Source changes, qualified artifact and
 running Worker generation are separate facts; live adoption is still unverified.
 
