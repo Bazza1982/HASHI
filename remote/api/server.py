@@ -80,6 +80,7 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from ..attachments import AttachmentStore, STREAM_ATTACHMENT_CHUNK_BYTES
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
+from .lan_readiness import LanReadinessCache, MAX_REPORT_BYTES
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
 from ..protocol_outbound import (
     load_outbound_state,
@@ -294,6 +295,7 @@ _pairing_manager: Optional[PairingManager] = None
 _terminal_executor: Optional[TerminalExecutor] = None
 _protocol_manager = None
 _exchange_transport = None
+_lan_readiness_cache: Optional[LanReadinessCache] = None
 _hashi_root: Optional[str] = None
 _control_hashi_root: Optional[str] = None
 _control_code_root: Optional[str] = None
@@ -3111,6 +3113,7 @@ def create_app(
     peer_registry=None,
     protocol_manager=None,
     exchange_transport=None,
+    lan_readiness_cache=None,
     workbench_port: int = DEFAULT_WORKBENCH_PORT,
     hashi_root: str = None,
     control_hashi_root: str = None,
@@ -3119,7 +3122,7 @@ def create_app(
     """Create the FastAPI application with all context injected."""
 
     global _instance_info, _peer_registry, _pairing_manager, _terminal_executor
-    global _workbench_port, _hashi_root, _control_hashi_root, _control_code_root, _protocol_manager, _exchange_transport, _attachment_store
+    global _workbench_port, _hashi_root, _control_hashi_root, _control_code_root, _protocol_manager, _exchange_transport, _attachment_store, _lan_readiness_cache
 
     _instance_info = instance_info
     _peer_registry = peer_registry
@@ -3127,6 +3130,7 @@ def create_app(
     _terminal_executor = terminal_executor
     _protocol_manager = protocol_manager
     _exchange_transport = exchange_transport
+    _lan_readiness_cache = lan_readiness_cache
     _workbench_port = workbench_port
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
@@ -3210,6 +3214,9 @@ def create_app(
                 "shared_token_configured": has_shared_token(),
                 "status": health_state,
                 "discovery": discovery_status,
+                "lan_readiness": (
+                    _lan_readiness_cache.projection() if _lan_readiness_cache else None
+                ),
             }
         return {
             "ok": True,
@@ -3230,8 +3237,81 @@ def create_app(
             ),
             "trusted_view": True,
             "discovery": discovery_status,
+            "lan_readiness": (
+                _lan_readiness_cache.projection() if _lan_readiness_cache else None
+            ),
             "credential": dict(protocol_status_view.get("credential") or {}),
         }
+
+
+    @app.post("/lan-readiness/report")
+    async def lan_readiness_report(request: Request):
+        """Accept an explicit, bounded local diagnostics report (Windows doctor).
+
+        Loopback-or-HMAC only. Stores a validated snapshot for the read-only
+        /health projection; a rejected or missing report never affects any
+        other endpoint. No PowerShell, firewall scan or network probe runs on
+        this path or on any later /health read.
+        """
+        if _lan_readiness_cache is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "lan_readiness_unavailable"},
+            )
+        authenticated = try_authenticate_request(request, allow_loopback=True)
+        if not authenticated:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "authentication_required"},
+            )
+        # Enforce the 32 KiB bound BEFORE accumulating an unbounded body.
+        # A declared Content-Length rejects early; chunked uploads are read
+        # through a bounded stream so a hostile client cannot force a large
+        # in-memory buffer past the limit.
+        content_length = request.headers.get("content-length")
+        try:
+            declared_length = int(content_length) if content_length is not None else -1
+        except ValueError:
+            declared_length = -1
+        if declared_length > MAX_REPORT_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"ok": False, "error": "lan_readiness_report_too_large"},
+            )
+        raw_chunks: list[bytes] = []
+        raw_size = 0
+        try:
+            async for chunk in request.stream():
+                raw_chunks.append(chunk)
+                raw_size += len(chunk)
+                if raw_size > MAX_REPORT_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"ok": False, "error": "lan_readiness_report_too_large"},
+                    )
+        except Exception:
+            # A client abort or transport error is an empty report, not a crash.
+            raw_chunks = []
+        raw = b"".join(raw_chunks)
+        try:
+            payload = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeError, json.JSONDecodeError):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "lan_readiness_report_invalid_json"},
+            )
+        try:
+            projection = _lan_readiness_cache.update(payload)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_lan_readiness_report",
+                    "detail": str(exc)[:200],
+                },
+            )
+        return {"ok": True, "lan_readiness": projection}
 
     @app.get("/version/v1")
     async def version_query(request: Request):

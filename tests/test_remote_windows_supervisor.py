@@ -1223,8 +1223,10 @@ $ErrorActionPreference = 'Stop'
 function Get-NetFirewallRule {{ @() }}
 function Get-NetTCPConnection {{ @() }}
 function Invoke-RestMethod {{
-    param($Method, $Uri, $TimeoutSec)
-    Set-Content -LiteralPath {_ps_string(observed_uri)} -Value $Uri
+    param($Method, $Uri, $TimeoutSec, $ContentType, $Body)
+    if ($Uri -notmatch '/lan-readiness/report') {{
+        Set-Content -LiteralPath {_ps_string(observed_uri)} -Value $Uri
+    }}
     [pscustomobject]@{{
         ok=$true; status='ready';
         instance=[pscustomobject]@{{instance_id='SUPERVISOR-TLS'}};
