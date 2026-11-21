@@ -381,84 +381,11 @@ class HERv2Config:
                 )
             stage_roles[stage] = str(role).strip()
 
-        stage_reasoning_raw = raw.get("stage_reasoning") or {}
-        if not isinstance(stage_reasoning_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.stage_reasoning must be an object")
+        # HERV3 single-model normalization (line 333) removes legacy multi-stage
+        # routing keys; populate clean empty defaults instead of re-parsing them.
         stage_reasoning: dict[Stage, str] = {}
-        for stage_name, value in stage_reasoning_raw.items():
-            try:
-                stage = Stage(str(stage_name).strip().lower())
-            except ValueError as exc:
-                raise HERv2ConfigurationError(
-                    f"unknown HER v2 reasoning stage: {stage_name!r}"
-                ) from exc
-            if stage is Stage.JSON_REPAIR:
-                raise HERv2ConfigurationError(
-                    "json_repair reasoning is inherited from its rejected source stage"
-                )
-            reasoning = str(value or "").strip()
-            if not reasoning:
-                raise HERv2ConfigurationError(
-                    f"provider reasoning for stage {stage.value!r} must be non-empty"
-                )
-            stage_reasoning[stage] = reasoning
-
-        slot_models_raw = raw.get("slot_models") or {}
-        if not isinstance(slot_models_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.slot_models must be an object")
         slot_models: dict[str, str] = {}
-        for raw_slot, value in slot_models_raw.items():
-            slot = str(raw_slot).strip().lower()
-            if slot == "quick":
-                slot = "fast"
-            if slot not in {"fast", "pro"}:
-                raise HERv2ConfigurationError(
-                    f"unknown HER v2 model slot: {raw_slot!r}"
-                )
-            model = str(value or "").strip()
-            if not model:
-                raise HERv2ConfigurationError(
-                    f"model for slot {slot!r} must be non-empty"
-                )
-            slot_models[slot] = model
-
-        targets_raw = raw.get("targets") or {}
-        if not isinstance(targets_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.targets must be an object")
         targets: dict[str, ProviderTarget] = {}
-        for raw_slot, value in targets_raw.items():
-            slot = str(raw_slot).strip().lower()
-            if slot == "quick":
-                slot = "fast"
-            if slot not in {"fast", "pro"}:
-                raise HERv2ConfigurationError(
-                    f"unknown HER v2 target slot: {raw_slot!r}"
-                )
-            if not isinstance(value, Mapping):
-                raise HERv2ConfigurationError(
-                    f"HER v2 target {slot!r} must be an object"
-                )
-            targets[slot] = ProviderTarget(
-                engine=str(value.get("provider") or value.get("engine") or "").strip(),
-                model=str(value.get("model") or "").strip(),
-            )
-
-        explicit_profile_slots: dict[str, str] = {}
-        model_slots_raw = raw.get("model_slots") or {}
-        if not isinstance(model_slots_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.model_slots must be an object")
-        for raw_slot, value in model_slots_raw.items():
-            slot = str(raw_slot).strip().lower()
-            if slot == "quick":
-                slot = "fast"
-            if slot not in {"fast", "pro"}:
-                continue
-            names = value.get("profiles") if isinstance(value, Mapping) else value
-            if isinstance(names, list):
-                for name in names:
-                    profile_name = str(name or "").strip()
-                    if profile_name:
-                        explicit_profile_slots[profile_name] = slot
         fast_roles = {
             stage_roles[stage]
             for stage in {
@@ -485,174 +412,24 @@ class HERv2Config:
         if "orchestrator" in profiles:
             pro_roles.add("orchestrator")
         profile_model_slots = {
-            name: explicit_profile_slots.get(
-                name,
-                (
-                    "fast"
-                    if name not in pro_roles
-                    and (name in fast_roles or name in {"lightweight", "triage"})
-                    else "pro"
-                ),
+            name: (
+                "fast"
+                if name not in pro_roles
+                and (name in fast_roles or name in {"auxiliary", "lightweight", "triage"})
+                else "pro"
             )
             for name in profiles
         }
-
-        route_model_slots_raw = raw.get("route_model_slots") or {}
-        if not isinstance(route_model_slots_raw, Mapping):
-            raise HERv2ConfigurationError(
-                "her_v2.route_model_slots must be an object"
-            )
         route_model_slots: dict[Route, str] = {}
-        for route_name, value in route_model_slots_raw.items():
-            try:
-                route = Route(str(route_name).strip().lower())
-            except ValueError as exc:
-                raise HERv2ConfigurationError(
-                    f"unknown HER v2 route model slot: {route_name!r}"
-                ) from exc
-            slot = str(value or "").strip().lower()
-            if slot == "quick":
-                slot = "fast"
-            if slot not in {"fast", "pro"}:
-                raise HERv2ConfigurationError(
-                    f"invalid model slot {slot!r} for route {route.value!r}"
-                )
-            if route is Route.DIRECT and slot != "fast":
-                raise HERv2ConfigurationError(
-                    "the Direct route always uses the Quick model slot"
-                )
-            route_model_slots[route] = slot
-        for route, slot in route_model_slots.items():
-            if slot not in slot_models and slot not in targets:
-                raise HERv2ConfigurationError(
-                    f"route {route.value!r} selects undefined model slot {slot!r}"
-                )
-
-        route_targets_raw = raw.get("route_targets") or {}
-        if not isinstance(route_targets_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.route_targets must be an object")
         route_targets: dict[Route, ProviderTarget] = {}
-        for route_name, value in route_targets_raw.items():
-            try:
-                route = Route(str(route_name).strip().lower())
-            except ValueError as exc:
-                raise HERv2ConfigurationError(
-                    f"unknown HER v2 custom route target: {route_name!r}"
-                ) from exc
-            if route is Route.DIRECT:
-                raise HERv2ConfigurationError(
-                    "the Direct route always uses the Quick model slot and cannot "
-                    "select a custom target"
-                )
-            if not isinstance(value, Mapping):
-                raise HERv2ConfigurationError(
-                    f"HER v2 custom route target {route.value!r} must be an object"
-                )
-            route_targets[route] = ProviderTarget(
-                engine=str(value.get("provider") or value.get("engine") or "").strip(),
-                model=str(value.get("model") or "").strip(),
-            )
-
-        route_reasoning_raw = raw.get("route_reasoning") or {}
-        if not isinstance(route_reasoning_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.route_reasoning must be an object")
         route_reasoning: dict[Route, str] = {}
-        for route_name, value in route_reasoning_raw.items():
-            try:
-                route = Route(str(route_name).strip().lower())
-            except ValueError as exc:
-                raise HERv2ConfigurationError(
-                    f"unknown HER v2 reasoning route: {route_name!r}"
-                ) from exc
-            reasoning = str(value or "").strip()
-            if not reasoning:
-                raise HERv2ConfigurationError(
-                    f"provider reasoning for route {route.value!r} must be non-empty"
-                )
-            route_reasoning[route] = reasoning
-
-        fallback_raw = raw.get("fallback") or {}
-        if not isinstance(fallback_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.fallback must be an object")
-        fallback_enabled = _strict_bool(
-            fallback_raw.get("enabled", False),
-            "fallback.enabled",
-        )
+        fallback_enabled = False
         fallback_targets: dict[int, dict[str, ProviderTarget]] = {}
-        for level, key in ((1, "level1"), (2, "level2")):
-            level_raw = fallback_raw.get(key) or {}
-            if not isinstance(level_raw, Mapping):
-                raise HERv2ConfigurationError(
-                    f"her_v2.fallback.{key} must be an object"
-                )
-            parsed_targets: dict[str, ProviderTarget] = {}
-            for raw_class, value in level_raw.items():
-                model_class = str(raw_class).strip().casefold()
-                if model_class in {"fast", "quick"}:
-                    model_class = "light"
-                if model_class not in {"light", "pro"}:
-                    raise HERv2ConfigurationError(
-                        f"unknown fallback model class: {raw_class!r}"
-                    )
-                if not isinstance(value, Mapping):
-                    raise HERv2ConfigurationError(
-                        f"fallback {key}.{model_class} must be an object"
-                    )
-                parsed_targets[model_class] = ProviderTarget(
-                    engine=str(
-                        value.get("provider") or value.get("engine") or ""
-                    ).strip(),
-                    model=str(value.get("model") or "").strip(),
-                )
-            if parsed_targets:
-                fallback_targets[level] = parsed_targets
-
-        voice_routes_raw = raw.get("voice_routes") or {}
-        if not isinstance(voice_routes_raw, Mapping):
-            raise HERv2ConfigurationError("her_v2.voice_routes must be an object")
-
-        def _voice_target(key: str) -> ProviderTarget | None:
-            value = voice_routes_raw.get(key)
-            if value is None or value == "":
-                return None
-            if not isinstance(value, Mapping):
-                raise HERv2ConfigurationError(
-                    f"her_v2.voice_routes.{key} must be an object"
-                )
-            return ProviderTarget(
-                engine=str(
-                    value.get("provider") or value.get("engine") or ""
-                ).strip(),
-                model=str(value.get("model") or "").strip(),
-            )
-
         voice_route_targets: dict[Route, ProviderTarget] = {}
-        direct_voice_target = _voice_target("direct_target")
-        immediate_voice_target = _voice_target("immediate_target")
-        if direct_voice_target is not None:
-            voice_route_targets[Route.DIRECT] = direct_voice_target
-        if immediate_voice_target is not None:
-            voice_route_targets[Route.IMMEDIATE_RESPONSE] = immediate_voice_target
-        voice_fallback_text_target = _voice_target("fallback_text_target")
-        voice_triage_input_policy = str(
-            voice_routes_raw.get("triage_input_policy") or "auto"
-        ).strip().casefold()
-        voice_tools_enabled = _strict_bool(
-            voice_routes_raw.get("tools_enabled", False),
-            "voice_routes.tools_enabled",
-        )
-        known_voice_keys = {
-            "direct_target",
-            "immediate_target",
-            "fallback_text_target",
-            "triage_input_policy",
-            "tools_enabled",
-        }
-        voice_options = {
-            str(key): value
-            for key, value in voice_routes_raw.items()
-            if key not in known_voice_keys
-        }
+        voice_fallback_text_target = None
+        voice_triage_input_policy = "auto"
+        voice_tools_enabled = False
+        voice_options: dict[str, Any] = {}
 
         routing_mode = str(raw.get("routing_mode") or "").strip().lower()
         if not routing_mode:
