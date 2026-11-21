@@ -23,6 +23,10 @@ over newly cached content until the Agent is enabled again. Refreshing or
 enqueueing a refresh does not change this preference. Switching affects the
 next PCM assembly, not an already executing model request. It does not start or
 stop Cron, clear HCC, change the model, or change other Agents.
+If preference publication cannot be confirmed, the command reports a failed
+operation and an unknown outcome through both the reply and structured receipt.
+The caller must inspect the saved state before retrying: a durability error may
+occur after the new preference was published.
 
 When ON and non-empty, **each external turn reads the full latest HCC from disk**,
 including incremental and scheduled turns, independently of Memory/Memory+

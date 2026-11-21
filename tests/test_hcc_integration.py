@@ -17,6 +17,7 @@ import pytest
 from adapters.her_v2 import HERv2Adapter
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.config_json import ConfigDurabilityError
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.hcc import is_hcc_enabled, set_hcc_enabled
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator, HerFixedProtocolError
@@ -90,7 +91,9 @@ async def test_command_reports_write_failure_without_overwriting_corrupt_state(t
     state = home / "state.json"
     state.write_text("{broken", encoding="utf-8")
     result = await execute_local_command(runtime_fixture(home), "/hcc on")
-    assert result["ok"], result
+    assert result["ok"] is False, result
+    assert result["error_code"] == "hcc_save_unconfirmed"
+    assert result["request_outcome"] == "unknown"
     text = "\n".join(message["text"] for message in result["messages"])
     assert "could not be confirmed" in text.lower(), text
     assert state.read_text() == "{broken"
@@ -131,11 +134,35 @@ async def test_failed_hcc_write_preserves_entire_previous_state(tmp_path, monkey
 
     monkeypatch.setattr("orchestrator.config_json.os.replace", fail_state_publication)
     result = await execute_local_command(runtime_fixture(home), "/hcc on")
+    assert result["ok"] is False, result
+    assert result["error_code"] == "hcc_save_unconfirmed"
+    assert result["request_outcome"] == "unknown"
     text = "\n".join(message["text"] for message in result["messages"])
     assert "could not be confirmed" in text.lower()
     assert state.read_bytes() == before_state
     assert json.loads(state.read_text(encoding="utf-8")) == original
     assert (home / "agent.md").read_bytes() == before_agent
+
+
+@pytest.mark.asyncio
+async def test_hcc_committed_durability_failure_is_not_retried(tmp_path, monkeypatch):
+    home = workspace(tmp_path / "agent")
+    state = home / "state.json"
+    state.write_text(json.dumps({"hcc_enabled": False}), encoding="utf-8")
+    calls = []
+
+    def published_but_not_durable(workspace_dir, enabled):
+        calls.append((workspace_dir, enabled))
+        set_hcc_enabled(workspace_dir, enabled)
+        raise ConfigDurabilityError("directory sync failed after publication")
+
+    monkeypatch.setattr("orchestrator.runtime_hcc.hcc.set_hcc_enabled", published_but_not_durable)
+    result = await execute_local_command(runtime_fixture(home), "/hcc on")
+    assert result["ok"] is False, result
+    assert result["error_code"] == "hcc_save_unconfirmed"
+    assert result["request_outcome"] == "unknown"
+    assert len(calls) == 1
+    assert WorkspaceStateStore(home).read()["hcc_enabled"] is True
 
 
 @pytest.mark.asyncio

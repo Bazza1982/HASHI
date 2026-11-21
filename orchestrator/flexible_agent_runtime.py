@@ -6393,7 +6393,7 @@ class FlexibleAgentRuntime:
     async def cmd_hcc(self, update, context):
         from orchestrator import runtime_hcc
 
-        await runtime_hcc.cmd_hcc(self, update, context)
+        return await runtime_hcc.cmd_hcc(self, update, context)
 
     async def cmd_habit(self, update, context):
         # Resolve lazily so /reboot can replace HER command behaviour without
