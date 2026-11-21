@@ -78,6 +78,10 @@ class FileLease:
             self.overlapped = None
 
 
+class ExecutionResourceTimeout(TimeoutError):
+    """The specific wait for a process-safe execution lease expired."""
+
+
 @asynccontextmanager
 async def leases(root, groups, *, on_wait=None, timeout=600):
     """Acquire every group without retaining partial slots while waiting.
@@ -117,7 +121,7 @@ async def leases(root, groups, *, on_wait=None, timeout=600):
                 waiting = failed
             remaining = timeout - (time.monotonic() - started)
             if remaining <= 0:
-                raise TimeoutError('execution_resource_wait_timeout')
+                raise ExecutionResourceTimeout('execution_resource_wait_timeout')
             delay = min(remaining, 0.5, 0.05 * (1.5 ** min(attempt, 8)))
             attempt += 1
             await asyncio.sleep(delay)

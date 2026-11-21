@@ -14,7 +14,7 @@ from functools import wraps
 import hashlib
 import json
 from typing import Any
-from orchestrator.execution_resources import execution_budget, limit
+from orchestrator.execution_resources import ExecutionResourceTimeout, execution_budget, limit
 
 _CURRENT = ContextVar("hashi_session_execution", default=None)
 LOCAL_FIELDS = frozenset({
@@ -199,6 +199,7 @@ async def process_sessions(runtime, process_item):
     async def execute(item, session):
         execution = None
         pipeline_owns_queue = False
+        waiting_for_capacity = False
         try:
             frozen = runtime._execution_admissions.pop(item.request_id, None) or snapshot(runtime)
             from orchestrator import runtime_cancel
@@ -206,7 +207,9 @@ async def process_sessions(runtime, process_item):
                 if item.request_id in runtime_cancel.requested_ids(runtime) or runtime_cancel.queued_run_is_terminal(runtime,item):
                     await runtime_cancel.finish_queued_request(runtime,item)
                     return
+            waiting_for_capacity = True
             async with execution_budget(runtime, item, frozen):
+                waiting_for_capacity = False
                 async with runtime_cancel.transition_lock(runtime):
                     if item.request_id in runtime_cancel.requested_ids(runtime) or runtime_cancel.queued_run_is_terminal(runtime,item):
                         await runtime_cancel.finish_queued_request(runtime,item)
@@ -236,7 +239,7 @@ async def process_sessions(runtime, process_item):
         except Exception as exc:
             runtime.error_logger.exception("Session execution failed: %s", exc)
             if execution is None:
-                is_capacity_timeout = isinstance(exc, TimeoutError) or "execution_resource_wait_timeout" in str(exc)
+                is_capacity_timeout = waiting_for_capacity and isinstance(exc, ExecutionResourceTimeout)
                 await runtime._notify_request_listeners(item.request_id, {
                     "request_id": item.request_id, "success": False, "text": None,
                     "error": str(exc),

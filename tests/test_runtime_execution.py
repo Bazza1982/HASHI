@@ -184,6 +184,53 @@ async def test_cancel_while_waiting_instance_budget_cleans_queue_without_startin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("setup_error", [
+    TimeoutError("backend startup timed out"),
+    execution.ExecutionResourceTimeout("execution_resource_wait_timeout"),
+])
+async def test_backend_initialization_timeout_is_not_misreported_as_capacity(tmp_path, monkeypatch, setup_error):
+    from contextlib import asynccontextmanager
+
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.name = "capacity-fixture"
+    runtime.config = SimpleNamespace(extra={}, active_backend="codex-cli", project_root=tmp_path)
+    runtime.global_config = SimpleNamespace(project_root=tmp_path)
+    runtime.backend_manager = SimpleNamespace(current_backend=None)
+    runtime.queue = execution.SessionQueue()
+    runtime.current_request_meta = None
+    runtime.is_generating = False
+    runtime._publish_worker_metadata = AsyncMock()
+    runtime.error_logger = SimpleNamespace(exception=lambda *a: None)
+    notifications = []
+
+    async def notify(request_id, payload):
+        notifications.append(payload)
+
+    @asynccontextmanager
+    async def available_budget(*_args, **_kwargs):
+        yield 0
+
+    runtime._notify_request_listeners = notify
+    runtime._execution_admissions = {"req-setup": {
+        "config": runtime.config, "settings": {"_agents_json_global": {}},
+    }}
+    monkeypatch.setattr(execution, "execution_budget", available_budget)
+    monkeypatch.setattr(execution, "create_execution", AsyncMock(side_effect=setup_error))
+    await runtime.queue.put(SimpleNamespace(
+        request_id="req-setup", session_id="S1", source="api", summary="test",
+    ))
+    dispatcher = asyncio.create_task(execution.process_sessions(runtime, AsyncMock()))
+    try:
+        await asyncio.wait_for(runtime.queue.join(), 1.0)
+        assert len(notifications) == 1
+        assert notifications[0]["error_code"] == "session_execution_unavailable"
+        assert notifications[0]["error_retryable"] is False
+    finally:
+        dispatcher.cancel()
+        await asyncio.gather(dispatcher, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_execution_capacity_defaults_and_retryable_timeout(tmp_path, monkeypatch):
     from orchestrator import execution_resources
 
@@ -237,7 +284,7 @@ async def test_execution_capacity_defaults_and_retryable_timeout(tmp_path, monke
 
     @asynccontextmanager
     async def timeout_budget(*_a, **_kw):
-        raise TimeoutError("execution_resource_wait_timeout")
+        raise execution_resources.ExecutionResourceTimeout("execution_resource_wait_timeout")
         yield 0
 
     monkeypatch.setattr(execution, "execution_budget", timeout_budget)

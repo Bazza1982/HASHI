@@ -1312,6 +1312,10 @@ Failed attachment intake uses owner-scoped atomic unbound discard; uncertain
 admission keeps the existing idempotency identity and assets. See the nightly
 repair record for limits, focused red/green and separate adoption evidence.
 
+A Run whose wait for an instance or engine execution lease actually expires is
+reported as recoverable capacity exhaustion. A separate backend initialization
+timeout or unrelated error is not classified as a capacity timeout.
+
 
 ## FYI v1 migration clarifications
 
