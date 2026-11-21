@@ -247,6 +247,20 @@ Provider, `/model` selects one of that Provider's real model IDs, and both chang
 persist immediately for subsequent turns. Old route buttons are rejected rather
 than allowed to change ignored settings.
 
+A configured lightweight profile supplies the non-user-facing auxiliary model
+when no explicit auxiliary is set and the Provider is allowed. Otherwise that
+lane follows the selected main model with reasoning off by default. Repeated
+configuration projection preserves the selected auxiliary and its migration
+warnings; switching the main model does not silently replace an independently
+configured auxiliary.
+Applying a retained HERV2 route draft stores its compatibility data without
+changing the active HERV3 main or auxiliary target. The next rebuilt adapter
+uses the same configured targets, and ignored route fields remain visible in
+the migration warnings.
+When a legacy Execution profile becomes the selected HERV3 main target, its
+configured reasoning and other profile options are retained. The final main
+and auxiliary targets still have to satisfy the current Provider allowlist.
+
 Public Provider identity is consistent across shared, creation and per-Agent
 catalogues, offline metadata and live presentation: the `providers` dictionary
 key and its entry's `engine` use the same public name, such as `deepseek` or

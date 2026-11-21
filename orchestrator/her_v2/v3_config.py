@@ -139,14 +139,70 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             primary["reasoning"] = reasoning
     primary["reasoning"] = primary.get("reasoning") or "default"
 
+    # A normalized compatibility view may pass through this function again at
+    # the adapter/config boundary; retain its resolved auxiliary and warnings.
+    already_normalized = (
+        set(profiles) == {"main", "auxiliary"}
+        and roles.get("execution") == "main"
+        and raw.get("routing_mode") == "single"
+    )
+    inherited_warnings = raw.get("migration_warnings") if already_normalized else ()
+    migration_warnings: list[dict[str, str]] = [
+        {key: str(item.get(key) or "") for key in ("field", "action", "detail")}
+        for item in inherited_warnings
+        if isinstance(item, Mapping) and item.get("field") and item.get("action")
+    ] if isinstance(inherited_warnings, (tuple, list)) else []
+    inherited_warning_count = len(migration_warnings)
     explicit_auxiliary = isinstance(raw.get("auxiliary"), Mapping)
-    auxiliary = deepcopy(dict(raw.get("auxiliary") if explicit_auxiliary else primary))
+    normalized_auxiliary = already_normalized and isinstance(profiles.get("auxiliary"), Mapping)
+    auxiliary_origin = "main"
+    if explicit_auxiliary:
+        auxiliary = deepcopy(dict(raw["auxiliary"]))
+        auxiliary_origin = "explicit"
+    elif normalized_auxiliary:
+        previous_main = profiles.get("main")
+        previous_main = previous_main if isinstance(previous_main, Mapping) else {}
+        previous_auxiliary = profiles["auxiliary"]
+        auxiliary_origin = str(raw.get("_herv3_auxiliary_origin") or "")
+        if auxiliary_origin not in {"main", "profile", "explicit"}:
+            same_target = (
+                previous_main.get("engine") == previous_auxiliary.get("engine")
+                and previous_main.get("model") == previous_auxiliary.get("model")
+            )
+            auxiliary_origin = "main" if same_target else "profile"
+        auxiliary = deepcopy(dict(primary if auxiliary_origin == "main" else previous_auxiliary))
+    else:
+        candidate_name = "lightweight" if profiles.get("lightweight") else "triage"
+        aux_candidate = profiles.get(candidate_name)
+        if (
+            isinstance(aux_candidate, Mapping)
+            and str(aux_candidate.get("engine") or aux_candidate.get("provider") or "").strip()
+            and str(aux_candidate.get("model") or "").strip()
+        ):
+            candidate_copy = deepcopy(dict(aux_candidate))
+            if "provider" in candidate_copy:
+                candidate_copy["engine"] = candidate_copy.pop("provider")
+            candidate_engine = canonical_model_provider(candidate_copy["engine"])
+            if provider_allowlist is None or candidate_engine in provider_allowlist:
+                auxiliary = candidate_copy
+                auxiliary_origin = "profile"
+            else:
+                auxiliary = deepcopy(primary)
+                migration_warnings.append(
+                    {
+                        "field": f"profiles.{candidate_name}",
+                        "action": "fallback_to_main",
+                        "detail": f"{candidate_name} profile engine is outside v3_provider_allowlist",
+                    }
+                )
+        else:
+            auxiliary = deepcopy(primary)
     if "provider" in auxiliary:
         auxiliary["engine"] = auxiliary.pop("provider")
     # Auxiliary presentation/housekeeping stages (commentary, final style,
     # meditation, dream) must not silently inherit expensive reasoning from the
     # main target; disable reasoning by default unless explicitly requested.
-    if not explicit_auxiliary:
+    if auxiliary_origin == "main" or (not explicit_auxiliary and not normalized_auxiliary):
         auxiliary["reasoning"] = "off"
     else:
         auxiliary.setdefault("reasoning", "off")
@@ -161,6 +217,7 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             profile.pop(key, None)
 
     result["profiles"] = {"main": primary, "auxiliary": auxiliary}
+    result["_herv3_auxiliary_origin"] = auxiliary_origin
     result["stage_roles"] = {
         name: "main"
         for name in (
@@ -174,7 +231,42 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
         "stage_reasoning", "slot_models", "targets", "model_slots", "route_targets",
         "route_reasoning", "route_model_slots", "fallback", "voice_routes",
     ):
-        result.pop(key, None)
+        removed = result.pop(key, None)
+        if removed:
+            migration_warnings.append(
+                {
+                    "field": key,
+                    "action": "ignored_by_v3",
+                    "detail": f"legacy HERV2 field {key!r} is retired in HERV3 single-model routing",
+                }
+            )
+    if raw.get("strategy_tools_enabled") is True:
+        migration_warnings.append(
+            {
+                "field": "strategy_tools_enabled",
+                "action": "forced_false",
+                "detail": "strategy_tools_enabled is retired in HERV3",
+            }
+        )
+    if raw.get("planning_tools_enabled") is True:
+        migration_warnings.append(
+            {
+                "field": "planning_tools_enabled",
+                "action": "forced_false",
+                "detail": "planning_tools_enabled is retired in HERV3",
+            }
+        )
+    raw_review_limits = raw.get("review_limits")
+    if isinstance(raw_review_limits, Mapping) and any(
+        bool(v) for v in raw_review_limits.values()
+    ):
+        migration_warnings.append(
+            {
+                "field": "review_limits",
+                "action": "forced_zero",
+                "detail": "stage review_limits are retired in HERV3",
+            }
+        )
     result["routing_mode"] = "single"
     result["direct_strategy_self_selection"] = raw.get(
         "strategy_cards", raw.get("direct_strategy_self_selection", False)
@@ -184,6 +276,16 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     result["review_limits"] = {
         name: 0 for name in ("zero", "low", "medium", "high", "xhigh", "max")
     }
+    new_warnings = migration_warnings[inherited_warning_count:]
+    if new_warnings:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "HERV3 config normalization recorded %d migration warning(s): %s",
+            len(new_warnings),
+            ", ".join(item["field"] for item in new_warnings),
+        )
+    result["migration_warnings"] = tuple(migration_warnings)
     return result
 
 
@@ -208,14 +310,21 @@ def apply_v3_target(
 
     updated = deepcopy(dict(raw))
     current_main = updated.get("main")
-    current_main = dict(current_main) if isinstance(current_main, Mapping) else {}
+    if not isinstance(current_main, Mapping):
+        # Legacy configurations may have only an Execution profile. Resolve
+        # that profile before changing its target so its reasoning and other
+        # configured options survive the conversion to an explicit v3 main.
+        # The old target may have left the current allowlist; this temporary
+        # projection makes no call and the final normalization still checks
+        # both selected targets against the unchanged allowlist.
+        previous = dict(updated)
+        previous.pop("v3_provider_allowlist", None)
+        current_main = normalise_v3_config(previous)["profiles"]["main"]
+    current_main = dict(current_main)
     current_main.update(target.to_dict())
     updated["main"] = current_main
-    # The auxiliary lane follows the main target unless an explicitly separate
-    # non-user-facing auxiliary target exists in configuration, but keeps
-    # reasoning disabled by default to avoid expensive commentary calls.
-    if not isinstance(updated.get("auxiliary"), Mapping):
-        updated["auxiliary"] = {**current_main, "reasoning": "off"}
+    # Normalization preserves a configured auxiliary, or derives it from the
+    # new main target when it previously followed main.
     return normalise_v3_config(updated)
 
 

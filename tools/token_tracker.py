@@ -325,14 +325,11 @@ def resolve_usage_cost(
         except Exception:
             pass
 
-    if fact is not None and fact.status == "unknown":
+    if fact is None or fact.status == "unknown":
         try:
             from tools.pricing_sources import has_exact_openrouter_mapping
 
             if has_exact_openrouter_mapping(engine, model):
-                # An explicit moving-alias binding is authoritative. Missing
-                # OpenRouter evidence remains unknown instead of regressing to
-                # a historical local snapshot for a similarly named model.
                 return None, "unknown", "unknown"
         except Exception:
             return None, "unknown", "unknown"

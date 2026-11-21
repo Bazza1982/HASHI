@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -36,14 +37,19 @@ from adapters.openrouter_api import (
     INVALID_TOOL_CALL_REPAIR_LIMIT,
     _MEDIA_FALLBACK_TOOL_NAMES,
     OpenRouterAdapter,
+    OutboundPrivacyGate,
     ProviderCallObserverError,
     _APIResult,
     _assistant_content_text,
     _backend_failure_response,
     _effective_protocol_parameters,
+    _effect_recovery_summary,
+    _iter_provider_stream_lines,
     _message_structured_data,
     _invalid_tool_repair_prompt,
     _invalid_tool_user_error,
+    _ProviderCallBudgetExhausted,
+    _provider_call_retry_delay,
     _provider_request_id,
     _provider_protocol_error_message,
     _provider_response_decision,
@@ -52,9 +58,11 @@ from adapters.openrouter_api import (
     _response_wire_evidence,
     _stream_error_exception,
     _tool_call_protocol_summary,
+    _transient_provider_call_error,
     _utc_timestamp,
     _usage_cost_usd,
     _usage_thinking_tokens,
+    compact_intra_turn_tool_messages,
 )
 from adapters.stream_events import (
     DELIVERY_INTERNAL,
@@ -640,6 +648,21 @@ class HashiApiAdapter(OpenRouterAdapter):
             "assembly_snapshots": [],
             "transport_audit_refs": list(audit_refs),
         }
+        protocol_state: dict[str, Any] = {
+            "raw_finish_reason_present": False,
+            "raw_finish_reason": None,
+            "finish_reason_source": "missing",
+            "normalized_finish_reason": "incomplete",
+            "provider_response_id": "",
+            "transport_request_id": "",
+            "text_provided": False,
+            "text_length": 0,
+            "reasoning_availability": "unavailable",
+            "reasoning_length": 0,
+            "tool_calls": [],
+            "wire_evidence": wire_evidence,
+        }
+        inactivity_guard = self._new_her_v2_stream_inactivity_guard()
         try:
             response = await self.client.send(request, stream=True)
         except BaseException as exc:
@@ -676,7 +699,11 @@ class HashiApiAdapter(OpenRouterAdapter):
                     self._attach_transport_refs(exc, audit_refs)
                     raise
 
-            async for line in response.aiter_lines():
+            async for line in _iter_provider_stream_lines(
+                response,
+                protocol_state,
+                inactivity_guard=inactivity_guard,
+            ):
                 stream_lines.append(line)
                 self._touch_activity()
                 event_arrival = len(wire_evidence["sse_events"]) + 1
@@ -688,6 +715,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                     continue
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
                     saw_done = True
                     break
 
@@ -943,18 +972,23 @@ class HashiApiAdapter(OpenRouterAdapter):
         on_stream_event: StreamCallback = None,
         request_content: Mapping[str, Any] | None = None,
         continuation_messages: list[dict[str, Any]] | None = None,
+        resume_pending_tools: bool = False,
         provider_call_limit: int | None = None,
         before_provider_call: Any = None,
         transient_images=None,
     ) -> BackendResponse:
+        del resume_pending_tools
         if continuation_messages is not None:
             # The gateway keeps its own session/continuation contract; an
             # HERV3 cross-Provider continuation cannot be represented here.
             raise ValueError(
                 "hashi-api does not accept an assembled HERV3 continuation"
             )
+        if provider_call_limit is not None and int(provider_call_limit) <= 0:
+            raise _ProviderCallBudgetExhausted("Provider-call budget is exhausted")
         started = time.perf_counter()
         self._ensure_client()
+        privacy_gate = getattr(self, "_privacy_gate", None) or OutboundPrivacyGate()
 
         use_streaming = on_stream_event is not None
         last_text = ""
@@ -966,11 +1000,16 @@ class HashiApiAdapter(OpenRouterAdapter):
         provider_call_count = 0
         provider_cost_complete = True
         provider_calls: list[dict[str, Any]] = []
+        provider_transport_retry_count = 0
         total_tool_calls = 0
         tool_loop_count = 0
+        tool_effect_facts: list[dict[str, Any]] = []
+        visible_partial_answer = False
         media_routing: tuple[dict[str, Any], ...] = ()
         media_fallback_attempted = False
         provider_attempt_count = 0
+        recovery_attempts_used = 0
+        total_local_recovery_requests = 0
         gateway_session_id: str | None = None
         gateway_transport_calls: list[dict[str, Any]] = []
         terminal_decision: dict[str, Any] | None = None
@@ -1017,13 +1056,6 @@ class HashiApiAdapter(OpenRouterAdapter):
             for loop_idx in count():
                 next_provider_recovery_kind = "none"
                 while True:
-                    provider_attempt_count += 1
-                    headers = self._hashi_headers(
-                        request_id=request_id,
-                        provider_call=provider_attempt_count,
-                        after_tool_end=tool_loop_count > 0,
-                        external_tool_session=gateway_session_id is not None,
-                    )
                     payload = self._build_payload(
                         list(outbound_messages),
                         use_streaming=use_streaming,
@@ -1032,6 +1064,48 @@ class HashiApiAdapter(OpenRouterAdapter):
                             if all_media_native
                             else frozenset()
                         ),
+                    )
+                    self._preflight_payload_capacity(payload)
+                    payload = await self._protect_outbound_payload(
+                        payload, request_id=str(request_id or ""), gate=privacy_gate
+                    )
+                    self._preflight_payload_capacity(payload)
+                    if (
+                        provider_call_limit is not None
+                        and provider_attempt_count >= int(provider_call_limit)
+                    ):
+                        raise _ProviderCallBudgetExhausted(
+                            "Provider-call budget is exhausted"
+                        )
+                    if callable(before_provider_call):
+                        debit = before_provider_call()
+                        if inspect.isawaitable(debit):
+                            await debit
+                    provider_attempt_count += 1
+                    provider_call_emitted_text = False
+
+                    async def _capture_provider_call(event: StreamEvent) -> None:
+                        nonlocal provider_call_emitted_text, visible_partial_answer
+                        is_text = event.kind == KIND_TEXT_DELTA and bool(
+                            event.raw_delta or event.summary
+                        )
+                        if is_text:
+                            provider_call_emitted_text = True
+                        if on_stream_event is not None:
+                            delivered = await on_stream_event(event)
+                            if is_text and delivered is True:
+                                visible_partial_answer = True
+
+                    call_stream_callback = (
+                        _capture_provider_call
+                        if on_stream_event is not None
+                        else None
+                    )
+                    headers = self._hashi_headers(
+                        request_id=request_id,
+                        provider_call=provider_attempt_count,
+                        after_tool_end=tool_loop_count > 0,
+                        external_tool_session=gateway_session_id is not None,
                     )
                     if gateway_session_id is not None:
                         payload["session_id"] = gateway_session_id
@@ -1084,13 +1158,13 @@ class HashiApiAdapter(OpenRouterAdapter):
                             result = await self._stream_api_once(
                                 payload,
                                 headers,
-                                on_stream_event,
+                                call_stream_callback,
                             )
                         else:
                             result = await self._call_api_once(
                                 payload,
                                 headers,
-                                on_stream_event,
+                                call_stream_callback,
                             )
                     except HashiApiTransportAuditError:
                         # No further provider or tool activity is allowed when
@@ -1140,12 +1214,29 @@ class HashiApiAdapter(OpenRouterAdapter):
                         )
                         raise
                     except Exception as exc:
+                        # An interrupted physical call may still have incurred a charge.
+                        provider_cost_complete = False
                         can_media_fallback = self._can_replay_typed_media_fallback(
                             exc,
                             media_routing=media_routing,
                             fallback_attempted=media_fallback_attempted,
                             provider_call_count=provider_call_count,
                             tool_call_count=total_tool_calls,
+                        )
+                        retry_limit = max(
+                            0,
+                            int(getattr(self, "TRANSIENT_PROVIDER_CALL_RETRY_LIMIT", 2)),
+                        )
+                        can_transport_retry = (
+                            not can_media_fallback
+                            and recovery_attempts_used < retry_limit
+                            and (
+                                provider_call_limit is None
+                                or provider_attempt_count < int(provider_call_limit)
+                            )
+                            and _transient_provider_call_error(exc)
+                            and total_tool_calls == 0
+                            and not provider_call_emitted_text
                         )
                         partial_protocol = dict(
                             getattr(exc, "hashi_provider_protocol", {}) or {}
@@ -1188,6 +1279,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                                     "decision": (
                                         "retry_with_typed_media_fallback"
                                         if can_media_fallback
+                                        else "retry_unfinished_provider_call"
+                                        if can_transport_retry
                                         else "return_provider_failure"
                                     ),
                                     "decision_reason": type(exc).__name__,
@@ -1196,27 +1289,68 @@ class HashiApiAdapter(OpenRouterAdapter):
                                 },
                             )
                         )
-                        if not can_media_fallback:
-                            raise
-                        media_fallback_attempted = True
-                        self._enable_request_local_media_fallback(
-                            native_attachment_ids
+                        if can_media_fallback:
+                            media_fallback_attempted = True
+                            self._enable_request_local_media_fallback(
+                                native_attachment_ids
+                            )
+                            messages = self._typed_media_fallback_messages(
+                                prompt,
+                                request_content,
+                            )
+                            outbound_messages = messages
+                            gateway_session_id = None
+                            media_routing = self._typed_media_fallback_routing(
+                                media_routing
+                            )
+                            self._last_media_routing = media_routing
+                            native_attachment_ids = set()
+                            native_local_refs = set()
+                            all_media_native = False
+                            next_provider_recovery_kind = "typed_media_fallback"
+                            continue
+                        if can_transport_retry:
+                            recovery_attempts_used += 1
+                            total_local_recovery_requests += 1
+                            provider_transport_retry_count += 1
+                            next_provider_recovery_kind = "provider_transport_retry"
+                            await asyncio.sleep(
+                                _provider_call_retry_delay(
+                                    exc,
+                                    default_s=float(
+                                        getattr(
+                                            self,
+                                            "TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S",
+                                            1.0,
+                                        )
+                                    ),
+                                    maximum_s=float(
+                                        getattr(
+                                            self,
+                                            "TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S",
+                                            8.0,
+                                        )
+                                    ),
+                                    attempt=recovery_attempts_used,
+                                )
+                            )
+                            continue
+                        fallback_response = await self._attempt_provider_fallback(
+                            exc,
+                            messages=messages,
+                            request_id=str(request_id or ""),
+                            on_stream_event=on_stream_event,
+                            effect_recovery=_effect_recovery_summary(tool_effect_facts),
+                            visible_partial_answer=visible_partial_answer,
+                            provider_calls=provider_calls,
+                            provider_transport_retry_count=provider_transport_retry_count,
+                            total_local_recovery_requests=total_local_recovery_requests,
+                            total_tool_calls=total_tool_calls,
+                            tool_loop_count=tool_loop_count,
                         )
-                        messages = self._typed_media_fallback_messages(
-                            prompt,
-                            request_content,
-                        )
-                        outbound_messages = messages
-                        gateway_session_id = None
-                        media_routing = self._typed_media_fallback_routing(
-                            media_routing
-                        )
-                        self._last_media_routing = media_routing
-                        native_attachment_ids = set()
-                        native_local_refs = set()
-                        all_media_native = False
-                        next_provider_recovery_kind = "typed_media_fallback"
-                        continue
+                        if fallback_response is not None:
+                            return fallback_response
+                        raise
                     break
 
                 self._trace(
@@ -1478,7 +1612,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                             )
                         )
 
-                await self._run_tool_calls(
+                effect_facts = await self._run_tool_calls(
                     result.tool_calls,
                     messages,
                     on_stream_event,
@@ -1492,10 +1626,51 @@ class HashiApiAdapter(OpenRouterAdapter):
                         ),
                     },
                 )
+                if (
+                    isinstance(effect_facts, (list, tuple))
+                    and len(effect_facts) == len(result.tool_calls)
+                    and all(isinstance(fact, dict) for fact in effect_facts)
+                ):
+                    tool_effect_facts.extend(effect_facts)
+                else:
+                    # An incomplete execution receipt cannot prove that a call had no effect.
+                    tool_effect_facts.extend({"executed": True} for _ in result.tool_calls)
                 # Only the request-local Gateway cache can reconstruct a tool
                 # delta. Inline media deliberately bypasses that cache, so
                 # stateless rounds must retain the user content, assistant
                 # calls and every preceding tool result.
+                compacted_tool_outputs = compact_intra_turn_tool_messages(
+                    messages,
+                    last_input_tokens=int(
+                        (last_provider_call_record or {}).get("input") or 0
+                    ),
+                    trigger_tokens=int(
+                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_TOKENS", 110_000)
+                    ),
+                    trigger_chars=int(
+                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_CHARS", 360_000)
+                    ),
+                    keep_recent_tool_messages=int(
+                        getattr(self, "INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS", 12)
+                    ),
+                )
+                if compacted_tool_outputs:
+                    self.logger.info(
+                        "Intra-turn context maintenance compacted %d older tool result(s) "
+                        "(request_id=%s, loop=%d)",
+                        compacted_tool_outputs,
+                        request_id,
+                        loop_idx + 1,
+                    )
+                self._observe_provider_context(
+                    boundary="completed_tool_batch",
+                    messages=messages,
+                    request_id=request_id,
+                    result=result,
+                    provider_request_id=str(
+                        last_provider_call_record.get("provider_request_id", "")
+                    ),
+                )
                 outbound_messages = (
                     messages[tool_result_start:]
                     if gateway_session_id is not None
@@ -1652,6 +1827,9 @@ class HashiApiAdapter(OpenRouterAdapter):
                 tool_loop_count=tool_loop_count,
             )
             metadata = dict(failure.stream_metadata or {})
+            fallback_record = getattr(e, "hashi_provider_fallback", None)
+            if isinstance(fallback_record, Mapping) and fallback_record:
+                metadata["provider_fallback"] = dict(fallback_record)
             metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted

@@ -12,6 +12,7 @@ from tools.registry import ToolRegistry, ToolResult
 
 class BrokeredToolRegistry(ToolRegistry):
     permission_durable_wait = True
+    supports_parallel_readonly = True
 
     def __init__(self, client, *, definitions, scratch_root):
         if not isinstance(definitions, list):
@@ -46,7 +47,7 @@ class BrokeredToolRegistry(ToolRegistry):
     async def execute(self, tool_name, arguments, tool_call_id=""):
         if not self.is_allowed(tool_name) or not isinstance(arguments, dict) or not tool_call_id:
             return ToolResult(tool_call_id=tool_call_id, output="This tool is unavailable in this execution channel.",
-                              is_error=False, details={"control_disposition": "denied"})
+                              is_error=True, details={"control_disposition": "denied"})
         try:
             result = await self._broker.call_async("tool_execute", {
                 "tool_name": tool_name, "arguments": arguments, "tool_call_id": tool_call_id,

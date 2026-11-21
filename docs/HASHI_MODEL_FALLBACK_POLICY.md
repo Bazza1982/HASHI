@@ -115,7 +115,14 @@ and the HER Turn, PAO Run, and user request are not restarted.  Cross-engine
 fallback may run only before any Tool execution, possible side effect, or
 user-visible partial answer; afterwards it is reported as blocked.  The failed
 primary call may still be billable; that fact is reported without claiming an
-exact charge when usage is unknown.
+exact charge when usage is unknown. An incomplete physical-call cost makes the
+combined response cost unknown even when a later call reports its own charge.
+
+The Provider passes completed Tool receipt and checkpoint facts to the fallback
+decision. Missing execution evidence is treated as a possible effect, not as
+proof that no Tool ran. A delivered answer preview also prevents blind
+same-target recovery or fallback; a raw Provider delta retained internally
+does not by itself count as a user-visible answer.
 
 Completed Tool call IDs are checked before execution.  An exact re-emission
 reuses the already-bound result; a changed call with the same ID and a

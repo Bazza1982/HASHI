@@ -228,6 +228,7 @@ class HERv2Config:
     routing_revision: int = 1
     capability_revision: int = 1
     pricing_revision: str = "unknown"
+    migration_warnings: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if self.shadow_mode:
@@ -715,6 +716,7 @@ class HERv2Config:
             routing_revision=max(1, int(raw.get("routing_revision") or 1)),
             capability_revision=max(1, int(raw.get("capability_revision") or 1)),
             pricing_revision=str(raw.get("pricing_revision") or "unknown"),
+            migration_warnings=tuple(raw.get("migration_warnings") or ()),
         )
 
     def _configured_route_profile(

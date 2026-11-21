@@ -115,10 +115,8 @@ class ClaudeCLIAdapter(BaseBackend):
     # ------------------------------------------------------------------
 
     def _emit_stream_event(self, se: StreamEvent, on_stream_event: StreamCallback) -> None:
-        """Fire-and-forget emit of a StreamEvent via the async callback."""
-        if on_stream_event is None:
-            return
-        asyncio.create_task(on_stream_event(se))
+        """Emit a StreamEvent via tracked async callback task."""
+        self._schedule_stream_event(on_stream_event, se)
 
     def _parse_stream_json_line(self, raw: str, on_stream_event: StreamCallback) -> str | None:
         """
@@ -460,6 +458,7 @@ class ClaudeCLIAdapter(BaseBackend):
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         self._active_read_tasks = []
         await proc.wait()
+        await self._drain_stream_event_tasks()
         returncode = proc.returncode
         self.current_proc = None
         duration_ms = round((time.perf_counter() - started) * 1000, 2)

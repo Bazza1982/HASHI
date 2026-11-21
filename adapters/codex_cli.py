@@ -493,9 +493,7 @@ class CodexCLIAdapter(BaseBackend):
         return prompt
 
     def _emit_stream_event(self, event: StreamEvent | None, on_stream_event: StreamCallback) -> None:
-        if event is None or on_stream_event is None:
-            return
-        asyncio.create_task(on_stream_event(event))
+        self._schedule_stream_event(on_stream_event, event)
 
     def _command_text(self, item: dict) -> str:
         raw_cmd = item.get("command")
@@ -1593,6 +1591,7 @@ class CodexCLIAdapter(BaseBackend):
             self._active_read_tasks = []
             if proc.returncode is None:
                 await proc.wait()
+            await self._drain_stream_event_tasks()
             returncode = proc.returncode
             duration_ms = round((time.perf_counter() - started) * 1000, 2)
 

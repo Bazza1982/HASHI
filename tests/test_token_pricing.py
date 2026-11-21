@@ -185,7 +185,7 @@ def test_direct_deepseek_usage_uses_cached_openrouter_reference(
     assert receipt.pricing_revisions == (fact.source_revision,)
 
 
-def test_direct_deepseek_alias_never_falls_back_to_historical_static_price(
+def test_unavailable_exact_price_mapping_remains_unknown(
     tmp_path,
     monkeypatch,
 ):
@@ -213,6 +213,18 @@ def test_direct_deepseek_alias_never_falls_back_to_historical_static_price(
     assert receipt.cost_usd is None
     assert receipt.dominant_cost_source() == "unknown"
     assert scheduled == [("deepseek-api", "deepseek-v4-pro", None)]
+
+    agy_receipt = record_usage(
+        tmp_path,
+        model="gemini-3.8-flash-high",
+        backend="antigravity-cli",
+        engine="antigravity-cli",
+        input_tokens=2_000,
+        output_tokens=1_000,
+        token_source="provider",
+    )
+    assert agy_receipt.cost_usd is None
+    assert agy_receipt.dominant_cost_source() == "unknown"
 
 
 def test_record_usage_reads_dynamic_price_cache_and_links_exact_revision(
