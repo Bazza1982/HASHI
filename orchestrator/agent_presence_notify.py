@@ -36,15 +36,52 @@ def _base_url() -> str:
     return str(os.environ.get(BASE_URL_ENV) or DEFAULT_BASE_URL).rstrip("/")
 
 
+def _is_wsl() -> bool:
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
+        return "microsoft" in release.casefold()
+    except OSError:
+        return False
+
+
+def _wsl_token_candidates(users_root: Path = Path("/mnt/c/Users")) -> list[Path]:
+    if not _is_wsl() or not users_root.is_dir():
+        return []
+    candidates: list[Path] = []
+    try:
+        entries = sorted(users_root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if entry.name.casefold() in {"all users", "default", "default user", "public"}:
+            continue
+        try:
+            token_path = entry / "AppData" / "Roaming" / "AgentPresence" / "ap-token"
+            if token_path.is_file():
+                candidates.append(token_path)
+        except OSError:
+            continue
+    return candidates
+
+
 def _token() -> str:
     app_data = os.environ.get("APPDATA")
-    if not app_data:
-        return ""
-    token_path = Path(app_data) / "AgentPresence" / "ap-token"
-    try:
-        return token_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    if app_data:
+        token_path = Path(app_data) / "AgentPresence" / "ap-token"
+        try:
+            return token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    for token_path in _wsl_token_candidates():
+        try:
+            text = token_path.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except OSError:
+            continue
+    return ""
 
 
 def token_matches(candidate: Any) -> bool:

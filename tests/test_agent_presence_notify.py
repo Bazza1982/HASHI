@@ -288,3 +288,20 @@ async def test_workbench_voice_publication_has_independent_agentpresence_outbox(
     )
     assert [receipt["endpoint_id"] for receipt in receipts] == [endpoint_id]
     assert [receipt["status"] for receipt in receipts] == ["accepted"]
+
+
+def test_wsl_token_fallback_reads_windows_appdata_ap_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu-22.04")
+    users_root = tmp_path / "Users"
+    token_dir = users_root / "thene" / "AppData" / "Roaming" / "AgentPresence"
+    token_dir.mkdir(parents=True)
+    (token_dir / "ap-token").write_text("wsl-token-secret\n", encoding="utf-8")
+
+    candidates = agent_presence_notify._wsl_token_candidates(users_root=users_root)
+    assert candidates == [token_dir / "ap-token"]
+    monkeypatch.setattr(
+        agent_presence_notify, "_wsl_token_candidates", lambda: candidates
+    )
+    assert agent_presence_notify._token() == "wsl-token-secret"
+    assert agent_presence_notify.token_matches("wsl-token-secret") is True
