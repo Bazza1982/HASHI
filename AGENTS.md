@@ -63,3 +63,5 @@ preserves custom hooks and checks staged Core/whitespace. Follow
 docs/TESTING_POLICY.md and .github/CI_POLICY.md: choose scope from impact,
 independently from local/hosted execution. CI is not an instruction to run
 the whole product suite for every commit, PR, label, or routine deployment.
+
+- **Pure Idiot Test (PIT):** For each new user-requested function and before declaring it delivered, apply the focused PIT Quick review in `docs/PURE_IDIOT_TEST.md`: verify the normal default user path and real outcome, challenge unnecessary default-off switches, hollow tests, unnatural wording, disproportionate gates, false-success receipts, hidden failures and avoidable overhead. On "run PIT test", follow the documented cross-repository scope and evidence requirements. PIT is **not** a blanket new CI gate, a permission bypass, or authority to test/deploy production. Report source, test, merge, deployment and observed behaviour separately.
