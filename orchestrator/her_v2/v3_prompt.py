@@ -119,12 +119,9 @@ def compile_main_prompt(
     """Compile one model request without adding another reasoning/router model call."""
     system = [MAIN_CONTRACT]
     cards_active = (
-        question_cards_enabled
-        if question_cards_enabled is not None
-        else (
-            bool(context.get("question_cards_enabled", True))
-            and bool(context.get("ask_user_available", True))
-        )
+        bool(context.get("question_cards_enabled", True))
+        and bool(context.get("ask_user_available", True))
+        and (question_cards_enabled is not False)
     )
     if not tools_available:
         system.append(NO_TOOLS_CONTRACT)

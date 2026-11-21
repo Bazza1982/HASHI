@@ -5745,6 +5745,11 @@ class HashiStageProvider(StageProvider):
                                 fallback_persona=(source.guidance if source.usable else ""),
                                 tools_available=request.allow_tools,
                                 developer_toolkit_enabled=toolkit_guidance,
+                                question_cards_enabled=(
+                                    bool(request.context.get("question_cards_enabled", True))
+                                    and bool(request.context.get("ask_user_available", True))
+                                    and {"ask_user", "get_user_answer"} <= catalogue_tool_names
+                                ),
                                 reference_projector=getattr(
                                     backend, "project_main_references", None
                                 ),

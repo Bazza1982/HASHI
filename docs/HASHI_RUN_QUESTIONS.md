@@ -99,6 +99,12 @@ The effective policy is their conjunction. `/askme` shows and changes both;
 changes this instance. Re-enabling the instance preserves Agent preferences.
 Changes are immediate and independent of presentation clients.
 
+HERV3 includes its question-card instruction only when both question tools
+are in the selected request's tool catalogue and the supplied availability
+and enablement context do not disable it. The catalogue alone does not prove
+the PAO preference remains enabled; the actual question operation checks the
+current authoritative policy.
+
 PAO rejects a new card when either switch is off and cancels existing pending
 cards with an explicit non-answer. Both HERV3 and native Codex receive guidance
 to finish the current turn by asking the necessary question in ordinary final

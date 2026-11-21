@@ -40,6 +40,14 @@ def test_question_contract_omitted_when_disabled_or_ask_user_unavailable():
     )
     assert QUESTION_CONTRACT not in system_disabled
 
+    system_unavailable, _ = compile_main_prompt(
+        pcm_input={"current_request": "hi"},
+        fallback_request="hi",
+        context={"ask_user_available": False},
+        question_cards_enabled=True,
+    )
+    assert QUESTION_CONTRACT not in system_unavailable
+
     system_enabled, _ = compile_main_prompt(
         pcm_input={"current_request": "hi", "sections": [], "history": []},
         fallback_request="hi",
