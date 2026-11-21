@@ -141,9 +141,14 @@ OpenRouter, DeepSeek API, Ollama API, xAI API, and HASHI Engine Runtime (HER) cu
 use stateless Memory+ assembly:
 
 - compact Memory+ card on every formal request;
-- at most four recent messages (two exchanges);
-- no automatic long-term semantic-memory retrieval;
+- recent exchanges according to the active PCM context profile;
+- saved Agent memory retrieval by default for full Context assembly; an explicit
+  `/memory search off` preference remains effective across subsequent turns;
 - current request last and authoritative.
+
+Stateless describes the provider session, not an isolation boundary for the
+Agent's saved memory. See `HASHI_PCM_SYSTEM_DESIGN.md` for the retrieval contract
+and its local lexical fallback limitations.
 
 Secrets are rejected/redacted from Memory+ updates. Provider transmission still
 follows HASHI's active `/privacy` policy and backend compatibility rules.
