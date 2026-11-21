@@ -19,7 +19,6 @@ from orchestrator.workzone import (
 )
 from tools.registry import ToolRegistry
 from tools.schemas import ALL_TOOL_NAMES
-from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES
 
 
 def test_workzone_off_has_no_prompt(tmp_path: Path):
