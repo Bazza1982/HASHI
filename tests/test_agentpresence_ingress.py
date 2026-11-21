@@ -85,13 +85,10 @@ def test_agentpresence_slash_text_uses_registered_command_adapter():
 
 
 @pytest.mark.asyncio
-async def test_agentpresence_reserved_source_requires_token_and_exact_instance(
-    tmp_path, monkeypatch
+async def test_agentpresence_reserved_source_requires_direct_loopback_and_exact_instance(
+    tmp_path
 ):
     server, runtime = _server(tmp_path)
-    monkeypatch.setattr(
-        agent_presence_notify, "token_matches", lambda value: value == "ap-secret"
-    )
     base = {
         "text": "hello",
         "source": "agentpresence",
@@ -99,14 +96,17 @@ async def test_agentpresence_reserved_source_requires_token_and_exact_instance(
         "instance_id": "TEST",
     }
     async with TestClient(TestServer(server.app)) as client:
-        response = await client.post("/api/chat", json=base)
-        assert response.status == 401
-        assert (await response.json())["error_code"] == "agentpresence_auth_required"
+        response = await client.post(
+            "/api/chat",
+            json=base,
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        )
+        assert response.status == 403
+        assert (await response.json())["error_code"] == "agentpresence_local_control_required"
 
         response = await client.post(
             "/api/chat",
             json={**base, "instance_id": "OTHER"},
-            headers={"X-AP-Token": "ap-secret"},
         )
         assert response.status == 409
         assert (await response.json())["error_code"] == "agentpresence_instance_mismatch"
@@ -114,7 +114,6 @@ async def test_agentpresence_reserved_source_requires_token_and_exact_instance(
         response = await client.post(
             "/api/chat",
             json={**base, "surface": "workbench"},
-            headers={"X-AP-Token": "ap-secret"},
         )
         assert response.status == 400
         assert (await response.json())["error_code"] == "agentpresence_source_mismatch"
@@ -299,11 +298,12 @@ async def test_agentpresence_safe_voice_returns_transcript_and_accepts_explicit_
                 "pending_id": "voice-ap-pending",
                 "decision": "confirm",
             },
-            headers={"X-AP-Token": "wrong"},
+            headers={"X-Forwarded-For": "203.0.113.10"},
         )
-        assert response.status == 401
-        assert (await response.json())["error_code"] == "agentpresence_auth_required"
+        assert response.status == 403
+        assert (await response.json())["error_code"] == "agentpresence_local_control_required"
 
+        # Loopback works without X-AP-Token as well.
         response = await client.post(
             "/api/agentpresence/voice-decision",
             json={
@@ -314,7 +314,6 @@ async def test_agentpresence_safe_voice_returns_transcript_and_accepts_explicit_
                 "decision": "confirm",
                 "agent": "caller-cannot-select-agent",
             },
-            headers=headers,
         )
         assert response.status == 200
         confirmed = await response.json()
