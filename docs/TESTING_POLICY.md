@@ -187,6 +187,9 @@ python -m pytest -q tests -m live
   environments are never repository test roots.
 - A skip is not a pass. Optional dependencies and platform tests must report
   the reason and remain outside claims about the exercised behavior.
+- Plain asynchronous pytest functions may use the shared AnyIO marker.
+  Do not apply that wrapper to `unittest.IsolatedAsyncioTestCase` methods:
+  pytest's unittest runner must execute their setup, cleanup and teardown.
 
 ## Test maintenance
 

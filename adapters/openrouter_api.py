@@ -445,6 +445,20 @@ def _stable_provider_error_code(response: httpx.Response | None) -> str:
             if isinstance(metadata, Mapping):
                 candidates.extend((metadata.get("code"), metadata.get("type")))
         candidates.extend((payload.get("code"), payload.get("type")))
+    # llama.cpp/llama-server reports native per-slot context overflow as a
+    # plain HTTP 400 with this message shape; it carries no provider code.
+    # Recognising it lets HASHI's typed capacity recovery Compact and retry
+    # exactly once instead of surfacing a generic bad request.
+    messages: list[Any] = []
+    if isinstance(payload, Mapping):
+        messages.append(payload.get("message"))
+        payload_error = payload.get("error")
+        if isinstance(payload_error, Mapping):
+            messages.append(payload_error.get("message"))
+    for value in messages:
+        lowered = str(value or "").casefold()
+        if "exceeds the available context size" in lowered:
+            return "CONTEXT_CAPACITY_REJECTED"
     for candidate in candidates:
         normalized = str(candidate or "").strip().lower()
         if normalized == "resource_profile_unverified":
@@ -2028,14 +2042,45 @@ class OpenRouterAdapter(BaseBackend):
     INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS = 12
     PARALLEL_READONLY_TOOL_CONCURRENCY = 4
 
+    def _implicit_provider_resubmission_allowed(
+        self, error: Exception, *, checkpoint_backed: bool = False,
+    ) -> bool:
+        """Whether one failed Provider HTTP call may be implicitly re-submitted.
+
+        The default mirrors the generic transient policy: bounded transport
+        retries for errors that carry no response, plus checkpoint-backed
+        stream-inactivity continuation. A backend whose host can accept a
+        request before any output exists (local llama.cpp) overrides this to
+        only allow failures positively proven to precede delivery, because
+        generic HTTP failures, timeouts, resets, missing first tokens and
+        incomplete SSE never prove the original request was not accepted.
+        """
+        if checkpoint_backed:
+            return True
+        return _transient_provider_call_error(error)
+
+    def _provider_failure_advertises_retry(self, error: Exception) -> bool:
+        """Whether the typed failure response may advertise retryability.
+
+        ``error_retryable`` feeds outer stage-level policy retries. An
+        uncertain-outcome local backend overrides this to False so no outer
+        policy ever replays an inference that may already be accepted.
+        """
+        return True
     async def _prepare_payload_capacity(
         self,
         payload: dict,
         *,
         request_id: str,
         provider_calls: list[dict],
-    ) -> None:
-        """Optional provider-native check of the final, privacy-filtered payload."""
+    ) -> Mapping[str, Any] | None:
+        """Optional provider-native check of the final, privacy-filtered payload.
+
+        A subclass may return a replacement payload after proactive context
+        maintenance (for example, Compact). The caller re-protects and
+        re-estimates the rebuilt payload before submission. Returning None
+        sends the original payload unchanged.
+        """
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
         """Reject a clearly oversized text payload before an HTTP call.
@@ -4051,7 +4096,7 @@ class OpenRouterAdapter(BaseBackend):
         # reasoning is marked as such and never reconstructed.
         reasoning_fragments: list[str] = []
         encrypted_reasoning = False
-        reasoning_text = str(message.get("reasoning") or "").strip()
+        reasoning_text = str(message.get("reasoning") or message.get("reasoning_content") or "").strip()
         if reasoning_text:
             reasoning_fragments.append(reasoning_text)
             if on_stream_event is not None:
@@ -4279,7 +4324,7 @@ class OpenRouterAdapter(BaseBackend):
 
                 # Text content
                 content = delta.get("content", "")
-                reasoning_text = str(delta.get("reasoning") or "")
+                reasoning_text = str(delta.get("reasoning") or delta.get("reasoning_content") or "")
                 reasoning_details = delta.get("reasoning_details") or []
                 tool_call_deltas = delta.get("tool_calls") or []
                 audio_delta = delta.get("audio")
@@ -4669,11 +4714,17 @@ class OpenRouterAdapter(BaseBackend):
                     # audited and sent over HTTP.
                     self._preflight_payload_capacity(payload)
                     capacity_start = len(provider_calls)
-                    await self._prepare_payload_capacity(
+                    rebuilt_payload = await self._prepare_payload_capacity(
                         payload,
                         request_id=str(request_id or ""),
                         provider_calls=provider_calls,
                     )
+                    if isinstance(rebuilt_payload, Mapping):
+                        payload = dict(rebuilt_payload)
+                        payload = await self._protect_outbound_payload(
+                            payload, request_id=str(request_id or ""), gate=privacy_gate
+                        )
+                        self._preflight_payload_capacity(payload)
                     provider_call_count += len(provider_calls) - capacity_start
                     for capacity_call in provider_calls[capacity_start:]:
                         total_prompt += int(capacity_call.get("input") or 0)
@@ -4894,8 +4945,10 @@ class OpenRouterAdapter(BaseBackend):
                                 or provider_attempt_serial < int(provider_call_limit)
                             )
                             and (
-                                stream_inactivity_continuation
-                                or _transient_provider_call_error(exc)
+                                self._implicit_provider_resubmission_allowed(
+                                    exc,
+                                    checkpoint_backed=stream_inactivity_continuation,
+                                )
                             )
                             and (
                                 current_call_continuation
@@ -5660,6 +5713,10 @@ class OpenRouterAdapter(BaseBackend):
                 tool_call_count=total_tool_calls,
                 tool_loop_count=tool_loop_count,
             )
+            if not self._provider_failure_advertises_retry(e):
+                # An outcome-uncertain backend never advertises the failure
+                # as retryable to outer stage policies.
+                failure.error_retryable = False
             metadata = dict(failure.stream_metadata or {})
             metadata["provider_transport_retry_count"] = (
                 provider_transport_retry_count
@@ -5735,8 +5792,10 @@ class OpenRouterAdapter(BaseBackend):
         )
 
         if not (
-            _transient_provider_call_error(exc)
-            or isinstance(exc, _ProviderStreamInactivityTimeout)
+            self._implicit_provider_resubmission_allowed(
+                exc,
+                checkpoint_backed=isinstance(exc, _ProviderStreamInactivityTimeout),
+            )
         ):
             setattr(
                 exc,
