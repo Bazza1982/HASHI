@@ -68,9 +68,11 @@ Challenge the original requirement assumptions, number of steps, scope of the pr
 
 | Priority | Meaning | Expected handling |
 | --- | --- | --- |
-| P0 | Core function unusable, user data lost/corrupted, false completion, or critical everyday path blocked | Fix first; cannot claim relevant feature delivered until verified |
-| P1 | Clearly unreasonable friction, degraded reliability, needless costs/waits, broken defaults or common recoverability | Prioritise next focused change with realistic acceptance |
-| P2 | Unnecessary complexity, awkward language or lower-impact UX issue | Simplify when the relevant owner is modified; avoid sweeping refactors |
+| P0 | Default service unavailable, basic chat or core tools unusable, actual permission/privacy breach, unrecoverable data corruption, uncontrolled repeated external side effects, inability to stop execution, or no viable rollback | Blocks release until resolved or the affected change is safely isolated |
+| P1 | Material friction, degraded reliability, unnecessary cost/wait, or reduced recoverability without a P0 outcome | Decide release impact from observed behavior and document any accepted limitation |
+| P2 | Lower-impact UX, avoidable complexity, and optimization opportunities | Does not block release; schedule as appropriate |
+
+**Release decision:** P0 findings block release. P1 findings are assessed against their actual user impact; P2 findings and optimization suggestions do not block release. Not every PIT-U scenario needs to be completed before a merge or release. Record unrun scenarios and accepted limitations truthfully, and do not claim those scenarios were verified. Required security, data integrity, and other applicable release controls remain in force.
 
 **Evidence state is independent of severity:** Confirmed-by-source / Reproduced-live / Suspected / Not-run / Fixed-in-branch / Merged / Verified-in-runtime. A source-level certainty is not a production deployment claim.
 
