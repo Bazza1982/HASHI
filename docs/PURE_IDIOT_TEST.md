@@ -1,10 +1,10 @@
 # Pure Idiot Test (PIT) v1.0 — 大傻逼测试
 
-**Status:** Authorised project quality standard, proposed in documentation PRs.  
-**Owner:** Product owner (user); implementation and independent review agents execute the protocol.  
-**Applies to:** Bazza1982/HASHI and Bazza1982/hashi-workbench-v2; shared features must be evaluated end-to-end across both.  
-**Defined:** 20 November 2026.  
-**Canonical trigger:** **"run PIT test"**, **"运行 PIT"**, **"PIT review"**.  
+**Status:** Authorised project quality standard.<br>
+**Owner:** Product owner (user); implementation and independent review agents execute the protocol.<br>
+**Applies to:** Bazza1982/HASHI and Bazza1982/hashi-workbench-v2; shared features must be evaluated end-to-end across both.<br>
+**Defined:** 20 November 2026.<br>
+**Canonical trigger:** **"run PIT test"**, **"运行 PIT"**, **"PIT review"**.<br>
 **Principle:** **Default path is the product. Green tests are not proof of a usable feature.**
 
 PIT is a recurring, independent **product reasonableness and delivery** review, not a substitute for security, correctness, or functional regression tests. It challenges unnecessary engineering machinery, false success, default-disabled delivered features, over-defensive behaviour, and tests that defend history rather than actual user value. Findings require evidence and a simpler alternative, not just a rude label. The name and taxonomy are the product owner's.
