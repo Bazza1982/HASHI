@@ -246,8 +246,8 @@ def test_direct_engine_gets_explicit_openrouter_reference_price(tmp_path):
 @pytest.mark.parametrize(
     ("model", "source_model"),
     [
-        ("deepseek-flash", "deepseek/deepseek-flash-latest"),
-        ("deepseek-v4-pro", "deepseek/deepseek-pro-latest"),
+        ("deepseek-flash", "~deepseek/deepseek-flash-latest"),
+        ("deepseek-v4-pro", "~deepseek/deepseek-pro-latest"),
     ],
 )
 def test_current_deepseek_aliases_use_openrouter_price_list_identity(
@@ -258,7 +258,7 @@ def test_current_deepseek_aliases_use_openrouter_price_list_identity(
 
 
 def test_direct_deepseek_price_fact_comes_from_openrouter_only(tmp_path):
-    source_model = "deepseek/deepseek-flash-latest"
+    source_model = "~deepseek/deepseek-flash-latest"
     seen = []
 
     def fetch(url):
@@ -285,7 +285,7 @@ def test_direct_deepseek_price_fact_comes_from_openrouter_only(tmp_path):
     assert fact.source_engine == "openrouter-api"
     assert fact.source_model_id == source_model
     assert seen == [
-        "https://openrouter.ai/api/v1/model/deepseek/deepseek-flash-latest"
+        "https://openrouter.ai/api/v1/model/~deepseek/deepseek-flash-latest"
     ]
 
 

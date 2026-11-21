@@ -325,12 +325,16 @@ def resolve_usage_cost(
         except Exception:
             pass
 
+    if fact is None or fact.status == "unknown":
+        try:
+            from tools.pricing_sources import has_exact_openrouter_mapping
+
+            if has_exact_openrouter_mapping(engine, model):
+                return None, "unknown", "unknown"
+        except Exception:
+            return None, "unknown", "unknown"
+
     if _static_model_has_pricing(model):
-        cost_source = (
-            "static_fallback"
-            if fact is not None and fact.status == "unknown"
-            else "pricing_table"
-        )
         return (
             calc_cost(
                 input_tokens,
@@ -340,7 +344,7 @@ def resolve_usage_cost(
                 cached_tokens=cached_tokens,
                 thinking_in_output=thinking_in_output,
             ),
-            cost_source,
+            "pricing_table",
             PRICING_REVISION,
         )
     return None, "unknown", "unknown"

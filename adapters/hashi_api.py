@@ -43,6 +43,7 @@ from adapters.openrouter_api import (
     _assistant_content_text,
     _backend_failure_response,
     _effective_protocol_parameters,
+    _effect_recovery_summary,
     _iter_provider_stream_lines,
     _message_structured_data,
     _invalid_tool_repair_prompt,
@@ -1002,6 +1003,8 @@ class HashiApiAdapter(OpenRouterAdapter):
         provider_transport_retry_count = 0
         total_tool_calls = 0
         tool_loop_count = 0
+        tool_effect_facts: list[dict[str, Any]] = []
+        visible_partial_answer = False
         media_routing: tuple[dict[str, Any], ...] = ()
         media_fallback_attempted = False
         provider_attempt_count = 0
@@ -1082,13 +1085,16 @@ class HashiApiAdapter(OpenRouterAdapter):
                     provider_call_emitted_text = False
 
                     async def _capture_provider_call(event: StreamEvent) -> None:
-                        nonlocal provider_call_emitted_text
-                        if event.kind == KIND_TEXT_DELTA and (
+                        nonlocal provider_call_emitted_text, visible_partial_answer
+                        is_text = event.kind == KIND_TEXT_DELTA and bool(
                             event.raw_delta or event.summary
-                        ):
+                        )
+                        if is_text:
                             provider_call_emitted_text = True
                         if on_stream_event is not None:
-                            await on_stream_event(event)
+                            delivered = await on_stream_event(event)
+                            if is_text and delivered is True:
+                                visible_partial_answer = True
 
                     call_stream_callback = (
                         _capture_provider_call
@@ -1208,12 +1214,29 @@ class HashiApiAdapter(OpenRouterAdapter):
                         )
                         raise
                     except Exception as exc:
+                        # An interrupted physical call may still have incurred a charge.
+                        provider_cost_complete = False
                         can_media_fallback = self._can_replay_typed_media_fallback(
                             exc,
                             media_routing=media_routing,
                             fallback_attempted=media_fallback_attempted,
                             provider_call_count=provider_call_count,
                             tool_call_count=total_tool_calls,
+                        )
+                        retry_limit = max(
+                            0,
+                            int(getattr(self, "TRANSIENT_PROVIDER_CALL_RETRY_LIMIT", 2)),
+                        )
+                        can_transport_retry = (
+                            not can_media_fallback
+                            and recovery_attempts_used < retry_limit
+                            and (
+                                provider_call_limit is None
+                                or provider_attempt_count < int(provider_call_limit)
+                            )
+                            and _transient_provider_call_error(exc)
+                            and total_tool_calls == 0
+                            and not provider_call_emitted_text
                         )
                         partial_protocol = dict(
                             getattr(exc, "hashi_provider_protocol", {}) or {}
@@ -1256,6 +1279,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                                     "decision": (
                                         "retry_with_typed_media_fallback"
                                         if can_media_fallback
+                                        else "retry_unfinished_provider_call"
+                                        if can_transport_retry
                                         else "return_provider_failure"
                                     ),
                                     "decision_reason": type(exc).__name__,
@@ -1263,21 +1288,6 @@ class HashiApiAdapter(OpenRouterAdapter):
                                     **partial_protocol,
                                 },
                             )
-                        )
-                        retry_limit = max(
-                            0,
-                            int(getattr(self, "TRANSIENT_PROVIDER_CALL_RETRY_LIMIT", 2)),
-                        )
-                        can_transport_retry = (
-                            not can_media_fallback
-                            and recovery_attempts_used < retry_limit
-                            and (
-                                provider_call_limit is None
-                                or provider_attempt_count < int(provider_call_limit)
-                            )
-                            and _transient_provider_call_error(exc)
-                            and total_tool_calls == 0
-                            and not provider_call_emitted_text
                         )
                         if can_media_fallback:
                             media_fallback_attempted = True
@@ -1330,7 +1340,8 @@ class HashiApiAdapter(OpenRouterAdapter):
                             messages=messages,
                             request_id=str(request_id or ""),
                             on_stream_event=on_stream_event,
-                            effect_recovery={},
+                            effect_recovery=_effect_recovery_summary(tool_effect_facts),
+                            visible_partial_answer=visible_partial_answer,
                             provider_calls=provider_calls,
                             provider_transport_retry_count=provider_transport_retry_count,
                             total_local_recovery_requests=total_local_recovery_requests,
@@ -1601,7 +1612,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                             )
                         )
 
-                await self._run_tool_calls(
+                effect_facts = await self._run_tool_calls(
                     result.tool_calls,
                     messages,
                     on_stream_event,
@@ -1615,6 +1626,15 @@ class HashiApiAdapter(OpenRouterAdapter):
                         ),
                     },
                 )
+                if (
+                    isinstance(effect_facts, (list, tuple))
+                    and len(effect_facts) == len(result.tool_calls)
+                    and all(isinstance(fact, dict) for fact in effect_facts)
+                ):
+                    tool_effect_facts.extend(effect_facts)
+                else:
+                    # An incomplete execution receipt cannot prove that a call had no effect.
+                    tool_effect_facts.extend({"executed": True} for _ in result.tool_calls)
                 # Only the request-local Gateway cache can reconstruct a tool
                 # delta. Inline media deliberately bypasses that cache, so
                 # stateless rounds must retain the user content, assistant
@@ -1807,6 +1827,9 @@ class HashiApiAdapter(OpenRouterAdapter):
                 tool_loop_count=tool_loop_count,
             )
             metadata = dict(failure.stream_metadata or {})
+            fallback_record = getattr(e, "hashi_provider_fallback", None)
+            if isinstance(fallback_record, Mapping) and fallback_record:
+                metadata["provider_fallback"] = dict(fallback_record)
             metadata["meter"] = {"provider_calls": provider_calls}
             metadata["multimodal_routing"] = list(media_routing)
             metadata["multimodal_fallback_attempted"] = media_fallback_attempted

@@ -139,12 +139,41 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             primary["reasoning"] = reasoning
     primary["reasoning"] = primary.get("reasoning") or "default"
 
+    # A normalized compatibility view may pass through this function again at
+    # the adapter/config boundary; retain its resolved auxiliary and warnings.
+    already_normalized = (
+        set(profiles) == {"main", "auxiliary"}
+        and roles.get("execution") == "main"
+        and raw.get("routing_mode") == "single"
+    )
+    inherited_warnings = raw.get("migration_warnings") if already_normalized else ()
+    migration_warnings: list[dict[str, str]] = [
+        {key: str(item.get(key) or "") for key in ("field", "action", "detail")}
+        for item in inherited_warnings
+        if isinstance(item, Mapping) and item.get("field") and item.get("action")
+    ] if isinstance(inherited_warnings, (tuple, list)) else []
+    inherited_warning_count = len(migration_warnings)
     explicit_auxiliary = isinstance(raw.get("auxiliary"), Mapping)
-    migration_warnings: list[dict[str, str]] = []
+    normalized_auxiliary = already_normalized and isinstance(profiles.get("auxiliary"), Mapping)
+    auxiliary_origin = "main"
     if explicit_auxiliary:
-        auxiliary = deepcopy(dict(raw.get("auxiliary")))
+        auxiliary = deepcopy(dict(raw["auxiliary"]))
+        auxiliary_origin = "explicit"
+    elif normalized_auxiliary:
+        previous_main = profiles.get("main")
+        previous_main = previous_main if isinstance(previous_main, Mapping) else {}
+        previous_auxiliary = profiles["auxiliary"]
+        auxiliary_origin = str(raw.get("_herv3_auxiliary_origin") or "")
+        if auxiliary_origin not in {"main", "profile", "explicit"}:
+            same_target = (
+                previous_main.get("engine") == previous_auxiliary.get("engine")
+                and previous_main.get("model") == previous_auxiliary.get("model")
+            )
+            auxiliary_origin = "main" if same_target else "profile"
+        auxiliary = deepcopy(dict(primary if auxiliary_origin == "main" else previous_auxiliary))
     else:
-        aux_candidate = profiles.get("lightweight") or profiles.get("triage")
+        candidate_name = "lightweight" if profiles.get("lightweight") else "triage"
+        aux_candidate = profiles.get(candidate_name)
         if (
             isinstance(aux_candidate, Mapping)
             and str(aux_candidate.get("engine") or aux_candidate.get("provider") or "").strip()
@@ -156,13 +185,14 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             candidate_engine = canonical_model_provider(candidate_copy["engine"])
             if provider_allowlist is None or candidate_engine in provider_allowlist:
                 auxiliary = candidate_copy
+                auxiliary_origin = "profile"
             else:
                 auxiliary = deepcopy(primary)
                 migration_warnings.append(
                     {
-                        "field": "profiles.lightweight",
+                        "field": f"profiles.{candidate_name}",
                         "action": "fallback_to_main",
-                        "detail": "lightweight profile engine is outside v3_provider_allowlist",
+                        "detail": f"{candidate_name} profile engine is outside v3_provider_allowlist",
                     }
                 )
         else:
@@ -172,7 +202,7 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     # Auxiliary presentation/housekeeping stages (commentary, final style,
     # meditation, dream) must not silently inherit expensive reasoning from the
     # main target; disable reasoning by default unless explicitly requested.
-    if not explicit_auxiliary:
+    if auxiliary_origin == "main" or (not explicit_auxiliary and not normalized_auxiliary):
         auxiliary["reasoning"] = "off"
     else:
         auxiliary.setdefault("reasoning", "off")
@@ -187,6 +217,7 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
             profile.pop(key, None)
 
     result["profiles"] = {"main": primary, "auxiliary": auxiliary}
+    result["_herv3_auxiliary_origin"] = auxiliary_origin
     result["stage_roles"] = {
         name: "main"
         for name in (
@@ -245,13 +276,14 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     result["review_limits"] = {
         name: 0 for name in ("zero", "low", "medium", "high", "xhigh", "max")
     }
-    if migration_warnings:
+    new_warnings = migration_warnings[inherited_warning_count:]
+    if new_warnings:
         import logging
 
         logging.getLogger(__name__).warning(
             "HERV3 config normalization recorded %d migration warning(s): %s",
-            len(migration_warnings),
-            ", ".join(item["field"] for item in migration_warnings),
+            len(new_warnings),
+            ", ".join(item["field"] for item in new_warnings),
         )
     result["migration_warnings"] = tuple(migration_warnings)
     return result
@@ -281,11 +313,8 @@ def apply_v3_target(
     current_main = dict(current_main) if isinstance(current_main, Mapping) else {}
     current_main.update(target.to_dict())
     updated["main"] = current_main
-    # The auxiliary lane follows the main target unless an explicitly separate
-    # non-user-facing auxiliary target exists in configuration, but keeps
-    # reasoning disabled by default to avoid expensive commentary calls.
-    if not isinstance(updated.get("auxiliary"), Mapping):
-        updated["auxiliary"] = {**current_main, "reasoning": "off"}
+    # Normalization preserves a configured auxiliary, or derives it from the
+    # new main target when it previously followed main.
     return normalise_v3_config(updated)
 
 

@@ -19,7 +19,7 @@ from adapters.xai_api import XaiApiAdapter
 from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.models import Effort, Stage, StageRequest
-from orchestrator.her_v2.v3_config import normalise_v3_config
+from orchestrator.her_v2.v3_config import HERv3ModelTarget, apply_v3_target, normalise_v3_config
 from orchestrator.permissions.remote_registry import BrokeredToolRegistry
 from tools.registry import ToolResult
 
@@ -60,6 +60,62 @@ def test_herv3_uses_lightweight_profile_for_auxiliary_and_emits_migration_warnin
     cfg = HERv2Config.from_mapping(raw)
     assert cfg.profile_for(Stage.MEDITATION).model == "deepseek-flash"
     assert {item["field"] for item in cfg.migration_warnings} >= warned_fields
+
+
+def test_renormalized_config_retains_auxiliary_and_migration_warnings():
+    raw = {
+        "profiles": {
+            "premium": {"engine": "deepseek-api", "model": "deepseek-v4-pro"},
+            "lightweight": {"engine": "deepseek-api", "model": "deepseek-flash"},
+        },
+        "fallback": {"legacy": "ignored"},
+    }
+    normalized = normalise_v3_config(raw)
+    # This is the real config-consumer boundary, which normalizes again.
+    config = HERv2Config.from_mapping(normalized)
+    assert config.profile_for(Stage.MEDITATION).model == "deepseek-flash"
+    assert any(warning["field"] == "fallback" for warning in config.migration_warnings)
+
+
+def test_model_selection_keeps_configured_lightweight_auxiliary():
+    raw = {
+        "profiles": {
+            "premium": {"engine": "deepseek-api", "model": "deepseek-v4-pro"},
+            "lightweight": {"engine": "deepseek-api", "model": "deepseek-flash"},
+        }
+    }
+    selected = apply_v3_target(raw, HERv3ModelTarget("hashi-api", "main-model"))
+    config = HERv2Config.from_mapping(selected)
+    assert config.profile_for(Stage.EXECUTION).model == "main-model"
+    assert config.profile_for(Stage.MEDITATION).model == "deepseek-flash"
+
+
+def test_default_auxiliary_follows_main_after_repeated_model_selection():
+    raw = {"main": {"provider": "hashi-api", "model": "old-main"}}
+    normalized = normalise_v3_config(raw)
+    switched = apply_v3_target(normalized, HERv3ModelTarget("hashi-api", "new-main"))
+    switched_again = apply_v3_target(switched, HERv3ModelTarget("hashi-api", "later-main"))
+    assert HERv2Config.from_mapping(switched_again).profile_for(Stage.MEDITATION).model == "later-main"
+
+
+def test_configured_equal_lightweight_stays_selected_after_main_changes():
+    raw = {"profiles": {
+        "premium": {"engine": "hashi-api", "model": "old-main"},
+        "lightweight": {"engine": "hashi-api", "model": "old-main"},
+    }}
+    normalized = normalise_v3_config(raw)
+    switched = apply_v3_target(normalized, HERv3ModelTarget("hashi-api", "new-main"))
+    assert HERv2Config.from_mapping(switched).profile_for(Stage.MEDITATION).model == "old-main"
+
+
+def test_migration_warning_identifies_the_rejected_triage_profile():
+    normalized = normalise_v3_config({
+        "main": {"provider": "hashi-api", "model": "main-model"},
+        "profiles": {"triage": {"engine": "xai-api", "model": "triage-model"}},
+        "v3_provider_allowlist": ["hashi-api"],
+    })
+    assert normalized["profiles"]["auxiliary"]["model"] == "main-model"
+    assert any(warning["field"] == "profiles.triage" for warning in normalized["migration_warnings"])
 
 
 @pytest.mark.asyncio

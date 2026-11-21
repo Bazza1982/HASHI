@@ -5430,7 +5430,7 @@ class HashiStageProvider(StageProvider):
         provider_commentary_serial = 0
         provider_answer_preview_serial = 0
 
-        async def _capture(event: StreamEvent) -> None:
+        async def _capture(event: StreamEvent) -> bool | None:
             nonlocal provider_commentary_serial
             nonlocal provider_answer_preview_serial
             nonlocal provider_replay_activity
@@ -5508,8 +5508,10 @@ class HashiStageProvider(StageProvider):
                             "answer_preview": True,
                         },
                     )
-                    await self.on_stream_event(preview_event)
-                return
+                    accepted = await self.on_stream_event(preview_event)
+                    return accepted is not False
+                # A raw provider delta that did not cross the preview boundary is internal.
+                return False
             # Provider activity is an internal liveness signal and must never
             # be projected to a user-facing connector.
             if event.kind == KIND_PROVIDER_ACTIVITY:

@@ -247,6 +247,13 @@ Provider, `/model` selects one of that Provider's real model IDs, and both chang
 persist immediately for subsequent turns. Old route buttons are rejected rather
 than allowed to change ignored settings.
 
+A configured lightweight profile supplies the non-user-facing auxiliary model
+when no explicit auxiliary is set and the Provider is allowed. Otherwise that
+lane follows the selected main model with reasoning off by default. Repeated
+configuration projection preserves the selected auxiliary and its migration
+warnings; switching the main model does not silently replace an independently
+configured auxiliary.
+
 Public Provider identity is consistent across shared, creation and per-Agent
 catalogues, offline metadata and live presentation: the `providers` dictionary
 key and its entry's `engine` use the same public name, such as `deepseek` or

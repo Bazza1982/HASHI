@@ -8,6 +8,7 @@ import io
 import inspect
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -4492,6 +4493,7 @@ class OpenRouterAdapter(BaseBackend):
         total_tool_repair_requests = 0
         total_local_recovery_requests = 0
         tool_effect_facts: list[dict[str, Any]] = []
+        visible_partial_answer = False
 
         try:
             self._touch_activity()
@@ -4625,13 +4627,16 @@ class OpenRouterAdapter(BaseBackend):
                     effective_parameters = _effective_protocol_parameters(payload)
 
                     async def _capture_provider_call(event: StreamEvent) -> None:
-                        nonlocal provider_call_emitted_text
-                        if event.kind == KIND_TEXT_DELTA and (
+                        nonlocal provider_call_emitted_text, visible_partial_answer
+                        is_text = event.kind == KIND_TEXT_DELTA and bool(
                             event.raw_delta or event.summary
-                        ):
+                        )
+                        if is_text:
                             provider_call_emitted_text = True
                         if on_stream_event is not None:
-                            await on_stream_event(event)
+                            delivered = await on_stream_event(event)
+                            if is_text and delivered is True:
+                                visible_partial_answer = True
 
                     call_stream_callback = (
                         _capture_provider_call
@@ -4761,6 +4766,8 @@ class OpenRouterAdapter(BaseBackend):
                         )
                         raise
                     except Exception as exc:
+                        # An interrupted physical call may still have incurred a charge.
+                        provider_cost_complete = False
                         setattr(exc, "hashi_provider_call_timing", {
                             "request_started_at": provider_call_started_at,
                             "failure_observed_at": _utc_timestamp(),
@@ -4824,6 +4831,7 @@ class OpenRouterAdapter(BaseBackend):
                         )
                         can_transport_retry = bool(
                             not can_media_fallback
+                            and not visible_partial_answer
                             and recovery_attempts_used < retry_limit
                             and (
                                 provider_call_limit is None
@@ -4976,6 +4984,7 @@ class OpenRouterAdapter(BaseBackend):
                             request_id=str(request_id or ""),
                             on_stream_event=on_stream_event,
                             effect_recovery=effect_recovery,
+                            visible_partial_answer=visible_partial_answer,
                             provider_calls=provider_calls,
                             provider_transport_retry_count=(
                                 provider_transport_retry_count
@@ -5641,6 +5650,7 @@ class OpenRouterAdapter(BaseBackend):
         total_local_recovery_requests: int,
         total_tool_calls: int,
         tool_loop_count: int,
+        visible_partial_answer: bool = False,
     ) -> BackendResponse | None:
         """Run the ordered, consented fallback chain within one paid-call budget."""
 
@@ -5714,7 +5724,7 @@ class OpenRouterAdapter(BaseBackend):
                     checkpoint_safe=bool(
                         effect_recovery.get("safe_current_call_continuation")
                     ),
-                    visible_partial_answer=False,
+                    visible_partial_answer=bool(visible_partial_answer),
                     primary_failure=dict(current_failure),
                 )
                 if inspect.isawaitable(decision):
@@ -5893,6 +5903,22 @@ class OpenRouterAdapter(BaseBackend):
         if last_response is None:
             setattr(exc, "hashi_provider_fallback", record)
             return None
+        all_calls = [*provider_calls, *accumulated_target_calls]
+        costs = [
+            call.get("cost_usd") if isinstance(call, Mapping) else None
+            for call in all_calls
+        ]
+        merged_cost = (
+            round(sum(float(value) for value in costs), 12)
+            if accumulated_target_calls and last_response.cost_usd is not None and costs and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(value) >= 0
+                for value in costs
+            )
+            else None
+        )
         merged_metadata: dict[str, Any] = {
             **last_metadata,
             "provider_fallback": record,
@@ -5919,7 +5945,7 @@ class OpenRouterAdapter(BaseBackend):
             is_success=last_response.is_success,
             stop_reason=last_response.stop_reason,
             usage=last_response.usage,
-            cost_usd=last_response.cost_usd,
+            cost_usd=merged_cost,
             tool_call_count=int(total_tool_calls)
             + int(last_response.tool_call_count or 0),
             tool_loop_count=int(tool_loop_count)

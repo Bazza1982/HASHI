@@ -3838,12 +3838,10 @@ class _AnswerPreviewBackend(_FakeBackend):
     ):
         del request_id, is_retry, silent
         self.prompt = prompt
-        await on_stream_event(
-            StreamEvent(kind=KIND_TEXT_DELTA, summary="Workbench ")
-        )
-        await on_stream_event(
-            StreamEvent(kind=KIND_TEXT_DELTA, summary="answer")
-        )
+        self.preview_deliveries = [
+            await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="Workbench ")),
+            await on_stream_event(StreamEvent(kind=KIND_TEXT_DELTA, summary="answer")),
+        ]
         return BackendResponse(
             text="Workbench answer",
             duration_ms=1,
@@ -4387,6 +4385,7 @@ async def test_hashi_stage_provider_emits_typed_preview_only_for_visible_stage_t
     assert [event.summary for event in forwarded] == ["Workbench ", "answer"]
     assert all(event.raw_delta == "" for event in forwarded)
     assert all(event.provenance == "provider_visible_text_delta" for event in forwarded)
+    assert manager.backends[-1].preview_deliveries == [True, True]
 
     forwarded.clear()
     await provider.invoke(
@@ -4398,6 +4397,7 @@ async def test_hashi_stage_provider_emits_typed_preview_only_for_visible_stage_t
         ),
     )
     assert forwarded == []
+    assert manager.backends[-1].preview_deliveries == [False, False]
 
 
 @pytest.mark.asyncio
