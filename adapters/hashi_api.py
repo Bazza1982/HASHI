@@ -52,9 +52,9 @@ from adapters.openrouter_api import (
     _response_wire_evidence,
     _stream_error_exception,
     _tool_call_protocol_summary,
-    _usage_cache_tokens,
     _utc_timestamp,
     _usage_cost_usd,
+    _usage_cache_tokens,
     _usage_thinking_tokens,
 )
 from adapters.stream_events import (

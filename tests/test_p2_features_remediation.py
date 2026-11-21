@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -110,6 +111,40 @@ async def test_prompt_cache_token_extraction_and_xai_propagation(tmp_path: Path)
     assert res.prompt_cache_hit_tokens == 40
     assert res.prompt_cache_miss_tokens == 60
     await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_xai_stream_preserves_cache_usage_and_finish_reason(tmp_path: Path):
+    cfg = AgentConfig("x", "xai-api", tmp_path, None, "grok-4.2", True)
+    adapter = XaiApiAdapter(cfg, GlobalConfig(authorized_id=0), api_key="k")
+    events = [
+        {"choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": None}]},
+        {
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        },
+    ]
+    wire = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+
+    async def handler(_request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=wire)
+
+    adapter.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await adapter._stream_api_once(
+            {"model": "grok-4.2", "messages": [], "stream": True},
+            {},
+            None,
+            api_url="https://api.x.ai/v1/chat/completions",
+        )
+        assert (result.text, result.finish_reason) == ("hello", "stop")
+        assert (result.prompt_cache_hit_tokens, result.prompt_cache_miss_tokens) == (40, 60)
+    finally:
+        await adapter.shutdown()
 
 
 def test_claude_cli_cache_usage_and_antigravity_mcp_hook(tmp_path: Path):

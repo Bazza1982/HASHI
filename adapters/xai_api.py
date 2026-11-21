@@ -609,10 +609,10 @@ class XaiApiAdapter(OpenRouterAdapter):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
-            completion_tokens=stream_usage.get("completion_tokens", 0),
-            thinking_tokens=comp_details.get("reasoning_tokens", 0),
             prompt_cache_hit_tokens=cache_hit,
             prompt_cache_miss_tokens=cache_miss,
+            completion_tokens=stream_usage.get("completion_tokens", 0),
+            thinking_tokens=comp_details.get("reasoning_tokens", 0),
         )
         result.reasoning_content = reasoning_content
         result.wire_evidence = wire_evidence
