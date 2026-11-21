@@ -13,6 +13,7 @@ import inspect
 import os
 from pathlib import Path
 import re
+import shlex
 import time
 
 if os.name == 'nt':
@@ -721,6 +722,41 @@ def _shell_lock_targets(registry, arguments: dict, roots: list[str]) -> list[Pat
     return targets
 
 
+def _shell_redirect_targets(command: str, exec_dir: Path, shell: str = "") -> list[Path]:
+    """Resolve literal output-redirection targets; this is not a shell parser.
+
+    An opaque script may write other paths. These cooperative leases cover only
+    the explicit targets we can identify and do not replace OS authorization.
+    """
+    try:
+        lexer = shlex.shlex(
+            command,
+            posix=(str(shell).casefold() == "bash" or os.name != "nt"),
+            punctuation_chars="<>|&;",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    targets = []
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {">", ">>"}:
+            continue
+        value = tokens[index + 1]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        # Expansions, descriptors and globbing are not stable file identities.
+        if (not value or value.startswith("~")
+                or value in {"&", "|", ";", "<", ">", ">>"}
+                or any(char in value for char in "$%*?[]{}()`")):
+            continue
+        target = _resolve_tool_target(value, exec_dir)
+        if target is not None and not _is_filesystem_root(target):
+            targets.append(target)
+    return targets
+
+
 @asynccontextmanager
 async def tool_resource(registry, name, arguments):
     """Synchronize mutating filesystem tools without over-locking independent work.
@@ -737,8 +773,8 @@ async def tool_resource(registry, name, arguments):
       * `move`: exclusive source and destination (file or directory subtree).
     - Provably read-only `shell`/`bash` commands take shared leases.
     - Arbitrary/mutating `shell`/`bash` commands take exclusive leases across
-      all accessible writable roots so scripts with internal cross-Workzone
-      writes serialize safely with competing edits.
+      accessible non-root Workzones and literal output-redirection targets.
+      Opaque scripts may also write paths that cannot be derived here.
     - Pure read tools take no lease.
     """
     arguments = arguments if isinstance(arguments, dict) else {}
@@ -810,6 +846,12 @@ async def tool_resource(registry, name, arguments):
         readonly_shell = _is_strictly_readonly_shell_command(command)
         for target_root in _shell_lock_targets(registry, arguments, roots):
             lock_path(target_root, shared=readonly_shell)
+        if not readonly_shell:
+            raw_cwd = str(arguments.get('cwd') or '').strip()
+            exec_dir = _resolve_tool_target(raw_cwd, workspace_dir) if raw_cwd else workspace_dir
+            if exec_dir is not None:
+                for target in _shell_redirect_targets(command, exec_dir, str(arguments.get('shell') or '')):
+                    lock_path(target, shared=False)
 
     groups = [(key, 1, shared) for key, shared in scopes.items()]
     async with leases(Path(root) / 'state' / 'instance', groups) as elapsed:

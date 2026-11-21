@@ -93,6 +93,11 @@
 
 [execution_resources.tool_resource](../../orchestrator/execution_resources.py) 会等待 shell/file-write/patch 的资源 lease。[固定证据](https://github.com/Bazza1982/HASHI/blob/d6b6513973bfc8f9f22c40ddd8f72802f907baa0/orchestrator/execution_resources.py#L178-L210) **只有排队前验证是不够的**：排队期间 grant 可以过期、撤销或 task/epoch 已变。审批等待不可长期占用执行资源；若二次检查需要重新批准，释放资源后再等。
 
+对带有可识别字面量输出重定向的 shell 命令，资源 lease 还覆盖该目标文件；
+不同工作区写入同一目标时应等待，互不重叠的工作不因盘符根目录而串行。
+脚本内部动态计算的目标不能从命令文本可靠推断，这种协作锁不是文件授权
+或任意脚本冲突保护的证明；仍需依照实际执行通道和授权边界判断。
+
 未知工具、工具内再调用、shell 子进程、browser/desktop 和外部 connector 不因顶层检查存在便自动证明完全受控。覆盖声明必须来自真实执行通道证据；L1 的应用级门控与 L2 的 OS 保证分别报告。
 
 追踪：PRD `SCOPE/LEASE/L1/NFR`；验收 `CASE-L1-04..12`、`CASE-L2-02/04/07`。
