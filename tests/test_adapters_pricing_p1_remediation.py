@@ -80,14 +80,36 @@ def test_renormalized_config_retains_auxiliary_and_migration_warnings():
 def test_model_selection_keeps_configured_lightweight_auxiliary():
     raw = {
         "profiles": {
-            "premium": {"engine": "deepseek-api", "model": "deepseek-v4-pro"},
+            "premium": {"engine": "deepseek-api", "model": "deepseek-v4-pro", "reasoning": "high"},
             "lightweight": {"engine": "deepseek-api", "model": "deepseek-flash"},
         }
     }
     selected = apply_v3_target(raw, HERv3ModelTarget("hashi-api", "main-model"))
     config = HERv2Config.from_mapping(selected)
     assert config.profile_for(Stage.EXECUTION).model == "main-model"
+    assert config.profile_for(Stage.EXECUTION).reasoning == "high"
     assert config.profile_for(Stage.MEDITATION).model == "deepseek-flash"
+
+
+def test_model_selection_can_replace_legacy_target_outside_current_allowlist():
+    raw = {
+        "profiles": {
+            "premium": {"engine": "deepseek-api", "model": "old-main", "reasoning": "high"},
+        },
+        "v3_provider_allowlist": ["hashi-api"],
+    }
+    selected = apply_v3_target(raw, HERv3ModelTarget("hashi-api", "new-main"))
+    config = HERv2Config.from_mapping(selected)
+    assert config.profile_for(Stage.EXECUTION).engine == "hashi-api"
+    assert config.profile_for(Stage.EXECUTION).model == "new-main"
+    assert config.profile_for(Stage.EXECUTION).reasoning == "high"
+    with pytest.raises(ValueError, match="allowlist"):
+        apply_v3_target(raw, HERv3ModelTarget("xai-api", "not-allowed"))
+    with pytest.raises(ValueError, match="allowlist"):
+        apply_v3_target(
+            {**raw, "auxiliary": {"provider": "xai-api", "model": "not-allowed"}},
+            HERv3ModelTarget("hashi-api", "new-main"),
+        )
 
 
 def test_default_auxiliary_follows_main_after_repeated_model_selection():

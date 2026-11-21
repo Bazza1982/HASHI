@@ -310,7 +310,17 @@ def apply_v3_target(
 
     updated = deepcopy(dict(raw))
     current_main = updated.get("main")
-    current_main = dict(current_main) if isinstance(current_main, Mapping) else {}
+    if not isinstance(current_main, Mapping):
+        # Legacy configurations may have only an Execution profile. Resolve
+        # that profile before changing its target so its reasoning and other
+        # configured options survive the conversion to an explicit v3 main.
+        # The old target may have left the current allowlist; this temporary
+        # projection makes no call and the final normalization still checks
+        # both selected targets against the unchanged allowlist.
+        previous = dict(updated)
+        previous.pop("v3_provider_allowlist", None)
+        current_main = normalise_v3_config(previous)["profiles"]["main"]
+    current_main = dict(current_main)
     current_main.update(target.to_dict())
     updated["main"] = current_main
     # Normalization preserves a configured auxiliary, or derives it from the
