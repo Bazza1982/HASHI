@@ -13,6 +13,7 @@ import inspect
 import os
 from pathlib import Path
 import re
+import shlex
 import time
 
 if os.name == 'nt':
@@ -261,6 +262,48 @@ _GIT_LS_FILES_BOOL_FLAGS = frozenset({
     '--deleted', '-i', '--ignored', '--exclude-standard', '-s',
     '--stage', '-u', '--unmerged', '-z', '--full-name',
 })
+_GIT_GREP_BOOL_FLAGS = frozenset({
+    '-n', '--line-number', '-i', '--ignore-case', '-F', '--fixed-strings',
+    '-w', '--word-regexp', '-E', '--extended-regexp', '-P', '--perl-regexp',
+    '-l', '--files-with-matches', '--name-only', '-c', '--count',
+    '-v', '--invert-match', '-H', '--heading', '--break', '--cached',
+    '-I', '-q', '--quiet', '--color', '--no-color', '-z', '--null',
+    '--untracked', '--no-index', '--exclude-standard', '--full-name',
+})
+_GIT_GREP_VALUE_FLAGS = frozenset({
+    '-e', '-A', '--after-context', '-B', '--before-context', '-C', '--context',
+    '--max-count', '--max-depth', '--threads', '--color',
+})
+_GIT_GREP_PREFIX_FLAGS = (
+    '--max-count=', '--max-depth=', '--threads=', '--after-context=',
+    '--before-context=', '--context=', '--color=', '-A', '-B', '-C',
+)
+_GIT_BLAME_BOOL_FLAGS = frozenset({
+    '-n', '-l', '-t', '-e', '--show-email', '-p', '--porcelain',
+    '--line-porcelain', '-w', '-M', '-C', '-s', '--show-name',
+    '--show-number', '--incremental', '-c', '--root', '--date',
+})
+_GIT_BLAME_VALUE_FLAGS = frozenset({'-L', '--abbrev', '--since', '--date', '-M', '-C'})
+_GIT_BLAME_PREFIX_FLAGS = ('-L', '--abbrev=', '--since=', '--date=')
+_GIT_LS_TREE_BOOL_FLAGS = frozenset({
+    '-r', '-d', '-t', '-l', '--long', '--name-only', '--name-status',
+    '--full-name', '--full-tree', '-z',
+})
+_GIT_LS_TREE_VALUE_FLAGS = frozenset({'--abbrev'})
+_GIT_LS_TREE_PREFIX_FLAGS = ('--abbrev=',)
+_GIT_DESCRIBE_BOOL_FLAGS = frozenset({
+    '--tags', '--all', '--always', '--dirty', '--broken', '--long',
+    '--exact-match', '--contains', '--first-parent',
+})
+_GIT_DESCRIBE_VALUE_FLAGS = frozenset({'--abbrev', '--candidates', '--match', '--exclude'})
+_GIT_DESCRIBE_PREFIX_FLAGS = ('--abbrev=', '--candidates=', '--match=', '--exclude=')
+_GIT_SHORTLOG_BOOL_FLAGS = frozenset({
+    '-s', '--summary', '-n', '--numbered', '-sn', '-ns', '-e', '--email', '-c',
+    '--committer', '--all', '--branches', '--tags', '--no-merges', '-z',
+})
+_GIT_SHORTLOG_VALUE_FLAGS = frozenset({'-n', '--max-count', '--since', '--until', '--format'})
+_GIT_SHORTLOG_PREFIX_FLAGS = ('--max-count=', '--since=', '--until=', '--format=', '-n')
+_GIT_CAT_FILE_BOOL_FLAGS = frozenset({'-p', '-t', '-s', '-e'})
 
 _RG_BOOL_FLAGS = frozenset({
     '-n', '--line-number', '-N', '--no-line-number', '-i', '--ignore-case',
@@ -503,6 +546,58 @@ def _validate_readonly_git(args: list[tuple[str, bool]]) -> bool:
             return False
         if sub == 'ls-files':
             return _validate_flag_stream(rest, bool_flags=_GIT_LS_FILES_BOOL_FLAGS) is not None
+        if sub == 'grep':
+            return _validate_flag_stream(
+                rest,
+                bool_flags=_GIT_GREP_BOOL_FLAGS,
+                value_flags=_GIT_GREP_VALUE_FLAGS,
+                prefix_flags=_GIT_GREP_PREFIX_FLAGS,
+                short_patterns=(_RG_CONTEXT_SHORT,),
+            ) is not None
+        if sub == 'blame':
+            return _validate_flag_stream(
+                rest,
+                bool_flags=_GIT_BLAME_BOOL_FLAGS,
+                value_flags=_GIT_BLAME_VALUE_FLAGS,
+                prefix_flags=_GIT_BLAME_PREFIX_FLAGS,
+            ) is not None
+        if sub == 'ls-tree':
+            return _validate_flag_stream(
+                rest,
+                bool_flags=_GIT_LS_TREE_BOOL_FLAGS,
+                value_flags=_GIT_LS_TREE_VALUE_FLAGS,
+                prefix_flags=_GIT_LS_TREE_PREFIX_FLAGS,
+            ) is not None
+        if sub == 'describe':
+            return _validate_flag_stream(
+                rest,
+                bool_flags=_GIT_DESCRIBE_BOOL_FLAGS,
+                value_flags=_GIT_DESCRIBE_VALUE_FLAGS,
+                prefix_flags=_GIT_DESCRIBE_PREFIX_FLAGS,
+            ) is not None
+        if sub == 'shortlog':
+            return _validate_flag_stream(
+                rest,
+                bool_flags=_GIT_SHORTLOG_BOOL_FLAGS,
+                value_flags=_GIT_SHORTLOG_VALUE_FLAGS,
+                prefix_flags=_GIT_SHORTLOG_PREFIX_FLAGS,
+                short_patterns=(_GIT_SHORT_COUNT,),
+            ) is not None
+        if sub == 'cat-file':
+            pos = _validate_flag_stream(rest, bool_flags=_GIT_CAT_FILE_BOOL_FLAGS)
+            return pos is not None and len(pos) in (1, 2)
+        if sub == 'reflog':
+            if rest and rest[0][0].casefold() in {'expire', 'delete', 'exists'}:
+                if rest[0][0].casefold() != 'exists':
+                    return False
+            reflog_rest = rest[1:] if rest and rest[0][0].casefold() == 'show' else rest
+            return _validate_flag_stream(
+                reflog_rest,
+                bool_flags=_GIT_LOG_BOOL_FLAGS,
+                value_flags=_GIT_LOG_VALUE_FLAGS,
+                prefix_flags=_GIT_LOG_PREFIX_FLAGS,
+                short_patterns=(_GIT_SHORT_COUNT,),
+            ) is not None
         return False
     return False
 
@@ -593,23 +688,72 @@ def _resolve_tool_target(raw_value: object, workspace_dir: Path) -> Path | None:
     return raw_path.resolve() if raw_path.is_absolute() else (workspace_dir / raw_path).resolve()
 
 
+def _is_filesystem_root(path: Path) -> bool:
+    """Return True when ``path`` is a drive or filesystem root (e.g. ``C:\\`` or ``/``)."""
+    resolved = path.resolve()
+    return resolved == resolved.parent
+
+
 def _shell_lock_targets(registry, arguments: dict, roots: list[str]) -> list[Path]:
-    """Conservative lock targets for shell commands across all accessible writable roots.
+    """Conservative lock targets for shell commands across accessible Workzones.
 
     Arbitrary scripts can mutate any accessible writable Workzone even when
     its literal path does not appear in the command string, so unknown/mutating
-    shell commands lock all authorized roots (plus explicit cwd if provided).
+    shell commands lock all non-root authorized Workzones (plus workspace/cwd).
+    Drive/filesystem roots added by ``access_scope='drive'`` (e.g. ``C:\\``)
+    must never be exclusively locked by a single workspace shell call, or one
+    Agent running tests would stall every unrelated Agent on the machine.
     """
     workspace = Path(registry.workspace_dir).resolve()
     raw_cwd = str(arguments.get('cwd') or '').strip()
     exec_dir = _resolve_tool_target(raw_cwd, workspace) if raw_cwd else workspace
     seen: set[str] = set()
     targets: list[Path] = []
-    for candidate in [*(Path(p) for p in roots), *( [exec_dir] if exec_dir is not None else [] )]:
+    candidates = [*(Path(p) for p in roots), *([exec_dir] if exec_dir is not None else [])]
+    for candidate in candidates:
+        if _is_filesystem_root(candidate):
+            continue
         norm = os.path.normcase(str(candidate))
         if norm not in seen:
             seen.add(norm)
             targets.append(candidate)
+    if not targets:
+        targets.append(workspace)
+    return targets
+
+
+def _shell_redirect_targets(command: str, exec_dir: Path, shell: str = "") -> list[Path]:
+    """Resolve literal output-redirection targets; this is not a shell parser.
+
+    An opaque script may write other paths. These cooperative leases cover only
+    the explicit targets we can identify and do not replace OS authorization.
+    """
+    try:
+        lexer = shlex.shlex(
+            command,
+            posix=(str(shell).casefold() == "bash" or os.name != "nt"),
+            punctuation_chars="<>|&;",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    targets = []
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {">", ">>"}:
+            continue
+        value = tokens[index + 1]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        # Expansions, descriptors and globbing are not stable file identities.
+        if (not value or value.startswith("~")
+                or value in {"&", "|", ";", "<", ">", ">>"}
+                or any(char in value for char in "$%*?[]{}()`")):
+            continue
+        target = _resolve_tool_target(value, exec_dir)
+        if target is not None and not _is_filesystem_root(target):
+            targets.append(target)
     return targets
 
 
@@ -629,8 +773,8 @@ async def tool_resource(registry, name, arguments):
       * `move`: exclusive source and destination (file or directory subtree).
     - Provably read-only `shell`/`bash` commands take shared leases.
     - Arbitrary/mutating `shell`/`bash` commands take exclusive leases across
-      all accessible writable roots so scripts with internal cross-Workzone
-      writes serialize safely with competing edits.
+      accessible non-root Workzones and literal output-redirection targets.
+      Opaque scripts may also write paths that cannot be derived here.
     - Pure read tools take no lease.
     """
     arguments = arguments if isinstance(arguments, dict) else {}
@@ -702,6 +846,12 @@ async def tool_resource(registry, name, arguments):
         readonly_shell = _is_strictly_readonly_shell_command(command)
         for target_root in _shell_lock_targets(registry, arguments, roots):
             lock_path(target_root, shared=readonly_shell)
+        if not readonly_shell:
+            raw_cwd = str(arguments.get('cwd') or '').strip()
+            exec_dir = _resolve_tool_target(raw_cwd, workspace_dir) if raw_cwd else workspace_dir
+            if exec_dir is not None:
+                for target in _shell_redirect_targets(command, exec_dir, str(arguments.get('shell') or '')):
+                    lock_path(target, shared=False)
 
     groups = [(key, 1, shared) for key, shared in scopes.items()]
     async with leases(Path(root) / 'state' / 'instance', groups) as elapsed:
