@@ -231,13 +231,41 @@ async def test_backend_initialization_timeout_is_not_misreported_as_capacity(tmp
 
 
 @pytest.mark.asyncio
-async def test_execution_capacity_defaults_and_retryable_timeout(tmp_path, monkeypatch):
-    from orchestrator import execution_resources
+async def test_explicit_engine_capacity_waits_and_recovers_after_failure(tmp_path):
+    from orchestrator.execution_resources import execution_budget
 
-    cfg = execution_resources.execution_configuration({}, {})
-    assert isinstance(cfg, dict)
-    assert execution_resources.DEFAULT_INSTANCE_SESSIONS >= 24
-    assert execution_resources.DEFAULT_ENGINE_SESSIONS >= 12
+    config = SimpleNamespace(extra={}, active_backend="codex-cli", project_root=tmp_path)
+    runtime = SimpleNamespace(config=config, global_config=SimpleNamespace(project_root=tmp_path))
+    frozen = {
+        "config": config,
+        "settings": {"_agents_json_global": {
+            "execution_limits": {"instance_sessions": 4, "engines": {"codex-cli": 1}},
+        }},
+    }
+    entered = asyncio.Event()
+
+    async def second_request():
+        async with execution_budget(runtime, SimpleNamespace(request_id="second"), frozen):
+            entered.set()
+
+    with pytest.raises(RuntimeError, match="synthetic failure"):
+        async with execution_budget(runtime, SimpleNamespace(request_id="first"), frozen):
+            waiting = asyncio.create_task(second_request())
+            for _ in range(200):
+                if runtime._execution_queue_reasons.get("second") == "engine_capacity":
+                    break
+                await asyncio.sleep(.01)
+            assert runtime._execution_queue_reasons.get("second") == "engine_capacity"
+            assert not entered.is_set()
+            raise RuntimeError("synthetic failure")
+    await asyncio.wait_for(waiting, timeout=2)
+    assert entered.is_set()
+    assert not runtime._execution_queue_reasons
+
+
+@pytest.mark.asyncio
+async def test_execution_capacity_timeout_is_retryable(tmp_path, monkeypatch):
+    from orchestrator import execution_resources
 
     delays = []
     orig_sleep = asyncio.sleep
