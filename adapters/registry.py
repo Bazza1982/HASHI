@@ -24,6 +24,7 @@ _BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
     "her-v2": ("adapters.her_v2", "HERv2Adapter"),
     "grok-cli": ("adapters.grok_cli", "GrokCLIAdapter"),
     "ollama-api": ("adapters.ollama_api", "OllamaAdapter"),
+    "hli-api": ("adapters.hli_api", "HLIAdapter"),
     "xai-api": ("adapters.xai_api", "XaiApiAdapter"),
     "hashi-api": ("adapters.hashi_api", "HashiApiAdapter"),
 }

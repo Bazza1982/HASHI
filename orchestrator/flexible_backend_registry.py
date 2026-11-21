@@ -11,7 +11,7 @@ REMOVED_ENGINE_REPLACEMENTS = {
 }
 REMOVED_ENGINE_IDS = frozenset(REMOVED_ENGINE_REPLACEMENTS)
 PROVIDER_ONLY_ENGINE_IDS = frozenset(
-    {"openrouter-api", "deepseek-api", "openai-compatible-api"}
+    {"openrouter-api", "deepseek-api", "openai-compatible-api", "hli-api"}
 )
 HER_V2_DEFAULT_PERMISSION_MODE = "danger-full-access"
 HER_V2_DEFAULT_ACCESS_SCOPE = "drive"
@@ -172,6 +172,20 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_model": "gemma4:26b",
         "efforts": [],
         "default_effort": None,
+        "secret_keys": [],
+    },
+    "hli-api": {
+        "label": "Hashi Local Inference",
+        "privacy_levels": [0, 1, 2],
+        "herv3_level2_qualified": True,
+        # HLI models come from the configured Hashi Compute instance. Do not
+        # hardcode a workstation's model inventory into HASHI's registry.
+        "models": [],
+        "allow_custom_models": True,
+        "default_model": None,
+        "efforts": [],
+        "default_effort": None,
+        "provider_reasoning_efforts": ["off", "low", "medium", "high", "xhigh", "max"],
         "secret_keys": [],
     },
     "xai-api": {

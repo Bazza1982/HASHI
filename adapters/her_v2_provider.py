@@ -5011,11 +5011,12 @@ class HashiStageProvider(StageProvider):
             if request.context.get("her_v3") is True:
                 from tools.tool_presentation import OnDemandToolView, on_demand_requested
                 if (
-                    on_demand_requested(
-                        getattr(self.tool_registry, "tool_options", None),
-                        model=profile.model,
-                        is_herv3=True,
-                    )
+                    (canonical_model_provider(profile.engine) == "hli-api" or
+                     on_demand_requested(
+                         getattr(self.tool_registry, "tool_options", None),
+                         model=profile.model,
+                         is_herv3=True,
+                     ))
                     and bool(getattr(selected_registry, "is_allowed")("tool_find"))
                 ):
                     selected_registry = OnDemandToolView(
@@ -6987,7 +6988,7 @@ class HashiStageProvider(StageProvider):
 
 
 def _pcm_only_presentation(profile: ProviderProfile) -> bool:
-    return canonical_model_provider(profile.engine) == "ollama-api"
+    return canonical_model_provider(profile.engine) in {"ollama-api", "hli-api"}
 
 
 class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
