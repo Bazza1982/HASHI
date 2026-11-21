@@ -45,6 +45,48 @@ def test_t01_fresh_workspace_injects_relevant_saved_memory_by_default_and_respec
     assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in prompt_off
 
 
+
+@pytest.mark.asyncio
+async def test_default_chinese_recall_reopens_and_explicit_search_off_persists(tmp_path):
+    workspace = tmp_path / "fresh_agent"
+    workspace.mkdir()
+    store = BridgeMemoryStore(workspace)
+    store.record_memory("fact", "chat", "用户喜欢喝茉莉花茶。")
+    store.record_memory("fact", "chat", "用户喜欢看天文纪录片。")
+
+    def assembler_for(memory_store):
+        assembler = BridgeContextAssembler(memory_store, system_md=None)
+        apply_memory_injection_preferences(assembler, workspace)
+        return assembler
+
+    assembler = assembler_for(store)
+    related = assembler.build_prompt("用户喜欢喝什么茶？", "deepseek-api")
+    unrelated = assembler.build_prompt("用户喜欢哪种音乐？", "deepseek-api")
+    assert "茉莉花茶" in related and "天文纪录片" not in related
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in unrelated
+
+    reopened_store = BridgeMemoryStore(workspace)
+    reopened = assembler_for(reopened_store)
+    assert "茉莉花茶" in reopened.build_prompt("用户喜欢喝什么茶？", "deepseek-api")
+
+    async def reply(*args, **kwargs):
+        pass
+
+    runtime = SimpleNamespace(
+        workspace_dir=workspace,
+        context_assembler=reopened,
+        memory_store=reopened_store,
+        _is_authorized_user=lambda _user_id: True,
+        _reply_text=reply,
+    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+    await cmd_memory(runtime, update, SimpleNamespace(args=["search", "off"]))
+    after_restart = assembler_for(BridgeMemoryStore(workspace))
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in after_restart.build_prompt(
+        "用户喜欢喝什么茶？", "deepseek-api"
+    )
+
+
 def test_t02_multilingual_chinese_japanese_mixed_vectors_are_nonzero_and_discriminative(tmp_path):
     enc = LocalEmbeddingEncoder()
     zh_vec = enc.encode("我最喜欢的颜色是黄绿色，平时喜欢喝乌龙茶。")
@@ -93,6 +135,138 @@ def test_t03_unrelated_memories_return_empty_instead_of_recency_backfill(tmp_pat
 
     assert store.retrieve_memories("量子力学薛定谔方程推导", limit=6, now=now) == []
     assert store.retrieve_memories("quantum mechanics hamiltonian", limit=6, now=now) == []
+
+
+
+def test_chinese_shared_boilerplate_does_not_inject_unrelated_memories(tmp_path):
+    store = BridgeMemoryStore(tmp_path)
+    tea = "用户喜欢喝茉莉花茶，不喜欢加糖。"
+    coffee = "用户喜欢喝咖啡，早晨加牛奶。"
+    documentary = "用户喜欢看天文纪录片，周末去天文馆。"
+    birthday = "用户的生日是九月十五日。"
+    for content in (tea, coffee, documentary, birthday):
+        store.record_memory("fact", "chat", content)
+
+    def contents(query):
+        return [item["content"] for item in store.retrieve_memories(query, limit=6)]
+
+    assert contents("用户喜欢喝什么茶？") == [tea]
+    assert contents("用户喜欢喝什么咖啡？") == [coffee]
+    assert contents("用户喜欢看什么纪录片？") == [documentary]
+    assert contents("用户喜欢哪种音乐？") == []
+    assert contents("用户的宠物叫什么名字？") == []
+
+
+
+def test_bge_inference_failure_preserves_memory_save_and_retrieval(tmp_path):
+    store = BridgeMemoryStore(tmp_path, bge_enabled=False)
+    store.record_memory("fact", "chat", "用户喜欢喝茉莉花茶。")
+    encoder = BgeM3Encoder.__new__(BgeM3Encoder)
+    encoder._fallback = LocalEmbeddingEncoder()
+    encoder._ready = True
+    encoder._error = None
+    encoder._np = None
+
+    def failed_inference(*args, **kwargs):
+        raise RuntimeError("synthetic model failure")
+
+    encoder._tokenizer = failed_inference
+    store.encoder = encoder
+    store._bge_requested = True
+    store._vec_enabled = True
+
+    hits = store.retrieve_memories("用户喜欢喝什么茶？")
+    assert [row["content"] for row in hits] == ["用户喜欢喝茉莉花茶。"]
+    assert store.get_vector_status()["degraded"] is True
+    assert store._vec_enabled is False
+
+    store.record_memory("fact", "chat", "用户的生日是九月十五日。")
+    reopened = BridgeMemoryStore(tmp_path, bge_enabled=False)
+    assert [row["content"] for row in reopened.retrieve_memories("用户的生日是什么？")] == [
+        "用户的生日是九月十五日。"
+    ]
+
+
+
+
+def test_memory_embedding_keeps_encoder_identity_when_runtime_changes(tmp_path):
+    import json
+    import sqlite3
+
+    store = BridgeMemoryStore(tmp_path, bge_enabled=False)
+
+    class ConcurrentBge:
+        ready = True
+        vector_dim = 256
+        encoder_id = "synthetic-other:256"
+        error = None
+
+        def encode(self, text):
+            # Another operation changes the selected encoder while this result
+            # is being produced; its persisted identity must still be accurate.
+            store.encoder = store.legacy_encoder
+            return [1.0] + [0.0] * 255
+
+    store.encoder = ConcurrentBge()
+    store.record_memory("fact", "chat", "用户喜欢喝茉莉花茶。")
+    with sqlite3.connect(store.db_path) as connection:
+        version, encoded = connection.execute(
+            "SELECT embedding_version, embedding FROM memories"
+        ).fetchone()
+    assert version == "synthetic-other:256"
+    assert len(json.loads(encoded)) == 256
+    status = store.get_vector_status()
+    if status["sqlite_vec_supported"]:
+        assert status["vec_enabled"] is False
+        assert status["counts"]["memory_vec"] == 0
+        assert status["degraded"] is True
+
+
+
+def test_broken_vector_index_falls_back_and_reports_degraded(tmp_path):
+    store = BridgeMemoryStore(tmp_path, bge_enabled=False)
+    if not store._vec_enabled:
+        pytest.skip("sqlite-vec is not available")
+    store.record_memory("fact", "chat", "用户喜欢喝茉莉花茶。")
+    with store._connect() as connection:
+        connection.execute("DROP TABLE memory_vec")
+        connection.commit()
+
+    assert [row["content"] for row in store.retrieve_memories("用户喜欢喝什么茶？")] == [
+        "用户喜欢喝茉莉花茶。"
+    ]
+    status = store.get_vector_status()
+    assert status["degraded"] is True
+    assert status["vec_enabled"] is False
+    assert "vector index read failed" in status["vec_reason"]
+
+
+def test_bge_failure_during_backfill_keeps_actual_embedding_identity(tmp_path, monkeypatch):
+    import json
+    import sqlite3
+
+    initial = BridgeMemoryStore(tmp_path, bge_enabled=False)
+    initial.record_memory("fact", "chat", "用户喜欢喝茉莉花茶。")
+
+    class FailingBge:
+        ready = True
+        vector_dim = 1024
+        encoder_id = "synthetic-bge:1024"
+        error = None
+
+        def encode(self, text):
+            raise RuntimeError("synthetic backfill failure")
+
+    monkeypatch.setattr(BgeM3Encoder, "cached", classmethod(lambda cls, **kwargs: FailingBge()))
+    reopened = BridgeMemoryStore(tmp_path, bge_enabled=True)
+    assert reopened.get_vector_status()["degraded"] is True
+    with sqlite3.connect(reopened.db_path) as connection:
+        version, encoded = connection.execute(
+            "SELECT embedding_version, embedding FROM memories"
+        ).fetchone()
+    assert version == reopened.legacy_encoder.encoder_id
+    assert len(json.loads(encoded)) == reopened.legacy_encoder.vector_dim
+    assert reopened.retrieve_memories("用户喜欢喝什么茶？")
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,32 @@ _LATIN_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _BGE_CACHE_LOCK = threading.Lock()
 _BGE_ENCODER_CACHE: dict[tuple[str, str], "BgeM3Encoder"] = {}
 
+# Conversational framing alone is not evidence that a memory is about a topic.
+# Keep the topic words (including one-character Chinese words such as 茶) for
+# candidate lookup and relevance; dense embeddings still use the full query.
+_MEMORY_QUERY_CJK_FRAME = re.compile(
+    r"请问|用户|(?:我|您|你|他|她)?(?:最)?(?:喜欢|偏爱|偏好)(?:喝|吃|看|听|玩)?"
+    r"|我的|您的|你的|他的|她的|叫什么名字|叫什么|什么|哪种|哪个|哪些"
+    r"|如何|怎么|是否|名字|吗|呢"
+)
+_MEMORY_QUERY_LATIN_FRAME = frozenset({
+    "a", "an", "the", "i", "me", "my", "you", "your", "user",
+    "what", "which", "who", "when", "where", "how", "is", "are",
+    "do", "does", "did", "please", "like", "likes", "favorite", "favourite",
+})
+
+
+def _memory_topic_query(query: str) -> str:
+    text = _MEMORY_QUERY_CJK_FRAME.sub(" ", (query or "").lower())
+    text = _LATIN_TOKEN_RE.sub(
+        lambda match: " " if match.group() in _MEMORY_QUERY_LATIN_FRAME else match.group(),
+        text,
+    )
+    if _tokenize_multilingual(text):
+        return text
+    # A broad request such as "我喜欢什么" still asks for preferences.
+    return next((word for word in ("喜欢", "偏爱", "偏好") if word in query), "")
+
 
 def _tokenize_multilingual(text: str) -> list[str]:
     """Extract ASCII/alphanumeric words plus CJK/Kana/Hangul n-grams.
@@ -331,7 +357,9 @@ class BridgeMemoryStore:
         self._sqlite_vec_supported: bool | None = None
         self._vec_enabled = False
         self._vec_dim: int | None = None
+        self._vec_encoder_id: str | None = None
         self._vec_reason: str | None = None
+        self._vector_degraded_reason: str | None = None
         try:
             self.recency_half_life_days = max(
                 0.01,
@@ -368,6 +396,28 @@ class BridgeMemoryStore:
             self._encoder_degraded_reason = encoder.error or "BGE-M3 unavailable; degraded to multilingual hash fallback"
         return encoder
 
+    def _encode(self, text: str) -> tuple[list[float], str, Any]:
+        """Return a vector with the identity of the encoder that produced it."""
+        encoder = self.encoder
+        bge_requested = self._bge_requested
+        try:
+            return encoder.encode(text), str(encoder.encoder_id), encoder
+        except Exception as exc:
+            if not bge_requested or encoder is self.legacy_encoder:
+                raise
+            reason = f"BGE-M3 inference failed ({type(exc).__name__})"
+            memory_logger.warning("%s; using local memory retrieval", reason)
+            if self.encoder is encoder:
+                self._encoder_degraded_reason = reason
+                self.encoder = self.legacy_encoder
+                # Existing BGE vectors retain their original identity and must
+                # not be queried or written as local hashes.
+                self._vec_enabled = False
+                self._vec_dim = None
+                self._vec_reason = reason
+            fallback = self.legacy_encoder
+            return fallback.encode(text), str(fallback.encoder_id), fallback
+
     def sync_embeddings(self, *, enable_bge: bool | None = None) -> dict[str, Any]:
         """Apply BGE/local encoder preference, migrate vector tables, and backfill."""
         if enable_bge is not None:
@@ -377,7 +427,9 @@ class BridgeMemoryStore:
         self.encoder = self._select_encoder(bge_enabled=enable_bge)
         self._vec_enabled = False
         self._vec_dim = None
+        self._vec_encoder_id = None
         self._vec_reason = None
+        self._vector_degraded_reason = None
         self._init_db()
         return self.get_vector_status()
 
@@ -424,16 +476,28 @@ class BridgeMemoryStore:
     def _vector_blob(self, embedding: list[float]) -> bytes:
         return struct.pack(f"{len(embedding)}f", *embedding)
 
-    def _upsert_vec(self, conn: sqlite3.Connection, table: str, key_col: str, row_id: int, embedding: list[float]):
-        if not self._vec_enabled or not embedding or self._vec_dim != len(embedding):
+    def _upsert_vec(
+        self, conn: sqlite3.Connection, table: str, key_col: str,
+        row_id: int, embedding: list[float], *, encoder_id: str,
+    ):
+        if not self._vec_enabled or not embedding:
+            return
+        if self._vec_dim != len(embedding) or encoder_id != self._vec_encoder_id:
+            self._disable_vector_index("encoder changed during indexing")
             return
         try:
             conn.execute(
                 f"INSERT OR REPLACE INTO {table}({key_col}, embedding) VALUES (?, ?)",
                 (row_id, self._vector_blob(embedding)),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._disable_vector_index(f"vector index write failed ({type(exc).__name__})")
+
+    def _disable_vector_index(self, reason: str) -> None:
+        self._vector_degraded_reason = reason
+        self._vec_reason = reason
+        self._vec_enabled = False
+        memory_logger.warning("%s; using local text retrieval", reason)
 
     def _init_db(self):
         with self._connect() as conn:
@@ -578,9 +642,11 @@ class BridgeMemoryStore:
                     )
                     self._vec_enabled = True
                     self._vec_dim = desired_vec_dim
+                    self._vec_encoder_id = str(self.encoder.encoder_id)
                 elif existing_dims == {desired_vec_dim}:
                     self._vec_enabled = self._vec_table_exists(conn, "memory_vec") and self._vec_table_exists(conn, "turns_vec")
                     self._vec_dim = desired_vec_dim if self._vec_enabled else None
+                    self._vec_encoder_id = str(self.encoder.encoder_id) if self._vec_enabled else None
             elif desired_vec_dim:
                 self._vec_reason = self._vec_reason or "sqlite-vec unavailable"
             else:
@@ -612,11 +678,11 @@ class BridgeMemoryStore:
                     (encoder_id,),
                 ).fetchall()
             for row in rows:
-                embedding = self.encoder.encode(str(row["body"] or ""))
-                if row["embedding_version"] != encoder_id:
+                embedding, row_encoder_id, _ = self._encode(str(row["body"] or ""))
+                if row["embedding_version"] != row_encoder_id:
                     conn.execute(
                         f"UPDATE {table} SET embedding = ?, embedding_version = ? WHERE id = ?",
-                        (json.dumps(embedding), encoder_id, int(row["id"])),
+                        (json.dumps(embedding), row_encoder_id, int(row["id"])),
                     )
                 self._upsert_vec(
                     conn,
@@ -624,6 +690,7 @@ class BridgeMemoryStore:
                     key_column,
                     int(row["id"]),
                     embedding,
+                    encoder_id=row_encoder_id,
                 )
 
     def _now(self) -> str:
@@ -666,7 +733,7 @@ class BridgeMemoryStore:
         if not clean:
             return None
         recorded_at = self._now()
-        embedding = self.encoder.encode(clean)
+        embedding, encoder_id, _ = self._encode(clean)
         emb = json.dumps(embedding)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -676,10 +743,10 @@ class BridgeMemoryStore:
                 "INSERT INTO turns "
                 "(ts, role, source, text, embedding, embedding_version) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (recorded_at, role, source, clean, emb, self.encoder.encoder_id),
+                (recorded_at, role, source, clean, emb, encoder_id),
             )
             if cur.lastrowid is not None:
-                self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding)
+                self._upsert_vec(conn, "turns_vec", "turn_id", int(cur.lastrowid), embedding, encoder_id=encoder_id)
             conn.commit()
             return int(cur.lastrowid) if cur.lastrowid is not None else None
 
@@ -691,7 +758,7 @@ class BridgeMemoryStore:
         if not clean or not reference:
             return None
         source = f"wip-recovery:{reference}"
-        embedding = self.encoder.encode(clean)
+        embedding, encoder_id, _ = self._encode(clean)
         encoded_embedding = json.dumps(embedding)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -708,7 +775,7 @@ class BridgeMemoryStore:
                     source,
                     clean,
                     encoded_embedding,
-                    self.encoder.encoder_id,
+                    encoder_id,
                 ),
             )
             row = conn.execute(
@@ -722,7 +789,7 @@ class BridgeMemoryStore:
             if row is not None:
                 conn.execute(
                     "UPDATE turns SET embedding = ?, embedding_version = ? WHERE id = ?",
-                    (encoded_embedding, self.encoder.encoder_id, int(row["id"])),
+                    (encoded_embedding, encoder_id, int(row["id"])),
                 )
                 self._upsert_vec(
                     conn,
@@ -730,6 +797,7 @@ class BridgeMemoryStore:
                     "turn_id",
                     int(row["id"]),
                     embedding,
+                    encoder_id=encoder_id,
                 )
             conn.commit()
             return int(row["id"]) if row is not None else None
@@ -1050,7 +1118,7 @@ class BridgeMemoryStore:
         if not clean:
             return None
         recorded_at = self._now()
-        embedding = self.encoder.encode(clean)
+        embedding, encoder_id, _ = self._encode(clean)
         emb = json.dumps(embedding)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1072,7 +1140,7 @@ class BridgeMemoryStore:
                     clean,
                     float(importance),
                     emb,
-                    self.encoder.encoder_id,
+                    encoder_id,
                     str(origin or "legacy"),
                     str(origin_ref or ""),
                     str(session_id) if session_id else None,
@@ -1093,7 +1161,7 @@ class BridgeMemoryStore:
                     "INSERT INTO memory_fts (content, memory_id, source) VALUES (?, ?, ?)",
                     (clean, memory_id, source),
                 )
-                self._upsert_vec(conn, "memory_vec", "memory_id", memory_id, embedding)
+                self._upsert_vec(conn, "memory_vec", "memory_id", memory_id, embedding, encoder_id=encoder_id)
             conn.commit()
         return memory_id
 
@@ -1149,11 +1217,16 @@ class BridgeMemoryStore:
         if not query_text:
             return []
 
-        safe_query = self._safe_query(query_text)
-        cjk_terms = _cjk_query_substrings(query_text)
-        q_tokens = set(_tokenize_multilingual(query_text))
-        q_vec = self.encoder.encode(query_text)
+        topic_query = _memory_topic_query(query_text)
+        safe_query = self._safe_query(topic_query)
+        cjk_terms = _cjk_query_substrings(topic_query)
+        q_tokens = set(_tokenize_multilingual(topic_query))
+        q_vec, query_encoder_id, query_encoder = self._encode(query_text)
         candidates: dict[int, dict[str, Any]] = {}
+        if self._vec_enabled and (
+            query_encoder_id != self._vec_encoder_id or len(q_vec) != self._vec_dim
+        ):
+            self._disable_vector_index("encoder changed during retrieval")
 
         with self._connect() as conn:
             if self._vec_enabled:
@@ -1175,8 +1248,10 @@ class BridgeMemoryStore:
                         item = dict(row)
                         item["_vector_match"] = True
                         candidates[row["id"]] = item
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._disable_vector_index(
+                        f"vector index read failed ({type(exc).__name__})"
+                    )
             if safe_query:
                 try:
                     rows = conn.execute(
@@ -1240,9 +1315,9 @@ class BridgeMemoryStore:
                     candidates.setdefault(row["id"], dict(row))
 
         is_dense_neural = (
-            bool(getattr(self.encoder, "ready", False))
-            and not isinstance(self.encoder, LocalEmbeddingEncoder)
-            and not (isinstance(self.encoder, BgeM3Encoder) and not self.encoder.ready)
+            bool(getattr(query_encoder, "ready", False))
+            and not isinstance(query_encoder, LocalEmbeddingEncoder)
+            and not (isinstance(query_encoder, BgeM3Encoder) and not query_encoder.ready)
         )
         scoring_now = now or datetime.now(timezone.utc)
         if scoring_now.tzinfo is None:
@@ -1252,7 +1327,7 @@ class BridgeMemoryStore:
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in candidates.values():
             sim = 0.0
-            encoder_matches = row.get("embedding_version") == self.encoder.encoder_id
+            encoder_matches = row.get("embedding_version") == query_encoder_id
             if encoder_matches and row.get("distance") is not None:
                 try:
                     sim = max(0.0, 1.0 - float(row["distance"]))
@@ -1264,20 +1339,23 @@ class BridgeMemoryStore:
                 except Exception:
                     emb = []
                 if len(emb) == len(q_vec):
-                    sim = self.encoder.cosine(q_vec, emb)
+                    sim = query_encoder.cosine(q_vec, emb)
             vector_score = max(0.0, min(1.0, float(sim)))
-            fts_hit = bool(row.pop("_text_match", False))
+            row.pop("_text_match", None)
             row.pop("_vector_match", None)
-            doc_tokens = set(_tokenize_multilingual(str(row.get("content") or "")))
-            lexical_overlap = (
-                len(q_tokens & doc_tokens) / len(q_tokens) if q_tokens else 0.0
-            )
-            text_score = max(1.0 if fts_hit else 0.0, float(lexical_overlap))
+            content = str(row.get("content") or "").lower()
+            doc_tokens = set(_tokenize_multilingual(content))
+            # CJK single-character topic words may be embedded in a longer
+            # run; the hash tokenizer alone does not include those unigrams.
+            matched = {
+                token for token in q_tokens
+                if token in doc_tokens
+                or (_CJK_RUN_RE.fullmatch(token) and token in content)
+            }
+            text_score = len(matched) / len(q_tokens) if q_tokens else 0.0
 
-            relevant = (
-                text_score > 0.0 or vector_score >= 0.35
-                if is_dense_neural
-                else (text_score > 0.0 or (not q_tokens and vector_score >= 0.35))
+            relevant = text_score > 0.0 or (
+                is_dense_neural and vector_score >= 0.35
             )
             if not relevant:
                 continue
@@ -1371,7 +1449,7 @@ class BridgeMemoryStore:
             "encoder_dim": self.encoder.vector_dim,
             "encoder_error": self._encoder_degraded_reason or self.encoder.error,
             "bge_requested": bool(self._bge_requested),
-            "degraded": bool(self._encoder_degraded_reason),
+            "degraded": bool(self._encoder_degraded_reason or self._vector_degraded_reason),
             "sqlite_vec_supported": bool(self._sqlite_vec_supported),
             "vec_enabled": bool(self._vec_enabled),
             "vec_dim": self._vec_dim,
@@ -1420,7 +1498,7 @@ class BridgeMemoryStore:
             status["counts"]["turns_vec"] / turns_total if turns_total else 1.0
         )
 
-        if self._encoder_degraded_reason:
+        if self._encoder_degraded_reason or self._vector_degraded_reason:
             status["overall_status"] = "degraded"
         elif status["vec_enabled"]:
             fully_backfilled = (
