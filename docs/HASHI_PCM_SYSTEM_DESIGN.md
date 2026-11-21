@@ -331,6 +331,19 @@ it for Persona-aware message rendering.
 
 Memory may be retrieved passively or proactively.
 
+Saved Agent memory search is on by default for a full Context projection,
+including a stateless Engine invocation. An explicit `/memory search off`
+preference survives later Context assembly and process replacement. Stateless
+describes the Engine Session; it does not itself isolate saved Agent memory.
+
+Local fallback retrieval uses meaningful query terms rather than treating a
+shared conversational phrase as proof of relevance. It supports Chinese and
+mixed-script text but is lexical, so it cannot promise to recognize every
+semantic paraphrase. If an active BGE encoder or vector index fails, memory
+storage and text retrieval remain available and status reports degradation.
+Vectors retain the identity of the encoder that produced them; a generation
+change during indexing disables that derived index until it can be rebuilt.
+
 #### Passive retrieval: persistent Engine Sessions
 
 At the start of a persistent Engine Session, PCM may provide the ten most recent
