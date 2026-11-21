@@ -14,6 +14,7 @@ from orchestrator.her_v2.session_store import (
     HerSessionStore,
     HerSessionStoreError,
 )
+from tools.token_tracker import estimate_tokens
 
 HER_FIXED_PROTOCOL = "hashi.her-fixed-backend.v1"
 HER_FIXED_ENVELOPE_PREFIX = "HASHI_HER_FIXED_ENVELOPE_V1\n"
@@ -313,10 +314,19 @@ class HerBackendSessionCoordinator:
                 },
             }
             encoded = self.encode(payload)
+            materialized_tokens = estimate_tokens(
+                self._render_prompt(
+                    section_map,
+                    resource_snapshot,
+                    str(user_message),
+                    (),
+                )
+            )
             return encoded, {
                 "operation": "open_session",
                 "incremental": False,
                 "transport_chars": len(encoded),
+                "materialized_tokens": materialized_tokens,
                 "pcm_sections_sent": len(section_map),
                 "pcm_sections_unchanged": 0,
                 "pcm_sections_removed": 0,
@@ -427,10 +437,23 @@ class HerBackendSessionCoordinator:
             },
         }
         encoded = self.encode(payload)
+        active_history = self._uncompacted_history(
+            target_pcm,
+            self.store.recent_completed_turns(session_id),
+        )
+        materialized_tokens = estimate_tokens(
+            self._render_prompt(
+                target_pcm,
+                {"attachments": list(target_resource_map.values())},
+                str(user_message),
+                active_history,
+            )
+        )
         return encoded, {
             "operation": "append_turn",
             "incremental": True,
             "transport_chars": len(encoded),
+            "materialized_tokens": materialized_tokens,
             "pcm_sections_sent": len(operations),
             "pcm_sections_unchanged": unchanged,
             "pcm_sections_removed": len(removed),
@@ -604,10 +627,14 @@ class HerBackendSessionCoordinator:
             if isinstance(item, Mapping)
         ]
         materialized = ""
-        history = self.store.recent_completed_turns(session_id)
+        pcm_dict = session.get("pcm") or {}
+        history = self._uncompacted_history(
+            pcm_dict,
+            self.store.recent_completed_turns(session_id),
+        )
         pcm_sections = [
             dict(value)
-            for value in (session.get("pcm") or {}).values()
+            for value in pcm_dict.values()
             if isinstance(value, Mapping)
         ]
         pcm_input = {
@@ -642,6 +669,49 @@ class HerBackendSessionCoordinator:
             resource_attachments=tuple(turn_resources),
             pcm_input=pcm_input,
         )
+
+    @staticmethod
+    def _uncompacted_history(
+        pcm: Mapping[str, Any],
+        history: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        entries = [dict(item) for item in history if isinstance(item, Mapping)]
+        section = pcm.get("extra:hashi_managed_conversation_history")
+        metadata = section.get("metadata") if isinstance(section, Mapping) else None
+        if not isinstance(metadata, Mapping):
+            return entries
+        session_id = str(metadata.get("compacted_her_session_id") or "")
+        boundary_request = str(metadata.get("compacted_through_her_request_id") or "")
+        expected_digest = str(metadata.get("compacted_her_prefix_digest") or "")
+        try:
+            boundary = int(metadata.get("compacted_through_her_sequence") or 0)
+        except (TypeError, ValueError):
+            return entries
+        if not session_id or not boundary_request or not expected_digest or boundary <= 0:
+            return entries
+        prefix: list[list[Any]] = []
+        previous = 0
+        for index, item in enumerate(entries):
+            try:
+                sequence = int(item.get("sequence") or 0)
+            except (TypeError, ValueError):
+                return entries
+            request_id = str(item.get("request_id") or "")
+            if str(item.get("session_id") or "") != session_id or sequence <= previous:
+                return entries
+            prefix.append([
+                sequence, request_id,
+                "sha256:" + hashlib.sha256(str(item.get("user_message") or "").encode("utf-8")).hexdigest(),
+                "sha256:" + hashlib.sha256(str(item.get("assistant_text") or "").encode("utf-8")).hexdigest(),
+            ])
+            if sequence == boundary:
+                if request_id == boundary_request and _digest(prefix) == expected_digest:
+                    return entries[index + 1:]
+                return entries
+            if sequence > boundary:
+                return entries
+            previous = sequence
+        return entries
 
     @staticmethod
     def _render_prompt(

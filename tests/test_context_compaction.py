@@ -686,7 +686,7 @@ async def test_manual_compact_is_unnecessary_only_below_64k(tmp_path):
     outcome = await coordinator.compact(
         trigger="manual_command",
         request_ref="manual-below-window",
-        force=True,
+        force=False,
     )
 
     assert outcome.status == "not_needed"

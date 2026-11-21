@@ -9397,6 +9397,41 @@ class SessionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def compaction_request_ids(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        agent_id: str,
+        context_generation: int,
+        run_ids: Iterable[str],
+    ) -> dict[str, str]:
+        """Resolve only completed, visible Runs in the exact owning Session."""
+        ids = list(dict.fromkeys(str(value) for value in run_ids if value))
+        if not ids:
+            return {}
+        result: dict[str, str] = {}
+        with self._lock, self._connection() as connection:
+            for offset in range(0, len(ids), 400):
+                batch = ids[offset:offset + 400]
+                placeholders = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    f"""SELECT r.run_id, r.request_id FROM runs r
+                        JOIN sessions s ON s.session_id = r.session_id
+                        JOIN messages m ON m.message_id = r.user_message_id
+                        WHERE s.instance_id = ? AND s.session_id = ?
+                          AND s.owner_id = ? AND s.agent_id = ?
+                          AND s.status != 'deleted'
+                          AND s.context_generation = ? AND r.context_generation = ?
+                          AND r.agent_id = ? AND r.state = 'completed'
+                          AND m.visibility != 'forgotten'
+                          AND r.run_id IN ({placeholders})""",
+                    [self.instance_id, str(session_id), str(owner_id), str(agent_id).lower(),
+                     int(context_generation), int(context_generation), str(agent_id).lower(), *batch],
+                ).fetchall()
+                result.update({str(row["run_id"]): str(row["request_id"]) for row in rows})
+        return result
+
     def get_run_by_request(
         self,
         request_id: str,

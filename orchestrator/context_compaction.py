@@ -1605,6 +1605,109 @@ def render_history(
     return "\n\n".join(blocks)
 
 
+def _fixed_history_coverage(
+    runtime: Any,
+    snapshot: HistorySnapshot,
+    *,
+    workspace_dir: Path | None,
+    memory_store: Any | None,
+) -> dict[str, Any]:
+    """Prove a contiguous HER prefix against PCM source hashes and PAO Run IDs."""
+    if workspace_dir is None or memory_store is None or snapshot.active_record is None:
+        return {}
+    backend = getattr(getattr(runtime, "backend_manager", None), "current_backend", None)
+    her_id = str(getattr(backend, "_session_id", "") or "")
+    her_store = getattr(getattr(backend, "_session_coordinator", None), "store", None)
+    pao_store = getattr(runtime, "session_store", None)
+    if not her_id or her_store is None or pao_store is None:
+        return {}
+    try:
+        session = her_store.session(her_id)
+        if not isinstance(session, Mapping):
+            return {}
+        conversation = str(session.get("hashi_conversation_id") or "")
+        owner = str(session.get("owner_id") or "")
+        agent = str(session.get("agent_id") or "")
+        generation = int(session.get("context_generation") or 0)
+        if (
+            not conversation or not owner or not agent or generation <= 0
+            or agent.casefold() != str(getattr(runtime, "name", "")).casefold()
+            or str(session.get("instance_id") or "").casefold()
+               != str(getattr(pao_store, "instance_id", "")).casefold()
+            or Path(workspace_dir).resolve()
+               != (Path(pao_store.workspaces_root) / conversation / f"generation_{generation}").resolve()
+            or Path(memory_store.db_path).parent.resolve() != Path(workspace_dir).resolve()
+            or Path(str(session.get("workzone_identity") or "")).resolve() != Path(workspace_dir).resolve()
+        ):
+            return {}
+        source_hashes = snapshot.active_record.get("source_hashes")
+        if not isinstance(source_hashes, Mapping):
+            return {}
+        rows_by_id = {int(row.get("id") or 0): row for row in snapshot.all_turns}
+        exchange_by_run: dict[str, Mapping[str, Any]] = {}
+        prefix = f"session:{conversation}:run:"
+        for exchange in memory_store.get_completed_exchanges(limit=max(1, len(rows_by_id))):
+            reference = str(exchange.get("origin_ref") or "")
+            if exchange.get("origin") != "session" or not reference.startswith(prefix):
+                continue
+            run_id = reference[len(prefix):]
+            user_id = int(exchange.get("user_turn_id") or 0)
+            assistant_id = int(exchange.get("assistant_turn_id") or 0)
+            if not run_id or not (0 < user_id <= snapshot.covered_through_turn_id):
+                continue
+            if not (0 < assistant_id <= snapshot.covered_through_turn_id):
+                continue
+            user_row, assistant_row = rows_by_id.get(user_id), rows_by_id.get(assistant_id)
+            if not user_row or not assistant_row:
+                continue
+            if (
+                source_hashes.get(f"turn:{user_id}") != _turn_segment(user_row).source_hash
+                or source_hashes.get(f"turn:{assistant_id}") != _turn_segment(assistant_row).source_hash
+                or str(user_row.get("role") or "").casefold() != "user"
+                or str(assistant_row.get("role") or "").casefold() != "assistant"
+                or str(user_row.get("text") or "").strip() != str(exchange.get("user_text") or "").strip()
+                or str(assistant_row.get("text") or "").strip() != str(exchange.get("assistant_text") or "").strip()
+            ):
+                continue
+            exchange_by_run[run_id] = exchange
+        request_by_run = pao_store.compaction_request_ids(
+            session_id=conversation, owner_id=owner, agent_id=agent,
+            context_generation=generation, run_ids=exchange_by_run,
+        )
+        exchange_by_request = {
+            request: exchange_by_run[run]
+            for run, request in request_by_run.items()
+        }
+        last: Mapping[str, Any] | None = None
+        covered_prefix: list[list[Any]] = []
+        for turn in her_store.recent_completed_turns(her_id):
+            exchange = exchange_by_request.get(str(turn.get("request_id") or ""))
+            if (
+                exchange is None
+                or str(turn.get("session_id") or "") != her_id
+                or str(turn.get("user_message") or "").strip() != str(exchange.get("user_text") or "").strip()
+                or str(turn.get("assistant_text") or "").strip() != str(exchange.get("assistant_text") or "").strip()
+            ):
+                break
+            last = turn
+            covered_prefix.append([
+                int(turn["sequence"]), str(turn["request_id"]),
+                _sha256_bytes(str(turn.get("user_message") or "").encode("utf-8")),
+                _sha256_bytes(str(turn.get("assistant_text") or "").encode("utf-8")),
+            ])
+        if last is None:
+            return {}
+        return {
+            "compacted_her_session_id": her_id,
+            "compacted_through_her_sequence": int(last["sequence"]),
+            "compacted_through_her_request_id": str(last["request_id"]),
+            "compacted_her_prefix_digest": _sha256_json(covered_prefix),
+        }
+    except (AttributeError, KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
+        logger.warning("Fixed history coverage could not be verified; retaining history: %s", type(exc).__name__)
+        return {}
+
+
 def install_history_section(
     runtime: Any,
     extra_sections: Sequence[tuple],
@@ -1614,15 +1717,9 @@ def install_history_section(
     primary_timeline_entries: Sequence[Mapping[str, Any]] | None = None,
     workspace_dir: Path | None = None,
     memory_store: Any | None = None,
+    capsule_only_for_incremental: bool = False,
 ) -> tuple[list[tuple], HistorySnapshot | None]:
     if str(getattr(getattr(runtime, "config", None), "active_backend", "")) != HER_V2_ENGINE:
-        return list(extra_sections), None
-    manager = getattr(runtime, "backend_manager", None)
-    default_agent_mode = _default_agent_mode()
-    if str(
-        getattr(manager, "agent_mode", default_agent_mode)
-        or default_agent_mode
-    ).lower() != "flex":
         return list(extra_sections), None
     coordinator = coordinator_for(
         runtime,
@@ -1648,6 +1745,36 @@ def install_history_section(
             else getattr(runtime, "memory_store", None),
             load_policy(runtime),
         )
+    result = [
+        section
+        for section in extra_sections
+        if len(section) >= 2 and str(section[0]) != MANAGED_HISTORY_TITLE
+    ]
+    if capsule_only_for_incremental:
+        if snapshot.active_capsule is None:
+            return result, snapshot
+        capsule_snapshot = replace(
+            snapshot,
+            eligible_turns=(),
+            recent_turns=(),
+        )
+        section_meta = _fixed_history_coverage(
+            runtime, snapshot, workspace_dir=workspace_dir, memory_store=memory_store
+        )
+        section_body = render_history(
+            capsule_snapshot,
+            protected_only=protected_only,
+            cross_session_entries=cross_session_entries,
+            primary_timeline_entries=(),
+            display_timezone=display_timezone,
+            naive_timezone=naive_timezone,
+        )
+        result.append(
+            (MANAGED_HISTORY_TITLE, section_body, section_meta)
+            if section_meta
+            else (MANAGED_HISTORY_TITLE, section_body)
+        )
+        return result, snapshot
     if primary_timeline_entries is None:
         primary_timeline_entries = ()
         get_completed_exchanges = getattr(
@@ -1688,29 +1815,28 @@ def install_history_section(
                     "Completed-exchange timeline unavailable; using working turns: %s",
                     type(exc).__name__,
                 )
-    result = [
-        section
-        for section in extra_sections
-        if len(section) >= 2 and str(section[0]) != MANAGED_HISTORY_TITLE
-    ]
     if (
         snapshot.all_turns
         or snapshot.active_capsule is not None
         or cross_session_entries
         or primary_timeline_entries
     ):
+        section_meta = (
+            _fixed_history_coverage(runtime, snapshot, workspace_dir=workspace_dir, memory_store=memory_store)
+            if snapshot.active_capsule is not None else {}
+        )
+        rendered_body = render_history(
+            snapshot,
+            protected_only=protected_only,
+            cross_session_entries=cross_session_entries,
+            primary_timeline_entries=primary_timeline_entries,
+            display_timezone=display_timezone,
+            naive_timezone=naive_timezone,
+        )
         result.append(
-            (
-                MANAGED_HISTORY_TITLE,
-                render_history(
-                    snapshot,
-                    protected_only=protected_only,
-                    cross_session_entries=cross_session_entries,
-                    primary_timeline_entries=primary_timeline_entries,
-                    display_timezone=display_timezone,
-                    naive_timezone=naive_timezone,
-                ),
-            )
+            (MANAGED_HISTORY_TITLE, rendered_body, section_meta)
+            if section_meta
+            else (MANAGED_HISTORY_TITLE, rendered_body)
         )
     return result, snapshot
 
@@ -2697,8 +2823,11 @@ class ContextCompactionCoordinator:
         continue_request_on_failure: bool = False,
     ) -> CompactionOutcome:
         policy = load_policy(self.runtime)
-        if trigger == "manual_command":
-            current_tokens = estimate_effective_context_tokens(self.runtime)
+        if trigger == "manual_command" and not force:
+            current_tokens = estimate_effective_context_tokens(
+                self.runtime,
+                coordinator=self,
+            )
             if current_tokens < policy.manual_min_tokens:
                 return CompactionOutcome(
                     status="not_needed",
@@ -2727,7 +2856,7 @@ class ContextCompactionCoordinator:
                         self.memory_store,
                         replace(policy, recent_exchanges=0),
                     )
-                    if trigger == "manual_command" and force
+                    if trigger == "manual_command"
                     else self.snapshot()
                 )
                 trigger_budget = resolve_trigger_budget(
@@ -2888,15 +3017,11 @@ class ContextCompactionCoordinator:
                 if after_tokens >= selection.before_tokens:
                     raise CompactionFailure("COMPACTION_NO_SHRINK", "final capsule did not strictly reduce source")
                 actual_reduction = selection.before_tokens - after_tokens
-                if (
-                    required_reduction_tokens is not None
-                    and not force
-                    and actual_reduction < int(required_reduction_tokens)
-                ):
-                    raise CompactionFailure(
-                        "COMPACTION_TARGET_NOT_REACHED",
-                        "valid Compact output did not reach the required lower capacity target",
-                    )
+                target_reached = (
+                    required_reduction_tokens is None
+                    or force
+                    or actual_reduction >= int(required_reduction_tokens)
+                )
                 _validate_frozen_turns(
                     selection.selected_turns,
                     self.memory_store,
@@ -2972,6 +3097,8 @@ class ContextCompactionCoordinator:
                         "after_tokens": after_tokens,
                         "attempt_count": candidate.attempt_count,
                         "trigger": trigger,
+                        "target_reached": target_reached,
+                        "required_reduction_tokens": required_reduction_tokens,
                         "compact_provider": route.provider,
                         "compact_model": route.model,
                         "provider_reasoning": route.reasoning,
@@ -2987,12 +3114,18 @@ class ContextCompactionCoordinator:
                         1,
                         last_prompt_tokens - actual_reduction,
                     )
+                outcome_message = (
+                    "Historical context was compacted and atomically committed."
+                    if target_reached
+                    else "Historical context was compacted and committed (partial reduction: remaining active turns stayed above target)."
+                )
                 return CompactionOutcome(
                     status="completed",
                     trigger=trigger,
                     compaction_id=compaction_id,
                     changed=True,
-                    message="Historical context was compacted and atomically committed.",
+                    code=None if target_reached else "COMPACTION_PARTIAL_REDUCTION",
+                    message=outcome_message,
                     message_key="compact.message.completed",
                     before_tokens=selection.before_tokens,
                     after_tokens=after_tokens,
