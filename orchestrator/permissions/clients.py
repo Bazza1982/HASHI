@@ -158,10 +158,21 @@ class RemoteRunExecutor:
             scratch_root=Path(owner.workspace_dir),
         )
 
+    async def _question_availability(self):
+        from orchestrator.permissions.host_protocol import unpack
+
+        value = await self._execution_client.call_async("runtime_port", {
+            "operation": "question_availability", "arguments": {"args": [], "kwargs": {}},
+        })
+        return unpack(value)
+
     def bind_provider(self, provider):
         provider.tool_registry = self.registry
         self._stage_provider = provider
         self.registry._event_sink = getattr(provider, "on_stream_event", None)
+        binder = getattr(provider, "bind_question_availability_port", None)
+        if callable(binder):
+            binder(self._question_availability)
 
     async def run_her(self, runtime, prompt, request_id, *, binding, **arguments):
         if binding != self.binding or request_id != binding.request_id:
