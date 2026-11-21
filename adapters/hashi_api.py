@@ -39,6 +39,7 @@ from adapters.openrouter_api import (
     OpenRouterAdapter,
     OutboundPrivacyGate,
     ProviderCallObserverError,
+    ProviderContextObserverError,
     _APIResult,
     _assistant_content_text,
     _backend_failure_response,
@@ -1571,6 +1572,15 @@ class HashiApiAdapter(OpenRouterAdapter):
                                 )
                             )
                             messages.extend(resolution_messages)
+                            self._observe_provider_context(
+                                boundary="ready_provider_request",
+                                messages=messages,
+                                request_id=request_id,
+                                result=result,
+                                provider_request_id=str(
+                                    last_provider_call_record.get("provider_request_id", "")
+                                ),
+                            )
                             # The Gateway's external-tool continuation accepts
                             # only tool-result deltas. A resolved PAO question is
                             # an authenticated user-level continuation, so replay
@@ -1821,7 +1831,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         except asyncio.CancelledError:
             self.logger.warning(f"Request cancelled for {request_id}")
             raise
-        except ProviderCallObserverError:
+        except (ProviderCallObserverError, ProviderContextObserverError):
             raise
         # Provider SDK/HTTP boundaries can raise backend-specific exception types;
         # convert all of them into the adapter's stable failure response.

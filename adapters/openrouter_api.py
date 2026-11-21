@@ -5295,7 +5295,7 @@ class OpenRouterAdapter(BaseBackend):
                                 )
                             )
                             self._observe_provider_context(
-                                boundary="run_question_resolved",
+                                boundary="ready_provider_request",
                                 messages=messages,
                                 request_id=request_id,
                                 result=result,

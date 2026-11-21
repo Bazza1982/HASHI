@@ -1,5 +1,14 @@
 # Asynchronous questions within a Run
 
+## November 21: durable continuation after an answer
+
+Before requesting another provider response after a Run question resolves,
+HERV3 persists the withheld assistant response and the authenticated answer at
+the existing `ready_provider_request` boundary. The normal provider and Gateway
+adapters both use this boundary. If persistence fails, the next provider
+request is not sent; recovery uses the saved complete context without replaying
+the question's side effects.
+
 ## November 14: SQLite contention and event-loop isolation
 
 PAO question state remains in the existing Session database and schema. Backend
