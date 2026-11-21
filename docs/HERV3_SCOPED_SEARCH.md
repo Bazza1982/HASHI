@@ -392,7 +392,18 @@ expression's progress, so anchors and lookbehind keep their original context.
 A record exceeding 1,000,000 characters is skipped in fixed-size chunks; it is
 never collected in full. The scan continues, reporting incomplete coverage and
 the reason. Once the input is exhausted no cursor remains, even if coverage is
-incomplete. Nested quantified expressions rejected by the scanner likewise
-report unsupported coverage. Regex matching does not span logical lines.
-Cancellation and per-call budgets remain in force while skipping. This describes
-the PR candidate; it does not assert deployment or live adoption.
+incomplete. A known EOF with no remaining match does not create an empty page;
+zero-width matches still remain pageable. Regex matching does not span logical
+lines.
+
+The regex guard is a heuristic, not proof that every expression is safe. It
+reports unsupported coverage for recognized nested unbounded quantifiers and
+overlapping repeated alternatives; finite nested repetitions remain searchable.
+Other costly expressions can reach the deadline: the parent terminates and
+reaps its managed worker if it cannot stop cooperatively.
+
+If that worker loses its scan state, each retained-result page reports
+`continuation_lost` and incomplete, unexhausted coverage. A cursor returns only
+buffered matches; once they are exhausted, a fresh scan is required. Guidance
+is generated for the cursor actually available on each page. This describes the
+PR candidate; it does not assert deployment or live adoption.

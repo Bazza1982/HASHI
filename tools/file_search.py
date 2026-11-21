@@ -287,18 +287,23 @@ async def run_worker(config):
                     cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, drain_task, pgid=group))
                     if result is None:
                         counters = dict(activity.snapshot['counters']) if activity else {}
+                        # Progress snapshots contain roots but not the full
+                        # terminal coverage/error structure.
+                        partial_coverage = dict((partial or {}).get('coverage') or {})
+                        partial_coverage.setdefault('roots', [])
+                        partial_coverage.setdefault('errors', [])
                         result = {'matches': (partial or {}).get('matches', []),
                                   'counters': (partial or {}).get('counters', counters),
-                                  'coverage': (partial or {}).get('coverage', {'roots': [], 'errors': []}),
+                                  'coverage': partial_coverage,
                                   'scope_exhausted': False, 'coverage_complete': False,
                                   'stop_reason': 'deadline', 'state': None,
                                   'continuation_lost': True,
                                   'warnings': [
                                       'Scan stopped before completing coverage',
-                                      ('The scanner could not serialize its state within the cleanup '
-                                       'grace window, so no continuation cursor exists. Matches and '
-                                       'coverage reflect the last progress event; consider narrowing '
-                                       'the roots, refining the query, or running a fresh scan.')]}
+                                      ('The scanner could not serialize its scan state within the cleanup '
+                                       'grace window. Matches and coverage reflect the last progress '
+                                       'event; consider narrowing the roots, refining the query, or '
+                                       'running a fresh scan.')]}
                     result['cleanup'] = cleanup
                     return result
         await asyncio.shield(drain_task)
@@ -445,7 +450,8 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                                      'failed': root['failed'], 'stack': [], 'pending_file': None}
                                     for root in result['coverage']['roots']],
                          'counters': dict(result['counters']), 'errors': result['coverage']['errors'],
-                         'warnings': result['warnings'], 'turn': 0}
+                         'warnings': list(result['warnings']), 'turn': 0,
+                         'continuation_lost': bool(result.get('continuation_lost'))}
         pending = ([state.pop('pending_match')] if 'pending_match' in state else [])
         state['pending_matches'] = removed + pending + state.get('pending_matches', [])
         result['counters']['matches'] -= len(removed)
@@ -456,7 +462,7 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
     result.update(can_continue=next_cursor is not None, next_cursor=next_cursor)
     if state and next_cursor is None:
         result['warnings'].append('Continuation capacity exceeded; no automatic restart')
-    if deadline_reached:
+    if deadline_reached or result.get('continuation_lost'):
         if result.get('continuation_lost') and next_cursor:
             guidance = ('The next_cursor returns buffered matches only; the scan '
                         'cannot be resumed. Narrow the roots or refine the query '

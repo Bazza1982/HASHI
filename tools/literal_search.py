@@ -33,7 +33,9 @@ def _regex_guard(pattern_text: str, *, ignore_case: bool = False) -> str | None:
     super-linear behaviour even on a single bounded record.  Refusing them
     explicitly is more honest than pretending a bounded scan found no match.
     """
-    if re.search(r"\([^()]*[+*{][^()]*\)[+*{?]", pattern_text):
+    # This heuristic is not a proof of safety; the managed worker deadline
+    # remains the boundary for patterns it does not recognize.
+    if re.search(r"\([^()]*(?:[+*]|\{\d+,\})[^()]*\)[+*{?]", pattern_text):
         return 'nested_quantifiers'
     # Repeating literal alternatives where one is a prefix of another can
     # backtrack exponentially (for example, a failing search for (a|aa)+).
@@ -183,6 +185,24 @@ def _scan_regex_lines(
                 positions[index] = [end, end == start]
 
             if len(matches) >= max_results:
+                # At a known EOF, check the final record for another match
+                # before issuing a cursor. The managed worker deadline still
+                # bounds expensive expressions during this lookahead.
+                at_end = eof and consume_end == len(buffer)
+                if at_end:
+                    remaining = False
+                    for (_, pattern), (position, skip_empty) in zip(patterns, positions):
+                        found_iter = pattern.finditer(segment, position)
+                        if skip_empty:
+                            next(found_iter, None)
+                        if next(found_iter, None) is not None:
+                            remaining = True
+                            break
+                    if not remaining:
+                        buffer = ''
+                        offset += consume_end
+                        lines += int(nl != -1)
+                        positions = None
                 page = True
                 break
 

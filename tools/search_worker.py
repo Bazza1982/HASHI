@@ -255,6 +255,10 @@ class Scanner:
                 self.state['pending_matches'] = pending
                 if item['text_state'] is None:
                     root['pending_file'] = None
+                    # An explicitly selected file has no directory to resume
+                    # once its final record and all matches were consumed.
+                    if path == Path(root['path']) and not root['stack']:
+                        root['done'] = True
                 return False
         if item['text_state'] is None:
             root['pending_file'] = None
@@ -408,7 +412,15 @@ class Scanner:
                 warnings.append(message)
         exhausted = (all(root['done'] for root in self.state['roots']) and
                      not self.state.get('pending_match') and not self.state.get('pending_matches'))
-        complete = exhausted and not self.count['errors'] and not warnings and not stale
+        # Synthetic done roots in a cache-only continuation do not mean the
+        # original search exhausted its scope.
+        continuation_lost = bool(self.state.get('continuation_lost'))
+        scope_exhausted = exhausted and not continuation_lost
+        complete = scope_exhausted and not self.count['errors'] and not warnings and not stale
+        if exhausted and continuation_lost:
+            self.stop_reason = 'deadline'
+        elif exhausted and self.stop_reason == 'page_limit':
+            self.stop_reason = 'completed'
         if self.stop_reason == 'completed' and self.count['errors']:
             self.stop_reason = 'io_error'
         state = None if exhausted or stale else self.state
@@ -416,13 +428,17 @@ class Scanner:
             state = None
             self.state['warnings'].append('Continuation capacity exceeded; no scan continues after return')
         self.progress(force=True)
-        return {'matches': self.matches, 'counters': self.count,
-                'coverage': {'roots': [{'path': root['path'], 'exhausted': root['done'],
-                                       'failed': root['failed']} for root in self.state['roots']],
-                             'errors': self.state['errors']},
-                'scope_exhausted': exhausted, 'coverage_complete': complete,
-                'stop_reason': self.stop_reason, 'warnings': warnings,
-                'state': state}
+        result = {'matches': self.matches, 'counters': self.count,
+                  'coverage': {'roots': [{'path': root['path'],
+                                          'exhausted': root['done'] and not continuation_lost,
+                                          'failed': root['failed']} for root in self.state['roots']],
+                               'errors': self.state['errors']},
+                  'scope_exhausted': scope_exhausted, 'coverage_complete': complete,
+                  'stop_reason': self.stop_reason, 'warnings': warnings,
+                  'state': state}
+        if continuation_lost:
+            result['continuation_lost'] = True
+        return result
 
 
 def main():
