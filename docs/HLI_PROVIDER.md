@@ -48,7 +48,9 @@ create a separate HASHI refusal policy.
 
 The core/small-model toolkit is presented to HERV3 HLI by default. The
 existing `tool_find` on-demand tool view keeps tool descriptions compact and
-reveals already-available tools when the model requests them. This does not
+reveals already-available tools when the model requests them. When authorised,
+the shared starter includes both `file_read` and `file_write`, so normal file
+work does not depend on a discovery call. This does not
 alter tool execution authority, invent new permission systems or impose tool
 call limits. Existing HASHI tool policies, `/stop`, and model switching remain
 as they are for other providers.

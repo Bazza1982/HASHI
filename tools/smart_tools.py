@@ -642,13 +642,16 @@ def _bash_outcome(
         if matched:
             exit_code = int(matched.group(1))
 
-    if "timed out" in lowered:
+    cleanup = details.get("foreground_cleanup")
+    forced_timeout = isinstance(cleanup, Mapping) and cleanup.get("forced") is True
+    first_line_lower = text.lstrip().splitlines()[0].casefold() if text.strip() else ""
+    if forced_timeout or first_line_lower.startswith("error: command timed out"):
         return SmartToolOutcome(
             status="failed",
             effect="unknown",
             error=SmartToolError("timeout", _legacy_error_message(text), True),
         )
-    if "blocked by policy" in lowered:
+    if first_line_lower.startswith("error: command blocked by policy"):
         return SmartToolOutcome(
             status="failed",
             effect="no_change",
@@ -656,7 +659,7 @@ def _bash_outcome(
                 "permission_denied", _legacy_error_message(text), False
             ),
         )
-    if "no command provided" in lowered:
+    if first_line_lower.startswith("error: no command provided"):
         return SmartToolOutcome(
             status="failed",
             effect="no_change",

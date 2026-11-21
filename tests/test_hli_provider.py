@@ -168,13 +168,53 @@ class HLIOnDemandToolViewTests(unittest.TestCase):
         payload = backend._build_payload(
             [{"role": "user", "content": "hi"}], use_streaming=True)
         names = {item["function"]["name"] for item in payload.get("tools", [])}
-        # Compact starter set only; further schemas are revealed by tool_find.
-        self.assertIn("tool_find", names)
-        self.assertNotIn("file_write", names)
-        self.assertNotIn("file_search", names)
-        self.assertNotIn("log_query", names)
-        self.assertNotIn("repo_discover", names)
-        self.assertLessEqual(len(payload["tools"]), 6)
+        # The shared starter includes writing when authorised; other schemas
+        # are still revealed on demand.
+        self.assertEqual(names, {
+            "tool_find", "file_read", "file_write", "shell",
+            "ask_user", "get_user_answer",
+        })
+
+
+class HLIOnDemandRealRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_registry_reveals_tools_without_losing_starter(self):
+        from tools.registry import ToolRegistry
+
+        for options in ({}, {"smart_registry": {"enabled": True}}):
+            with self.subTest(options=options), TemporaryDirectory() as directory:
+                root = Path(directory)
+                agent = AgentConfig(
+                    name="herv3-hli", engine="hli-api", workspace_dir=root,
+                    system_md=root / "agent.md", model="qwen-local",
+                    is_active=True, extra={},
+                )
+                backend = HLIAdapter(
+                    agent, GlobalConfig(authorized_id=1), api_key=None,
+                )
+                registry = ToolRegistry(
+                    allowed_tools=["*"], access_root=root, workspace_dir=root,
+                    secrets={}, tool_options=options,
+                )
+                backend.tool_registry = registry
+                messages = [{"role": "user", "content": "inspect my workspace"}]
+
+                def payload_names():
+                    payload = backend._build_payload(messages, use_streaming=True)
+                    return {item["function"]["name"] for item in payload["tools"]}
+
+                before = payload_names()
+                self.assertIn("tool_find", before)
+                self.assertIn("file_write", before)
+                self.assertNotIn("workspace_inspect", before)
+                self.assertLessEqual(len(before), 12)
+                result = await backend.tool_registry.execute(
+                    "tool_find", {"names": ["workspace_inspect"]}, "find",
+                )
+                self.assertFalse(result.is_error, result.output)
+                after = payload_names()
+                self.assertIn("workspace_inspect", after)
+                self.assertIn("file_write", after)
+                self.assertTrue(registry.is_allowed("workspace_inspect"))
 
 
 class KeylessInitializationTests(unittest.IsolatedAsyncioTestCase):

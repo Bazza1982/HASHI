@@ -352,14 +352,12 @@ def test_tool_registry_wildcard_excludes_explicit_opt_in_tools(tmp_path: Path):
     assert set(registry._allowed) == set(ALL_TOOL_NAMES) - {
         "media_read",
         "vision_inspect",
-        *TOOLKIT_TOOL_NAMES,
     }
 
 
-def test_tool_registry_wildcard_adopts_toolkit_tools_only_when_listed(tmp_path: Path):
-    """Explicitly listed toolkit tools are adopted by a wildcard instance;
-    unlisted toolkit tools remain opt-in so a wildcard never silently broadens
-    an instance's capabilities."""
+def test_tool_registry_narrow_allowlist_stays_strictly_scoped(tmp_path: Path):
+    """Narrow allowlists keep only explicitly listed tools while wildcard
+    adopts the Developer Toolkit by default."""
     manager = FlexibleBackendManager.__new__(FlexibleBackendManager)
     manager.current_backend = SimpleNamespace(tool_registry=None)
     manager.secrets = {}
@@ -374,7 +372,7 @@ def test_tool_registry_wildcard_adopts_toolkit_tools_only_when_listed(tmp_path: 
     )
 
     manager._attach_tool_registry(
-        {"allowed": ["*", "code_search", "data_inspect"]}, adapter_cfg
+        {"allowed": ["file_read", "code_search", "data_inspect"]}, adapter_cfg
     )
 
     registry = manager.current_backend.tool_registry
