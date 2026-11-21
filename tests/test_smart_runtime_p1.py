@@ -47,7 +47,28 @@ def test_native_failure_never_reclassified_as_success(tmp_path):
     native = ToolResult(tool_call_id="call-1", output="whatever", is_error=True, details={})
     result = registry._finalize_tool_result("file_read", {"path": "x"}, native, started=0.0)
     assert result.is_error is True
-    assert result.details["smart_status"] == "success"
+    assert result.details["smart_status"] == "failed"
+    assert result.details["smart_classifier_status"] == "success"
+    assert result.details["smart_error"]["retryable"] is False
+
+
+def test_inconsistent_search_envelope_keeps_truth_in_smart_ledger(tmp_path):
+    import json
+
+    registry = _registry(tmp_path, "file_search")
+    output = json.dumps({"status": "success", "effect": "observed",
+                         "data": {}, "error": None, "warning": None})
+    native = ToolResult(tool_call_id="call-search", output=output, is_error=True,
+                        details={"search_outcome": "failed"})
+    result = registry._finalize_tool_result("file_search", {"query": "x"},
+                                            native, started=0.0)
+    assert result.output == output
+    assert result.is_error is True
+    assert result.details["smart_status"] == "failed"
+    assert result.details["smart_classifier_status"] == "success"
+    record = json.loads(registry.smart_tools.ledger_path.read_text().splitlines()[-1])
+    assert record["status"] == "failed"
+    assert record["classifier_status"] == "success"
 
 
 def test_native_success_preserved(tmp_path):

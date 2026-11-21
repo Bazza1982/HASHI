@@ -6,7 +6,7 @@ from tools.literal_search import scan_literal
 
 def _write(tmp_path, name: str, text: str):
     path = tmp_path / name
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     return path
 
 
@@ -102,3 +102,101 @@ def test_regex_character_budget_is_partial_and_resumable(tmp_path):
             break
         state = rn["continuation"]
     assert sorted(found) == ["target", "target"]
+
+
+def _all_regex_pages(path, terms, *, chunk_chars=16):
+    state = None
+    matches = []
+    for _ in range(100):
+        result = scan_literal(path, terms=terms, case_sensitive=True,
+                              max_results=1, context_chars=4, chunk_chars=chunk_chars,
+                              regex=True, state=state)
+        matches.extend(result["matches"])
+        state = result["continuation"]
+        if state is None:
+            return matches, result
+    raise AssertionError("regex continuation did not terminate")
+
+
+def test_regex_pagination_retains_line_anchors_and_order(tmp_path):
+    anchored = _write(tmp_path, "anchored.txt", "aaa\n")
+    matches, result = _all_regex_pages(anchored, ("^a",))
+    assert [item["character_offset"] for item in matches] == [0]
+    assert result["coverage_complete"] is True
+
+    ordered = _write(tmp_path, "ordered.txt", "a z a z\n")
+    matches, result = _all_regex_pages(ordered, ("z", "a"))
+    assert [(item["term"], item["character_offset"]) for item in matches] == [
+        ("a", 0), ("z", 2), ("a", 4), ("z", 6),
+    ]
+    assert result["coverage_complete"] is True
+
+    overlapping, _ = _all_regex_pages(anchored, ("a", "^a"))
+    assert [(m["term"], m["character_offset"]) for m in overlapping] == [
+        ("a", 0), ("^a", 0), ("a", 1), ("a", 2),
+    ]
+    empty_and_nonempty, _ = _all_regex_pages(anchored, (r"(?=a)|a",))
+    assert [m["character_offset"] for m in empty_and_nonempty] == [0, 0, 1, 1, 2, 2]
+
+
+def test_regex_crlf_uses_logical_line_and_physical_offsets(tmp_path):
+    path = tmp_path / "windows.txt"
+    path.write_bytes("中文\r\nfoo\r\nfoo\r\n".encode("utf-8"))
+    matches, result = _all_regex_pages(path, ("^foo$",), chunk_chars=3)
+    assert [(m["line"], m["character_offset"]) for m in matches] == [(2, 4), (3, 9)]
+    assert result["coverage_complete"] is True
+
+
+def test_overlong_regex_record_streams_and_exhausts_without_cursor(tmp_path, monkeypatch):
+    import tools.literal_search as literal_search
+
+    monkeypatch.setattr(literal_search, "MAX_REGEX_RECORD_CHARS", 64)
+    for suffix in ("", "\nneedle\n"):
+        path = _write(tmp_path, "overlong.txt", "x" * 1024 + suffix)
+        state = None
+        seen = []
+        for _ in range(100):
+            result = scan_literal(path, terms=("^needle$",), case_sensitive=True,
+                                  max_results=10, context_chars=4, chunk_chars=16,
+                                  regex=True, state=state, character_budget=32)
+            assert result["characters_read"] <= 48
+            seen.extend(result["matches"])
+            state = result["continuation"]
+            if state is None:
+                break
+            assert len(state["buffer"]) <= 80
+        else:
+            raise AssertionError("overlong record continuation did not terminate")
+        assert result["coverage_complete"] is False
+        assert "bounded scan limit" in result["coverage_warning"]
+        assert [m["character_offset"] for m in seen] == ([1025] if suffix else [])
+
+
+def test_overlong_regex_at_eof_is_partial_without_continuation(tmp_path, monkeypatch):
+    import tools.literal_search as literal_search
+
+    monkeypatch.setattr(literal_search, "MAX_REGEX_RECORD_CHARS", 64)
+    path = _write(tmp_path, "overlong-eof.txt", "x" * 1024)
+    for _ in range(2):
+        result = scan_literal(path, terms=("needle",), case_sensitive=True,
+                              max_results=10, context_chars=4, chunk_chars=16, regex=True)
+        assert result["matches"] == []
+        assert result["coverage_complete"] is False
+        assert result["continuation"] is None
+        assert "bounded scan limit" in result["coverage_warning"]
+
+
+def test_regex_cancellation_interrupts_overlong_record(tmp_path, monkeypatch):
+    import pytest
+    import tools.literal_search as literal_search
+
+    monkeypatch.setattr(literal_search, "MAX_REGEX_RECORD_CHARS", 64)
+    path = _write(tmp_path, "cancel.txt", "x" * 1024)
+
+    def cancel(characters):
+        if characters >= 128:
+            raise RuntimeError("cancelled")
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        scan_literal(path, terms=("needle",), case_sensitive=True, max_results=10,
+                     context_chars=4, chunk_chars=16, regex=True, progress=cancel)

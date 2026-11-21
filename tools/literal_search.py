@@ -54,99 +54,126 @@ def _scan_regex_lines(
     buffer = saved.get('buffer', '')
     offset = saved.get('offset', 0)
     lines = saved.get('lines', 0)
-    cursor = saved.get('cursor', 0)
     eof = saved.get('eof', False)
+    skipping = saved.get('skipping_overlong', False)
+    positions = saved.get('pattern_positions')
     coverage_warning = saved.get('coverage_warning')
     matches: list[dict] = []
     characters = 0
     encoding_warning = False
     page = False
+    chunk_chars = max(1, min(chunk_chars, CHUNK_CHARS))
 
     with path.open('r', encoding='utf-8-sig', errors='replace', newline='') as stream:
         if saved:
             stream.seek(saved['cookie'])
+
+        def read_chunk():
+            nonlocal buffer, characters, encoding_warning, eof
+            chunk = stream.read(chunk_chars)
+            if not chunk:
+                eof = True
+                return
+            buffer += chunk
+            characters += len(chunk)
+            encoding_warning |= '\ufffd' in chunk
+            if progress:
+                progress(characters)
+
         while True:
-            local = max(0, cursor - offset)
-            # Top up the buffer until we hold a complete record (newline), reach
-            # EOF, or discover an over-long record.
-            while buffer.find('\n', local) == -1 and not eof:
-                if len(buffer) - local >= MAX_REGEX_RECORD_CHARS:
+            nl = buffer.find('\n')
+            if skipping:
+                if nl != -1:
+                    consumed = nl + 1
+                    offset += consumed
+                    lines += 1
+                    buffer = buffer[consumed:]
+                    skipping = False
+                    continue
+                # Discard each chunk while skipping, rather than accumulating
+                # an arbitrarily large record. Offset remains in characters.
+                offset += len(buffer)
+                buffer = ''
+                if eof:
+                    skipping = False
                     break
-                chunk = stream.read(chunk_chars)
-                if not chunk:
-                    eof = True
+                if character_budget is not None and characters >= character_budget:
                     break
-                buffer += chunk
-                characters += len(chunk)
-                encoding_warning |= '\ufffd' in chunk
-                if progress:
-                    progress(characters)
-            local = max(0, cursor - offset)
-            if eof and local >= len(buffer):
-                break
-            nl = buffer.find('\n', local)
-            if nl != -1:
-                record_end = nl
-                consume_end = nl + 1
-                skip = False
-            elif len(buffer) - local >= MAX_REGEX_RECORD_CHARS:
-                # Over-long record: consume it fully without matching and mark
-                # coverage incomplete rather than fabricate a truncated result.
-                coverage_warning = coverage_warning or _OVERLONG_MESSAGE
-                while buffer.find('\n', local) == -1 and not eof:
-                    chunk = stream.read(chunk_chars)
-                    if not chunk:
-                        eof = True
-                        break
-                    buffer += chunk
-                    characters += len(chunk)
-                    encoding_warning |= '\ufffd' in chunk
-                    if progress:
-                        progress(characters)
-                nl = buffer.find('\n', local)
-                record_end = len(buffer) if nl == -1 else nl
-                consume_end = len(buffer) if nl == -1 else nl + 1
-                skip = True
-            else:
-                # EOF with a bounded final record that has no trailing newline.
+                read_chunk()
+                continue
+
+            if nl == -1 and not eof:
+                # A final CR might be the first half of CRLF, so allow it
+                # beyond the logical record limit until the next character.
+                pending_length = len(buffer) - int(buffer.endswith('\r'))
+                if pending_length > MAX_REGEX_RECORD_CHARS:
+                    coverage_warning = coverage_warning or _OVERLONG_MESSAGE
+                    skipping = True
+                    continue
+                if character_budget is not None and characters >= character_budget:
+                    break
+                read_chunk()
+                continue
+
+            if nl == -1:
+                if not buffer:
+                    break
                 record_end = len(buffer)
-                consume_end = len(buffer)
-                skip = False
+                consume_end = record_end
+            else:
+                record_end = nl - int(nl > 0 and buffer[nl - 1] == '\r')
+                consume_end = nl + 1
+            if record_end > MAX_REGEX_RECORD_CHARS:
+                coverage_warning = coverage_warning or _OVERLONG_MESSAGE
+                skipping = True
+                continue
 
-            last_end = local
-            if not skip:
-                segment = buffer[local:record_end]
-                for term, pattern in patterns:
-                    for found in pattern.finditer(segment):
-                        if len(matches) >= max_results:
-                            break
-                        start = found.start()
-                        end = max(found.end(), start + 1)
-                        matches.append({
-                            'term': term,
-                            'line': lines + segment.count('\n', 0, start) + 1,
-                            'character_offset': offset + local + start,
-                            'excerpt': segment[max(0, start - context_chars):end + context_chars],
-                        })
-                        last_end = local + end
-                    if len(matches) >= max_results:
-                        break
+            segment = buffer[:record_end]
+            if positions is None:
+                positions = [[0, False] for _ in patterns]
+            while len(matches) < max_results:
+                candidates = []
+                for index, (term, pattern) in enumerate(patterns):
+                    position, skip_empty = positions[index]
+                    found_iter = pattern.finditer(segment, position)
+                    if skip_empty:
+                        next(found_iter, None)
+                    found = next(found_iter, None)
+                    if found is not None:
+                        candidates.append((found.start(), index, term, found))
+                if not candidates:
+                    break
+                start, index, term, found = min(candidates, key=lambda item: item[:2])
+                end = found.end()
+                matches.append({
+                    'term': term,
+                    'line': lines + 1,
+                    'character_offset': offset + start,
+                    'excerpt': segment[max(0, start - context_chars):end + context_chars],
+                })
+                # After an empty match finditer can yield a nonempty match at
+                # the same position. Remember the empty match to skip only it.
+                positions[index] = [end, end == start]
 
-            cursor = offset + last_end if len(matches) >= max_results else offset + consume_end
-            drop = cursor - offset
-            lines += buffer.count('\n', 0, drop)
-            buffer = buffer[drop:]
-            offset += drop
-            cursor = offset
-            page = len(matches) >= max_results
-            if page or (character_budget is not None and characters >= character_budget):
+            if len(matches) >= max_results:
+                page = True
                 break
 
-        complete = eof and not buffer and not page and not coverage_warning
-        continuation = None if complete else {
+            # Keep a record intact across page boundaries so ^, lookbehind,
+            # and other line-relative expressions see the original line.
+            buffer = buffer[consume_end:]
+            offset += consume_end
+            lines += int(nl != -1)
+            positions = None
+            if character_budget is not None and characters >= character_budget:
+                break
+
+        exhausted = eof and not buffer and not skipping and positions is None
+        complete = exhausted and not coverage_warning
+        continuation = None if exhausted else {
             'cookie': stream.tell(), 'buffer': buffer, 'offset': offset,
-            'lines': lines, 'cursor': cursor, 'eof': eof,
-            'coverage_warning': coverage_warning,
+            'lines': lines, 'eof': eof, 'skipping_overlong': skipping,
+            'pattern_positions': positions, 'coverage_warning': coverage_warning,
         }
 
     return {

@@ -76,7 +76,11 @@ or a missing Scheduler gateway are deterministic `no_change` outcomes).
 `is_error` always preserves the native execution truth: a genuine tool failure
 cannot be reclassified as success by an inconsistent smart envelope, while an
 admission denial (`needs_replan`) or unavailable tool is still reported as an
-error. A structured search partial result is not an error.
+error. If a classifier reports success or partial for a native failure, HASHI
+records `failed` with unknown effect and no invented retry advice; the original
+classification is recorded as `smart_classifier_status` in the result details
+and `classifier_status` in the Smart ledger. The native output is unchanged. A
+structured search partial result without a native failure is not an error.
 
 ### Model-visible guidance
 

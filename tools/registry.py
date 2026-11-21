@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from orchestrator.background_job_policy import background_job_start_authorized
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
-from tools.smart_tools import SmartToolRuntime
+from tools.smart_tools import SmartToolRuntime, reconcile_native_failure
 from tools.office.contract import OFFICE_TOOL_NAMES, OFFICE_READ_ONLY_TOOLS
 from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES, TOOLKIT_READ_ONLY_TOOLS
 
@@ -1351,7 +1351,7 @@ class ToolRegistry:
         result: ToolResult,
         started: float,
     ) -> ToolResult:
-        """Apply the optional five-field contract and append one ledger row."""
+        """Preserve the native result and append Smart Tool classification."""
         from tools.effect_receipts import observe_tool_effect
 
         policy = self._live_runtime_policy_cache
@@ -1389,7 +1389,10 @@ class ToolRegistry:
             call_id=result.tool_call_id,
             audit_context=self._effective_audit_context(),
         )
+        outcome = reconcile_native_failure(outcome, result.is_error)
         details = dict(result.details or {})
+        if outcome.classifier_status is not None:
+            details["smart_classifier_status"] = outcome.classifier_status
         details.update(
             {
                 "smart_result": True,

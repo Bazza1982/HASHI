@@ -127,6 +127,30 @@ async def test_no_workzone_prefers_cwd_over_broad_access_root(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_default_regex_search_pages_crlf_after_skipped_long_record(tmp_path):
+    registry, repo, _ = registry_for(tmp_path)
+    path = repo / 'records.txt'
+    path.write_bytes(b'x' * 1_000_001 + b'\r\nfoo\r\nfoo\r\n')
+    query = {'query': '^foo$', 'mode': 'content', 'match': 'regex',
+             'roots': [str(path)], 'max_results': 1}
+    matches = []
+    for _ in range(10):
+        result = await registry.execute_with_audit_context(
+            'file_search', query, audit_context={'request_id': 'regex-page-run'})
+        data = payload(result)
+        matches.extend((item['line'], item['character_offset']) for item in data['matches'])
+        if not data['can_continue']:
+            break
+        query['cursor'] = data['next_cursor']
+    else:
+        pytest.fail('regex search continuation did not terminate')
+    assert matches == [(2, 1_000_003), (3, 1_000_008)]
+    assert data['scope_exhausted'] is True and data['coverage_complete'] is False
+    assert any('bounded scan limit' in warning for warning in data['warnings'])
+    assert json.loads(result.output)['status'] == 'partial'
+
+
+@pytest.mark.asyncio
 async def test_content_pagination_has_no_lost_or_duplicate_long_record_hits(tmp_path):
     registry, repo, _ = registry_for(tmp_path, options={'smart_registry': {'enabled': True}})
     text = ('x' * 65533 + ' TOKEN\n') * 6

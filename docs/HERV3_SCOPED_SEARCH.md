@@ -373,3 +373,20 @@ Validation is local on isolated native Windows CPython 3.12; Unix-specific
 acceptance remains separate. No hosted suite, production adoption, merge or
 deployment is part of this review repair. Repository discovery still has no
 continuation cursor; its existing partial-result and narrowing guidance remains.
+
+## PR #186 candidate — bounded regex content search
+
+PAO Tools supports regex content matching within logical lines. LF and CRLF
+terminators are excluded from the matched line, while offsets count the actual
+decoded characters, including both CRLF characters. Matches are reported in
+file order; when several expressions match at the same position, expression
+order breaks the tie. Pagination retains the whole bounded line and each
+expression's progress, so anchors and lookbehind keep their original context.
+
+A record exceeding 1,000,000 characters is skipped in fixed-size chunks; it is
+never collected in full. The scan continues, reporting incomplete coverage and
+the reason. Once the input is exhausted no cursor remains, even if coverage is
+incomplete. Nested quantified expressions rejected by the scanner likewise
+report unsupported coverage. Regex matching does not span logical lines.
+Cancellation and per-call budgets remain in force while skipping. This describes
+the PR candidate; it does not assert deployment or live adoption.

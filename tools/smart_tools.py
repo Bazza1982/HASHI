@@ -245,6 +245,7 @@ class SmartToolOutcome:
     data: Any = None
     error: SmartToolError | None = None
     warning: SmartToolWarning | None = None
+    classifier_status: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -896,6 +897,19 @@ def adapt_legacy_result(
     return spec, outcome
 
 
+def reconcile_native_failure(outcome: SmartToolOutcome, raw_is_error: bool) -> SmartToolOutcome:
+    """Keep a native failure authoritative and retain the classifier disagreement."""
+    if raw_is_error and outcome.status in {"success", "partial"}:
+        return replace(
+            outcome, status="failed", effect="unknown",
+            error=SmartToolError(
+                "native_tool_error", "The tool reported a failure; see its native result.", False
+            ),
+            classifier_status=outcome.status,
+        )
+    return outcome
+
+
 class SmartToolRuntime:
     """Deterministic admission, result shaping, repeat guidance, and Ledger output."""
 
@@ -984,6 +998,7 @@ class SmartToolRuntime:
             raw_is_error=raw_is_error,
             details=details,
         )
+        outcome = reconcile_native_failure(outcome, raw_is_error)
         context = dict(audit_context or {})
         task_id = str(
             context.get("task_id") or context.get("turn_id") or "unscoped"
@@ -1106,6 +1121,8 @@ class SmartToolRuntime:
                 "result_hash": result_hash,
                 "repeat_count": repeat_count,
             }
+            if outcome.classifier_status is not None:
+                record["classifier_status"] = outcome.classifier_status
             if tool_name in {"file_write", "apply_patch"}:
                 record["target"] = str(arguments.get("path") or "")[:4096]
             receipt = (details or {}).get("effect_receipt")
