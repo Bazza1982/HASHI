@@ -534,8 +534,15 @@ async def test_native_context_records_transport_failure_after_tool_fragment(tmp_
     assert protocol["wire_evidence"]["ndjson_events"]
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("actual_tokens", [40961, 48875, 50900, 0])
-async def test_native_capacity_uses_provider_count_before_full_generation(tmp_path, actual_tokens):
+@pytest.mark.parametrize(("actual_tokens", "expected_code"), [
+    (40961, "CONTEXT_CAPACITY_REJECTED"),
+    (48875, "CONTEXT_CAPACITY_REJECTED"),
+    (50900, "CONTEXT_CAPACITY_REJECTED"),
+    (0, "PROVIDER_CAPACITY_PROBE_INVALID"),
+])
+async def test_native_capacity_uses_provider_count_before_full_generation(
+    tmp_path, actual_tokens, expected_code
+):
     adapter = _adapter(tmp_path)
     requests = []
 
@@ -554,7 +561,7 @@ async def test_native_capacity_uses_provider_count_before_full_generation(tmp_pa
         response = await adapter.generate_response("small character estimate", "capacity-regression")
 
     assert response.is_success is False
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert response.error_code == expected_code
     assert len(requests) == 1
     assert requests[0]["options"]["num_ctx"] == 49152
     assert requests[0]["options"]["num_predict"] == 1
@@ -586,9 +593,19 @@ async def test_native_probe_without_complete_bounded_counts_cannot_admit_generat
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         adapter.client = client
         response = await adapter.generate_response("task", "invalid-counter-regression")
+    from adapters.her_v2_provider import _backend_response_error
+    from orchestrator.runtime_pipeline import _typed_capacity_recovery_is_safe
+
     assert not response.is_success
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
+    assert response.error_code == "PROVIDER_CAPACITY_PROBE_INVALID"
+    assert response.error_retryable is False
+    assert _typed_capacity_recovery_is_safe(response) is False
+    stage_error = _backend_response_error(response, fallback="test")
+    assert stage_error.code.value == "PROVIDER_CAPACITY_PROBE_INVALID"
+    assert stage_error.retryable is False
     assert len(requests) == 1
+    records = response.stream_metadata["meter"]["provider_calls"]
+    assert records[0]["decision"] == "capacity_probe_invalid"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reasoning,think", [("enabled", True), ("off", False)])

@@ -1,5 +1,14 @@
 # HERV3 Ollama context pilot
 
+## Invalid native capacity probes — 2026-11-21
+
+If Ollama returns missing or invalid token counts, an unbounded output count,
+or an invalid completion for its one-token capacity probe, HASHI reports
+`PROVIDER_CAPACITY_PROBE_INVALID`: input fit is unknown. It does not report a
+proven context overflow, start the full generation, execute probe Tool calls,
+or automatically compact and retry. A valid probe that establishes input
+exceeding the configured capacity retains `CONTEXT_CAPACITY_REJECTED`.
+
 ## Exact-model input qualification — 2026-11-04
 
 The context opt-in can be declared on an exact `model_capabilities` row.

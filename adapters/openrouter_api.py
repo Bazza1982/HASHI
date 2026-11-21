@@ -225,6 +225,12 @@ class ProviderContextCapacityPreflightError(RuntimeError):
     hashi_error_code = "CONTEXT_CAPACITY_REJECTED"
 
 
+class ProviderCapacityProbeInvalidError(RuntimeError):
+    """The provider did not return a valid bounded capacity measurement."""
+
+    hashi_error_code = "PROVIDER_CAPACITY_PROBE_INVALID"
+
+
 class _ProviderCallBudgetExhausted(RuntimeError):
     """A fallback continuation reached its physical Provider-call limit."""
 
@@ -1602,6 +1608,9 @@ def _backend_failure_response(
     elif explicit_code == "CONTEXT_CAPACITY_REJECTED":
         code = explicit_code
         description = "The prepared request exceeds the declared model context capacity."
+    elif explicit_code == "PROVIDER_CAPACITY_PROBE_INVALID":
+        code = explicit_code
+        description = "The provider's capacity probe was invalid, so input capacity could not be verified."
     elif explicit_code == "PROVIDER_CALL_BUDGET_EXHAUSTED":
         code = explicit_code
         description = "The authorised fallback Provider-call budget was exhausted."
