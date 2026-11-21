@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 from adapters.base import BaseBackend, BackendCapabilities, BackendResponse, TokenUsage
+from adapters.hashi_mcp import prepare_hashi_mcp
 from adapters.stream_io import iter_stream_lines
 from adapters.stream_events import (
     KIND_ERROR,
@@ -141,6 +142,8 @@ class AntigravityCLIAdapter(BaseBackend):
         self._output_format = "stream-json"
         self._result_payload: dict = {}
         self.access_root = str(self.config.resolve_access_root())
+        self.tool_registry = None
+        self._hashi_mcp_enabled = False
 
     # ------------------------------------------------------------------
     # conversation_id lifecycle
@@ -198,6 +201,9 @@ class AntigravityCLIAdapter(BaseBackend):
         except Exception as exc:
             self.logger.error(f"Antigravity CLI not accessible: {exc}")
             return False
+        descriptor = prepare_hashi_mcp(self, backend="antigravity-cli")
+        if descriptor is not None:
+            descriptor.close()
         return True
 
     async def handle_new_session(self) -> bool:
@@ -221,9 +227,7 @@ class AntigravityCLIAdapter(BaseBackend):
     # ------------------------------------------------------------------
 
     def _emit_stream_event(self, se: StreamEvent, on_stream_event: StreamCallback) -> None:
-        if on_stream_event is None:
-            return
-        asyncio.create_task(on_stream_event(se))
+        self._schedule_stream_event(on_stream_event, se)
 
     def _parse_stream_json_line(
         self, raw: str, on_stream_event: StreamCallback, text_fragments: list[str],
@@ -376,7 +380,7 @@ class AntigravityCLIAdapter(BaseBackend):
             "--input-format", "stream-json",
             "--model", self.config.model,
             "--output-format", self._output_format,
-            "--print-timeout", f"{int(self.DEFAULT_IDLE_TIMEOUT_SEC)}s",
+            "--print-timeout", f"{int(self.IDLE_TIMEOUT_SEC)}s",
             "--dangerously-skip-permissions",
         ]
         if self._session_mode and resumed_conversation_id:
@@ -666,10 +670,10 @@ class AntigravityCLIAdapter(BaseBackend):
         try:
             while proc.returncode is None:
                 idle_for = self._last_activity_age()
-                if idle_for >= self.DEFAULT_IDLE_TIMEOUT_SEC:
+                if idle_for >= self.IDLE_TIMEOUT_SEC:
                     timeout_kind = "idle"
                     break
-                wait_slice = min(5.0, max(0.1, self.DEFAULT_IDLE_TIMEOUT_SEC - idle_for))
+                wait_slice = min(5.0, max(0.1, self.IDLE_TIMEOUT_SEC - idle_for))
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=wait_slice)
                 except asyncio.TimeoutError:
@@ -700,7 +704,7 @@ class AntigravityCLIAdapter(BaseBackend):
                     text="",
                     duration_ms=duration_ms,
                     error=(
-                        f"Antigravity CLI was idle for {self.DEFAULT_IDLE_TIMEOUT_SEC}s "
+                        f"Antigravity CLI was idle for {self.IDLE_TIMEOUT_SEC}s "
                         f"with no output."
                     ),
                     is_success=False,
@@ -721,6 +725,7 @@ class AntigravityCLIAdapter(BaseBackend):
             await asyncio.gather(*reader_tasks, return_exceptions=True)
             if self._active_read_tasks == reader_tasks:
                 self._active_read_tasks = []
+            await self._drain_stream_event_tasks()
 
         returncode = proc.returncode
         if self.current_proc is proc:

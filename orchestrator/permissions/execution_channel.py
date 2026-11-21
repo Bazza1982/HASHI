@@ -118,6 +118,23 @@ class PermissionExecutionChannel:
 
     async def runtime_port(self, *, operation, arguments):
         self._current()
+        if operation == "question_availability":
+            if arguments != {"args": [], "kwargs": {}}:
+                raise PermissionDenied("question availability takes no arguments")
+            from orchestrator.permissions.host_protocol import pack
+            from orchestrator.permissions.questions import ScopedRunQuestions
+            import asyncio
+
+            questions = self.registry._ordinary_questions
+            if questions is None:
+                return pack(False)
+            if not isinstance(questions, ScopedRunQuestions) or questions.binding != self.binding:
+                raise PermissionDenied("question availability is outside this Run")
+            policy = await asyncio.to_thread(
+                questions.questions.question_policy, self.binding.context.agent_id,
+            )
+            self._current()
+            return pack(policy.get("enabled") is True)
         if self._runtime_port is None:
             raise PermissionDenied("the actual HER runtime ports are unavailable")
         result = await self._runtime_port(self.binding, operation, arguments)

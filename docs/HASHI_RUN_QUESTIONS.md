@@ -1,5 +1,14 @@
 # Asynchronous questions within a Run
 
+## November 21: durable continuation after an answer
+
+Before requesting another provider response after a Run question resolves,
+HERV3 persists the withheld assistant response and the authenticated answer at
+the existing `ready_provider_request` boundary. The normal provider and Gateway
+adapters both use this boundary. If persistence fails, the next provider
+request is not sent; recovery uses the saved complete context without replaying
+the question's side effects.
+
 ## November 14: SQLite contention and event-loop isolation
 
 PAO question state remains in the existing Session database and schema. Backend
@@ -98,6 +107,14 @@ The effective policy is their conjunction. `/askme` shows and changes both;
 `/askme on|off` changes the current Agent and `/askme global on|off`
 changes this instance. Re-enabling the instance preserves Agent preferences.
 Changes are immediate and independent of presentation clients.
+
+HERV3 includes its question-card instruction only when both question tools
+are in the selected request's tool catalogue, the request permits them, and
+PAO's current Agent and instance preferences are enabled. Before composing a
+stage prompt it reads the original PAO owner; restricted hosts use a read-only
+port bound to their existing Run. If the policy cannot be read, the question
+instruction is omitted and the failure is logged. The actual question operation
+checks the authoritative policy again, including changes made after the prompt.
 
 PAO rejects a new card when either switch is off and cancels existing pending
 cards with an explicit non-answer. Both HERV3 and native Codex receive guidance

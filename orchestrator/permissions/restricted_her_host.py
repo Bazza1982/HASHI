@@ -111,6 +111,11 @@ async def run_command(command, *, client, scratch_root, emit, brokered_forensics
     )
     provider.bind_commentary_port(services or ports.port("commentary"))
     provider.bind_turn_services(services)
+
+    async def question_availability():
+        return await ports._async("question_availability")
+
+    provider.bind_question_availability_port(question_availability)
     delivery = _AdapterDelivery(stream, allow_immediate_response=ports.manifest["allow_immediate_response"])
     from adapters.her_v2 import _ExecutionStageCompactionProvider, _HChatDraftToolProvider
 

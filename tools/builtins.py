@@ -461,9 +461,26 @@ async def execute_shell(
         if proc.returncode != 0:
             result = f"[exit code {proc.returncode}]\n{result}" if result else f"[exit code {proc.returncode}]"
 
-        # Truncate very long output
+        # Truncate very long output while preserving valid JSON envelopes when applicable (H34)
         if len(result) > 20000:
-            result = result[:20000] + "\n...[output truncated]"
+            stripped_json = result.lstrip()
+            truncated = False
+            if stripped_json[:1] in {"{", "["}:
+                try:
+                    json.loads(result)
+                    result = json.dumps(
+                        {
+                            "truncated": True,
+                            "original_chars": len(result),
+                            "preview": result[:19500],
+                        },
+                        ensure_ascii=False,
+                    )
+                    truncated = True
+                except ValueError:
+                    pass
+            if not truncated:
+                result = result[:20000] + "\n...[output truncated]"
 
         if _bash_group_alive(pgid):
             completion_cleanup = await _shield_bash_cleanup(
@@ -1163,8 +1180,12 @@ def _apply_unified_diff(text: str, patch_str: str) -> tuple[bool, str]:
         new_block: list[str] = []
         old_seen = 0
         new_seen = 0
-        while index < total and (old_seen < old_len or new_seen < new_len):
+        while index < total:
             entry = patch_lines[index]
+            if _parse_hunk_header(entry) is not None:
+                break
+            if old_seen >= old_len and new_seen >= new_len and not entry.startswith(("+", "-", " ", "\\")):
+                break
             if entry.startswith("\\"):
                 index += 1
                 continue
@@ -1179,7 +1200,7 @@ def _apply_unified_diff(text: str, patch_str: str) -> tuple[bool, str]:
                 new_block.append(entry[1:])
                 old_seen += 1
                 new_seen += 1
-            elif entry == "":
+            elif entry == "" and (old_seen < old_len or new_seen < new_len):
                 old_block.append("")
                 new_block.append("")
                 old_seen += 1
@@ -1196,13 +1217,18 @@ def _apply_unified_diff(text: str, patch_str: str) -> tuple[bool, str]:
     offset = 0
     for old_start, old_len, old_block, new_block in hunks:
         base = old_start if old_len == 0 else old_start - 1
-        floor = max(base + offset, 0)
+        max_pos = max(len(result) - len(old_block), 0)
+        floor = min(max(base + offset, 0), max_pos)
         position = floor
         if result[position:position + len(old_block)] != old_block:
             position = -1
-            for candidate in range(floor, len(result) - len(old_block) + 1):
-                if result[candidate:candidate + len(old_block)] == old_block:
-                    position = candidate
+            max_delta = max(floor, max_pos - floor)
+            for delta in range(1, max_delta + 1):
+                for candidate in (floor + delta, floor - delta):
+                    if 0 <= candidate <= max_pos and result[candidate:candidate + len(old_block)] == old_block:
+                        position = candidate
+                        break
+                if position >= 0:
                     break
             if position < 0:
                 return (
@@ -1210,7 +1236,7 @@ def _apply_unified_diff(text: str, patch_str: str) -> tuple[bool, str]:
                     f"hunk at line {old_start} does not match file content",
                 )
         result[position:position + len(old_block)] = new_block
-        offset += len(new_block) - len(old_block)
+        offset += (position - (base + offset)) + len(new_block) - len(old_block)
 
     output = "\n".join(result)
     if trailing_newline:
@@ -1281,8 +1307,14 @@ async def execute_apply_patch(
     if patch_cmd is not None:
         outcome = _apply_patch_with_patch_command(patch_cmd, path, patch_str)
         if outcome is not None:
-            # A resolved ``patch`` binary is authoritative: honour its verdict,
-            # including a dry-run rejection, and never silently fall through.
+            if outcome[0] == "ok":
+                return _format_patch_outcome(outcome, path)
+            if outcome[0] == "rejected":
+                # patch --dry-run did not modify the file; try pure-Python
+                # fallback for bidirectional hunk offset & header count tolerance
+                py_outcome = _apply_patch_with_python(path, patch_str)
+                if py_outcome[0] == "ok":
+                    return _format_patch_outcome(py_outcome, path)
             return _format_patch_outcome(outcome, path)
 
     try:

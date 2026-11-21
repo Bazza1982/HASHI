@@ -121,14 +121,7 @@ def _parse_time(value: str) -> datetime:
     return _utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
 
 
-def normalize_engine(engine: str) -> str:
-    normalized = str(engine or "").strip().casefold().replace("_", "-")
-    aliases = {
-        "openrouter": OPENROUTER_ENGINE,
-        "codex": "codex-cli",
-        "hashi": "hashi-api",
-    }
-    return aliases.get(normalized, normalized)
+from tools.pricing_sources import normalize_engine  # noqa: E402,F401
 
 
 def default_cache_path() -> Path:

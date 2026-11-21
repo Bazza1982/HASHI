@@ -111,18 +111,18 @@ def test_bridge_context_assembler_splits_turn_and_saved_memory_flags():
 
     prompt = assembler.build_prompt("hello", "deepseek-api")
     assert "RECENT COMPLETED EXCHANGES" in prompt
-    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in prompt
-    assert store.recent_calls == 1
-    assert store.memory_calls == 0
-
-    store.recent_calls = 0
-    store.memory_calls = 0
-    assembler.saved_memory_injection_enabled = True
-    prompt = assembler.build_prompt("hello", "deepseek-api")
-    assert "RECENT COMPLETED EXCHANGES" in prompt
     assert "OPTIONAL SEARCHED LONG-TERM MEMORY" in prompt
     assert store.recent_calls == 1
     assert store.memory_calls == 1
+
+    store.recent_calls = 0
+    store.memory_calls = 0
+    assembler.saved_memory_injection_enabled = False
+    prompt = assembler.build_prompt("hello", "deepseek-api")
+    assert "RECENT COMPLETED EXCHANGES" in prompt
+    assert "OPTIONAL SEARCHED LONG-TERM MEMORY" not in prompt
+    assert store.recent_calls == 1
+    assert store.memory_calls == 0
 
     store.recent_calls = 0
     store.memory_calls = 0

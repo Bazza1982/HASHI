@@ -6,6 +6,7 @@ from functools import cache
 import json
 import stat
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -107,10 +108,20 @@ class Scanner:
         include = self.cfg['include']
         return not include or any(glob_match(relative, value, self.cfg['case_sensitive']) for value in include)
 
+    def _regex_pattern(self):
+        pattern = getattr(self, '_compiled_regex', None)
+        if pattern is None:
+            flags = 0 if self.cfg['case_sensitive'] else re.IGNORECASE
+            pattern = re.compile(self.cfg['query'], flags)
+            self._compiled_regex = pattern
+        return pattern
+
     def path_matches(self, relative):
         query = self.cfg['query']
         if self.cfg['match'] == 'glob':
             return glob_match(relative, query, self.cfg['case_sensitive'])
+        if self.cfg['match'] == 'regex':
+            return self._regex_pattern().search(relative) is not None
         return query in relative if self.cfg['case_sensitive'] else query.casefold() in relative.casefold()
 
     def add(self, match):
@@ -224,12 +235,15 @@ class Scanner:
             self.progress()
         result = scan_literal(physical, terms=tuple(self.cfg.get('terms') or [self.cfg['query']]),
                               case_sensitive=self.cfg['case_sensitive'],
+                              regex=self.cfg['match'] == 'regex',
                               max_results=max(1, self.cfg['max_results'] - len(self.matches)),
                               context_chars=self.cfg['context_chars'], state=item['text_state'],
                               character_budget=128 * 1024, progress=progress)
         item['text_state'] = result['continuation']
         if result['encoding_warning'] and 'UTF-8 replacement characters observed' not in self.state['warnings']:
             self.state['warnings'].append('UTF-8 replacement characters observed')
+        if result.get('coverage_warning') and result['coverage_warning'] not in self.state['warnings']:
+            self.state['warnings'].append(result['coverage_warning'])
         if signature(path) != item['signature']:
             raise StaleCursor(str(path))
         # A bounded queue preserves every unreturned match if serialization stops.
@@ -241,6 +255,10 @@ class Scanner:
                 self.state['pending_matches'] = pending
                 if item['text_state'] is None:
                     root['pending_file'] = None
+                    # An explicitly selected file has no directory to resume
+                    # once its final record and all matches were consumed.
+                    if path == Path(root['path']) and not root['stack']:
+                        root['done'] = True
                 return False
         if item['text_state'] is None:
             root['pending_file'] = None
@@ -394,7 +412,15 @@ class Scanner:
                 warnings.append(message)
         exhausted = (all(root['done'] for root in self.state['roots']) and
                      not self.state.get('pending_match') and not self.state.get('pending_matches'))
-        complete = exhausted and not self.count['errors'] and not warnings and not stale
+        # Synthetic done roots in a cache-only continuation do not mean the
+        # original search exhausted its scope.
+        continuation_lost = bool(self.state.get('continuation_lost'))
+        scope_exhausted = exhausted and not continuation_lost
+        complete = scope_exhausted and not self.count['errors'] and not warnings and not stale
+        if exhausted and continuation_lost:
+            self.stop_reason = 'deadline'
+        elif exhausted and self.stop_reason == 'page_limit':
+            self.stop_reason = 'completed'
         if self.stop_reason == 'completed' and self.count['errors']:
             self.stop_reason = 'io_error'
         state = None if exhausted or stale else self.state
@@ -402,13 +428,17 @@ class Scanner:
             state = None
             self.state['warnings'].append('Continuation capacity exceeded; no scan continues after return')
         self.progress(force=True)
-        return {'matches': self.matches, 'counters': self.count,
-                'coverage': {'roots': [{'path': root['path'], 'exhausted': root['done'],
-                                       'failed': root['failed']} for root in self.state['roots']],
-                             'errors': self.state['errors']},
-                'scope_exhausted': exhausted, 'coverage_complete': complete,
-                'stop_reason': self.stop_reason, 'warnings': warnings,
-                'state': state}
+        result = {'matches': self.matches, 'counters': self.count,
+                  'coverage': {'roots': [{'path': root['path'],
+                                          'exhausted': root['done'] and not continuation_lost,
+                                          'failed': root['failed']} for root in self.state['roots']],
+                               'errors': self.state['errors']},
+                  'scope_exhausted': scope_exhausted, 'coverage_complete': complete,
+                  'stop_reason': self.stop_reason, 'warnings': warnings,
+                  'state': state}
+        if continuation_lost:
+            result['continuation_lost'] = True
+        return result
 
 
 def main():

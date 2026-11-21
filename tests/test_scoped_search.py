@@ -127,6 +127,105 @@ async def test_no_workzone_prefers_cwd_over_broad_access_root(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('ending', ['\n', '\r\n', ''])
+@pytest.mark.parametrize('page_size', [1, 2])
+async def test_regex_final_matching_record_has_no_empty_continuation(tmp_path, ending, page_size):
+    registry, repo, _ = registry_for(tmp_path)
+    path = repo / 'record.txt'
+    path.write_bytes(('aaa' + ending).encode('utf-8'))
+    result = await registry.execute_with_audit_context(
+        'file_search',
+        {'query': '^a', 'mode': 'content', 'match': 'regex',
+         'roots': [str(path)], 'max_results': page_size},
+        audit_context={'request_id': 'regex-final-record'})
+    envelope = json.loads(result.output)
+    data = envelope['data']
+    assert [(item['line'], item['character_offset']) for item in data['matches']] == [(1, 0)]
+    assert envelope['status'] == 'success'
+    assert data['coverage_complete'] and data['scope_exhausted']
+    assert not data['can_continue'] and data['next_cursor'] is None
+    assert data['stop_reason'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_regex_final_zero_width_match_survives_full_pages(tmp_path):
+    registry, repo, _ = registry_for(tmp_path)
+    path = repo / 'record.txt'
+    path.write_bytes(b'aaa\n')
+    query = {'query': 'a*', 'mode': 'content', 'match': 'regex',
+             'roots': [str(path)], 'max_results': 1}
+    first = payload(await registry.execute_with_audit_context(
+        'file_search', query, audit_context={'request_id': 'regex-zero-width'}))
+    assert [item['character_offset'] for item in first['matches']] == [0]
+    assert first['can_continue'] and first['next_cursor']
+    assert not first['coverage_complete'] and not first['scope_exhausted']
+    query['cursor'] = first['next_cursor']
+    result = await registry.execute_with_audit_context(
+        'file_search', query, audit_context={'request_id': 'regex-zero-width'})
+    envelope = json.loads(result.output)
+    last = envelope['data']
+    assert [item['character_offset'] for item in last['matches']] == [3]
+    assert envelope['status'] == 'success'
+    assert last['coverage_complete'] and last['scope_exhausted']
+    assert not last['can_continue'] and last['next_cursor'] is None
+    assert last['stop_reason'] == 'completed'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('directory_scope', [False, True])
+async def test_regex_final_file_does_not_exhaust_other_selected_files(tmp_path, directory_scope):
+    registry, repo, _ = registry_for(tmp_path)
+    scope = repo / 'records'
+    scope.mkdir()
+    files = [scope / 'first.txt', scope / 'second.txt']
+    for path in files:
+        path.write_bytes(b'aaa\n')
+    query = {'query': '^a', 'mode': 'content', 'match': 'regex',
+             'roots': [str(scope)] if directory_scope else [str(path) for path in files],
+             'max_results': 1}
+    found = []
+    for page in range(5):
+        data = payload(await registry.execute_with_audit_context(
+            'file_search', query, audit_context={'request_id': 'regex-multiple-files'}))
+        found.extend(item['path'] for item in data['matches'])
+        if page == 0:
+            assert data['can_continue'] and data['next_cursor']
+            assert not data['coverage_complete'] and not data['scope_exhausted']
+        if not data['can_continue']:
+            break
+        query['cursor'] = data['next_cursor']
+    else:
+        pytest.fail('multiple-file regex pagination did not terminate')
+    assert len(found) == 2 and set(found) == {str(path) for path in files}
+    assert data['coverage_complete'] and data['scope_exhausted']
+    assert data['next_cursor'] is None and data['stop_reason'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_default_regex_search_pages_crlf_after_skipped_long_record(tmp_path):
+    registry, repo, _ = registry_for(tmp_path)
+    path = repo / 'records.txt'
+    path.write_bytes(b'x' * 1_000_001 + b'\r\nfoo\r\nfoo\r\n')
+    query = {'query': '^foo$', 'mode': 'content', 'match': 'regex',
+             'roots': [str(path)], 'max_results': 1}
+    matches = []
+    for _ in range(10):
+        result = await registry.execute_with_audit_context(
+            'file_search', query, audit_context={'request_id': 'regex-page-run'})
+        data = payload(result)
+        matches.extend((item['line'], item['character_offset']) for item in data['matches'])
+        if not data['can_continue']:
+            break
+        query['cursor'] = data['next_cursor']
+    else:
+        pytest.fail('regex search continuation did not terminate')
+    assert matches == [(2, 1_000_003), (3, 1_000_008)]
+    assert data['scope_exhausted'] is True and data['coverage_complete'] is False
+    assert any('bounded scan limit' in warning for warning in data['warnings'])
+    assert json.loads(result.output)['status'] == 'partial'
+
+
+@pytest.mark.asyncio
 async def test_content_pagination_has_no_lost_or_duplicate_long_record_hits(tmp_path):
     registry, repo, _ = registry_for(tmp_path, options={'smart_registry': {'enabled': True}})
     text = ('x' * 65533 + ' TOKEN\n') * 6
@@ -191,8 +290,13 @@ async def test_zero_partial_and_exclusions_are_distinct(tmp_path):
     assert {Path(m['path']).name for m in expanded['matches']} == {'.env', 'needle.txt'}
     path = payload(await registry.execute('file_search', {'query': '*.pdf', 'match': 'glob', 'roots': [str(repo)]}))
     assert len(path['matches']) == 1
-    unavailable = await registry.execute('file_search', {**query, 'match': 'regex'})
-    assert unavailable.is_error and json.loads(unavailable.output)['status'] == 'unavailable'
+    regex_path = payload(await registry.execute('file_search', {'query': r'paper\.pdf$', 'match': 'regex', 'roots': [str(repo)]}))
+    assert len(regex_path['matches']) == 1
+    regex_content = payload(await registry.execute('file_search', {**query, 'query': r'SEC[A-Z]+', 'mode': 'content', 'match': 'regex'}))
+    assert len(regex_content['matches']) == 0  # .env excluded in project profile
+    regex_expanded = payload(await registry.execute('file_search', {
+        **query, 'query': r'SEC[A-Z]+', 'mode': 'content', 'match': 'regex', 'profile': 'expanded', 'include': ['*.txt']}))
+    assert len(regex_expanded['matches']) == 1
 
 
 @pytest.mark.asyncio
@@ -334,12 +438,12 @@ async def test_repeat_advisory_uses_search_evidence_not_operation_identity(tmp_p
                            audit_context={'task_id': 'repeat', 'request_id': 'repeat'})
     envelope = json.loads(result.output)
     assert envelope['status'] == 'success' and envelope['data']['coverage_complete']
-    assert envelope['warning']['code'] == 'same_result_repeated'
+    assert result.details['smart_warning']['code'] == 'same_result_repeated'
     # A genuinely changed tree is new evidence; the warning never blocks.
     (repo / 'new.txt').touch()
     changed = await registry.execute_with_audit_context('file_search', args,
                         audit_context={'task_id': 'repeat', 'request_id': 'repeat'})
-    assert json.loads(changed.output)['warning'] is None and not changed.is_error
+    assert changed.details.get('smart_warning') is None and not changed.is_error
 
 
 @pytest.mark.asyncio

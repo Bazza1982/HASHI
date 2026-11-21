@@ -331,6 +331,19 @@ it for Persona-aware message rendering.
 
 Memory may be retrieved passively or proactively.
 
+Saved Agent memory search is on by default for a full Context projection,
+including a stateless Engine invocation. An explicit `/memory search off`
+preference survives later Context assembly and process replacement. Stateless
+describes the Engine Session; it does not itself isolate saved Agent memory.
+
+Local fallback retrieval uses meaningful query terms rather than treating a
+shared conversational phrase as proof of relevance. It supports Chinese and
+mixed-script text but is lexical, so it cannot promise to recognize every
+semantic paraphrase. If an active BGE encoder or vector index fails, memory
+storage and text retrieval remain available and status reports degradation.
+Vectors retain the identity of the encoder that produced them; a generation
+change during indexing disables that derived index until it can be rebuilt.
+
 #### Passive retrieval: persistent Engine Sessions
 
 At the start of a persistent Engine Session, PCM may provide the ten most recent
@@ -350,6 +363,14 @@ ordinary persistent-Session operation. Recent history is injected again only
 at an applicable bootstrap, rebase, or explicit continuation event such as
 cross-Session Context or `/handoff`. Engine Adapters that do not yet support the
 same delta contract must declare their full-projection behaviour explicitly.
+
+When a Compact capsule replaces fixed-Session history, PCM identifies a
+contiguous covered Engine-history prefix using the Session's completed PAO Runs
+and the capsule's verified source-turn hashes. HERV3 checks the exact Session,
+boundary and prefix digest before excluding those turns from the model context.
+Timestamps alone never establish coverage. If identity or content cannot be
+verified, HERV3 retains the original history; this can reduce the space saved
+until coverage is established. Compact does not delete the durable raw turns.
 
 #### Passive retrieval: stateless or per-turn Engine invocations
 

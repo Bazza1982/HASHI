@@ -350,9 +350,23 @@ def test_retired_hybrid_draft_does_not_change_herv3_live_route(tmp_path):
     assert configured.routing_mode == "single"
     assert set(configured.profiles) == {"main", "auxiliary"}
     assert {
-        (profile.engine, profile.model)
-        for profile in configured.profiles.values()
-    } == {("deepseek-api", "deepseek-v4-pro")}
+        name: (profile.engine, profile.model)
+        for name, profile in configured.profiles.items()
+    } == {
+        "main": ("deepseek-api", "deepseek-v4-pro"),
+        "auxiliary": ("deepseek-api", "deepseek-v4-flash"),
+    }
+    assert any(item["field"] == "route_targets" for item in configured.migration_warnings)
+    reloaded = _manager(tmp_path)
+    row = next(row for row in reloaded.config.allowed_backends if row["engine"] == "her-v2")
+    rebuilt_profiles = reloaded._build_adapter_config("her-v2", row).extra["her_v2"]["profiles"]
+    assert {
+        name: (profile["engine"], profile["model"])
+        for name, profile in rebuilt_profiles.items()
+    } == {
+        "main": ("deepseek-api", "deepseek-v4-pro"),
+        "auxiliary": ("deepseek-api", "deepseek-v4-flash"),
+    }
 
 
 def test_last_hybrid_configuration_is_restored_after_single_mode(tmp_path):
@@ -388,18 +402,18 @@ def test_apply_replaces_live_config_without_mutating_turn_snapshot(tmp_path):
         _v2_config=None,
         effort="medium",
     )
-    manager.apply_her_v2_configuration(
-        manager.prepare_her_v2_provider("openrouter-api")
+    manager.apply_her_v3_target(
+        manager.prepare_her_v3_provider("openrouter-api")
     )
     frozen_turn_config = manager.current_backend._v2_config
 
-    manager.apply_her_v2_configuration(
-        manager.prepare_her_v2_provider("deepseek-api")
+    manager.apply_her_v3_target(
+        manager.prepare_her_v3_provider("deepseek-api")
     )
 
-    assert frozen_turn_config.profile_for(Stage.PLANNING).engine == "openrouter-api"
+    assert frozen_turn_config.profile_for(Stage.EXECUTION).engine == "openrouter-api"
     assert manager.current_backend._v2_config is not frozen_turn_config
-    assert manager.current_backend._v2_config.profile_for(Stage.PLANNING).engine == (
+    assert manager.current_backend._v2_config.profile_for(Stage.EXECUTION).engine == (
         "deepseek-api"
     )
 
@@ -747,9 +761,12 @@ def test_retired_selection_is_not_applied_when_herv3_adapter_is_rebuilt(tmp_path
     assert selected.provider == "openrouter-api"
     assert set(profiles) == {"main", "auxiliary"}
     assert {
-        (profile["engine"], profile["model"])
-        for profile in profiles.values()
-    } == {("deepseek-api", "deepseek-v4-pro")}
+        name: (profile["engine"], profile["model"])
+        for name, profile in profiles.items()
+    } == {
+        "main": ("deepseek-api", "deepseek-v4-pro"),
+        "auxiliary": ("deepseek-api", "deepseek-v4-flash"),
+    }
     assert "route_model_slots" not in adapter_config.extra["her_v2"]
     assert "route_reasoning" not in adapter_config.extra["her_v2"]
 

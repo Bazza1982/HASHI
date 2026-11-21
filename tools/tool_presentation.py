@@ -7,6 +7,7 @@ owns every allowlist, availability check and execution admission.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 from typing import Any
 
@@ -22,6 +23,9 @@ _STARTER_TOOLS = (
 # onto earlier ones (never silently drop an already-revealed, still-authorised
 # schema), capped so the model payload stays compact for small models.
 _MAX_DISCOVERED = 48
+# In-use tools are also bounded with the same LRU strategy so a very long
+# tool-enabled turn cannot grow the exposed schemas without limit.
+_MAX_IN_USE = 48
 
 
 class OnDemandToolView:
@@ -30,7 +34,10 @@ class OnDemandToolView:
     def __init__(self, base: Any, *, goal: str = "") -> None:
         self._base = base
         self.max_loops = None
-        self._discovered: set[str] = set()
+        # Ordered LRU map so tools are retained by recency/usage rather than
+        # alphabetically evicting names like 'windows_*' / 'z*' above 48.
+        self._discovered: OrderedDict[str, bool] = OrderedDict()
+        self._in_use: OrderedDict[str, bool] = OrderedDict()
         # Relevance hints are advisory, not new immutable capability state.
         available = tuple(
             str((schema.get("function") or {}).get("name") or "")
@@ -53,13 +60,27 @@ class OnDemandToolView:
         # Ignore Ollama's historical ["core"] presentation tier *only* in
         # this opt-in view; the original registry still validates permission.
         all_definitions = self._base.get_tool_definitions(tiers=None)
-        visible = self._starter | self._discovered
+        visible = self._starter | set(self._discovered.keys()) | set(self._in_use.keys())
         return [
             item for item in all_definitions
             if str((item.get("function") or {}).get("name") or "") in visible
         ]
 
+    def _note_used(self, tool_name: str) -> None:
+        if tool_name and tool_name not in self._starter:
+            self._in_use[tool_name] = True
+            self._in_use.move_to_end(tool_name)
+            if tool_name in self._discovered:
+                self._discovered.move_to_end(tool_name)
+            # Bounded LRU: evict the least-recently-used in-use tool so a long
+            # turn never expands the exposed schemas indefinitely. The just-used
+            # tool sits at the MRU end and is never the eviction victim.
+            while len(self._in_use) > _MAX_IN_USE:
+                evict = next(iter(self._in_use))
+                del self._in_use[evict]
+
     def _activate_after_success(self, tool_name: str, arguments: dict, result: Any) -> None:
+        self._note_used(tool_name)
         if tool_name != "tool_find" or getattr(result, "is_error", False):
             return
         output = str(getattr(result, "output", "") or "")
@@ -75,11 +96,19 @@ class OnDemandToolView:
             str((schema.get("function") or {}).get("name") or "")
             for schema in self._base.get_tool_definitions(tiers=None)
         )
-        revealed = set(_tool_find_selections(arguments, available))
-        # Accumulate within this request and keep only still-authorised names.
-        self._discovered = (self._discovered | revealed) & set(available)
-        if len(self._discovered) > _MAX_DISCOVERED:
-            self._discovered = set(sorted(self._discovered)[:_MAX_DISCOVERED])
+        available_set = set(available)
+        for name in list(self._discovered):
+            if name not in available_set:
+                del self._discovered[name]
+        for name in _tool_find_selections(arguments, available):
+            if name in available_set:
+                self._discovered[name] = True
+                self._discovered.move_to_end(name)
+        while len(self._discovered) > _MAX_DISCOVERED:
+            evict = next((k for k in self._discovered if k not in self._in_use), None)
+            if evict is None:
+                break
+            del self._discovered[evict]
 
     async def execute(self, tool_name: str, arguments: dict, tool_call_id: str = ""):
         result = await self._base.execute(tool_name, arguments, tool_call_id)

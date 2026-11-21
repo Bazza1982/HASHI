@@ -39,9 +39,15 @@ def _registry(tmp_path, *tool_names: str) -> ToolRegistry:
     )
 
 
-def _payload(result) -> dict:
-    payload = json.loads(result.output)
-    assert set(payload) == {"status", "effect", "data", "error", "warning"}
+def _smart(result) -> dict:
+    details = result.details or {}
+    assert details.get("smart_result") is True
+    payload = {
+        "status": details["smart_status"],
+        "effect": details["smart_effect"],
+        "error": details.get("smart_error"),
+        "warning": details.get("smart_warning"),
+    }
     assert payload["status"] in SMART_TOOL_STATUSES
     assert payload["effect"] in SMART_TOOL_EFFECTS
     return payload
@@ -109,11 +115,12 @@ async def test_bash_nonzero_exit_is_failed_not_false_success(
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
     result = await registry.execute("bash", {"command": "false"}, "call-1")
 
-    payload = _payload(result)
+    payload = _smart(result)
     assert result.is_error is True
     assert payload["status"] == "failed"
     assert payload["effect"] == "unknown"
     assert payload["error"]["code"] == "nonzero_exit"
+    assert result.output == "[exit code 1]\nfailed output"
     assert _ledger(tmp_path)[0]["status"] == "failed"
 
 
@@ -155,7 +162,7 @@ async def test_scheduler_without_gateway_is_unavailable_and_not_retryable(
     monkeypatch.setattr(registry, "_dispatch", fake_dispatch)
     result = await registry.execute("hashi_scheduler_list", {}, "call-1")
 
-    payload = _payload(result)
+    payload = _smart(result)
     assert result.is_error is True
     assert payload["status"] == "unavailable"
     assert payload["effect"] == "no_change"
@@ -217,7 +224,7 @@ async def test_rejected_patch_is_failed_and_known_no_change(
         "apply_patch", {"path": "a.py", "patch": "bad"}, "call-1"
     )
 
-    payload = _payload(result)
+    payload = _smart(result)
     assert payload["status"] == "failed"
     assert payload["effect"] == "no_change"
     assert payload["error"]["code"] == "patch_rejected"
@@ -240,13 +247,13 @@ async def test_third_identical_query_warns_and_writes_one_row_per_call(
         for index in range(1, 4)
     ]
 
-    assert _payload(results[0])["warning"] is None
-    assert _payload(results[1])["warning"] is None
-    assert _payload(results[2])["warning"]["code"] == "same_result_repeated"
+    assert _smart(results[0])["warning"] is None
+    assert _smart(results[1])["warning"] is None
+    assert _smart(results[2])["warning"]["code"] == "same_result_repeated"
+    assert results[0].output == "same result"
     rows = _ledger(tmp_path)
     assert [row["repeat_count"] for row in rows] == [0, 1, 2]
     assert len({row["result_hash"] for row in rows}) == 1
-    assert not (tmp_path / "tool_action_audit.jsonl").exists()
     assert set(rows[0]) == {
         "timestamp",
         "task_id",
@@ -296,7 +303,7 @@ async def test_poll_repeat_warns_with_backoff_but_never_stops(
     ]
 
     assert calls == 3
-    assert _payload(results[-1])["warning"]["code"] == "poll_state_unchanged"
+    assert _smart(results[-1])["warning"]["code"] == "poll_state_unchanged"
 
 
 @pytest.mark.asyncio
@@ -318,8 +325,8 @@ async def test_repeated_side_effect_warns_after_execution(tmp_path, monkeypatch)
     )
 
     assert calls == 2
-    assert _payload(first)["warning"] is None
-    assert _payload(second)["warning"]["code"] == "repeated_side_effect"
+    assert _smart(first)["warning"] is None
+    assert _smart(second)["warning"]["code"] == "repeated_side_effect"
 
 
 @pytest.mark.asyncio
@@ -343,12 +350,12 @@ async def test_idempotent_action_is_rechecked_not_short_circuited(
     )
 
     assert calls == 2
-    assert _payload(first)["effect"] == "no_change"
-    assert _payload(second)["effect"] == "no_change"
+    assert _smart(first)["effect"] == "no_change"
+    assert _smart(second)["effect"] == "no_change"
 
 
 @pytest.mark.asyncio
-async def test_her_receipt_stays_internal_to_five_field_result(
+async def test_her_receipt_stays_internal_not_in_output(
     tmp_path, monkeypatch
 ) -> None:
     registry = _registry(tmp_path, "file_read")
@@ -374,7 +381,7 @@ async def test_her_receipt_stays_internal_to_five_field_result(
 
     result = await evidence.execute("file_read", {"path": "a.txt"}, "call-1")
 
-    _payload(result)
+    _smart(result)
     assert "HASHI_EVIDENCE_RECEIPT" not in result.output
     assert result.details["evidence_ref"]
     row = _ledger(tmp_path)[0]
@@ -464,15 +471,17 @@ async def test_large_record_grep_is_rejected_before_dispatch_with_replan_guidanc
         "call-risky-grep",
     )
 
-    payload = _payload(result)
     assert dispatched is False
     assert result.is_error is True
-    assert payload["status"] == "needs_replan"
-    assert payload["effect"] == "no_change"
-    assert payload["error"]["code"] == "unsafe_text_search"
-    assert payload["data"]["suggested_tool"] == "log_query"
-    assert payload["data"]["record_over_limit"] is True
     assert result.details["control_disposition"] == "needs_replan"
+    assert result.details["suggested_tool"] == "log_query"
+    admission = result.details["smart_admission"]
+    assert admission["code"] == "unsafe_text_search"
+    assert admission["suggested_tool"] == "log_query"
+    assert admission["record_over_limit"] is True
+    # The model-visible output names the recommended alternative so HER can
+    # actually choose it on the next attempt.
+    assert "log_query" in result.output
 
 
 @pytest.mark.asyncio
@@ -508,15 +517,13 @@ async def test_log_query_bounds_an_18m_character_single_record(tmp_path) -> None
         "call-log-query",
     )
 
-    payload = _payload(result)
     assert result.is_error is False
-    assert payload["status"] == "partial"
-    assert payload["effect"] == "observed"
-    data = payload["data"]
+    assert result.details["smart_status"] == "partial"
+    assert result.details["smart_effect"] == "observed"
+    data = json.loads(result.output)
     assert data["file_size_bytes"] == target_size
     assert data["literal_only"] is True
     assert data["result_limit_reached"] is True
-    assert payload["status"] == "partial"
     assert data["can_continue"] and not data["coverage_complete"]
     assert data["matches"] == [
         {

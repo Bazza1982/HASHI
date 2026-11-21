@@ -14,6 +14,7 @@ from pathlib import Path
 
 from adapters.ollama_native import call_native_chat
 from adapters.openrouter_api import (
+    ProviderCapacityProbeInvalidError,
     ProviderContextCapacityPreflightError,
     ProviderProtocolForensicError,
     _effective_protocol_parameters,
@@ -116,7 +117,10 @@ async def check_native_capacity(
             "input": result.prompt_tokens, "output": result.completion_tokens,
             "thinking": result.thinking_tokens, "token_source": "provider" if valid_count else "unknown",
             "thinking_in_output": True, "cost_usd": 0.0, "status": "completed",
-            "decision": "capacity_accepted" if fits else "capacity_rejected",
+            "decision": (
+                "capacity_probe_invalid" if not valid_count or not bounded_probe
+                else "capacity_accepted" if fits else "capacity_rejected"
+            ),
             "decision_success": fits, "usable_input_tokens": capacity.usable_input_tokens,
             "provider_call_latency_ms": (time.perf_counter() - started) * 1000,
             "request_started_at": started_at, "response_observed_at": _utc_timestamp(),
@@ -125,7 +129,7 @@ async def check_native_capacity(
         },
     ))
     if not valid_count or not bounded_probe:
-        raise ProviderContextCapacityPreflightError(
+        raise ProviderCapacityProbeInvalidError(
             "Ollama did not provide a valid bounded capacity probe; full generation "
             "was not started and no tools were executed by the probe."
         )

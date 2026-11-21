@@ -412,16 +412,17 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
         return
 
     policy = load_policy(runtime)
+    force_compact = action == "force"
     current_tokens = estimate_effective_context_tokens(
         runtime,
         coordinator=coordinator,
         use_last_runtime_measurement=False,
     )
-    if current_tokens < policy.manual_min_tokens:
+    if current_tokens < policy.manual_min_tokens and not force_compact:
         outcome = await coordinator.compact(
             trigger="manual_command",
             request_ref=f"compact-command:{getattr(update, 'update_id', 'unknown')}",
-            force=True,
+            force=False,
         )
         await _send(runtime, update, _outcome_text(outcome, wip=wip))
         return
@@ -437,7 +438,7 @@ async def compact_command(runtime: Any, update: Any, context: Any) -> None:
     outcome = await coordinator.compact(
         trigger="manual_command",
         request_ref=f"compact-command:{getattr(update, 'update_id', 'unknown')}",
-        force=True,
+        force=force_compact,
     )
     await _send(runtime, update, _outcome_text(outcome, wip=wip))
 

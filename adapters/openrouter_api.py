@@ -8,6 +8,7 @@ import io
 import inspect
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -222,6 +223,12 @@ class ProviderContextCapacityPreflightError(RuntimeError):
     """The declared model capacity cannot hold the next text request."""
 
     hashi_error_code = "CONTEXT_CAPACITY_REJECTED"
+
+
+class ProviderCapacityProbeInvalidError(RuntimeError):
+    """The provider did not return a valid bounded capacity measurement."""
+
+    hashi_error_code = "PROVIDER_CAPACITY_PROBE_INVALID"
 
 
 class _ProviderCallBudgetExhausted(RuntimeError):
@@ -1290,6 +1297,33 @@ def _optional_usage_token_count(value: Any) -> int | None:
         return None
 
 
+def _usage_cache_tokens(usage: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """Extract optional prompt-cache hit and miss token counters without guessing."""
+
+    if not isinstance(usage, Mapping):
+        return None, None
+    hit = _optional_usage_token_count(usage.get("prompt_cache_hit_tokens"))
+    if hit is None:
+        hit = _optional_usage_token_count(usage.get("cache_read_input_tokens"))
+    if hit is None:
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(details_key)
+            if isinstance(details, Mapping) and "cached_tokens" in details:
+                hit = _optional_usage_token_count(details.get("cached_tokens"))
+                if hit is not None:
+                    break
+    miss = _optional_usage_token_count(usage.get("prompt_cache_miss_tokens"))
+    if miss is None:
+        miss = _optional_usage_token_count(usage.get("cache_creation_input_tokens"))
+    if miss is None and hit is not None:
+        prompt_tokens = _optional_usage_token_count(usage.get("prompt_tokens"))
+        if prompt_tokens is None:
+            prompt_tokens = _optional_usage_token_count(usage.get("input_tokens"))
+        if prompt_tokens is not None:
+            miss = max(0, prompt_tokens - hit)
+    return hit, miss
+
+
 def _retry_after_seconds(response: httpx.Response | None) -> float | None:
     if response is None:
         return None
@@ -1574,6 +1608,9 @@ def _backend_failure_response(
     elif explicit_code == "CONTEXT_CAPACITY_REJECTED":
         code = explicit_code
         description = "The prepared request exceeds the declared model context capacity."
+    elif explicit_code == "PROVIDER_CAPACITY_PROBE_INVALID":
+        code = explicit_code
+        description = "The provider's capacity probe was invalid, so input capacity could not be verified."
     elif explicit_code == "PROVIDER_CALL_BUDGET_EXHAUSTED":
         code = explicit_code
         description = "The authorised fallback Provider-call budget was exhausted."
@@ -1780,6 +1817,14 @@ _PARALLEL_SAFE_READONLY_TOOLS = frozenset(
         "memory_search",
         "web_search",
         "web_fetch",
+        "wiki_search",
+        "documentation_read",
+        "workspace_inspect",
+        "tool_find",
+        "process_list",
+        "request_diagnostics",
+        "media_read",
+        "background_job_list",
     }
 )
 
@@ -3379,7 +3424,9 @@ class OpenRouterAdapter(BaseBackend):
         """
         if len(tool_calls) <= 1:
             return None
-        if getattr(self.tool_registry, "permission_durable_wait", False):
+        if getattr(self.tool_registry, "permission_durable_wait", False) and not getattr(
+            self.tool_registry, "supports_parallel_readonly", False
+        ):
             return None
 
         prepared: list[dict[str, Any]] = []
@@ -3472,6 +3519,9 @@ class OpenRouterAdapter(BaseBackend):
             )
             messages.extend(tool_msgs)
             deferred_tool_result_messages.extend(deferred_msgs)
+            advisory = self._smart_tool_guidance_message(result, tc_id)
+            if advisory is not None:
+                deferred_tool_result_messages.append(advisory)
             effect_facts.append(fact)
             completed_bindings[tc_id] = (
                 binding[0],
@@ -3892,6 +3942,9 @@ class OpenRouterAdapter(BaseBackend):
                 for message in translated_messages
                 if message.get("role") != "tool"
             )
+            advisory = self._smart_tool_guidance_message(result, tc_id)
+            if advisory is not None:
+                deferred_tool_result_messages.append(advisory)
             if claim_id:
                 completed_bindings[claim_id] = (
                     binding[0],
@@ -3943,6 +3996,23 @@ class OpenRouterAdapter(BaseBackend):
             return f"Error: tool call requires approval by enterprise policy: {tool_name}"
         return f"Error: tool call blocked by enterprise policy: {tool_name}"
 
+    @staticmethod
+    def _smart_tool_guidance_message(result: Any, tool_call_id: str) -> dict[str, str] | None:
+        """Keep the native tool result intact while presenting actionable advice."""
+        from tools.smart_tools import smart_warning_guidance
+
+        guidance = smart_warning_guidance(getattr(result, "details", None))
+        if not guidance:
+            return None
+        return {
+            "role": "system",
+            "content": (
+                "[HASHI-generated tool advisory, not a user request; "
+                f"tool_call_id={json.dumps(str(tool_call_id or ''), ensure_ascii=False)}]\n"
+                + guidance
+            ),
+        }
+
     def _tool_result_messages(
         self,
         *,
@@ -3982,6 +4052,7 @@ class OpenRouterAdapter(BaseBackend):
             json=payload,
             headers=headers,
         )
+        await _read_http_error_body(response)
         response.raise_for_status()
         try:
             response_request = response.request
@@ -4073,12 +4144,15 @@ class OpenRouterAdapter(BaseBackend):
         thinking_tokens = _usage_thinking_tokens(usage)
 
         reasoning_content = "".join(reasoning_fragments)
+        cache_hit, cache_miss = _usage_cache_tokens(usage)
         return _APIResult(
             text=ai_text, tool_calls=tool_calls, finish_reason=finish_reason,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             thinking_tokens=thinking_tokens,
             cost_usd=_usage_cost_usd(usage),
             reasoning_content=reasoning_content,
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             structured_data=_message_structured_data(message),
             audio_bytes=audio_bytes,
             audio_transcript=audio_transcript,
@@ -4428,6 +4502,7 @@ class OpenRouterAdapter(BaseBackend):
                     "provider audio output exceeds the 64 MiB limit",
                     code="AUDIO_OUTPUT_LIMIT_EXCEEDED",
                 )
+        cache_hit, cache_miss = _usage_cache_tokens(stream_usage)
         return _APIResult(
             text=full_text,
             tool_calls=tool_calls,
@@ -4437,6 +4512,8 @@ class OpenRouterAdapter(BaseBackend):
             thinking_tokens=_usage_thinking_tokens(stream_usage),
             cost_usd=_usage_cost_usd(stream_usage),
             reasoning_content="".join(reasoning_chunks),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             audio_bytes=audio_bytes,
             audio_transcript=audio_transcript,
             raw_finish_reason=(
@@ -4526,6 +4603,7 @@ class OpenRouterAdapter(BaseBackend):
         total_tool_repair_requests = 0
         total_local_recovery_requests = 0
         tool_effect_facts: list[dict[str, Any]] = []
+        visible_partial_answer = False
 
         try:
             self._touch_activity()
@@ -4665,13 +4743,16 @@ class OpenRouterAdapter(BaseBackend):
                     effective_parameters = _effective_protocol_parameters(payload)
 
                     async def _capture_provider_call(event: StreamEvent) -> None:
-                        nonlocal provider_call_emitted_text
-                        if event.kind == KIND_TEXT_DELTA and (
+                        nonlocal provider_call_emitted_text, visible_partial_answer
+                        is_text = event.kind == KIND_TEXT_DELTA and bool(
                             event.raw_delta or event.summary
-                        ):
+                        )
+                        if is_text:
                             provider_call_emitted_text = True
                         if on_stream_event is not None:
-                            await on_stream_event(event)
+                            delivered = await on_stream_event(event)
+                            if is_text and delivered is True:
+                                visible_partial_answer = True
 
                     call_stream_callback = (
                         _capture_provider_call
@@ -4801,6 +4882,8 @@ class OpenRouterAdapter(BaseBackend):
                         )
                         raise
                     except Exception as exc:
+                        # An interrupted physical call may still have incurred a charge.
+                        provider_cost_complete = False
                         setattr(exc, "hashi_provider_call_timing", {
                             "request_started_at": provider_call_started_at,
                             "failure_observed_at": _utc_timestamp(),
@@ -4864,6 +4947,7 @@ class OpenRouterAdapter(BaseBackend):
                         )
                         can_transport_retry = bool(
                             not can_media_fallback
+                            and not visible_partial_answer
                             and recovery_attempts_used < retry_limit
                             and (
                                 provider_call_limit is None
@@ -5018,6 +5102,7 @@ class OpenRouterAdapter(BaseBackend):
                             request_id=str(request_id or ""),
                             on_stream_event=on_stream_event,
                             effect_recovery=effect_recovery,
+                            visible_partial_answer=visible_partial_answer,
                             provider_calls=provider_calls,
                             provider_transport_retry_count=(
                                 provider_transport_retry_count
@@ -5272,7 +5357,7 @@ class OpenRouterAdapter(BaseBackend):
                                 )
                             )
                             self._observe_provider_context(
-                                boundary="run_question_resolved",
+                                boundary="ready_provider_request",
                                 messages=messages,
                                 request_id=request_id,
                                 result=result,
@@ -5687,6 +5772,7 @@ class OpenRouterAdapter(BaseBackend):
         total_local_recovery_requests: int,
         total_tool_calls: int,
         tool_loop_count: int,
+        visible_partial_answer: bool = False,
     ) -> BackendResponse | None:
         """Run the ordered, consented fallback chain within one paid-call budget."""
 
@@ -5762,7 +5848,7 @@ class OpenRouterAdapter(BaseBackend):
                     checkpoint_safe=bool(
                         effect_recovery.get("safe_current_call_continuation")
                     ),
-                    visible_partial_answer=False,
+                    visible_partial_answer=bool(visible_partial_answer),
                     primary_failure=dict(current_failure),
                 )
                 if inspect.isawaitable(decision):
@@ -5941,6 +6027,22 @@ class OpenRouterAdapter(BaseBackend):
         if last_response is None:
             setattr(exc, "hashi_provider_fallback", record)
             return None
+        all_calls = [*provider_calls, *accumulated_target_calls]
+        costs = [
+            call.get("cost_usd") if isinstance(call, Mapping) else None
+            for call in all_calls
+        ]
+        merged_cost = (
+            round(sum(float(value) for value in costs), 12)
+            if accumulated_target_calls and last_response.cost_usd is not None and costs and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(value) >= 0
+                for value in costs
+            )
+            else None
+        )
         merged_metadata: dict[str, Any] = {
             **last_metadata,
             "provider_fallback": record,
@@ -5967,7 +6069,7 @@ class OpenRouterAdapter(BaseBackend):
             is_success=last_response.is_success,
             stop_reason=last_response.stop_reason,
             usage=last_response.usage,
-            cost_usd=last_response.cost_usd,
+            cost_usd=merged_cost,
             tool_call_count=int(total_tool_calls)
             + int(last_response.tool_call_count or 0),
             tool_loop_count=int(tool_loop_count)

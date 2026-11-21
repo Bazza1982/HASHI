@@ -1214,7 +1214,18 @@ class FlexibleBackendManager:
                     "Run /compact after the active Turn settles, then retry the switch."
                 )
 
-        effective = self._effective_her_v2_config(selected)
+        # Legacy route choices remain persisted compatibility data. They must
+        # not rewrite HERV3's configured main or auxiliary target for live
+        # turns: the adapter rebuilt after restart uses the v3 target and base
+        # configuration, not the retired route matrix.
+        legacy_effective = self._effective_her_v2_config(selected)
+        legacy_parsed = HERv2Config.from_mapping(legacy_effective)
+        effective = apply_v3_target(self._her_v3_base_config(), self.get_her_v3_target())
+        warnings = list(effective.get("migration_warnings") or ())
+        for warning in legacy_parsed.migration_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+        effective["migration_warnings"] = tuple(warnings)
         parsed = HERv2Config.from_mapping(effective)
         serialized = selected.to_dict()
         draft = self.get_her_v2_draft_configuration()

@@ -543,6 +543,25 @@ class GrokCLIAdapter(BaseBackend):
                     "grok_action_event_count": len(action_events),
                 },
             )
+        except asyncio.CancelledError:
+            self.logger.warning(f"Grok request {request_id} cancelled; cleaning up subprocess tree.")
+            for task in list(self._active_read_tasks):
+                if not task.done():
+                    task.cancel()
+            if self.current_proc is not None:
+                try:
+                    await asyncio.shield(
+                        self.force_kill_process_tree(
+                            self.current_proc,
+                            self.logger,
+                            reason=f"grok cancelled:{request_id}",
+                        )
+                    )
+                except Exception:
+                    pass
+            if self._active_read_tasks:
+                await asyncio.gather(*self._active_read_tasks, return_exceptions=True)
+            raise
         except Exception as exc:
             self.logger.exception(f"Grok request {request_id} failed")
             return BackendResponse(
@@ -552,6 +571,19 @@ class GrokCLIAdapter(BaseBackend):
                 duration_ms=(time.perf_counter() - started) * 1000,
             )
         finally:
+            for task in list(self._active_read_tasks):
+                if not task.done():
+                    task.cancel()
+            proc = self.current_proc
+            if proc is not None and getattr(proc, "returncode", None) is None:
+                try:
+                    await self.force_kill_process_tree(
+                        proc,
+                        self.logger,
+                        reason=f"grok finally cleanup:{request_id}",
+                    )
+                except Exception:
+                    pass
             self.current_proc = None
             self._active_read_tasks = []
             if prompt_file is not None:

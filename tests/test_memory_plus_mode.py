@@ -721,14 +721,18 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
         context_profile="memory_plus_session",
     )
     assert store.recent_limits == [10]
-    assert store.memory_limits == []
+    # Saved-memory retrieval is on by default (H1); a persistent CLI session
+    # fetches relevant long-term memories alongside Memory+ continuity.
+    assert store.memory_limits == [6]
     assert session_payload["final_prompt"].count(
         "--- CURRENT USER REQUEST — AUTHORITATIVE ---"
     ) == 1
     assert "brief card" in session_payload["final_prompt"]
     assert "recent one" in session_payload["final_prompt"]
-    assert "long-term" not in session_payload["final_prompt"]
+    assert "long-term" in session_payload["final_prompt"]
 
+    # Stateless describes the Provider session, not Agent memory isolation.
+    # The real default still retrieves relevant saved Agent memory.
     api_payload = assembler.build_prompt_payload(
         "current API task",
         "openrouter-api",
@@ -736,9 +740,9 @@ def test_context_profiles_separate_persistent_cli_and_stateless_api_memory(
         context_profile="memory_plus_stateless",
     )
     assert store.recent_limits == [10, 10]
-    assert store.memory_limits == []
+    assert store.memory_limits == [6, 6]
     assert "recent one" in api_payload["final_prompt"]
-    assert "long-term" not in api_payload["final_prompt"]
+    assert "long-term" in api_payload["final_prompt"]
     assert api_payload["audit"]["context_profile"] == "memory_plus_stateless"
     assert api_payload["final_prompt"].count(
         "--- CURRENT USER REQUEST — AUTHORITATIVE ---"

@@ -1,5 +1,15 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+## 2026-11-21 Compact follows the current HERV3 target
+
+Manual and automatic conversation Compact resolve the Provider and model from
+the initiating Agent's current HERV3 main target. A legacy Quick/Pro selection
+does not override that target, and a configuration containing only HERV3 main
+and auxiliary models does not require legacy profiles. Capacity calculations
+use the same effective HERV3 configuration; HLI's existing small-context
+trigger follows the current main target. When a safe typed capacity rejection
+has no eligible history to compact, the original capacity failure is retained.
+
 ## 2026-10-19 long-running execution invariant
 
 HERV3 foreground work has no HASHI total token, message, Turn, model-call,
@@ -246,6 +256,20 @@ returned by the Backend API or command cards. `/provider` selects one configured
 Provider, `/model` selects one of that Provider's real model IDs, and both changes
 persist immediately for subsequent turns. Old route buttons are rejected rather
 than allowed to change ignored settings.
+
+A configured lightweight profile supplies the non-user-facing auxiliary model
+when no explicit auxiliary is set and the Provider is allowed. Otherwise that
+lane follows the selected main model with reasoning off by default. Repeated
+configuration projection preserves the selected auxiliary and its migration
+warnings; switching the main model does not silently replace an independently
+configured auxiliary.
+Applying a retained HERV2 route draft stores its compatibility data without
+changing the active HERV3 main or auxiliary target. The next rebuilt adapter
+uses the same configured targets, and ignored route fields remain visible in
+the migration warnings.
+When a legacy Execution profile becomes the selected HERV3 main target, its
+configured reasoning and other profile options are retained. The final main
+and auxiliary targets still have to satisfy the current Provider allowlist.
 
 Public Provider identity is consistent across shared, creation and per-Agent
 catalogues, offline metadata and live presentation: the `providers` dictionary

@@ -148,15 +148,22 @@ def normalize_query(args: dict, *, defaults: list[dict], read_roots, cwd: Path,
     query = args.get('query')
     if not isinstance(query, str) or not query.strip() or len(query) > 1024:
         raise ValueError('query must be a non-empty string of at most 1024 characters')
+    import re
     mode = args.get('mode', 'path')
     match = args.get('match', 'literal')
     profile = args.get('profile', 'project')
     if mode not in {'path', 'content'} or match not in {'literal', 'glob', 'regex'}:
         raise ValueError('invalid mode or match')
+    if mode == 'content' and match not in {'literal', 'regex'}:
+        raise ValueError('content search supports literal or regex matching')
+    bools_case = args.get('case_sensitive', False)
     if match == 'regex':
-        raise NotImplementedError('Regex search backend is unavailable; use literal/path or an appropriate scoped Shell command')
-    if mode == 'content' and match != 'literal':
-        raise ValueError('content search supports literal matching')
+        if not isinstance(bools_case, bool):
+            raise ValueError('search boolean options must be true or false')
+        try:
+            re.compile(query, 0 if bools_case else re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f'invalid regex pattern: {exc}') from exc
     if profile not in {'project', 'expanded'}:
         raise ValueError('profile must be project or expanded')
     raw_roots = args.get('roots')
@@ -280,18 +287,23 @@ async def run_worker(config):
                     cleanup = await _shield_bash_cleanup(_cleanup_bash_process(proc, drain_task, pgid=group))
                     if result is None:
                         counters = dict(activity.snapshot['counters']) if activity else {}
+                        # Progress snapshots contain roots but not the full
+                        # terminal coverage/error structure.
+                        partial_coverage = dict((partial or {}).get('coverage') or {})
+                        partial_coverage.setdefault('roots', [])
+                        partial_coverage.setdefault('errors', [])
                         result = {'matches': (partial or {}).get('matches', []),
                                   'counters': (partial or {}).get('counters', counters),
-                                  'coverage': (partial or {}).get('coverage', {'roots': [], 'errors': []}),
+                                  'coverage': partial_coverage,
                                   'scope_exhausted': False, 'coverage_complete': False,
                                   'stop_reason': 'deadline', 'state': None,
                                   'continuation_lost': True,
                                   'warnings': [
                                       'Scan stopped before completing coverage',
-                                      ('The scanner could not serialize its state within the cleanup '
-                                       'grace window, so no continuation cursor exists. Matches and '
-                                       'coverage reflect the last progress event; consider narrowing '
-                                       'the roots, refining the query, or running a fresh scan.')]}
+                                      ('The scanner could not serialize its scan state within the cleanup '
+                                       'grace window. Matches and coverage reflect the last progress '
+                                       'event; consider narrowing the roots, refining the query, or '
+                                       'running a fresh scan.')]}
                     result['cleanup'] = cleanup
                     return result
         await asyncio.shield(drain_task)
@@ -401,12 +413,7 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                                     'cleanup_grace_seconds': config.get('cleanup_grace_seconds')},
                   effective_policy={key: config[key] for key in (
                       'profile', 'include', 'exclude', 'include_hidden', 'follow_links', 'cross_filesystems')})
-    if result['stop_reason'] == 'deadline':
-        result['warnings'].append(
-            'Execution budget reached; coverage is incomplete. You may continue '
-            'this scan with next_cursor, narrow the roots, refine the query, switch '
-            'tools, or stop when you have enough evidence. A deadline is not a '
-            'command to abandon the task.')
+    deadline_reached = result['stop_reason'] == 'deadline'
     result['coverage']['excluded_content'] = 'Containers/media/binary; ordinary UTF-8 text only' if config['mode'] == 'content' else 'No file bodies read'
     from tools.search_worker import PROJECT_EXCLUDED_DIRS, PROJECT_EXCLUDED_FILES, CONTAINER_SUFFIXES
     result['coverage']['default_directory_exclusions'] = (
@@ -443,7 +450,8 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
                                      'failed': root['failed'], 'stack': [], 'pending_file': None}
                                     for root in result['coverage']['roots']],
                          'counters': dict(result['counters']), 'errors': result['coverage']['errors'],
-                         'warnings': result['warnings'], 'turn': 0}
+                         'warnings': list(result['warnings']), 'turn': 0,
+                         'continuation_lost': bool(result.get('continuation_lost'))}
         pending = ([state.pop('pending_match')] if 'pending_match' in state else [])
         state['pending_matches'] = removed + pending + state.get('pending_matches', [])
         result['counters']['matches'] -= len(removed)
@@ -454,6 +462,18 @@ async def execute_file_search(args, *, read_roots, cwd, search_scope, audit_cont
     result.update(can_continue=next_cursor is not None, next_cursor=next_cursor)
     if state and next_cursor is None:
         result['warnings'].append('Continuation capacity exceeded; no automatic restart')
+    if deadline_reached or result.get('continuation_lost'):
+        if result.get('continuation_lost') and next_cursor:
+            guidance = ('The next_cursor returns buffered matches only; the scan '
+                        'cannot be resumed. Narrow the roots or refine the query '
+                        'and run a fresh scan.')
+        elif next_cursor:
+            guidance = ('You may continue this scan with next_cursor, narrow the '
+                        'roots, or refine the query.')
+        else:
+            guidance = ('No continuation cursor is available. Narrow the roots '
+                        'or refine the query and run a fresh scan.')
+        result['warnings'].append('Execution budget reached; coverage is incomplete. ' + guidance)
     output = outcome(status, result, error=error)
     return BuiltinExecutionResult(output, {'search_outcome': status,
                                           'foreground_cleanup': result['cleanup'],

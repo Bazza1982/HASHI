@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from orchestrator.background_job_policy import background_job_start_authorized
 from tools.schemas import TOOL_SCHEMA_MAP, ALL_TOOL_NAMES
-from tools.smart_tools import SmartToolRuntime
+from tools.smart_tools import SmartToolRuntime, reconcile_native_failure
 from tools.office.contract import OFFICE_TOOL_NAMES, OFFICE_READ_ONLY_TOOLS
 from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES, TOOLKIT_READ_ONLY_TOOLS
 
@@ -313,21 +313,31 @@ class ToolRegistry:
             smart_options if isinstance(smart_options, dict) else {},
         )
 
+        self.config_warnings: list[dict[str, Any]] = []
         explicitly_allowed = set(allowed_tools) - {"*"}
-        if "*" in allowed_tools:
+        self._wildcard_allowed = "*" in allowed_tools
+        if self._wildcard_allowed:
             self._allowed = set(ALL_TOOL_NAMES)
-            # media_read is injected explicitly into the HER-only gateway
-            # context. A wildcard on other backends must not broaden their
-            # capabilities merely because the schema exists globally.
-            if "media_read" not in explicitly_allowed:
+            # media_read & vision_inspect are permitted under wildcard when the
+            # instance declares media roots or explicit vision configuration.
+            if "media_read" not in explicitly_allowed and not self.media_roots:
                 self._allowed.discard("media_read")
-            # Local vision is opt-in and requires explicit provider config.
-            if "vision_inspect" not in explicitly_allowed:
+            if (
+                "vision_inspect" not in explicitly_allowed
+                and not self.media_roots
+                and not self.tool_options.get("vision_inspect")
+            ):
                 self._allowed.discard("vision_inspect")
         else:
             self._allowed = set(allowed_tools) & set(ALL_TOOL_NAMES)
             unknown = set(allowed_tools) - set(ALL_TOOL_NAMES) - {"*"}
             if unknown:
+                self.config_warnings.append(
+                    {
+                        "code": "unknown_configured_tools",
+                        "unknown_tools": sorted(unknown),
+                    }
+                )
                 self.logger.warning(f"Unknown tool names in config (ignored): {unknown}")
 
         # ``bash`` remains executable for persisted/provider in-flight calls,
@@ -419,10 +429,10 @@ class ToolRegistry:
 
     def _search_options(self):
         options = dict(self.tool_options.get("file_search") or {})
-        if "timeout_seconds" not in options and self.smart_tools.enabled:
+        if self.smart_tools.enabled:
             timeout = self.smart_tools.foreground_timeout_seconds
-            if timeout is not None:
-                options["timeout_seconds"] = timeout
+            if timeout is not None and "timeout_max_seconds" not in options:
+                options["timeout_max_seconds"] = timeout
         return options
 
     async def execute_with_audit_context(
@@ -515,6 +525,14 @@ class ToolRegistry:
             available.intersection_update(normalized_allowlist)
         if not background_job_start_authorized(self._effective_audit_context()):
             available.discard("background_job_start")
+            if self._wildcard_allowed:
+                for bg_tool in (
+                    "background_job_status",
+                    "background_job_tail",
+                    "background_job_cancel",
+                    "background_job_list",
+                ):
+                    available.discard(bg_tool)
         if "shell" in available:
             available.discard("bash")
         unavailable_browser = False
@@ -893,9 +911,14 @@ class ToolRegistry:
         )
         if smart_admission is not None:
             admission_data = smart_admission.as_dict()
+            message = f"Error: Smart Tool requires replanning: {smart_admission.message}"
+            if smart_admission.suggested_tool:
+                message += (
+                    f" Recommended alternative: use the '{smart_admission.suggested_tool}' tool."
+                )
             return ToolResult(
                 tool_call_id=tool_call_id,
-                output=f"Error: Smart Tool requires replanning: {smart_admission.message}",
+                output=message,
                 is_error=True,
                 details={
                     "control_disposition": "needs_replan",
@@ -1346,7 +1369,7 @@ class ToolRegistry:
         result: ToolResult,
         started: float,
     ) -> ToolResult:
-        """Apply the optional five-field contract and append one ledger row."""
+        """Preserve the native result and append Smart Tool classification."""
         from tools.effect_receipts import observe_tool_effect
 
         policy = self._live_runtime_policy_cache
@@ -1372,6 +1395,11 @@ class ToolRegistry:
             receipt = None
         if receipt is not None:
             result.details = {**(result.details or {}), "effect_receipt": receipt}
+        # This marker is reserved for the local repeat detector even when the
+        # Smart Registry is disabled. Native Tool metadata cannot create it.
+        if "smart_repeat_warning" in (result.details or {}):
+            result.details = {key: value for key, value in result.details.items()
+                              if key != "smart_repeat_warning"}
         if not self.smart_tools.enabled:
             return result
         outcome, _spec, _record = self.smart_tools.complete(
@@ -1384,7 +1412,14 @@ class ToolRegistry:
             call_id=result.tool_call_id,
             audit_context=self._effective_audit_context(),
         )
+        outcome = reconcile_native_failure(outcome, result.is_error)
         details = dict(result.details or {})
+        # Repeat advice belongs to this runtime, not to Tool-supplied metadata.
+        details.pop("smart_repeat_warning", None)
+        if outcome.repeat_warning_code is not None:
+            details["smart_repeat_warning"] = outcome.repeat_warning_code
+        if outcome.classifier_status is not None:
+            details["smart_classifier_status"] = outcome.classifier_status
         details.update(
             {
                 "smart_result": True,
@@ -1392,10 +1427,16 @@ class ToolRegistry:
                 "smart_effect": outcome.effect,
             }
         )
+        if outcome.warning is not None:
+            details["smart_warning"] = outcome.warning.as_dict()
+        if outcome.error is not None:
+            details["smart_error"] = outcome.error.as_dict()
         return ToolResult(
             tool_call_id=result.tool_call_id,
-            output=outcome.model_output(),
-            is_error=outcome.status in {"failed", "unavailable", "needs_replan"},
+            output=result.output,
+            # Preserve the native execution truth: a genuine failure must never
+            # be reclassified as success by an inconsistent smart envelope.
+            is_error=result.is_error or outcome.status in {"failed", "unavailable", "needs_replan"},
             content=result.content,
             details=details,
         )
@@ -1620,8 +1661,6 @@ class ToolRegistry:
                     "Failed to persist canonical Tool audit evidence: %s", exc
                 )
                 raise
-        if self.smart_tools.enabled:
-            return
         try:
             from tools.tool_audit import record_tool_action
 

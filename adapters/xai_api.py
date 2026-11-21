@@ -14,12 +14,15 @@ from adapters.openrouter_api import (
     _annotate_stream_exception,
     _assistant_content_text,
     _diagnostic_headers,
+    _iter_provider_stream_lines,
     _message_structured_data,
     _provider_http_failure_diagnostics,
+    _provider_request_id,
     _read_http_error_body,
     _request_wire_evidence,
     _response_wire_evidence,
     _stream_error_exception,
+    _usage_cache_tokens,
 )
 from adapters.stream_events import KIND_TEXT_DELTA, KIND_THINKING, StreamEvent
 from adapters.xai_imagine import generate_xai_image, is_imagine_image_model
@@ -303,6 +306,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         tool_calls = message.get("tool_calls") or None
         usage = data.get("usage") or {}
         comp_details = usage.get("completion_tokens_details") or {}
+        cache_hit, cache_miss = _usage_cache_tokens(usage)
         result = _APIResult(
             text=ai_text,
             tool_calls=tool_calls,
@@ -310,6 +314,8 @@ class XaiApiAdapter(OpenRouterAdapter):
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
             thinking_tokens=comp_details.get("reasoning_tokens", 0),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             structured_data=_message_structured_data(message),
         )
         result.reasoning_content = reasoning_content
@@ -409,7 +415,13 @@ class XaiApiAdapter(OpenRouterAdapter):
         text_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
-        finish_reason = "stop"
+        finish_reason: str | None = None
+        raw_finish_reason: str | None = None
+        finish_reason_present = False
+        finish_reason_field_seen = False
+        saw_done = False
+        provider_response_id = ""
+        transport_request_id = ""
         stream_usage: dict = {}
         wire_evidence: dict[str, Any] = {
             "transport": "sse",
@@ -423,11 +435,20 @@ class XaiApiAdapter(OpenRouterAdapter):
             "raw_finish_reason": None,
             "finish_reason_source": "missing",
             "normalized_finish_reason": "incomplete",
+            "provider_response_id": "",
+            "transport_request_id": "",
+            "text_provided": False,
+            "text_length": 0,
             "wire_evidence": wire_evidence,
         }
+        inactivity_guard = self._new_her_v2_stream_inactivity_guard()
 
         async def _read_stream(response) -> None:
-            nonlocal finish_reason, stream_usage
+            nonlocal finish_reason, raw_finish_reason, finish_reason_present
+            nonlocal finish_reason_field_seen, saw_done, provider_response_id
+            nonlocal transport_request_id, stream_usage
+            transport_request_id = _provider_request_id(response)
+            protocol_state["transport_request_id"] = transport_request_id
             try:
                 stream_request = response.request
             except (AttributeError, RuntimeError):
@@ -435,7 +456,11 @@ class XaiApiAdapter(OpenRouterAdapter):
             wire_evidence["request"] = _request_wire_evidence(
                 payload, stream_request
             )
-            async for line in response.aiter_lines():
+            async for line in _iter_provider_stream_lines(
+                response,
+                protocol_state,
+                inactivity_guard=inactivity_guard,
+            ):
                 self._touch_activity()
                 event_arrival = len(wire_evidence["sse_events"]) + 1
                 wire_evidence["sse_events"].append(
@@ -445,6 +470,9 @@ class XaiApiAdapter(OpenRouterAdapter):
                     continue
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
+                    saw_done = True
                     break
                 try:
                     data = json.loads(data_str)
@@ -455,6 +483,11 @@ class XaiApiAdapter(OpenRouterAdapter):
                     raise _annotate_stream_exception(
                         error, protocol_state
                     ) from exc
+                if not isinstance(data, dict):
+                    continue
+                if data.get("id"):
+                    provider_response_id = str(data.get("id"))
+                    protocol_state["provider_response_id"] = provider_response_id
 
                 stream_error = _stream_error_exception(
                     data,
@@ -477,12 +510,25 @@ class XaiApiAdapter(OpenRouterAdapter):
 
                 choice = choices[0]
                 delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason") or finish_reason
+                if "finish_reason" in choice:
+                    finish_reason_field_seen = True
+                    raw_finish = choice.get("finish_reason")
+                    if raw_finish is not None and str(raw_finish).strip():
+                        raw_finish_reason = str(raw_finish).strip()
+                        finish_reason = raw_finish_reason
+                        finish_reason_present = True
+                        protocol_state["raw_finish_reason_present"] = True
+                        protocol_state["raw_finish_reason"] = raw_finish_reason
+                        protocol_state["finish_reason_source"] = "provider"
+                    elif not finish_reason_present:
+                        protocol_state["finish_reason_source"] = "provider_null"
 
                 reasoning_delta = str(
                     delta.get("reasoning_content") or delta.get("reasoning") or ""
                 )
                 if reasoning_delta:
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
                     reasoning_chunks.append(reasoning_delta)
                     if on_stream_event:
                         await on_stream_event(
@@ -495,13 +541,19 @@ class XaiApiAdapter(OpenRouterAdapter):
 
                 content = delta.get("content", "")
                 if content:
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
                     text_chunks.append(content)
+                    protocol_state["text_provided"] = True
+                    protocol_state["text_length"] += len(content)
                     if on_stream_event:
                         await on_stream_event(
                             StreamEvent(kind=KIND_TEXT_DELTA, summary=content)
                         )
 
                 for tc_delta in (delta.get("tool_calls") or []):
+                    if inactivity_guard is not None:
+                        inactivity_guard.mark_meaningful()
                     idx = tc_delta.get("index", 0)
                     if idx not in tool_calls_acc:
                         tool_calls_acc[idx] = {
@@ -598,17 +650,40 @@ class XaiApiAdapter(OpenRouterAdapter):
         full_text = "".join(text_chunks)
         reasoning_content = "".join(reasoning_chunks)
         tool_calls = [tool_calls_acc[idx] for idx in sorted(tool_calls_acc)] if tool_calls_acc else None
+        if not saw_done and not finish_reason_present:
+            error = httpx.RemoteProtocolError(
+                "xAI SSE stream ended prematurely without [DONE] or finish_reason"
+            )
+            raise _annotate_stream_exception(error, protocol_state)
         comp_details = stream_usage.get("completion_tokens_details") or {}
+        cache_hit, cache_miss = _usage_cache_tokens(stream_usage)
         result = _APIResult(
             text=full_text,
             tool_calls=tool_calls,
-            finish_reason=finish_reason,
+            finish_reason=finish_reason or None,
             prompt_tokens=stream_usage.get("prompt_tokens", 0),
+            prompt_cache_hit_tokens=cache_hit,
+            prompt_cache_miss_tokens=cache_miss,
             completion_tokens=stream_usage.get("completion_tokens", 0),
             thinking_tokens=comp_details.get("reasoning_tokens", 0),
+            raw_finish_reason=raw_finish_reason,
+            finish_reason_present=finish_reason_present,
+            finish_reason_source=(
+                "provider"
+                if finish_reason_present
+                else ("provider_null" if finish_reason_field_seen else "missing")
+            ),
+            provider_response_id=provider_response_id,
+            transport_request_id=transport_request_id,
+            transport_complete=True,
+            transport_state=(
+                "done_marker" if saw_done else "eof_after_finish_reason"
+            ),
+            stream_done=saw_done,
+            stream_eof=not saw_done,
+            wire_evidence=wire_evidence,
         )
         result.reasoning_content = reasoning_content
-        result.wire_evidence = wire_evidence
         return result
 
     async def generate_external_tool_response(

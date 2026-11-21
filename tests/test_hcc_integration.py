@@ -17,6 +17,7 @@ import pytest
 from adapters.her_v2 import HERv2Adapter
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.config_json import ConfigDurabilityError
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.hcc import is_hcc_enabled, set_hcc_enabled
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator, HerFixedProtocolError
@@ -57,7 +58,8 @@ async def test_real_local_command_dispatch_persists_flag_and_status(tmp_path):
     before = (home / "agent.md").read_bytes()
     initial = await execute_local_command(runtime, "/hcc", session_metadata={"ui_locale": "zh-CN"})
     assert initial["ok"] and initial["messages"]
-    assert not is_hcc_enabled(home)
+    # Cached HCC content is present in the fixture, so it is available by default.
+    assert is_hcc_enabled(home)
     result = await execute_local_command(runtime, "/hcc on", session_metadata={"ui_locale": "zh-CN"})
     assert result["ok"], result
     assert WorkspaceStateStore(home).read()["hcc_enabled"] is True
@@ -66,6 +68,14 @@ async def test_real_local_command_dispatch_persists_flag_and_status(tmp_path):
     reloaded = runtime_fixture(home)
     result = await execute_local_command(reloaded, "/hcc off")
     assert result["ok"] and not is_hcc_enabled(home)
+    # A new runtime and PCM assembly must honour the persisted opt-out.
+    reloaded = runtime_fixture(home)
+    assert WorkspaceStateStore(home).read()["hcc_enabled"] is False
+    builder = BridgeContextAssembler(BridgeMemoryStore(home), home / "agent.md")
+    adapter = transport_adapter(home, tmp_path / "restarted-her-state")
+    _, accepted, _ = prepare(adapter, builder, 10)
+    assert "CURRENT_PRIVATE_CACHE" not in accepted.materialized_prompt
+    assert "HCC is user-configured temporary context" not in accepted.materialized_prompt
     assert (home / "agent.md").read_bytes() == before
     invalid = await execute_local_command(reloaded, "/hcc nonsense")
     assert "on|off" in str(invalid["messages"])
@@ -81,21 +91,78 @@ async def test_command_reports_write_failure_without_overwriting_corrupt_state(t
     state = home / "state.json"
     state.write_text("{broken", encoding="utf-8")
     result = await execute_local_command(runtime_fixture(home), "/hcc on")
-    assert result["ok"], result
+    assert result["ok"] is False, result
+    assert result["error_code"] == "hcc_save_unconfirmed"
+    assert result["request_outcome"] == "unknown"
     text = "\n".join(message["text"] for message in result["messages"])
     assert "could not be confirmed" in text.lower(), text
     assert state.read_text() == "{broken"
-    assert not is_hcc_enabled(home)
+    # The failed write must not persist an explicit enable flag (cached content
+    # still exists, but no opt-in flag may be fabricated by a failed command).
+    assert WorkspaceStateStore(home).read().get("hcc_enabled") is not True
 
 
 @pytest.mark.asyncio
 async def test_unauthorized_command_does_not_mutate(tmp_path):
     home = workspace(tmp_path / "agent")
+    state = home / "state.json"
+    original = {"hcc_enabled": False, "other_preference": {"value": "preserve"}}
+    state.write_text(json.dumps(original, indent=2), encoding="utf-8")
+    before_state, before_agent = state.read_bytes(), (home / "agent.md").read_bytes()
     runtime = runtime_fixture(home)
     update = SimpleNamespace(effective_user=SimpleNamespace(id=7), message=SimpleNamespace(reply_text=AsyncMock()))
     await runtime.cmd_hcc(update, SimpleNamespace(args=["on"]))
-    assert not is_hcc_enabled(home)
+    assert state.read_bytes() == before_state
+    assert json.loads(state.read_text(encoding="utf-8")) == original
+    assert (home / "agent.md").read_bytes() == before_agent
     update.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_hcc_write_preserves_entire_previous_state(tmp_path, monkeypatch):
+    home = workspace(tmp_path / "agent")
+    state = home / "state.json"
+    original = {"hcc_enabled": False, "other_preference": {"value": "preserve"}}
+    state.write_text(json.dumps(original, indent=2), encoding="utf-8")
+    before_state, before_agent = state.read_bytes(), (home / "agent.md").read_bytes()
+    original_replace = os.replace
+
+    def fail_state_publication(source, destination):
+        if Path(destination) == state:
+            raise OSError("simulated atomic publication failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("orchestrator.config_json.os.replace", fail_state_publication)
+    result = await execute_local_command(runtime_fixture(home), "/hcc on")
+    assert result["ok"] is False, result
+    assert result["error_code"] == "hcc_save_unconfirmed"
+    assert result["request_outcome"] == "unknown"
+    text = "\n".join(message["text"] for message in result["messages"])
+    assert "could not be confirmed" in text.lower()
+    assert state.read_bytes() == before_state
+    assert json.loads(state.read_text(encoding="utf-8")) == original
+    assert (home / "agent.md").read_bytes() == before_agent
+
+
+@pytest.mark.asyncio
+async def test_hcc_committed_durability_failure_is_not_retried(tmp_path, monkeypatch):
+    home = workspace(tmp_path / "agent")
+    state = home / "state.json"
+    state.write_text(json.dumps({"hcc_enabled": False}), encoding="utf-8")
+    calls = []
+
+    def published_but_not_durable(workspace_dir, enabled):
+        calls.append((workspace_dir, enabled))
+        set_hcc_enabled(workspace_dir, enabled)
+        raise ConfigDurabilityError("directory sync failed after publication")
+
+    monkeypatch.setattr("orchestrator.runtime_hcc.hcc.set_hcc_enabled", published_but_not_durable)
+    result = await execute_local_command(runtime_fixture(home), "/hcc on")
+    assert result["ok"] is False, result
+    assert result["error_code"] == "hcc_save_unconfirmed"
+    assert result["request_outcome"] == "unknown"
+    assert len(calls) == 1
+    assert WorkspaceStateStore(home).read()["hcc_enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -139,6 +206,23 @@ def prepare(adapter, builder, number):
     accepted = adapter._session_coordinator.accept(encoded)
     adapter._session_coordinator.complete(accepted, assistant_text=f"Answer {number}")
     return envelope, accepted, audit
+
+
+@pytest.mark.parametrize("cache", ["CACHED BY DEFAULT", None, ""])
+def test_default_pcm_adapter_includes_only_available_cached_hcc(tmp_path, cache):
+    home = workspace(tmp_path / "agent", cache)
+    assert not (home / "state.json").exists()
+    builder = BridgeContextAssembler(BridgeMemoryStore(home), home / "agent.md")
+    adapter = transport_adapter(home, tmp_path / "her-state")
+    envelope, accepted, _ = prepare(adapter, builder, 1)
+    sections = envelope["pcm_snapshot"]["sections"]
+    if cache:
+        assert sections["hcc"]["text"] == cache
+        assert cache in accepted.materialized_prompt
+    else:
+        assert "hcc" not in sections and "hcc_usage" not in sections
+        assert "HCC is user-configured temporary context" not in accepted.materialized_prompt
+    assert not (home / "state.json").exists()
 
 
 @pytest.mark.parametrize("removal", ["off", "empty", "absent"])
@@ -237,6 +321,10 @@ async def test_actual_scheduler_and_skill_manager_use_existing_job_path(tmp_path
     runtime = runtime_fixture(home)
     runtime.skill_manager = manager
     runtime.enqueue_request = AsyncMock(return_value="queued-test")  # The external provider boundary only.
+    state = home / "state.json"
+    original = {"hcc_enabled": False, "other_preference": {"value": "preserve"}}
+    state.write_text(json.dumps(original, indent=2), encoding="utf-8")
+    before_state = state.read_bytes()
     scheduler = TaskScheduler(tasks_path=project / "tasks.json", state_path=project / "scheduler-state.json", runtimes=[runtime], authorized_id=42)
     cron = {"id": "weather", "agent": runtime.name, "schedule": "*/5 * * * *", "timezone": "Australia/Sydney", "action": "skill:hcc-refresh", "args": "Entry weather; source test fixture; maximum 100 tokens."}
     before = (home / "agent.md").read_bytes()
@@ -249,7 +337,8 @@ async def test_actual_scheduler_and_skill_manager_use_existing_job_path(tmp_path
     assert call["scheduler_context"]["task_id"] == "weather"
     assert _resolve_session_scope(SimpleNamespace(scheduler_context=call["scheduler_context"])) == SESSION_SCOPE_ISOLATED
     assert runtime.config.active_backend == "her-v2"
-    assert not is_hcc_enabled(home), "a refresh job must not enable HCC injection"
+    assert state.read_bytes() == before_state, "enqueue must not mutate Agent settings"
+    assert WorkspaceStateStore(home).read() == original
     assert (home / "agent.md").read_bytes() == before, "enqueue itself must not mutate source cache"
 
 

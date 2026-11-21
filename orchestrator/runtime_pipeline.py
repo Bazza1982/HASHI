@@ -1299,7 +1299,6 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     cross_session_timeline_entries: list[dict[str, Any]] = []
     if (
         runtime.config.active_backend == "her-v2"
-        and not incremental
         and not item.skip_memory_injection
         and not isolated_activity_run
         and not is_bridge_request
@@ -1311,26 +1310,36 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             )
         )
     ):
-        from orchestrator.context_compaction import install_history_section
+        from orchestrator.context_compaction import CompactionStore, install_history_section
 
-        cross_session_timeline_entries = runtime_cross_session.timeline_entries(
-            runtime,
-            item,
-        )
-        extra_sections, compaction_snapshot = install_history_section(
-            runtime,
-            base_extra_sections,
-            cross_session_entries=cross_session_timeline_entries,
-            primary_timeline_entries=session_history,
-            workspace_dir=session_workspace if session_scoped else None,
-            memory_store=(
-                runtime_session.session_memory_store(runtime, item)
-                if session_scoped
-                else None
-            ),
-        )
-        history_compaction_enabled = compaction_snapshot is not None
-        prompt_kwargs["extra_sections"] = extra_sections
+        active_capsule_present = False
+        if incremental:
+            compaction_home = session_workspace if session_scoped else getattr(runtime, "workspace_dir", None)
+            if compaction_home is not None:
+                active_capsule_present = bool(
+                    CompactionStore(Path(compaction_home)).read_state().get("active_capsule")
+                )
+        if not incremental or active_capsule_present:
+            if not incremental:
+                cross_session_timeline_entries = runtime_cross_session.timeline_entries(
+                    runtime,
+                    item,
+                )
+            extra_sections, compaction_snapshot = install_history_section(
+                runtime,
+                base_extra_sections,
+                cross_session_entries=cross_session_timeline_entries,
+                primary_timeline_entries=session_history,
+                workspace_dir=session_workspace if session_scoped else None,
+                memory_store=(
+                    runtime_session.session_memory_store(runtime, item)
+                    if session_scoped
+                    else None
+                ),
+                capsule_only_for_incremental=incremental,
+            )
+            history_compaction_enabled = compaction_snapshot is not None
+            prompt_kwargs["extra_sections"] = extra_sections
 
     def assemble(sections: list[tuple]) -> dict[str, Any]:
         current_kwargs = dict(prompt_kwargs)
@@ -1480,6 +1489,14 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         )
         incremental = bool(fixed_audit.get("incremental"))
         request_meta["her_fixed_backend"] = dict(fixed_audit)
+        materialized_tokens = int(fixed_audit.get("materialized_tokens") or 0)
+        if materialized_tokens > 0:
+            request_tokens = getattr(runtime, "_context_compaction_prompt_tokens", None)
+            if not isinstance(request_tokens, dict):
+                request_tokens = {}
+                runtime._context_compaction_prompt_tokens = request_tokens
+            request_tokens[item.request_id] = materialized_tokens
+            runtime._last_full_prompt_tokens = materialized_tokens
         # Persist the HASHI conversation -> HER session binding before any
         # model or tool work. A process replacement during the first turn can
         # therefore recover the same durable HER session instead of opening a

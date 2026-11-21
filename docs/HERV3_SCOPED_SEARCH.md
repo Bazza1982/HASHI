@@ -306,8 +306,14 @@ Changes (all in Functions territory; protected Core untouched):
   `resolve_search_budget` (per-call request > configured > default, optional
   `timeout_max_seconds` cap), parent cleanup grace window before emergency
   process-tree termination, explicit `continuation_lost` reporting and
-  actionable deadline warnings. Backward compatible: existing configured
-  timeouts keep their exact semantics.
+  actionable deadline warnings. Guidance uses the actual allocated continuation:
+  it offers resumption only when the scan state is retained. If the scan state
+  was lost, a cursor that only pages buffered matches is described as such,
+  and the remaining coverage requires a fresh scan. Regex content searches
+  report incomplete coverage for unbounded repeated literal alternatives where
+  one alternative prefixes another; disjoint alternatives and finite repeats
+  remain available. Other costly expressions may still reach the deadline.
+  Backward compatible: existing configured timeouts keep their exact semantics.
 - `tools/search_worker.py`: one `DirEntry.stat` per entry, physical-prefix
   authorization for ordinary descendants (`resolve` only at roots/links and
   cursor frame validation), cycle checks for linked directories against all
@@ -373,3 +379,33 @@ Validation is local on isolated native Windows CPython 3.12; Unix-specific
 acceptance remains separate. No hosted suite, production adoption, merge or
 deployment is part of this review repair. Repository discovery still has no
 continuation cursor; its existing partial-result and narrowing guidance remains.
+
+## PR #186 candidate — bounded regex content search
+
+PAO Tools supports regex content matching within logical lines. LF and CRLF
+terminators are excluded from the matched line, while offsets count the actual
+decoded characters, including both CRLF characters. Matches are reported in
+file order; when several expressions match at the same position, expression
+order breaks the tie. Pagination retains the whole bounded line and each
+expression's progress, so anchors and lookbehind keep their original context.
+
+A record exceeding 1,000,000 characters is skipped in fixed-size chunks; it is
+never collected in full. The scan continues, reporting incomplete coverage and
+the reason. Once the input is exhausted no cursor remains, even if coverage is
+incomplete. A final matching record ending in LF or CRLF completes on that
+page when no further match exists; it does not offer an empty continuation.
+Zero-width matches remain pageable, and exhausting one file never implies that
+other selected files or directory entries have been scanned. Regex matching
+does not span logical lines.
+
+The regex guard is a heuristic, not proof that every expression is safe. It
+reports unsupported coverage for recognized nested unbounded quantifiers and
+overlapping repeated alternatives; finite nested repetitions remain searchable.
+Other costly expressions can reach the deadline: the parent terminates and
+reaps its managed worker if it cannot stop cooperatively.
+
+If that worker loses its scan state, each retained-result page reports
+`continuation_lost` and incomplete, unexhausted coverage. A cursor returns only
+buffered matches; once they are exhausted, a fresh scan is required. Guidance
+is generated for the cursor actually available on each page. This describes the
+PR candidate; it does not assert deployment or live adoption.
