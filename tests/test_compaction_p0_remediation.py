@@ -176,14 +176,19 @@ async def test_fixed_mode_retains_unverified_history_while_installing_capsule(tm
     acc2 = session_coord.accept(enc2)
     session_coord.complete(acc2, assistant_text="Reply 2 fresh context")
 
+    # Time is a live PCM section and can change between incremental turns.
+    runtime.context_assembler._build_time_fyi = lambda: "Synthetic updated time for turn 3"
+
     # Both unrelated Turns remain visible; a coincident timestamp is not proof of coverage.
     payload3 = runtime.context_assembler.build_prompt_payload("Turn 3 prompt", "her-v2", extra_sections=inc_sections)
     enc3, audit3 = runtime.backend_manager.current_backend.prepare_fixed_turn_input(
         prompt_payload=payload3, user_message="Turn 3 prompt", request_id="req-3", request_meta={"conversation_at": later_ts}
     )
-    assert audit3["pcm_sections_sent"] == 0  # Capsule already synced in Turn 2!
+    third_delta = json.loads(enc3.split("\n", 1)[1])["pcm_delta"]["operations"]
+    assert [operation["key"] for operation in third_delta] == ["time"]
+    assert "Compacted historical summary." not in enc3  # Capsule already synced in Turn 2.
     acc3 = session_coord.accept(enc3)
-    assert "Compacted historical summary." in acc3.materialized_prompt
+    assert acc3.materialized_prompt.count("Compacted historical summary.") == 1
     assert "Turn 2 prompt" in acc3.materialized_prompt
     assert "Reply 1 early old history" in acc3.materialized_prompt
     assert len(session_coord.store.recent_completed_turns("her-fixed-1")) == 2
