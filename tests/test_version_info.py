@@ -261,6 +261,14 @@ def test_version_names_remote_mismatch_and_reports_unavailable_remote(
     matching = collect_version_payload(owner, agent_name="akane")
     assert matching["state"]["code"] == "running_matches_source"
 
+    remote["provenance"]["dirty_at_build"] = True
+    modified_remote = collect_version_payload(owner, agent_name="akane")
+    assert modified_remote["state"]["code"] == "component_unverified"
+    assert "remote_dirty_at_build" in modified_remote["state"]["reasons"]
+    assert "uncommitted" in render_version_card(modified_remote, locale="en").lower()
+    remote["provenance"]["dirty_at_build"] = False
+    assert collect_version_payload(owner, agent_name="akane")["state"]["code"] == "running_matches_source"
+
     remote.clear()
     remote["status"] = "offline"
     unavailable = collect_version_payload(owner, agent_name="akane")
@@ -356,6 +364,26 @@ def test_version_requires_live_matching_remote_health(tmp_path: Path, monkeypatc
     assert unreachable["state"]["code"] == "component_unverified"
     assert "remote_unreachable" in unreachable["state"]["reasons"]
     assert "本机服务无响应" in render_version_card(unreachable, locale="zh-CN")
+
+
+def test_dirty_function_generation_is_not_reported_as_exact_match(tmp_path: Path, monkeypatch) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    provenance["dirty_at_build"] = True
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    remote = {"status": "active", "pid": 23,
+              "provenance": {"commit": provenance["commit"], "dirty_at_build": False}}
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
+
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["state"]["code"] == "component_unverified"
+    assert "function_worker_dirty_at_build" in payload["state"]["reasons"]
+    assert "uncommitted" in render_version_card(payload, locale="en").lower()
 
 
 def test_old_worker_does_not_make_matching_remote_appear_old(tmp_path: Path, monkeypatch) -> None:

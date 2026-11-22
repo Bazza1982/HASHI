@@ -123,6 +123,8 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
             ))
     if "function_worker_identity_unavailable" in reasons:
         lines.append(_tr("version.issue.worker_unverified", locale))
+    if "function_worker_dirty_at_build" in reasons:
+        lines.append(_tr("version.issue.worker_dirty_at_build", locale))
     remote = running.get("remote") or {}
     if "remote_commit_differs" in reasons:
         remote_commit = (remote.get("provenance") or {}).get("commit")
@@ -147,6 +149,8 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
     elif "remote_provenance_unavailable" in reasons:
         lines.append(_tr("version.issue.remote_unverified", locale))
         lines.append(_tr("version.issue.remote_check", locale))
+    if "remote_dirty_at_build" in reasons:
+        lines.append(_tr("version.issue.remote_dirty_at_build", locale))
     return [html.escape(line) for line in lines]
 
 

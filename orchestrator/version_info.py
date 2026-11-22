@@ -456,12 +456,17 @@ def collect_version_payload(
     reasons: list[str] = []
     mixed_workers = len(generations) > 1 or len(adopted_commits) > 1
     mixed = mixed_workers
+    if any(_mapping(item.get("provenance")).get("dirty_at_build") is True
+           for item in [shared, *workers]):
+        reasons.append("function_worker_dirty_at_build")
     if len(generations) > 1:
         reasons.append("function_worker_generations_differ")
     if len(adopted_commits) > 1:
         reasons.append("function_worker_commits_differ")
     remote_commit = _adopted_component_commit(remote)
     shared_commit = _adopted_component_commit(shared)
+    if _mapping(remote.get("provenance")).get("dirty_at_build") is True:
+        reasons.append("remote_dirty_at_build")
     if shared_commit and remote_commit and shared_commit != remote_commit:
         mixed = True
         reasons.append("remote_commit_differs")

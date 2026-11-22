@@ -216,10 +216,14 @@ edit or a successful offline check is not proof of running-version adoption.
 identity, and compares Remote to that shared target. A Worker's identity cannot
 fill a missing Functions identity. It names mismatching components and their
 observed and target identities; missing component evidence is unverified, not
-green. For the local Remote, a live, bounded loopback health read must report
+green. A recorded uncommitted source tree at adoption makes the affected
+Functions or Worker identity unverified. For the local Remote, a live, bounded
+loopback health read must report
 a trusted view and the same instance, root, port, PID, start time and provenance
 as the process claim; an unreachable, degraded or mismatching response is not
-green. This confirms the local health response, not an authenticated peer
+green. Remote started from a source tree with uncommitted changes is also
+unverified even when its recorded commit matches. This confirms the local health
+response, not an authenticated peer
 connection or a successful user interaction. Remote has a separate lifecycle
 from `/reboot max`. Once the intended source has been adopted, an authorized
 operator can use a local channel independent of Remote to run `/remote off`,
