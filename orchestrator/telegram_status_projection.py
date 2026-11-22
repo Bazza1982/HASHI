@@ -155,7 +155,12 @@ class TelegramStatusProjection:
             handle = self._handles.get(name)
             metadata = getattr(handle, "metadata", {}) if handle is not None else {}
             metadata = metadata if isinstance(metadata, Mapping) else {}
-            diagnostics = getattr(ingress, "diagnostics", None) or self._diagnostics.get(name)
+            diagnostics = getattr(ingress, "diagnostics", None) if ingress_fingerprint == fingerprint else None
+            if diagnostics is None:
+                candidate = self._diagnostics.get(name)
+                identity = getattr(candidate, "identity", {})
+                if isinstance(identity, Mapping) and identity.get("bot_fingerprint") == fingerprint:
+                    diagnostics = candidate
             diagnostic = getattr(diagnostics, "summary", {})
             process = getattr(getattr(handle, "client", None), "process", None)
             try:
@@ -163,7 +168,8 @@ class TelegramStatusProjection:
             except Exception:
                 alive = False
             outbound_reason = metadata.get("telegram_connector_permanent_failure")
-            if alive and isinstance(outbound_reason, str) and outbound_reason in _SAFE_FAILURE_REASONS:
+            if (alive and metadata.get("telegram_bot_fingerprint") == fingerprint
+                    and isinstance(outbound_reason, str) and outbound_reason in _SAFE_FAILURE_REASONS):
                 failure_reasons.add(outbound_reason)
             if (isinstance(diagnostic, Mapping) and diagnostic.get("consecutive_failures")
                     and diagnostic.get("stage") != "stopped"):
