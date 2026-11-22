@@ -474,11 +474,22 @@ class DeviceWorkerState:
         with self.desktop_init_lock:
             if self.desktop_controller is None:
                 from tools.desktop_session import DesktopController
-                from tools.windows_helper.secure_desktop import native_desktop_for
-                self.desktop_controller = DesktopController(
-                    native_desktop_for(self.bridge_home),
-                    lambda: _DeviceLock(self.lock_path, windows_session=_windows_process_session()),
-                )
+                from tools.windows_helper.secure_desktop import SecureDesktop, native_desktop_for
+
+                native = native_desktop_for(self.bridge_home)
+
+                def desktop_lock():
+                    session = _windows_process_session()
+                    if session is not None and isinstance(native, SecureDesktop):
+                        # The SYSTEM bridge may control a different interactive
+                        # session than this Worker's process session. The bridge
+                        # validates this target against its authenticated pipe.
+                        session = native.configuration.get("session_id")
+                        if isinstance(session, bool) or not isinstance(session, int) or session < 0:
+                            raise DeviceWorkerError("desktop target session identity unavailable")
+                    return _DeviceLock(self.lock_path, windows_session=session)
+
+                self.desktop_controller = DesktopController(native, desktop_lock)
             return self.desktop_controller
 
     @property

@@ -621,4 +621,32 @@ def test_device_write_lock_coordinates_with_other_desktop_products(tmp_path):
         contender.release()
         probe.release()
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows named mutex contract")
+def test_manual_secure_desktop_locks_target_session_not_service_session(tmp_path, monkeypatch):
+    """A SYSTEM Worker in session 0 must contend for its helper's target session."""
+    from uuid import uuid4
+    from tools.windows_helper import secure_desktop
+
+    target_session = 100000 + uuid4().int % 1000000000
+    native = object.__new__(secure_desktop.SecureDesktop)
+    native.configuration = {"session_id": target_session}
+    monkeypatch.setattr(secure_desktop, "native_desktop_for", lambda _home: native)
+    monkeypatch.setattr(device_worker, "_windows_process_session", lambda: 0)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    controller = _state(tmp_path).manual_desktop()
+    owner = controller.lock_factory()
+    competitor = device_worker._WindowsDesktopMutex(target_session)
+    try:
+        owner.acquire()
+        with pytest.raises(DeviceWorkerError, match="lock"):
+            competitor.acquire()
+        competitor.release()
+        owner.release()
+        competitor.acquire()
+    finally:
+        owner.release()
+        competitor.release()
+        controller.close()
+
+
 # HASHI-Fingerprint: hfp_f530098a390146678247e1cfe36cfefa
