@@ -192,7 +192,8 @@ def test_payload_distinguishes_source_ahead_mixed_and_legacy(
 
     matching = collect_version_payload(owner, agent_name="akane")
     assert matching["running"]["commit"] == provenance["commit"]
-    assert matching["state"]["code"] == "running_matches_source"
+    assert matching["state"]["code"] == "component_unverified"
+    assert "remote_unavailable" in matching["state"]["reasons"]
     assert matching["compatibility"]["core_api"] == 4
 
     (source / "source.txt").write_text("two\n", encoding="utf-8")
@@ -225,6 +226,83 @@ def test_payload_distinguishes_source_ahead_mixed_and_legacy(
     assert generation_provenance(home, legacy) is None
     assert unavailable["running"]["commit"] is None
     assert unavailable["state"]["code"] == "provenance_unavailable"
+
+
+def test_version_names_remote_mismatch_and_reports_unavailable_remote(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    target_commit = provenance["commit"]
+    remote_commit = "b" * 40
+    remote = {
+        "status": "active",
+        "pid": 23,
+        "provenance": {"commit": remote_commit},
+    }
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
+
+    mismatch = collect_version_payload(owner, agent_name="akane")
+    assert mismatch["state"]["code"] == "mixed_generations"
+    assert "remote_commit_differs" in mismatch["state"]["reasons"]
+    rendered = render_version_card(mismatch, locale="en")
+    assert "Remote" in rendered
+    assert remote_commit[:12] in rendered and target_commit[:12] in rendered
+    assert "restart" in rendered.lower()
+
+    remote["provenance"]["commit"] = target_commit
+    matching = collect_version_payload(owner, agent_name="akane")
+    assert matching["state"]["code"] == "running_matches_source"
+
+    remote.clear()
+    remote["status"] = "offline"
+    unavailable = collect_version_payload(owner, agent_name="akane")
+    assert unavailable["state"]["code"] == "component_unverified"
+    assert "remote_unavailable" in unavailable["state"]["reasons"]
+    assert "Remote" in render_version_card(unavailable, locale="en")
+
+
+def test_old_worker_does_not_make_matching_remote_appear_old(tmp_path: Path, monkeypatch) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    owner.runtimes[0].metadata["source_commit"] = "b" * 40
+    remote = {"status": "active", "pid": 23, "provenance": {"commit": provenance["commit"]}}
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
+
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["state"]["code"] == "mixed_generations"
+    assert "function_worker_commits_differ" in payload["state"]["reasons"]
+    assert "remote_commit_differs" not in payload["state"]["reasons"]
+    assert "Remote source:" not in render_version_card(payload, locale="en")
+
+
+def test_unknown_functions_identity_is_not_inferred_from_a_worker(tmp_path: Path, monkeypatch) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "c" * 64
+    _generation_record(home, generation, None)
+    owner = _owner(source, home, generation)
+    commit = _git(source, "rev-parse", "HEAD")
+    owner.runtimes[0].metadata["source_commit"] = commit
+    monkeypatch.setattr("orchestrator.version_info._remote_fact",
+                        lambda *_: {"status": "active", "pid": 23, "provenance": {"commit": commit}})
+
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["running"]["functions"]["source_commit"] is None
+    assert payload["state"]["code"] == "component_unverified"
+    assert "function_worker_identity_unavailable" in payload["state"]["reasons"]
 
 
 def test_payload_reports_live_adoption_commit_for_reused_artifact(
@@ -265,8 +343,8 @@ def test_payload_reports_live_adoption_commit_for_reused_artifact(
     assert artifact_commit != adopted_commit
     assert payload["source"]["commit"] == adopted_commit
     assert payload["state"] == {
-        "code": "running_matches_source",
-        "reasons": [],
+        "code": "component_unverified",
+        "reasons": ["remote_unavailable"],
     }
 
 

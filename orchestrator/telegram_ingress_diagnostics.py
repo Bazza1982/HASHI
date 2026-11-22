@@ -41,9 +41,14 @@ _MESSAGES = {
     "timeout": "The Telegram request timed out",
     "watchdog_timeout": "The poll exceeded its effective watchdog deadline",
     "network_error": "The Telegram transport raised a network error",
+    "bot_identity_mismatch": "The receiver and Agent use different Bot identities",
     "retry_after": "Telegram requested a retry delay",
     "unknown": "Error details withheld; consult the recorded type and stage",
 }
+
+
+class TelegramBotIdentityMismatch(RuntimeError):
+    """The active receiver cannot safely deliver to this Agent route."""
 
 
 def _name(value: object) -> str:
@@ -66,6 +71,7 @@ are deliberately withheld at the first boundary, including the console.
 
     reason, code = "unknown", None
     if stage == "watchdog": reason = "watchdog_timeout"
+    elif isinstance(exc, TelegramBotIdentityMismatch): reason = "bot_identity_mismatch"
     elif isinstance(exc, InvalidToken): reason, code = "invalid_token", 401
     elif isinstance(exc, Forbidden): reason, code = "forbidden", 403
     elif isinstance(exc, Conflict): reason, code = "conflict", 409
@@ -319,3 +325,4 @@ class TelegramIngressDiagnostics:
                 value = raw.get(key)
                 if isinstance(value, (int, float)) and 0 <= value <= 86400: result["error"][key] = value
         return result
+# HASHI-Fingerprint: hfp_a68b8c92d09d4fbcb5b30e037e74f5ca

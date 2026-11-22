@@ -301,7 +301,7 @@ def _runtime():
     runtime.escalating_loops = []
     runtime.streaming_loops = []
 
-    async def _typing_loop(chat_id, stop_typing):
+    async def _typing_loop(chat_id, stop_typing, *, request_id=None):
         await stop_typing.wait()
 
     runtime.typing_loop = _typing_loop
@@ -5641,3 +5641,4 @@ async def test_scheduled_turn_carries_hcc_through_real_pcm_and_fixed_transport(t
     assert "SCHEDULED_HCC_SNAPSHOT" in accepted.materialized_prompt
     assert runtime._last_prompt_audit["hcc"]["included"] is True
     assert runtime.current_request_meta["session_scope"] == runtime_pipeline.SESSION_SCOPE_ISOLATED
+# HASHI-Fingerprint: hfp_8298318001c64b128a66701312161da9

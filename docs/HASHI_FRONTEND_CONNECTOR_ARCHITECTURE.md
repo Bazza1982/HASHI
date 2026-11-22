@@ -333,16 +333,26 @@ Worker publishes explicit `telegram_outbound_connected` evidence only while
 its prepared application is running. The supervisor does not infer that fact
 from an older Worker's ambiguous `telegram_connected` field. Public connection
 projections also require a live Worker and a receiver with the same Bot
-fingerprint; the credential service separately checks the currently saved Bot.
+fingerprint; an unknown Worker identity is not a connected receiver, and the
+credential service separately checks the currently saved Bot.
 
 Credential status projects `inbound_connected`, `outbound_connected` and
 `bidirectional_ready` from the live Worker and actual receiver, bound to the
 currently saved Bot fingerprint. Token verification, Worker presence, a saved
 mirror policy, or successful outbound delivery alone cannot assert a two-way
-connection. These transport facts are still distinct from a real user round
-trip. Clients must preserve that distinction, including on older backends
+connection. `mirror_delivery_ready` has the same two-way readiness requirement;
+`resolved_mirror_enabled` is only a preference. Explicitly empty credential
+references resolve to the Agent's default key in both configuration and status.
+A present but mismatching Worker/receiver identity yields the safe
+`bot_identity_mismatch` reason without exposing tokens. These transport facts
+are still distinct from a real user round trip. Clients must preserve that distinction, including on older backends
 that do not publish connection facts. Mirror-policy changes remain immediate
-and do not themselves request a Worker switch.
+and do not themselves request a Worker switch. A Run retains its admitted
+primary destination, but each unsent Telegram mirror rechecks the current
+effective owner/Agent mirror policy immediately before transport. Turning it
+off suppresses remaining chunks, cards and attachments; already sent content
+is not recalled. Telegram-origin replies and explicit notification tools retain
+their normal delivery.
 
 ## 3. External-client boundary
 
@@ -1517,8 +1527,8 @@ New Workbench voice recordings enter the selected owner-scoped Session as an
 audio attachment with `semantic_role=voice_message`, then one idempotent Session
 Run. The route verifies the Session's Agent and context generation before
 staging bytes. It reads the durable transcript event filtered by that Run ID;
-Safe Voice still presents a confirmation preview, and confirm/discard use the
-typed Session voice-transcript decision endpoint. The audio is never converted
+Safe Voice presents a confirmation preview; confirm, discard and keep-as-draft
+use the typed Session voice-transcript decision endpoint. The audio is never converted
 to plain text by the connector, and no decision is automatic.
 
 Workbench treats the `voice_message` attachment as transport and recovery
@@ -1541,6 +1551,16 @@ generation and the Session's current generation. Session events support a Run-ID
 filter so a replay can find its own durable transcript event without mixing in
 other messages. The Session API does not currently expose a durable transcript
 expiry, so the Workbench does not invent one in its presentation contract.
+
+Keeping a transcript records `voice.input.transcript_draft` and ends the
+transcript-dependent Run without model execution. Workbench first persists the
+text in the existing session-scoped composer draft, preserving prior text and
+attachments; it then makes the idempotent keep decision. A storage failure keeps
+confirmation available. An uncertain decision is not automatically replayed.
+Telegram cannot set its user's input box, so it delivers the entire transcript
+as copyable text and explains how to edit it. The basic Agent Presence transport
+accepts the keep decision without admitting a Run; support in a particular AP
+client requires its own implementation and validation.
 
 The changes are source-only and offline-validated. Running Function adoption,
 real microphone/file delivery, confirmation in the external Workbench, and the

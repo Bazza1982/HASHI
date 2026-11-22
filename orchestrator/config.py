@@ -40,6 +40,7 @@ from orchestrator.timezone_policy import canonical_timezone_name
 from orchestrator.telegram_identity import (
     resolve_owner_scope_id,
     resolve_telegram_owner_id,
+    resolve_telegram_token_key,
 )
 
 # Valid access_scope values:
@@ -804,7 +805,9 @@ class ConfigManager:
             a_raw.pop("system_md", None)
             system_md = canonical_agent_md(workspace_dir)
             load_pcm_document(system_md, workspace_dir=workspace_dir)
-            telegram_token_key = a_raw.pop("telegram_token_key", name)
+            telegram_token_key = resolve_telegram_token_key(
+                a_raw.pop("telegram_token_key", None), name
+            )
             registry = _backend_registry()
             allowed_backends = registry.normalize_allowed_backends(
                 a_raw.pop("allowed_backends")

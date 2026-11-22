@@ -820,6 +820,10 @@ async def _present_safe_voice_transcript(
                     callback_data=f"safevoice:yes:{chat_key}",
                 ),
                 InlineKeyboardButton(
+                    ui_language.tr("safevoice.keep", locale=locale),
+                    callback_data=f"safevoice:keep:{chat_key}",
+                ),
+                InlineKeyboardButton(
                     ui_language.tr("safevoice.discard", locale=locale),
                     callback_data=f"safevoice:no:{chat_key}",
                 ),
@@ -1390,6 +1394,10 @@ async def handle_voice_or_audio(
                     InlineKeyboardButton(
                         ui_language.tr("safevoice.send", locale=locale),
                         callback_data=f"safevoice:yes:{chat_key}",
+                    ),
+                    InlineKeyboardButton(
+                        ui_language.tr("safevoice.keep", locale=locale),
+                        callback_data=f"safevoice:keep:{chat_key}",
                     ),
                     InlineKeyboardButton(
                         ui_language.tr("safevoice.discard", locale=locale),

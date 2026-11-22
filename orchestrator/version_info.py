@@ -359,15 +359,6 @@ def collect_version_payload(
     for worker in workers:
         worker["provenance"] = provenance_for(worker["generation_id"])
 
-    if not shared["source_commit"]:
-        worker_source_commits = {
-            _commit_text(worker.get("source_commit"))
-            for worker in workers
-            if _commit_text(worker.get("source_commit"))
-        }
-        if len(worker_source_commits) == 1:
-            shared["source_commit"] = next(iter(worker_source_commits))
-
     primary_component = current_worker or shared
     primary = _mapping(primary_component.get("provenance"))
     running_commit = _adopted_component_commit(primary_component) or None
@@ -395,9 +386,19 @@ def collect_version_payload(
     if len(adopted_commits) > 1:
         reasons.append("function_worker_commits_differ")
     remote_commit = _adopted_component_commit(remote)
-    if running_commit and remote_commit and running_commit != remote_commit:
+    shared_commit = _adopted_component_commit(shared)
+    if shared_commit and remote_commit and shared_commit != remote_commit:
         mixed = True
         reasons.append("remote_commit_differs")
+    if not shared.get("generation_id") or not _adopted_component_commit(shared) or any(
+        not row.get("generation_id") or not _adopted_component_commit(row)
+        for row in workers
+    ):
+        reasons.append("function_worker_identity_unavailable")
+    if remote.get("status") == "offline":
+        reasons.append("remote_unavailable")
+    elif not remote_commit:
+        reasons.append("remote_provenance_unavailable")
 
     if mixed:
         state_code = "mixed_generations"
@@ -419,6 +420,9 @@ def collect_version_payload(
             reasons.append("commit_relation_unknown")
     else:
         state_code = "packaged_release"
+
+    if state_code in {"running_matches_source", "packaged_release"} and reasons:
+        state_code = "component_unverified"
 
     fingerprint = _fingerprint_mapping(
         getattr(owner, "runtime_fingerprint", None)

@@ -212,6 +212,15 @@ shared Functions generation, and per-Agent Worker generation. Different
 instances may adopt the same release at different times. A repository version
 edit or a successful offline check is not proof of running-version adoption.
 
+`/version` compares each Worker to the independently observed shared Functions
+identity, and compares Remote to that shared target. A Worker's identity cannot
+fill a missing Functions identity. It names mismatching components and their
+observed and target identities; missing component evidence is unverified, not
+green. The Remote process claim and PID report a recorded process and version,
+not authenticated connectivity or a successful user interaction. Remote has a
+separate lifecycle from `/reboot max`; checks and updates use the instance's
+Remote controller and require their own operational scope.
+
 ## 6. Acceptance, implementation, and rollout boundary
 
 - **Approval:** the user accepted the architecture-based numbering and Portable

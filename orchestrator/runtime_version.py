@@ -91,6 +91,56 @@ def _state_text(code: str, locale: str) -> str:
     return translated if translated != key else _tr("version.state.provenance_unavailable", locale)
 
 
+def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
+    running = payload.get("running") or {}
+    reasons = set((payload.get("state") or {}).get("reasons") or ())
+    functions = running.get("functions") or {}
+    shared_generation = str(functions.get("generation_id") or "")
+    shared_commit = str(
+        functions.get("source_commit")
+        or (functions.get("provenance") or {}).get("commit")
+        or ""
+    )
+    lines: list[str] = []
+    for worker in running.get("workers") or ():
+        generation = str(worker.get("generation_id") or "")
+        commit = str(
+            worker.get("source_commit")
+            or (worker.get("provenance") or {}).get("commit")
+            or ""
+        )
+        if generation and shared_generation and generation != shared_generation:
+            lines.append(_tr(
+                "version.issue.worker_generation", locale,
+                agent=str(worker.get("agent") or _tr("version.unavailable", locale)),
+                actual=_short(generation), expected=_short(shared_generation),
+            ))
+        if commit and shared_commit and commit != shared_commit:
+            lines.append(_tr(
+                "version.issue.worker_commit", locale,
+                agent=str(worker.get("agent") or _tr("version.unavailable", locale)),
+                actual=_short(commit), expected=_short(shared_commit),
+            ))
+    if "function_worker_identity_unavailable" in reasons:
+        lines.append(_tr("version.issue.worker_unverified", locale))
+    remote = running.get("remote") or {}
+    if "remote_commit_differs" in reasons:
+        remote_commit = (remote.get("provenance") or {}).get("commit")
+        lines.append(_tr(
+            "version.issue.remote_mismatch", locale,
+            actual=_short(remote_commit),
+            expected=_short(shared_commit),
+        ))
+        lines.append(_tr("version.issue.remote_update", locale))
+    elif "remote_unavailable" in reasons:
+        lines.append(_tr("version.issue.remote_unavailable", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_provenance_unavailable" in reasons:
+        lines.append(_tr("version.issue.remote_unverified", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    return [html.escape(line) for line in lines]
+
+
 def render_version_card(
     payload: Mapping[str, Any],
     *,
@@ -126,6 +176,7 @@ def render_version_card(
         f"<b>{html.escape(_tr('version.source', locale))}</b> · <code>{html.escape(_source_ref(payload, locale))}</code>",
         f"<b>{html.escape(_tr('version.status', locale))}</b> · {_state_icon(str(state.get('code') or ''))} {html.escape(_state_text(str(state.get('code') or ''), locale))}",
     ]
+    lines.extend(_component_details(payload, locale))
     if not full:
         return "\n".join(lines)
 

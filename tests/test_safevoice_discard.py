@@ -1,5 +1,6 @@
 """Safe Voice discard is an intentional, durable Run termination."""
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -139,6 +140,81 @@ async def test_discarded_voice_finishes_canonical_run_without_error(tmp_path, mo
                                 fencing_token=token)["state"] == "completed"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("worker_proxy", [False, True])
+async def test_voice_kept_as_draft_ends_run_without_model_execution(
+    tmp_path, monkeypatch, worker_proxy
+):
+    mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
+    record, state = transcript_fixture(mgr, store, run, content, status="ready", safe=True)
+    challenged = asyncio.Event()
+
+    async def challenge():
+        store.require_voice_transcript_confirmation(request_id=run["request_id"])
+        state["status"] = "pending_confirmation"
+        challenged.set()
+
+    state["request_confirmation"] = challenge
+    state["transcript_decisions"] = {record["transcript_id"]: "pending_confirmation"}
+    task = asyncio.create_task(
+        mgr.generate_response("synthetic", run["request_id"], request_content=content)
+    )
+    await asyncio.wait_for(challenged.wait(), 3)
+    api_runtime = mgr.runtime
+    if worker_proxy:
+        host = SimpleNamespace(_require_runtime=lambda: mgr.runtime)
+
+        async def remote_decider(**params):
+            return FunctionWorkerHost._decide_native_transcript(host, params)
+
+        api_runtime = SimpleNamespace(
+            is_function_worker_proxy=True, decide_native_voice_transcript=remote_decider
+        )
+    api = SimpleNamespace(
+        session_store=store, _v1_owner_id=lambda _request: session["owner_id"],
+        _native_audio_chat_v1_ready=lambda: True, _runtime_map=lambda: {"qa": api_runtime},
+    )
+
+    class Request:
+        match_info = {"session_id": session["session_id"],
+                      "transcript_id": record["transcript_id"]}
+
+        async def json(self):
+            return {"decision": "keep", "session_context_generation": session["context_generation"]}
+
+    result = await WorkbenchApiServer.handle_v1_voice_transcript_decide(api, Request())
+    assert result.status == 200
+    assert json.loads(result.text)["state"] == "draft"
+    response = await asyncio.wait_for(task, 3)
+    assert response.stop_reason == "safe_voice_kept_as_draft"
+    assert not hasattr(backend, "seen_prompt")
+
+    runtime = _listener_runtime(
+        store, owner=session["owner_id"], agent="qa", request_id=run["request_id"],
+        fencing_token=meta["hashi_fencing_token"],
+    )
+    runtime.config.active_backend = "codex-cli"
+    runtime._native_voice_transcripts = mgr.runtime._native_voice_transcripts
+    runtime._log_maintenance = lambda *args, **kwargs: None
+    monkeypatch.setattr(runtime_session, "capture_backend_binding", lambda *_a, **_k: None)
+    monkeypatch.setattr("orchestrator.frontend_whatsapp_mirror.deliver_whatsapp_mirror", AsyncMock())
+    monkeypatch.setattr("orchestrator.runtime_debug_reporting.schedule_terminal_diagnostic", lambda *_a, **_k: None)
+    monkeypatch.setattr("orchestrator.runtime_debug_reporting.schedule_failure_report", lambda *_a, **_k: None)
+    monkeypatch.setattr("orchestrator.terminal_console.finish_request", lambda *_a, **_k: None)
+    item = SimpleNamespace(request_id=run["request_id"], source="session-api", summary="voice")
+    await runtime_pipeline.handle_safe_voice_discard(
+        runtime, item, reason="safe_voice_kept_as_draft"
+    )
+    terminal = store.get_run(run["run_id"])
+    assert terminal["state"] == "stopped" and terminal["error_code"] is None
+    events = store.events(session["session_id"], owner_id=session["owner_id"], run_id=run["run_id"])
+    assert any(event["kind"] == "voice.input.transcript_draft" for event in events)
+    assert not any(event["kind"] == "voice.input.transcript_discarded" for event in events)
+    assert next(event for event in events if event["phase"] == "terminal")["detail"] == {
+        "reason": "safe_voice_kept_as_draft"
+    }
+
+
 def test_discard_terminal_requires_durable_decision_and_current_fence(tmp_path):
     mgr, backend, store, session, run, meta, content = fixture(tmp_path, codex=True)
     transcript_fixture(mgr, store, run, content, status="ready", safe=True)
@@ -243,9 +319,10 @@ async def test_discard_is_not_accepted_from_memory_without_durable_decision(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("background", [False, True])
-async def test_foreground_and_background_discard_do_not_send_backend_error(tmp_path, background, monkeypatch):
+@pytest.mark.parametrize("reason", ["safe_voice_discarded", "safe_voice_kept_as_draft"])
+async def test_foreground_and_background_discard_do_not_send_backend_error(tmp_path, background, reason, monkeypatch):
     response = BackendResponse(text="", duration_ms=0, is_success=False,
-                               stop_reason="safe_voice_discarded")
+                               stop_reason=reason)
     if background:
         runtime, sent, _voices = _make_background_runtime(tmp_path)
         runtime._log_maintenance = lambda *_a, **_k: None
@@ -275,7 +352,54 @@ async def test_foreground_and_background_discard_do_not_send_backend_error(tmp_p
             task.cancel()
             await task
 
-    assert observed and observed[0]["interrupt_reason"] == "safe_voice_discarded"
+    assert observed and observed[0]["interrupt_reason"] == reason
     assert not observed[0].get("error")
     assert not errors and not sent
     assert not receipts
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery_succeeds", [True, False])
+async def test_telegram_keep_preserves_full_text_and_never_admits_a_request(
+    delivery_succeeds, monkeypatch
+):
+    from unittest.mock import AsyncMock
+    from orchestrator import runtime_sys_prompts, ui_language
+
+    transcript = "茶" * 4301
+    pending = {"transcript": transcript, "native_audio": True, "request_id": "req-voice",
+               "chat_id": 7, "prompt": "not submitted", "summary": "voice"}
+    event = asyncio.Event()
+    decisions = []
+    runtime = SimpleNamespace(
+        _is_authorized_user=lambda _owner: True,
+        _pending_voice={"7": pending}, _long_pending_voice_keys=set(),
+        _native_voice_transcripts={"req-voice": {"status": "ready", "release_event": event}},
+        session_store=SimpleNamespace(decide_voice_transcript=lambda **kw: decisions.append(kw)),
+        enqueue_request=AsyncMock(),
+    )
+    query = SimpleNamespace(from_user=SimpleNamespace(id=7), data="safevoice:keep:7",
+                            message=SimpleNamespace(), edit_message_text=AsyncMock(),
+                            answer=AsyncMock())
+    update = SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=7))
+    messages = []
+
+    async def reply(_runtime, _update, _query, text, **_kwargs):
+        messages.append(text)
+        return object() if delivery_succeeds else None
+
+    monkeypatch.setattr(runtime_sys_prompts, "_reply_from_callback", reply)
+    monkeypatch.setattr(ui_language, "preferred_locale", lambda *_args: "en")
+    await FlexibleAgentRuntime.callback_safevoice(runtime, update, None)
+    runtime.enqueue_request.assert_not_awaited()
+    if delivery_succeeds:
+        assert "".join(messages[1:]) == transcript
+        assert all(len(chunk) <= 2000 for chunk in messages[1:])
+        assert decisions == [{"request_id": "req-voice", "confirmed": False, "keep_draft": True}]
+        assert event.is_set() and runtime._native_voice_transcripts["req-voice"]["status"] == "draft"
+        assert "7" not in runtime._pending_voice
+    else:
+        assert not decisions and not event.is_set()
+        assert runtime._pending_voice["7"] is pending
+        assert query.answer.await_args.kwargs["show_alert"] is True
+
+# HASHI-Fingerprint: hfp_8a26d4c116f54975a40b4d8962504d61

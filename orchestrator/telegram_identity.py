@@ -10,6 +10,14 @@ from collections.abc import Mapping
 from typing import Any
 
 
+def resolve_telegram_token_key(value: Any, agent_name: str) -> str:
+    """Resolve an Agent's credential reference consistently for every consumer."""
+    default_key = str(agent_name or "").strip()
+    if not isinstance(value, str):
+        return default_key
+    return value.strip() or default_key
+
+
 def _optional_positive_id(value: Any, *, field: str) -> int | None:
     if value in (None, "", 0, "0"):
         return None
@@ -58,4 +66,9 @@ def resolve_owner_scope_id(
     return scope
 
 
-__all__ = ["resolve_owner_scope_id", "resolve_telegram_owner_id"]
+__all__ = [
+    "resolve_owner_scope_id",
+    "resolve_telegram_owner_id",
+    "resolve_telegram_token_key",
+]
+# HASHI-Fingerprint: hfp_1c410a9cb2e04ced9c1b0bff5a56fc26

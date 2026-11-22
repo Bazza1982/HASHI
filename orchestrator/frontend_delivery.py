@@ -1,6 +1,6 @@
 """Typed per-Run delivery routes for HASHI Frontend Connectors.
 
-Mirror preferences belong to the server and are frozen at Run admission.
+Run destinations are frozen at admission; mirror preferences are rechecked at delivery.
 Legacy client-supplied delivery policies remain readable but cannot override
 the owner's connector preferences.
 """
@@ -625,6 +625,42 @@ def telegram_delivery_for_admission(
         # A missing/corrupt Agent policy must not accidentally enable a mirror.
         # Telegram-origin traffic was returned above and remains deliverable.
         return False
+
+
+def telegram_mirror_allowed_for_run(
+    runtime: Any,
+    request_id: str | None,
+    *,
+    frozen_route: Mapping[str, Any] | None = None,
+    owner_id: str | None = None,
+) -> bool:
+    """Recheck the current mirror policy for a Run's frozen Telegram destination."""
+    from orchestrator.runtime_session import request_metadata
+
+    run = request_metadata(runtime, request_id)
+    metadata = run.get("request_metadata") if isinstance(run, Mapping) else None
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    route_value = frozen_route or metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY)
+    if not route_value:
+        return True
+    try:
+        route = normalize_run_delivery_route(route_value)
+    except ValueError:
+        return False
+    primary = route.get("primary")
+    if isinstance(primary, Mapping) and primary.get("surface") == "telegram":
+        return True
+    if not any(destination.get("surface") == "telegram" for destination in route["mirrors"]):
+        return False
+    global_config = getattr(runtime, "global_config", None)
+    owner = str(owner_id or run.get("owner_id") or metadata.get("owner_id") or "").strip()
+    return telegram_delivery_for_admission(
+        source="api",
+        request_metadata={**metadata, "owner_id": owner},
+        state_root=getattr(global_config, "bridge_home", None),
+        agent_id=getattr(runtime, "name", None),
+        agent_config_path=getattr(global_config, "config_path", None),
+    )
 
 
 def configured_whatsapp_mirror_channel(global_config: Any) -> str | None:

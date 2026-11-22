@@ -292,9 +292,33 @@ async def test_status_requires_current_bot_and_both_live_directions(
     )
     payload = json.loads(response.text)
     assert payload["bidirectional_ready"] is ready
+    assert payload["mirror_delivery_ready"] is ready
+    assert payload["connection_reason"] == (
+        "bot_identity_mismatch" if not current_bot or not current_receiver else None
+    )
     assert (payload["activation_status"] == "connected") is ready
     assert payload["inbound_connected"] is bool(current_bot and current_receiver and running and inbound)
     assert payload["outbound_connected"] is bool(current_bot and outbound)
+    assert OLD_TOKEN not in response.text
+
+
+@pytest.mark.asyncio
+async def test_null_worker_bot_identity_is_reported_as_mismatch(tmp_path):
+    from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
+
+    server = _server(tmp_path, verifier=None, runtime_active=True)
+    server.orchestrator.runtimes[0].get_runtime_metadata = lambda: {
+        "online": True, "telegram_bot_fingerprint": None, "telegram_outbound_connected": False,
+        "telegram_ingress": {"running": True, "connected": False,
+                             "bot_fingerprint": telegram_bot_fingerprint(OLD_TOKEN)},
+    }
+    response = await server.handle_admin_agent_telegram_credential(
+        _Request(headers={"X-Workbench-Token": ADMIN_TOKEN})
+    )
+    payload = json.loads(response.text)
+    assert payload["connection_reason"] == "bot_identity_mismatch"
+    assert payload["bidirectional_ready"] is False
+    assert payload["mirror_delivery_ready"] is False
     assert OLD_TOKEN not in response.text
 
 
@@ -667,7 +691,7 @@ async def test_agent_mirror_policy_is_revision_checked_and_applies_without_resta
     assert initial["mirror_policy"] == "inherit"
     assert initial["instance_mirror_enabled"] is True
     assert initial["resolved_mirror_enabled"] is True
-    assert initial["mirror_delivery_ready"] is True
+    assert initial["mirror_delivery_ready"] is False
     assert len(initial["mirror_policy_revision"]) == 64
 
     disabled_response = await server.handle_admin_agent_telegram_mirror_policy_update(
@@ -737,3 +761,4 @@ async def test_always_on_still_reports_missing_telegram_delivery_prerequisites(t
     assert result["mirror_policy"] == "always_on"
     assert result["resolved_mirror_enabled"] is True
     assert result["mirror_delivery_ready"] is False
+# HASHI-Fingerprint: hfp_08188eaf241848f3820249463eac3bae

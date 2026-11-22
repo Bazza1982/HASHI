@@ -12,6 +12,7 @@ from pathlib import Path
 
 from orchestrator.telegram_ingress_diagnostics import (
     TelegramIngressDiagnostics,
+    TelegramBotIdentityMismatch,
     safe_error,
 )
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
@@ -104,7 +105,7 @@ class CoreTelegramIngress:
             # A poll may outlive a Worker pointer swap. Leave its updates
             # unacknowledged instead of delivering the previous Bot's inbox to
             # a Worker configured for another Bot.
-            raise RuntimeError("Telegram Bot identity changed at the Agent route")
+            raise TelegramBotIdentityMismatch("Telegram Bot identity changed at the Agent route")
 
     async def start(self, *, drop_pending_updates: bool) -> None:
         if self.is_running or self.permanent_failure_reason is not None:

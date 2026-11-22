@@ -1797,7 +1797,7 @@ class FunctionWorkerSupervisor:
             "configured": ingress is not None or diagnostics is not None or bool(self._telegram_token(agent_name)),
             "running": bool(ingress is not None and ingress.is_running),
             "connected": bool(ingress is not None and ingress.connected
-                              and (not expected or fingerprint == expected)),
+                              and expected and fingerprint == expected),
             "bot_fingerprint": fingerprint,
             "offset": None if ingress is None else ingress.offset,
             "diagnostics": None if diagnostics is None else diagnostics.snapshot(),

@@ -236,6 +236,71 @@ async def test_managed_short_send_projects_buttons_and_records_acceptance(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("primary_telegram", [False, True])
+async def test_short_run_message_respects_current_mirror_setting(tmp_path, primary_telegram):
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config.authorized_id = 7
+    runtime.global_config.bridge_home = tmp_path
+    route = freeze_run_delivery_route(
+        message_source_id="telegram" if primary_telegram else "api",
+        session_surface="telegram" if primary_telegram else "workbench",
+        session_channel_key="default",
+        chat_id=7,
+        telegram_requested=True,
+    )
+    runtime._request_meta_by_id = {
+        "req-short": {
+            "request_id": "req-short",
+            "owner_id": "user:7",
+            "request_metadata": {"owner_id": "user:7", "_run_delivery_route": route},
+        }
+    }
+    set_connector_preference(tmp_path, "user:7", "telegram", "mirror", False)
+
+    result = await FlexibleAgentRuntime._send_text(
+        runtime, 7, "progress", _request_id="req-short", _purpose="commentary"
+    )
+
+    assert bool(result) is primary_telegram
+    assert len(runtime.app.bot.messages) == int(primary_telegram)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_during_synthesis", [False, True])
+async def test_voice_mirror_stops_without_false_failure(tmp_path, monkeypatch, disable_during_synthesis):
+    from unittest.mock import AsyncMock
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator import ui_language
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config.authorized_id = 7
+    runtime.global_config.bridge_home = tmp_path
+    route = freeze_run_delivery_route(message_source_id="api", session_surface="workbench",
+                                      session_channel_key="default", chat_id=7, telegram_requested=True)
+    runtime._request_meta_by_id = {"req-voice": {"request_id": "req-voice", "owner_id": "user:7",
+        "request_metadata": {"owner_id": "user:7", "_run_delivery_route": route}}}
+    set_connector_preference(tmp_path, "user:7", "telegram", "mirror", disable_during_synthesis)
+    async def synthesize(*_args, **_kwargs):
+        set_connector_preference(tmp_path, "user:7", "telegram", "mirror", False)
+        return SimpleNamespace()
+    runtime.voice_manager = SimpleNamespace(synthesize_reply=AsyncMock(side_effect=synthesize))
+    errors = []
+    runtime._mark_error = errors.append
+    monkeypatch.setattr(ui_language, "preferred_locale", lambda *_args: "en")
+
+    result = await FlexibleAgentRuntime._send_voice_reply_result(runtime, 7, "voice", "req-voice")
+    assert result.code == "telegram_mirror_disabled"
+    assert not errors and not runtime.app.bot.media
+    assert runtime.voice_manager.synthesize_reply.await_count == int(disable_during_synthesis)
+
+
+@pytest.mark.asyncio
 async def test_send_long_message_skips_when_telegram_disconnected(tmp_path):
     runtime = _runtime(tmp_path, connected=False)
 
@@ -442,6 +507,65 @@ async def test_canonical_background_reply_uses_outbox_and_does_not_double_send(
             (event["event_id"],),
         ).fetchone()[0]
     assert state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_disabled_mirror_suppresses_persisted_outbox_after_worker_metadata_is_lost(
+    tmp_path, monkeypatch
+):
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+    from orchestrator.session_store import SessionStore
+
+    store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI1")
+    owner = "user:7"
+    session = store.ensure_default_session(owner_id=owner, agent_id="test-agent")
+    route = freeze_run_delivery_route(
+        message_source_id="api", session_surface="workbench",
+        session_channel_key="default", chat_id=7, telegram_requested=True,
+    )
+    accepted = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="test-agent",
+        request_id="req-disabled-mirror", text="question", source="api",
+        idempotency_key="disabled-mirror-key", delivery_route=route,
+    )
+    store.mark_request_running(accepted.request_id, worker_id="test-worker")
+    store.finish_request(accepted.request_id, success=True, assistant_text="answer")
+    runtime = _runtime(tmp_path)
+    runtime.session_store = store
+    runtime.global_config.authorized_id = 7
+    runtime.global_config.bridge_home = tmp_path
+    set_connector_preference(tmp_path, owner, "telegram", "mirror", False)
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(runtime_delivery.runtime_delivery_order, "wait_for_turn", no_wait)
+    monkeypatch.setattr(runtime_delivery.telegram_delivery_failover, "handle_blocked_send", not_blocked)
+
+    result = await runtime_delivery.send_long_message(
+        runtime, chat_id=7, text="answer", request_id=accepted.request_id,
+        purpose="response", frontend_outbox=True,
+    )
+    assert result[1] == 0
+    assert runtime.app.bot.messages == []
+    event = next(
+        entry for entry in store.events(session["session_id"], owner_id=owner)
+        if entry["kind"] == "run.completed"
+    )
+    receipts = store.frontend_delivery_receipts(
+        session_id=session["session_id"], owner_id=owner, event_id=event["event_id"]
+    )
+    assert [receipt["status"] for receipt in receipts] == ["skipped"]
+    with store._connection() as connection:
+        row = connection.execute(
+            "SELECT state FROM connector_delivery_tasks WHERE event_id=? AND connector_id='telegram'",
+            (event["event_id"],),
+        ).fetchone()
+    assert row[0] == "suppressed"
 
 
 @pytest.mark.asyncio
@@ -759,6 +883,49 @@ async def test_send_long_message_sends_html_by_default(tmp_path):
             "disable_notification": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary_telegram", [False, True])
+async def test_disabling_mirror_stops_remaining_chunks_but_keeps_telegram_primary(
+    tmp_path, primary_telegram
+):
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    route = freeze_run_delivery_route(
+        message_source_id="telegram" if primary_telegram else "api",
+        session_surface="telegram" if primary_telegram else "workbench",
+        session_channel_key="default",
+        chat_id=123,
+        telegram_requested=True,
+    )
+    runtime._request_meta_by_id = {
+        "req-mirror": {
+            "request_id": "req-mirror",
+            "owner_id": "user:42",
+            "source": "telegram" if primary_telegram else "api",
+            "request_metadata": {"owner_id": "user:42", "_run_delivery_route": route},
+        }
+    }
+    send = runtime.app.bot.send_message
+
+    async def disable_after_first(**kwargs):
+        result = await send(**kwargs)
+        if len(runtime.app.bot.messages) == 1:
+            set_connector_preference(tmp_path, "user:42", "telegram", "mirror", False)
+        return result
+
+    runtime.app.bot.send_message = disable_after_first
+    _elapsed, count = await runtime_delivery.send_long_message(
+        runtime, chat_id=123, text="a" * 9000,
+        request_id="req-mirror", purpose="response",
+    )
+    expected = 3 if primary_telegram else 1
+    assert count == expected
+    assert len(runtime.app.bot.messages) == expected
 
 
 @pytest.mark.asyncio
@@ -1293,3 +1460,4 @@ def test_backend_failure_fields_expose_scoped_counters_without_a_ratio():
     assert fields["recovery_exhausted"] is True
     assert fields["fallback"]["reason"] == "privacy_blocked"
     assert fields["fallback"]["disposition"] == "blocked"
+# HASHI-Fingerprint: hfp_3d5f6cf908f7453aad0e12387e87ea19

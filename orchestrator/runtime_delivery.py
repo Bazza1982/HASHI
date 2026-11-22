@@ -392,6 +392,10 @@ class TelegramAccessRevoked(RuntimeError):
     """A delegated Telegram grant no longer permits this delivery."""
 
 
+class TelegramMirrorDisabled(TelegramAccessRevoked):
+    """The owner disabled this Run's Telegram mirror."""
+
+
 async def _send_standard_event_media_to_telegram(
     runtime: Any,
     *,
@@ -511,6 +515,16 @@ async def _send_standard_event_media_to_telegram(
                 explicit_recipient=explicit_telegram_purpose(purpose),
             ):
                 raise TelegramAccessRevoked()
+            from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+
+            if (
+                not explicit_telegram_purpose(purpose)
+                and not telegram_mirror_allowed_for_run(
+                    runtime, request_id, frozen_route=claim.get("delivery_route"),
+                    owner_id=owner_id,
+                )
+            ):
+                raise TelegramMirrorDisabled()
             with upload_path.open("rb") as handle:
                 kwargs[field] = handle
                 sent_message = await method(**kwargs)
@@ -823,6 +837,7 @@ async def _send_long_message_transport(
     outbox_outcome: dict[str, Any] | None = None,
     reply_markup: Any = None,
     frontend_question_id: str | None = None,
+    frozen_route: Mapping[str, Any] | None = None,
 ):
     """Send Markdown or pre-rendered Telegram HTML with safe chunking."""
     from orchestrator.admin_local_testing import capture_local_command_output
@@ -845,6 +860,8 @@ async def _send_long_message_transport(
     async def record_frontend_receipt(status: str) -> None:
         if outbox_outcome is not None and outbox_outcome.get("status") == "retry":
             return  # No external effect was attempted/accepted.
+        if outbox_outcome is not None and outbox_outcome.get("status") == "suppressed":
+            status = "skipped"
         if not frontend_event_id or not frontend_session_id or not frontend_owner_id:
             return
         if status == "delivered" and not accepted_message_ids:
@@ -993,6 +1010,19 @@ async def _send_long_message_transport(
             explicit_recipient=explicit_telegram_purpose(purpose),
         ):
             await record_delivery("blocked", disposition="telegram_access_revoked")
+            if outbox_outcome is not None:
+                outbox_outcome["status"] = "unknown" if accepted_message_ids else "suppressed"
+            return False
+        from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+
+        if (
+            not explicit_telegram_purpose(purpose)
+            and not telegram_mirror_allowed_for_run(
+                runtime, request_id, frozen_route=frozen_route,
+                owner_id=frontend_owner_id,
+            )
+        ):
+            await record_delivery("skipped", disposition="telegram_mirror_disabled")
             if outbox_outcome is not None:
                 outbox_outcome["status"] = "unknown" if accepted_message_ids else "suppressed"
             return False
@@ -1373,6 +1403,7 @@ async def dispatch_claimed_telegram_event(
                 outbox_outcome=outcome,
                 reply_markup=canonical_markup,
                 frontend_question_id=frontend_question_id,
+                frozen_route=claim.get("delivery_route"),
             )
             status = str(
                 outcome.get("status") or ("completed" if chunks else "failed")
@@ -1405,6 +1436,7 @@ async def dispatch_claimed_telegram_event(
                 # media effect has completed under this same outbox lease.
                 skip_local_capture=True,
                 outbox_outcome=outcome,
+                frozen_route=claim.get("delivery_route"),
             )
             message_ids = list(outcome.get("accepted_message_ids") or ())
             accepted_effects = int(outcome.get("accepted_effect_count") or 0)
@@ -1533,7 +1565,11 @@ async def dispatch_claimed_telegram_event(
                 outbox_id=str(claim["outbox_id"]),
                 lease_token=str(claim["lease_token"]),
                 status=status,
-                error_code="telegram_access_revoked" if revoked else f"telegram_media_{status}",
+                error_code=(
+                    "telegram_mirror_disabled" if isinstance(media_error, TelegramMirrorDisabled)
+                    else "telegram_access_revoked" if revoked
+                    else f"telegram_media_{status}"
+                ),
             )
             claim_terminal = True
             if revoked:
@@ -1875,10 +1911,16 @@ async def send_long_message(
     )
 
 
-async def typing_loop(runtime: Any, chat_id: int, stop_event: asyncio.Event):
+async def typing_loop(
+    runtime: Any, chat_id: int, stop_event: asyncio.Event, *, request_id: str | None = None
+):
+    from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+
     if not runtime.telegram_connected:
         return
     while not stop_event.is_set():
+        if not telegram_mirror_allowed_for_run(runtime, request_id):
+            return
         try:
             await runtime.app.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
         except Exception:

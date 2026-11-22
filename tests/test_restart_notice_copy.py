@@ -20,8 +20,8 @@ def hot_record(**changes):
 
 
 @pytest.mark.parametrize(("locale", "expected"), [
-    ("zh-CN", "✅ 完整热重启成功，耗时139.8秒，2个代理在线。\n其它连接形式进行中。"),
-    ("en", "✅ Full hot reboot succeeded in 139.8s; 2 agents online.\nOther connection types are being established."),
+    ("zh-CN", "✅ 完整热重启成功，耗时139.8秒，2个代理在线。\nRemote 未包含在本次热重启中；请运行 /version 查看其版本。\n其它连接形式进行中。"),
+    ("en", "✅ Full hot reboot succeeded in 139.8s; 2 agents online.\nRemote is outside this reboot; check its version with /version.\nOther connection types are being established."),
 ])
 def test_optional_connector_recovery_is_success_with_progress(locale, expected):
     record = hot_record(locale=locale)

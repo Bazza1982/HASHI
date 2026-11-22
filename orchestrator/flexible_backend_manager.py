@@ -2422,9 +2422,9 @@ class FlexibleBackendManager:
                     metadata["multimodal_routing"] = list(transcript_routes) + list(metadata.get("multimodal_routing") or [])
                     response.stream_metadata = metadata
                 return response
-        except VoiceTranscriptDiscarded:
+        except VoiceTranscriptDiscarded as decision:
             return BackendResponse(
-                text="", duration_ms=0, is_success=False, stop_reason="safe_voice_discarded",
+                text="", duration_ms=0, is_success=False, stop_reason=decision.stop_reason,
             )
         except MultimodalContractError as exc:
             return self._media_contract_failure(exc, request_id)

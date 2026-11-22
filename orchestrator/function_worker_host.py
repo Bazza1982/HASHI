@@ -1903,13 +1903,14 @@ class FunctionWorkerHost:
         decisions = state.get("transcript_decisions")
         if isinstance(decisions, dict):
             decisions[transcript_id] = (
-                "released" if decision == "confirm" else "discarded"
+                "released" if decision == "confirm"
+                else "draft" if decision == "keep" else "discarded"
             )
             if decision == "discard":
                 state["status"] = "discarded"
-            elif decisions and all(value == "released" for value in decisions.values()):
-                state["status"] = "released"
-        if state.get("status") in {"released", "discarded", "unavailable"}:
+            elif decisions and all(value in {"released", "draft"} for value in decisions.values()):
+                state["status"] = "draft" if "draft" in decisions.values() else "released"
+        if state.get("status") in {"released", "discarded", "draft", "unavailable"}:
             release = state.get("release_event")
             if isinstance(release, asyncio.Event):
                 release.set()
