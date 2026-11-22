@@ -292,7 +292,7 @@ async def test_status_requires_current_bot_and_both_live_directions(
     )
     payload = json.loads(response.text)
     assert payload["bidirectional_ready"] is ready
-    assert payload["mirror_delivery_ready"] is ready
+    assert payload["mirror_delivery_ready"] is bool(outbound and current_bot)
     assert payload["connection_reason"] == (
         "bot_identity_mismatch" if not current_bot or not current_receiver else None
     )

@@ -357,7 +357,7 @@ class TelegramCredentialService:
             "mirror_policy_revision": context.mirror_policy_revision,
             "instance_mirror_enabled": instance_mirror_enabled,
             "resolved_mirror_enabled": resolved_mirror_enabled,
-            "mirror_delivery_ready": ready,
+            "mirror_delivery_ready": outbound and context.authorized_user_configured,
         }
 
     def update_mirror_policy(

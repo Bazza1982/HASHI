@@ -340,8 +340,10 @@ Credential status projects `inbound_connected`, `outbound_connected` and
 `bidirectional_ready` from the live Worker and actual receiver, bound to the
 currently saved Bot fingerprint. Token verification, Worker presence, a saved
 mirror policy, or successful outbound delivery alone cannot assert a two-way
-connection. `mirror_delivery_ready` has the same two-way readiness requirement;
-`resolved_mirror_enabled` is only a preference. Explicitly empty credential
+connection. `mirror_delivery_ready` reports an authorized, live outbound sender
+using the current Bot independently of inbound polling. It does not claim that
+a message was delivered; `resolved_mirror_enabled` is only a preference.
+Explicitly empty credential
 references resolve to the Agent's default key in both configuration and status.
 A present but mismatching Worker/receiver identity yields the safe
 `bot_identity_mismatch` reason without exposing tokens. These transport facts
