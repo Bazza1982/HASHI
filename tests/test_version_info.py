@@ -326,6 +326,15 @@ def test_version_requires_live_matching_remote_health(tmp_path: Path, monkeypatc
         assert "remote_identity_unverified" in untrusted["state"]["reasons"]
 
         response["trusted_view"] = True
+        monkeypatch.chdir(home)
+        claim["root"] = ""
+        response["instance"]["runtime_claim"]["root"] = ""
+        missing_root = collect_version_payload(owner, agent_name="akane")
+        assert missing_root["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in missing_root["state"]["reasons"]
+        claim["root"] = str(home.resolve())
+        response["instance"]["runtime_claim"]["root"] = str(home.resolve())
+
         response["instance"]["runtime_claim"]["provenance"] = {"commit": "b" * 40}
         wrong_provenance = collect_version_payload(owner, agent_name="akane")
         assert wrong_provenance["state"]["code"] == "component_unverified"

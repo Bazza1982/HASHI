@@ -308,12 +308,14 @@ def _remote_health_matches_claim(
     if not isinstance(live, Mapping):
         return False
     try:
+        live_root = str(live.get("root") or "").strip()
+        claim_root = str(claim.get("root") or "").strip()
         return (
             str(instance.get("instance_id") or "").strip().upper() == instance_id.upper()
             and str(live.get("instance_id") or "").strip().upper() == instance_id.upper()
             and str(claim.get("instance_id") or "").strip().upper() == instance_id.upper()
-            and Path(str(live.get("root") or "")).resolve() == bridge_home.resolve()
-            and Path(str(claim.get("root") or "")).resolve() == bridge_home.resolve()
+            and bool(live_root) and Path(live_root).resolve() == bridge_home.resolve()
+            and bool(claim_root) and Path(claim_root).resolve() == bridge_home.resolve()
             and int(live.get("pid") or 0) == int(claim.get("pid") or 0) > 0
             and int(live.get("port") or 0) == int(claim.get("port") or 0) > 0
             and live.get("started_at") is not None
