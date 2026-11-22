@@ -480,7 +480,20 @@ class SessionStore:
     per-Session working files are derived state used by Memory+ and Compact.
     """
 
-    SCHEMA_VERSION = 37
+    SCHEMA_VERSION = 38
+    TELEGRAM_DELIVERABLE_EVENT_KINDS = frozenset(
+        {
+            "run.completed",
+            "run.failed",
+            "run.cancelled",
+            "run.interrupted",
+            "assistant.output.available",
+            "frontend.message.recorded",
+            "run.question.created",
+            "frontend.command_result",
+            "command.completed",
+        }
+    )
 
     def __init__(
         self,
@@ -506,7 +519,51 @@ class SessionStore:
         except OSError:
             pass
         self._lock = threading.RLock()
+        self._telegram_delivery_listeners: list[Any] = []
+        self._pending_telegram_notifications = threading.local()
         self._initialize()
+
+    def register_telegram_delivery_listener(self, listener: Any) -> None:
+        """Register a post-commit callback ``listener(agent_id, event_id, kind)``."""
+        with self._lock:
+            if listener not in self._telegram_delivery_listeners:
+                self._telegram_delivery_listeners.append(listener)
+
+    def unregister_telegram_delivery_listener(self, listener: Any) -> None:
+        with self._lock:
+            self._telegram_delivery_listeners = [
+                existing
+                for existing in self._telegram_delivery_listeners
+                if existing != listener
+            ]
+
+    def _queue_telegram_delivery_notification(
+        self, agent_id: str, event_id: str, kind: str
+    ) -> None:
+        stack = getattr(self._pending_telegram_notifications, "stack", None)
+        if stack:
+            stack[-1].append((str(agent_id).lower(), str(event_id), str(kind)))
+
+    def _dispatch_telegram_delivery_notifications(
+        self, items: list[tuple[str, str, str]]
+    ) -> None:
+        if not items:
+            return
+        with self._lock:
+            listeners = tuple(self._telegram_delivery_listeners)
+        if not listeners:
+            return
+        seen: set[tuple[str, str]] = set()
+        for agent_id, event_id, kind in items:
+            key = (agent_id, event_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            for listener in listeners:
+                try:
+                    listener(agent_id, event_id, kind)
+                except Exception:
+                    continue
 
     @classmethod
     def from_global_config(cls, global_config: Any) -> SessionStore:
@@ -549,11 +606,23 @@ class SessionStore:
             connection.execute(
                 f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}"
             )
+        stack = getattr(self._pending_telegram_notifications, "stack", None)
+        if stack is None:
+            stack = []
+            self._pending_telegram_notifications.stack = stack
+        pending: list[tuple[str, str, str]] = []
+        stack.append(pending)
+        committed = False
         try:
             with connection:
                 yield connection
+            committed = True
         finally:
+            if stack and stack[-1] is pending:
+                stack.pop()
             connection.close()
+        if committed and pending:
+            self._dispatch_telegram_delivery_notifications(pending)
 
     def _initialize(self) -> None:
         with self._lock, self._connection() as connection:
@@ -1833,6 +1902,15 @@ class SessionStore:
                 self._promote_legacy_session_workzones(connection)
             if stored_schema_version < 29:
                 self._revert_legacy_terminal_recovery(connection)
+            if stored_schema_version < 38:
+                self._suppress_legacy_non_deliverable_telegram_tasks(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS connector_delivery_tasks_telegram_active
+                    ON connector_delivery_tasks(session_id, connector_id, created_at, task_id)
+                    WHERE connector_id = 'telegram' AND state IN ('pending', 'retry', 'claimed')
+                """
+            )
             from orchestrator import attachment_catalogue
             attachment_catalogue.install_schema(connection)
             from orchestrator.standby.store import install_schema as install_standby_schema
@@ -1846,6 +1924,55 @@ class SessionStore:
                 (str(self.SCHEMA_VERSION),),
             )
         self._repair_pending_audio_projections()
+
+    def _suppress_legacy_non_deliverable_telegram_tasks(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        """Schema 38 cleanup: suppress historical zombie telegram/pending tasks.
+
+        Prior versions inserted ``connector_delivery_tasks(connector_id='telegram',
+        state='pending')`` for internal lifecycle events (such as ``run.accepted``,
+        ``run.stopped``, ``session.title_updated``) that Telegram never consumes,
+        as well as legacy route-less ``frontend.message.recorded`` rows. Leaving
+        them in ``pending`` forced every Worker to rescan them indefinitely.
+        """
+        now = _utc_now()
+        deliverable_sql = ", ".join(
+            f"'{kind}'" for kind in sorted(self.TELEGRAM_DELIVERABLE_EVENT_KINDS)
+        )
+        connection.execute(
+            f"""
+            UPDATE connector_delivery_tasks
+            SET state = 'suppressed',
+                last_error_code = 'telegram_non_deliverable_event',
+                completed_at = COALESCE(completed_at, ?)
+            WHERE connector_id = 'telegram'
+              AND state = 'pending'
+              AND EXISTS (
+                  SELECT 1 FROM run_events AS e
+                  WHERE e.event_id = connector_delivery_tasks.event_id
+                    AND e.kind NOT IN ({deliverable_sql})
+              )
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            UPDATE connector_delivery_tasks
+            SET state = 'suppressed',
+                last_error_code = 'telegram_missing_route',
+                completed_at = COALESCE(completed_at, ?)
+            WHERE connector_id = 'telegram'
+              AND state = 'pending'
+              AND run_id IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM run_events AS e
+                  WHERE e.event_id = connector_delivery_tasks.event_id
+                    AND e.detail_json NOT LIKE '%delivery_route%'
+              )
+            """,
+            (now,),
+        )
 
     def _revert_legacy_terminal_recovery(
         self, connection: sqlite3.Connection
@@ -2898,8 +3025,16 @@ class SessionStore:
                         "retry_class": "query_before_retry",
                     }
                 ]
+            if kind not in self.TELEGRAM_DELIVERABLE_EVENT_KINDS:
+                destinations = [
+                    dest
+                    for dest in destinations
+                    if str(dest.get("connector_id") or "") != "telegram"
+                ]
+            telegram_inserted = False
             for destination in destinations:
-                connection.execute(
+                connector_id = str(destination["connector_id"])
+                cursor = connection.execute(
                     """
                     INSERT INTO connector_delivery_tasks(
                         task_id, session_id, run_id, event_id, connector_id,
@@ -2913,7 +3048,7 @@ class SessionStore:
                         session_id,
                         run_id,
                         event_id,
-                        str(destination["connector_id"]),
+                        connector_id,
                         str(destination["endpoint_id"]),
                         str(destination.get("role") or "primary"),
                         _json(list(destination.get("content_modes") or [])),
@@ -2923,6 +3058,19 @@ class SessionStore:
                         ),
                         created_at,
                     ),
+                )
+                if connector_id == "telegram" and cursor.rowcount == 1:
+                    telegram_inserted = True
+            if telegram_inserted:
+                session_agent_row = connection.execute(
+                    "SELECT agent_id FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if session_agent_row is not None and session_agent_row["agent_id"]:
+                    self._queue_telegram_delivery_notification(
+                        str(session_agent_row["agent_id"]),
+                        event_id,
+                        kind,
                     )
             if invalid_route:
                 connection.execute(
@@ -7136,40 +7284,85 @@ class SessionStore:
     ) -> list[dict[str, Any]]:
         """Find durable Telegram results/notices, including offline deferrals.
 
-        Only existing frozen endpoints are eligible. Unknown/expired claims
-        are never resent; the normal lease owner reconciles their uncertainty.
+        Scoped strictly to this Agent's sessions so one Agent's pending backlog
+        never causes another Agent to scan unrelated delivery rows. Only
+        existing frozen endpoints are eligible. Unknown/expired claims are
+        never resent; the normal lease owner reconciles their uncertainty.
         """
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("incremental delivery limit must be between 1 and 100")
         now = datetime.now(timezone.utc).isoformat()
+        normalized_agent = str(agent_id).lower()
+        missing_route_task_ids: list[str] = []
+        candidates: list[tuple[str, str, dict[str, Any]]] = []
         with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                """SELECT t.session_id, s.owner_id, COALESCE(r.request_id, '') AS request_id,
-                          t.event_id, r.delivery_route_json, e.detail_json
-                   FROM connector_delivery_tasks AS t
-                   JOIN sessions AS s ON s.session_id=t.session_id
-                   JOIN run_events AS e ON e.event_id=t.event_id
-                   LEFT JOIN runs AS r ON r.run_id=t.run_id
+            active_sessions = connection.execute(
+                """SELECT s.session_id, s.owner_id
+                   FROM sessions AS s
                    WHERE s.instance_id=? AND s.agent_id=?
-                     AND (r.agent_id=? OR r.run_id IS NULL)
-                     AND t.connector_id='telegram'
-                     AND e.kind IN ('run.completed','run.failed','run.cancelled',
-                                    'run.interrupted','assistant.output.available',
-                                    'frontend.message.recorded','run.question.created')
-                     AND (t.state IN ('pending','retry') OR
-                          (t.state='claimed' AND t.lease_expires_at<=?))
-                   ORDER BY t.created_at, t.task_id LIMIT ?""",
-                (self.instance_id, str(agent_id).lower(), str(agent_id).lower(), now, limit),
+                     AND EXISTS (
+                         SELECT 1 FROM connector_delivery_tasks AS t
+                         WHERE t.session_id=s.session_id
+                           AND t.connector_id='telegram'
+                           AND t.state IN ('pending','retry','claimed')
+                           AND (t.state!='claimed' OR t.lease_expires_at<=?)
+                     )""",
+                (self.instance_id, normalized_agent, now),
             ).fetchall()
-        result = []
-        for row in rows:
-            detail = _json_object(row["detail_json"])
-            route = _json_object(row["delivery_route_json"] or "{}") or detail.get("delivery_route")
-            if not route:
-                continue  # Never infer a new destination for legacy notices.
-            result.append({**{key: row[key] for key in ("session_id","owner_id","request_id","event_id")},
-                           "delivery_route": route})
-        return result
+            if not active_sessions:
+                return []
+            for session_row in active_sessions:
+                session_id = str(session_row["session_id"])
+                owner_id = str(session_row["owner_id"])
+                rows = connection.execute(
+                    """SELECT t.task_id, t.session_id, t.created_at,
+                              COALESCE(r.request_id, '') AS request_id,
+                              t.event_id, r.delivery_route_json, e.detail_json
+                       FROM connector_delivery_tasks AS t
+                       JOIN run_events AS e ON e.event_id=t.event_id
+                       LEFT JOIN runs AS r ON r.run_id=t.run_id
+                       WHERE t.session_id=?
+                         AND t.connector_id='telegram'
+                         AND t.state IN ('pending','retry','claimed')
+                         AND (t.state!='claimed' OR t.lease_expires_at<=?)
+                         AND (r.agent_id=? OR r.run_id IS NULL)
+                         AND e.kind IN ('run.completed','run.failed','run.cancelled',
+                                        'run.interrupted','assistant.output.available',
+                                        'frontend.message.recorded','run.question.created')
+                       ORDER BY t.created_at, t.task_id LIMIT ?""",
+                    (session_id, now, normalized_agent, limit),
+                ).fetchall()
+                for row in rows:
+                    detail = _json_object(row["detail_json"])
+                    route = _json_object(row["delivery_route_json"] or "{}") or detail.get("delivery_route")
+                    if not route:
+                        missing_route_task_ids.append(str(row["task_id"]))
+                        continue  # Never infer a new destination for legacy notices.
+                    candidates.append(
+                        (
+                            str(row["created_at"] or ""),
+                            str(row["task_id"]),
+                            {
+                                "session_id": str(row["session_id"]),
+                                "owner_id": owner_id,
+                                "request_id": str(row["request_id"]),
+                                "event_id": str(row["event_id"]),
+                                "delivery_route": route,
+                            },
+                        )
+                    )
+            if missing_route_task_ids:
+                connection.executemany(
+                    """UPDATE connector_delivery_tasks
+                       SET state='suppressed',
+                           last_error_code='telegram_missing_route',
+                           completed_at=COALESCE(completed_at, ?)
+                       WHERE task_id=? AND state IN ('pending','retry')""",
+                    [(now, tid) for tid in missing_route_task_ids],
+                )
+        if len(active_sessions) > 1:
+            candidates.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in candidates[:limit]]
 
     def run_deliverable_publication(
         self,
@@ -14114,26 +14307,34 @@ class SessionStore:
             )
             return True
 
-    def promotion_status(self, *, agent_id: str) -> dict[str, Any]:
+    def get_promotion_schedule(self, *, agent_id: str) -> dict[str, Any]:
+        """Lightweight O(1) schedule lookup without scanning promotion candidates."""
+        normalized_agent = str(agent_id).lower()
         with self._lock, self._connection() as connection:
             schedule = connection.execute(
                 "SELECT * FROM memory_promotion_schedules WHERE agent_id = ?",
-                (str(agent_id).lower(),),
+                (normalized_agent,),
             ).fetchone()
+        if schedule is not None:
+            return dict(schedule)
+        return {
+            "agent_id": normalized_agent,
+            "enabled": 1,
+            "local_time": "00:00",
+            "timezone": "local",
+            "last_local_date": None,
+        }
+
+    def promotion_status(self, *, agent_id: str) -> dict[str, Any]:
+        normalized_agent = str(agent_id).lower()
+        schedule = self.get_promotion_schedule(agent_id=normalized_agent)
+        with self._lock, self._connection() as connection:
             promoted = connection.execute(
                 "SELECT COUNT(*) AS value FROM agent_memory_records WHERE agent_id = ?",
-                (str(agent_id).lower(),),
+                (normalized_agent,),
             ).fetchone()
         return {
-            "schedule": dict(schedule)
-            if schedule is not None
-            else {
-                "agent_id": str(agent_id).lower(),
-                "enabled": 1,
-                "local_time": "00:00",
-                "timezone": "local",
-                "last_local_date": None,
-            },
+            "schedule": schedule,
             "promoted_count": int(promoted["value"] if promoted is not None else 0),
             "pending_count": len(
                 self.promotion_candidates(agent_id=agent_id, limit=5000)
@@ -14148,7 +14349,7 @@ class SessionStore:
         local_time: str | None = None,
         timezone_name: str | None = None,
     ) -> dict[str, Any]:
-        current = self.promotion_status(agent_id=agent_id)["schedule"]
+        current = self.get_promotion_schedule(agent_id=agent_id)
         resolved_enabled = (
             bool(current.get("enabled", 1)) if enabled is None else bool(enabled)
         )
@@ -14182,7 +14383,7 @@ class SessionStore:
                     _utc_now(),
                 ),
             )
-        return self.promotion_status(agent_id=agent_id)["schedule"]
+        return self.get_promotion_schedule(agent_id=agent_id)
 
     def mark_promotion_schedule_ran(self, *, agent_id: str, local_date: str) -> None:
         with self._lock, self._connection() as connection:

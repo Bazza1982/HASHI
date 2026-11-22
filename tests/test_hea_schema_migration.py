@@ -83,9 +83,9 @@ def _append_terminal(store: SessionStore, session_id: str, kind: str = "run.comp
         )
 
 
-def test_fresh_database_is_schema_37_with_event_index(db_path):
+def test_fresh_database_is_current_schema_with_event_index(db_path):
     store = SessionStore(db_path, instance_id="HASHI1")
-    assert _meta_version(db_path) == 37
+    assert _meta_version(db_path) == SessionStore.SCHEMA_VERSION
     with store._lock, store._connection() as connection:
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='automation_event_index'"
@@ -107,7 +107,7 @@ def test_schema36_database_migrates_with_sessions_and_runs_intact(db_path):
     # The 37 build migrates on open: table recreated, version restored, and
     # all prior Session/Run data intact.
     reopened = SessionStore(db_path, instance_id="HASHI1")
-    assert _meta_version(db_path) == 37
+    assert _meta_version(db_path) == SessionStore.SCHEMA_VERSION
     assert reopened.get_session(seeded["session_id"], owner_id="user:7") is not None
     run = reopened.get_run(seeded["run_id"], owner_id="user:7")
     assert run["run_id"] == seeded["run_id"]
@@ -183,7 +183,7 @@ def test_reopen_after_migration_keeps_version_and_events(db_path):
     del first
 
     second = SessionStore(db_path, instance_id="HASHI1")
-    assert _meta_version(db_path) == 37
+    assert _meta_version(db_path) == SessionStore.SCHEMA_VERSION
     page = terminal_events_page(second, owner_id="user:7", after=-1, limit=50)
     assert page["next_cursor"] == 1  # only the post-migration event
     assert page["events"] == []
@@ -214,7 +214,7 @@ def test_downgrade_procedure_then_reupgrade_rebaselines(db_path):
 
     # Re-upgrade.
     upgraded = SessionStore(db_path, instance_id="HASHI1")
-    assert _meta_version(db_path) == 37
+    assert _meta_version(db_path) == SessionStore.SCHEMA_VERSION
     # The feed head restarts at zero; a consumer holding an old cursor must
     # see reset_required and re-baseline (documented contract), never skip.
     stale_consumer = terminal_events_page(upgraded, owner_id="user:7", after=5, limit=50)

@@ -176,6 +176,7 @@ class RunQuestions:
                     created_at TEXT NOT NULL, expires_epoch REAL NOT NULL, updated_at TEXT NOT NULL,
                     UNIQUE(run_id,create_key), FOREIGN KEY(run_id) REFERENCES runs(run_id))''')
                 c.execute('CREATE INDEX IF NOT EXISTS run_questions_session ON run_questions(session_id,context_generation,created_at)')
+                c.execute("CREATE INDEX IF NOT EXISTS run_questions_active_by_agent ON run_questions(instance_id,agent_id,created_at) WHERE state IN ('pending','answered')")
                 c.execute('''CREATE TABLE IF NOT EXISTS run_question_preferences (
                     instance_id TEXT NOT NULL, scope_key TEXT NOT NULL, enabled INTEGER NOT NULL,
                     PRIMARY KEY(instance_id,scope_key), CHECK(enabled IN (0,1)))''')

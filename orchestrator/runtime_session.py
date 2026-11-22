@@ -2808,7 +2808,12 @@ def _schedule_now(schedule: Mapping[str, Any]) -> tuple[datetime, str]:
 
 
 def promotion_is_due(runtime: Any) -> tuple[bool, str]:
-    schedule = ensure_store(runtime).promotion_status(agent_id=runtime.name)["schedule"]
+    store = ensure_store(runtime)
+    schedule = (
+        store.get_promotion_schedule(agent_id=runtime.name)
+        if hasattr(store, "get_promotion_schedule")
+        else store.promotion_status(agent_id=runtime.name)["schedule"]
+    )
     if not bool(schedule.get("enabled", 1)):
         return False, ""
     now, local_date = _schedule_now(schedule)
@@ -2821,23 +2826,44 @@ def promotion_is_due(runtime: Any) -> tuple[bool, str]:
 
 async def automatic_promotion_loop(runtime: Any) -> None:
     while not bool(getattr(runtime, "is_shutting_down", False)):
+        sleep_seconds = 60.0
         try:
-            due, local_date = promotion_is_due(runtime)
+            due, local_date = await asyncio.to_thread(promotion_is_due, runtime)
             if due:
-                result = promote_sessions(runtime, trigger="scheduled")
-                ensure_store(runtime).mark_promotion_schedule_ran(
-                    agent_id=runtime.name, local_date=local_date
+                result = await asyncio.to_thread(
+                    promote_sessions, runtime, trigger="scheduled"
+                )
+                await asyncio.to_thread(
+                    ensure_store(runtime).mark_promotion_schedule_ran,
+                    agent_id=runtime.name,
+                    local_date=local_date,
                 )
                 runtime.logger.info(
                     "Scheduled Session promotion completed: promoted=%s pending=%s",
                     result["promoted_count"],
                     result["pending_count"],
                 )
+                sleep_seconds = 300.0
+            elif not local_date:
+                # Disabled schedule: check infrequently to minimize idle DB wakeups.
+                sleep_seconds = 300.0
+            else:
+                # Already ran today -> sleep coarsely; before target time -> check every minute.
+                store = ensure_store(runtime)
+                schedule = (
+                    await asyncio.to_thread(
+                        store.get_promotion_schedule, agent_id=runtime.name
+                    )
+                    if hasattr(store, "get_promotion_schedule")
+                    else {}
+                )
+                if str(schedule.get("last_local_date") or "") == local_date:
+                    sleep_seconds = 300.0
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             runtime.logger.exception("Scheduled Session promotion failed safely: %s", exc)
-        await asyncio.sleep(30.0)
+        await asyncio.sleep(sleep_seconds)
 
 
 def start_automatic_promotion(runtime: Any) -> None:

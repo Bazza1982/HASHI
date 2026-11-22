@@ -127,14 +127,16 @@ async def test_checkpoint_retry_never_reprocesses_acknowledged_update(monkeypatc
         await ingress.stop()
 
 
-def test_current_schema_reopen_skips_ddl_but_keeps_recovery(tmp_path,monkeypatch):
+def test_current_schema_reopen_skips_ddl_and_defers_recovery(tmp_path,monkeypatch):
     path=tmp_path/"sessions.sqlite3"
     SessionStore(path,instance_id="test")
     monkeypatch.setattr(SessionStore,"_initialize_schema",
         lambda _:pytest.fail("current schema must not migrate again"))
     repair=[]
     monkeypatch.setattr(SessionStore,"_repair_pending_audio_projections",lambda _:repair.append(True))
-    SessionStore(path,instance_id="test")
+    reopened=SessionStore(path,instance_id="test")
+    assert repair==[]
+    reopened.run_deferred_maintenance()
     assert repair==[True]
 
 
@@ -145,7 +147,7 @@ def test_old_schema_still_migrates_and_future_schema_is_rejected(tmp_path):
         db.execute("UPDATE schema_metadata SET value='35' WHERE key='schema_version'")
     SessionStore(path,instance_id="test")
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0]=="36"
+        assert db.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0]==str(SessionStore.SCHEMA_VERSION)
         db.execute("UPDATE schema_metadata SET value='999' WHERE key='schema_version'")
     with pytest.raises(RuntimeError,match="newer schema"):
         SessionStore(path,instance_id="test")

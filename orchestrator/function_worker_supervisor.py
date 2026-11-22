@@ -547,8 +547,15 @@ class FunctionWorkerClient:
         await self.supervisor.handle_worker_event(self, event, payload)
 
     async def _monitor_process(self) -> None:
+        peer_closed = getattr(getattr(self, "peer", None), "_closed", None)
         while self.process.is_alive() and not self.closed:
-            await asyncio.sleep(0.2)
+            if isinstance(peer_closed, asyncio.Event) and not peer_closed.is_set():
+                try:
+                    await asyncio.wait_for(peer_closed.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+            else:
+                await asyncio.sleep(2.0)
         try:
             await asyncio.to_thread(self.process.join, 0.2)
         except (AssertionError, RuntimeError):
@@ -2424,12 +2431,71 @@ class FunctionWorkerSupervisor:
                     and not getattr(self.kernel, "_connector_activation_pending", False)):
                 reconcile()
 
+    def notify_telegram_delivery(self, agent_id: str) -> None:
+        """Forward a committed Telegram deliverable wakeup to the owning Worker.
+
+        Reuses the existing Function Worker IPC channel (one-way event) and
+        skips disconnected Workers completely. Does not drop concurrent wakeups
+        while a previous emit Task is still settling; the Worker's asyncio.Event
+        coalesces signals safely on the receiving side.
+        """
+        target = str(agent_id or "").strip().lower()
+        if not target:
+            return
+        runtime_map = self.kernel._runtime_map()
+        handle = None
+        for name, candidate in runtime_map.items():
+            if str(name or "").strip().lower() == target:
+                handle = candidate
+                break
+        if handle is None:
+            return
+        if not isinstance(handle, AgentRuntimeHandle):
+            from orchestrator.frontend_incremental_delivery import (
+                notify_incremental_telegram_delivery,
+            )
+
+            notify_incremental_telegram_delivery(handle)
+            return
+        if not getattr(handle, "telegram_connected", False):
+            return
+        client = getattr(handle, "client", None)
+        if client is None or getattr(client, "closed", True):
+            return
+        peer = getattr(client, "peer", None)
+        if peer is None or getattr(peer, "is_closed", True):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        tasks = getattr(self, "_telegram_wake_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._telegram_wake_tasks = tasks
+
+        async def _emit() -> None:
+            try:
+                await peer.emit(
+                    "core.telegram_delivery_wake",
+                    {"agent_id": target},
+                )
+            except Exception:
+                pass
+
+        task = loop.create_task(_emit(), name=f"core-tg-wake:{target}")
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     async def handle_worker_event(
         self,
         client: FunctionWorkerClient,
         event: str,
         payload: dict[str, Any],
     ) -> None:
+        if event == "worker.telegram_delivery_wake":
+            self.notify_telegram_delivery(str(payload.get("agent_id") or ""))
+            return
         if event == "worker.log":
             from orchestrator.bootstrap_logging import receive_worker_log
 
