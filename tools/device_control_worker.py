@@ -303,14 +303,93 @@ def _render_origin(host: str, port: int) -> str:
     return f"http://{rendered}:{port}"
 
 
-class _DeviceLock:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.stream: Any | None = None
+def _windows_process_session() -> int | None:
+    """Use the executing worker's OS session, never an Agent or instance ID."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcessId.restype = wintypes.DWORD
+    kernel.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel.ProcessIdToSessionId.restype = wintypes.BOOL
+    session = wintypes.DWORD()
+    if not kernel.ProcessIdToSessionId(kernel.GetCurrentProcessId(), ctypes.byref(session)):
+        raise DeviceWorkerError("device/session write lock identity unavailable")
+    return session.value
+
+
+class _WindowsDesktopMutex:
+    """One Windows session, shared with independent local desktop products.
+
+    Windows mutex ownership is thread-specific. The dedicated owner thread
+    allows a desktop lease watchdog to release it from a different thread.
+    """
+    def __init__(self, session: int | str) -> None:
+        self.name = "Global" + chr(92) + "LocalDesktopControl-Session-v1-" + str(session)
+        self.ready = threading.Event()
+        self.done = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.acquired = False
 
     def acquire(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.thread is not None:
+            raise DeviceWorkerError("device/session write lock already active")
+        self.ready = threading.Event()
+        self.done = threading.Event()
+        self.acquired = False
+
+        def own() -> None:
+            import ctypes
+            from ctypes import wintypes
+
+            handle = None
+            try:
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+                kernel.CreateMutexW.restype = wintypes.HANDLE
+                kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+                kernel.WaitForSingleObject.restype = wintypes.DWORD
+                kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                handle = kernel.CreateMutexW(None, False, self.name)
+                if handle:
+                    self.acquired = kernel.WaitForSingleObject(handle, 0) in (0, 0x80)
+                self.ready.set()
+                if self.acquired:
+                    self.done.wait()
+                    kernel.ReleaseMutex(handle)
+            finally:
+                self.ready.set()
+                if handle:
+                    kernel.CloseHandle(handle)
+
+        self.thread = threading.Thread(target=own, name="device-control-desktop-lock", daemon=True)
+        self.thread.start()
+        if not self.ready.wait(2) or not self.acquired:
+            self.done.set()
+            raise DeviceWorkerError("device/session write lock is held by another controller")
+
+    def release(self) -> None:
+        self.done.set()
+        if self.thread is not None:
+            self.thread.join(timeout=2)
+            self.thread = None
+        self.acquired = False
+
+
+class _DeviceLock:
+    def __init__(self, path: Path, *, windows_session: int | str | None = None) -> None:
+        self.path = path
+        self.stream: Any | None = None
+        self.session_lock = _WindowsDesktopMutex(windows_session) if windows_session is not None else None
+
+    def acquire(self) -> None:
         try:
+            if self.session_lock:
+                self.session_lock.acquire()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             self.stream = self.path.open("a+b")
             self.stream.seek(0)
             if self.stream.read(1) == b"":
@@ -326,30 +405,34 @@ class _DeviceLock:
                 import fcntl
 
                 fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
+        except (OSError, DeviceWorkerError) as exc:
             if self.stream is not None:
                 self.stream.close()
                 self.stream = None
+            if self.session_lock:
+                self.session_lock.release()
             raise DeviceWorkerError(
                 "device/session write lock is held by another worker"
             ) from exc
 
     def release(self) -> None:
-        if self.stream is None:
-            return
         try:
-            self.stream.seek(0)
-            if os.name == "nt":
-                import msvcrt
+            if self.stream is not None:
+                self.stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
 
-                msvcrt.locking(self.stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
+                    msvcrt.locking(self.stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
         finally:
-            self.stream.close()
-            self.stream = None
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
+            if self.session_lock:
+                self.session_lock.release()
 
     def __enter__(self) -> "_DeviceLock":
         self.acquire()
@@ -392,7 +475,10 @@ class DeviceWorkerState:
             if self.desktop_controller is None:
                 from tools.desktop_session import DesktopController
                 from tools.windows_helper.secure_desktop import native_desktop_for
-                self.desktop_controller = DesktopController(native_desktop_for(self.bridge_home), lambda: _DeviceLock(self.lock_path))
+                self.desktop_controller = DesktopController(
+                    native_desktop_for(self.bridge_home),
+                    lambda: _DeviceLock(self.lock_path, windows_session=_windows_process_session()),
+                )
             return self.desktop_controller
 
     @property
@@ -720,7 +806,7 @@ def _optional_device_lock(
     with desktop.guard if desktop is not None else nullcontext():
         if desktop is not None and desktop.protects_input():
             raise DeviceWorkerError("device/session write lock is held by manual desktop control")
-        with _DeviceLock(state.lock_path):
+        with _DeviceLock(state.lock_path, windows_session=_windows_process_session()):
             yield
 
 
@@ -1314,3 +1400,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_3e51459c17c646c1870453cd91ae0e2d
