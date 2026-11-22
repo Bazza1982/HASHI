@@ -669,10 +669,18 @@ context generation for the AP message. Text, voice transcript, Run and reply
 therefore share the Conversation projected by Workbench instead of creating an
 AP-only chat history. Voice uses the existing STT, Safe Voice and PAO admission
 path. When Safe Voice is enabled, HASHI returns the transcript without admitting
-a Run; AP presents an explicit confirm/discard choice, and only an authenticated
-AP decision bound to the same frozen Conversation Session and generation can
-admit it. A primary-Session change invalidates the pending confirmation. AP
-never silently confirms, and Workbench cannot decide an AP-held transcript.
+a Run; AP presents explicit confirm, discard and keep-as-draft choices.
+Keeping does not admit a Run. AP owns the editable local draft and binds it to
+the instance, Conversation Session and context generation. When a saved draft
+is later sent through `/api/agentpresence/draft`, required expected Session and
+generation fields restrict admission to that same current Conversation; they
+never select an Agent or Session. Missing or invalid scope is rejected, and a
+changed Session or generation returns a conflict without sending. Older HASHI
+versions lack this dedicated endpoint and cannot silently accept an unscoped
+draft.
+An authenticated AP confirmation is also bound to the frozen Conversation.
+A primary-Session change invalidates the pending confirmation. AP never silently
+confirms, and Workbench cannot decide an AP-held transcript.
 AgentPresence owns capture, its instance binding and this local presentation,
 not HASHI Agent, Session, Message, Run, Event, call, STT or voice authority.
 Ingress authentication/routing fails closed; this is separate from the egress

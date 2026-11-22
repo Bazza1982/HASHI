@@ -1066,6 +1066,7 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post("/api/agentpresence/draft", self.handle_agentpresence_draft)
         self.app.router.add_post(
             "/api/agentpresence/voice-decision",
             self.handle_agentpresence_voice_decision,
@@ -12022,6 +12023,26 @@ class WorkbenchApiServer:
     def _has_admission_request_id(request_id):
         return isinstance(request_id, str) and bool(request_id.strip())
 
+    async def handle_agentpresence_draft(self, request):
+        """Admit an AP draft only while its original conversation is current."""
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return web.json_response(
+                {"ok": False, "accepted": False, "error_code": "agentpresence_draft_scope_invalid"},
+                status=400,
+            )
+        if (not isinstance(payload, Mapping)
+                or payload.get("source") != "agentpresence"
+                or payload.get("surface") != "agentpresence"
+                or "expected_session_id" not in payload
+                or "expected_context_generation" not in payload):
+            return web.json_response(
+                {"ok": False, "accepted": False, "error_code": "agentpresence_draft_scope_invalid"},
+                status=400,
+            )
+        return await self.handle_chat(request)
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -12375,6 +12396,23 @@ class WorkbenchApiServer:
             )
             if route_rejection is not None:
                 return route_rejection
+            # Saved drafts may restrict admission to their original conversation.
+            # These fields never select a target; HASHI still resolves its own route.
+            expected_session = payload.get("expected_session_id")
+            expected_generation = payload.get("expected_context_generation")
+            if "expected_session_id" in payload or "expected_context_generation" in payload:
+                if (not isinstance(expected_session, str) or not expected_session
+                        or type(expected_generation) is not int or expected_generation < 1):
+                    return web.json_response(
+                        {"ok": False, "accepted": False, "error_code": "agentpresence_draft_scope_invalid"},
+                        status=400,
+                    )
+                if (expected_session != agentpresence_session_metadata["session_id"]
+                        or expected_generation != agentpresence_session_metadata["session_context_generation"]):
+                    return web.json_response(
+                        {"ok": False, "accepted": False, "error_code": "agentpresence_draft_session_changed"},
+                        status=409,
+                    )
         else:
             agentpresence_session_metadata = None
             agent_name = payload.get("agent") or payload.get("agentId")
