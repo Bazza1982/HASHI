@@ -278,7 +278,17 @@ The following rules are mandatory:
 - clicks, typing, scrolling, focus, navigation, and other mutations require a
   short-lived control lease for the affected device/session/window;
 - the platform-side agent enforces the final device write lock so two HASHI
-  instances cannot concurrently drive the same desktop;
+  instances cannot concurrently drive the same desktop; on Windows, mutating
+  Browser/Computer actions and manual desktop leases also hold the named OS
+  mutex `Global\\LocalDesktopControl-Session-v1-{session_id}` for their actual
+  Windows target session: the process session for native input and the
+  authenticated interactive bridge session for SYSTEM-hosted desktop input.
+  This optional coordination lets independent local
+  desktop controllers share the same physical input boundary without requiring
+  either product to run or to connect to the other. The existing per-device
+  lock remains in force, and lock or session-query failures deny mutation;
+  existing older Workers do not coordinate until their updated generation is
+  installed and running;
 - a browser-to-computer handoff records the source capability, target
   capability, window/tab identity, task identity, and lease transition;
 - a Browser Worker failure must not silently escalate to full-computer control;
