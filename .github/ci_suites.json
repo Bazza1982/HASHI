@@ -68,6 +68,9 @@
       "-q"
     ],
     "tests": [
+      "tests/test_agentpresence_ingress.py",
+      "tests/test_agentpresence_desktop_context.py",
+      "tests/test_agentpresence_controls.py",
       "tests/test_workbench_primary_session_metadata.py",
       "tests/test_admin_failure_details.py",
       "tests/test_management_failure_details.py",

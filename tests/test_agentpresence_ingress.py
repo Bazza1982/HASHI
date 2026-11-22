@@ -242,6 +242,17 @@ async def test_agentpresence_saved_draft_cannot_follow_a_changed_session(tmp_pat
         "expected_context_generation": first["context_generation"],
     }
     async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/api/agentpresence/draft", json=payload,
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        )
+        assert response.status == 403
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post(
+            "/api/agentpresence/draft", json={**payload, "source": "api", "surface": "workbench"},
+        )
+        assert response.status == 400
+        runtime.enqueue_api_text.assert_not_awaited()
         response = await client.post("/api/agentpresence/draft", json=payload)
         assert response.status == 409
         assert (await response.json())["error_code"] == "agentpresence_draft_session_changed"
