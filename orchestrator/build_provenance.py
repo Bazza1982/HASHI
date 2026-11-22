@@ -267,8 +267,8 @@ def inspect_source_checkout(
             "branch": None,
             "commit": packaged.get("commit"),
             "commit_time": packaged.get("commit_time"),
-            "dirty": False,
-            "change_count": 0,
+            "dirty": packaged.get("dirty"),
+            "change_count": packaged.get("change_count"),
             "relation": "unavailable",
             "reason": "packaged_install",
         }

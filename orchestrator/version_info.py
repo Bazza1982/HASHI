@@ -495,6 +495,18 @@ def collect_version_payload(
 
     if source.get("available") and source.get("dirty") is None:
         reasons.append("source_status_unavailable")
+    packaged_commit = ""
+    if not source.get("available") and source.get("reason") == "packaged_install":
+        packaged_commit = _commit_text(source.get("commit"))
+        if not packaged_commit:
+            reasons.append("packaged_source_commit_unavailable")
+        elif (shared_commit or running_commit) and packaged_commit != (shared_commit or running_commit):
+            mixed = True
+            reasons.append("packaged_source_commit_differs")
+        if source.get("dirty") is True:
+            reasons.append("packaged_source_dirty")
+        elif source.get("dirty") is not False:
+            reasons.append("packaged_source_status_unknown")
 
     if mixed:
         state_code = "mixed_generations"
@@ -515,7 +527,7 @@ def collect_version_payload(
             state_code = "provenance_unavailable"
             reasons.append("commit_relation_unknown")
     else:
-        state_code = "packaged_release"
+        state_code = "packaged_release" if packaged_commit else "provenance_unavailable"
 
     if state_code in {"running_matches_source", "packaged_release"} and reasons:
         state_code = "component_unverified"

@@ -123,6 +123,16 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
                 agent=str(worker.get("agent") or _tr("version.unavailable", locale)),
                 actual=_short(commit), expected=_short(shared_commit),
             ))
+    if "packaged_source_commit_differs" in reasons:
+        lines.append(_tr("version.issue.package_mismatch", locale,
+                         actual=_short((payload.get("source") or {}).get("commit")),
+                         expected=_short(shared_commit or running.get("commit"))))
+    if "packaged_source_commit_unavailable" in reasons:
+        lines.append(_tr("version.issue.package_commit_unknown", locale))
+    if "packaged_source_dirty" in reasons:
+        lines.append(_tr("version.issue.package_dirty", locale))
+    if "packaged_source_status_unknown" in reasons:
+        lines.append(_tr("version.issue.package_status_unknown", locale))
     if "function_worker_identity_unavailable" in reasons:
         lines.append(_tr("version.issue.worker_unverified", locale))
     if "function_worker_dirty_at_build" in reasons:

@@ -189,6 +189,50 @@ def test_packaged_provenance_never_invents_a_branch(tmp_path: Path) -> None:
     assert source["reason"] == "packaged_install"
 
 
+def test_packaged_source_requires_matching_known_clean_provenance(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        '[project]\\nname = "hashi-bridge"\\nversion = "4.0.0a2"\\n', encoding="utf-8"
+    )
+    commit = "a" * 40
+    info = {"release_channel": "portable", "commit": commit, "dirty_at_build": False}
+    info_path = source / "BUILD_INFO.json"
+    info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = {"schema_version": 1, "generation_id": generation,
+                  "commit": commit, "dirty_at_build": False}
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: {
+        "status": "active", "pid": 23,
+        "provenance": {"commit": commit, "dirty_at_build": False},
+    })
+
+    assert collect_version_payload(owner)["state"]["code"] == "packaged_release"
+    info["commit"] = "b" * 40
+    info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+    different = collect_version_payload(owner)
+    assert different["state"]["code"] == "mixed_generations"
+    assert "packaged_source_commit_differs" in different["state"]["reasons"]
+    assert "package" in render_version_card(different, locale="en").lower()
+
+    info["commit"] = None
+    info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+    missing = collect_version_payload(owner)
+    assert missing["state"]["code"] == "provenance_unavailable"
+    assert "packaged_source_commit_unavailable" in missing["state"]["reasons"]
+
+    info["commit"] = commit
+    for dirty in (True, None):
+        info["dirty_at_build"] = dirty
+        info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+        uncertain = collect_version_payload(owner)
+        assert uncertain["state"]["code"] == "component_unverified"
+        assert ("packaged_source_dirty" if dirty else "packaged_source_status_unknown") in uncertain["state"]["reasons"]
+
+
 def test_payload_distinguishes_source_ahead_mixed_and_legacy(
     tmp_path: Path, monkeypatch
 ) -> None:
