@@ -818,6 +818,9 @@ class FunctionWorkerHost:
         self.legacy_reboot_bridge_task: asyncio.Task[Any] | None = None
         self.command_menu_task: asyncio.Task[Any] | None = None
         self.generation_finder: _GenerationModuleFinder | None = None
+        self._resource_alert_listener: Any = None
+        self._resource_metadata_publish_task: asyncio.Task[Any] | None = None
+        self._peer_telegram_wake_tasks: set[asyncio.Task[Any]] = set()
 
     @timed("worker.prepare")
     async def prepare(self) -> None:
@@ -1289,6 +1292,69 @@ class FunctionWorkerHost:
         return list(reconciled)
 
     @timed("worker.activate")
+    def _schedule_peer_telegram_wake(self, target_agent_id: str) -> None:
+        target = str(target_agent_id or "").strip().lower()
+        if not target or target == self.agent_name.lower() or self.phase in {"STOPPING", "STOPPED"}:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        async def _emit() -> None:
+            try:
+                await self.peer.emit(
+                    "worker.telegram_delivery_wake",
+                    {"agent_id": target},
+                )
+            except Exception:
+                pass
+        task = loop.create_task(_emit(), name=f"worker-tg-wake:{target}")
+        self._peer_telegram_wake_tasks.add(task)
+        task.add_done_callback(self._peer_telegram_wake_tasks.discard)
+
+    def _install_resource_alert_bridge(self) -> None:
+        from orchestrator import frontend_database
+
+        self._remove_resource_alert_bridge()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        def _schedule_publish() -> None:
+            if self.phase in {"STOPPING", "STOPPED"} or self.runtime is None:
+                return
+            pending = self._resource_metadata_publish_task
+            if isinstance(pending, asyncio.Task) and not pending.done():
+                return
+            self._resource_metadata_publish_task = loop.create_task(
+                self.publish_metadata(),
+                name=f"worker-resource-health:{self.agent_name}",
+            )
+
+        def _on_alert_change(_alerts: list[dict[str, Any]]) -> None:
+            if loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(_schedule_publish)
+            except RuntimeError:
+                pass
+
+        frontend_database.register_resource_alert_listener(_on_alert_change)
+        self._resource_alert_listener = _on_alert_change
+
+    def _remove_resource_alert_bridge(self) -> None:
+        listener = getattr(self, "_resource_alert_listener", None)
+        if listener is not None:
+            from orchestrator import frontend_database
+
+            frontend_database.unregister_resource_alert_listener(listener)
+            self._resource_alert_listener = None
+        pending = getattr(self, "_resource_metadata_publish_task", None)
+        if isinstance(pending, asyncio.Task) and not pending.done():
+            pending.cancel()
+        self._resource_metadata_publish_task = None
+
     async def activate(self) -> dict[str, Any]:
         if self.phase != "READY":
             raise FunctionWorkerStateError(
@@ -1303,6 +1369,14 @@ class FunctionWorkerHost:
         runtime.startup_success = True
         if hasattr(runtime, "prepare_post_start_state"):
             runtime.prepare_post_start_state()
+        from orchestrator.frontend_incremental_delivery import (
+            bind_telegram_delivery_wakeup,
+        )
+
+        bind_telegram_delivery_wakeup(
+            runtime, peer_notifier=self._schedule_peer_telegram_wake
+        )
+        self._install_resource_alert_bridge()
         runtime.process_task = asyncio.create_task(
             runtime.process_queue(),
             name=f"queue-{runtime.name}",
@@ -1424,6 +1498,9 @@ class FunctionWorkerHost:
             return {"ok": True}
         self.phase = "STOPPING"
         self.accepting = False
+        self._remove_resource_alert_bridge()
+        for task in tuple(getattr(self, "_peer_telegram_wake_tasks", ())):
+            task.cancel()
         await self._cancel_connector_tasks()
         command_menu_task = getattr(self, "command_menu_task", None)
         if command_menu_task is not None:
@@ -1465,9 +1542,25 @@ class FunctionWorkerHost:
             if self.facade is not None:
                 self.facade.update_topology(payload)
             return
+        if event == "core.telegram_delivery_wake":
+            if self.runtime is not None:
+                from orchestrator.frontend_incremental_delivery import (
+                    notify_incremental_telegram_delivery,
+                )
+
+                notify_incremental_telegram_delivery(self.runtime)
+            return
         raise FunctionWorkerStateError(f"unknown Core event: {event}")
 
     async def handle_request(self, method: str, params: dict[str, Any]) -> Any:
+        if method == "worker.telegram_delivery_wake":
+            if self.runtime is not None:
+                from orchestrator.frontend_incremental_delivery import (
+                    notify_incremental_telegram_delivery,
+                )
+
+                notify_incremental_telegram_delivery(self.runtime)
+            return {"ok": True}
         if method == "worker.ping":
             return {
                 "pid": os.getpid(),

@@ -197,27 +197,49 @@ def test_schema_migration_cleans_legacy_zombies_and_enforces_indexed_query_plans
         ).fetchone()[0]
         assert no_route_state == "suppressed"
 
-        # EXPLAIN QUERY PLAN assertion: hot telegram scan MUST use partial index and NEVER use TEMP B-TREE!
+        # EXPLAIN QUERY PLAN assertions: both active-session discovery and per-session
+        # top-K retrieval MUST use connector_delivery_tasks_telegram_active (session_id=?)
+        # with ZERO full table scan and ZERO TEMP B-TREE!
+        active_plan_text = "\n".join(
+            str(r[3])
+            for r in conn.execute(
+                """EXPLAIN QUERY PLAN
+                   SELECT s.session_id, s.owner_id
+                   FROM sessions AS s
+                   WHERE s.instance_id='HASHI_MIG' AND s.agent_id='zhao_ling'
+                     AND EXISTS (
+                         SELECT 1 FROM connector_delivery_tasks AS t
+                         WHERE t.session_id=s.session_id
+                           AND t.connector_id='telegram'
+                           AND t.state IN ('pending','retry','claimed')
+                           AND (t.state!='claimed' OR t.lease_expires_at<='2026-11-23T00:00:00Z')
+                     )"""
+            ).fetchall()
+        )
+        assert "connector_delivery_tasks_telegram_active (session_id=? AND connector_id=?)" in active_plan_text, active_plan_text
+        assert "SCAN t" not in active_plan_text, active_plan_text
+
         plan_rows = conn.execute(
             """EXPLAIN QUERY PLAN
-               SELECT t.session_id, s.owner_id, COALESCE(r.request_id, '') AS request_id,
+               SELECT t.task_id, t.session_id, t.created_at,
+                      COALESCE(r.request_id, '') AS request_id,
                       t.event_id, r.delivery_route_json, e.detail_json
                FROM connector_delivery_tasks AS t
-               CROSS JOIN sessions AS s ON s.session_id=t.session_id
                JOIN run_events AS e ON e.event_id=t.event_id
                LEFT JOIN runs AS r ON r.run_id=t.run_id
-               WHERE t.connector_id='telegram'
+               WHERE t.session_id=?
+                 AND t.connector_id='telegram'
                  AND t.state IN ('pending','retry','claimed')
                  AND (t.state!='claimed' OR t.lease_expires_at<='2026-11-23T00:00:00Z')
-                 AND s.instance_id='HASHI_MIG' AND s.agent_id='zhao_ling'
                  AND (r.agent_id='zhao_ling' OR r.run_id IS NULL)
                  AND e.kind IN ('run.completed','run.failed','run.cancelled',
                                 'run.interrupted','assistant.output.available',
                                 'frontend.message.recorded','run.question.created')
-               ORDER BY t.created_at, t.task_id LIMIT 20"""
+               ORDER BY t.created_at, t.task_id LIMIT 20""",
+            (session["session_id"],),
         ).fetchall()
         plan_text = "\n".join(str(r[3]) for r in plan_rows)
-        assert "connector_delivery_tasks_telegram_active" in plan_text, plan_text
+        assert "connector_delivery_tasks_telegram_active (session_id=? AND connector_id=?)" in plan_text, plan_text
         assert "USE TEMP B-TREE FOR ORDER BY" not in plan_text, plan_text
         assert "SCAN t" not in plan_text, plan_text
 
@@ -560,5 +582,777 @@ async def test_slow_db_and_spin_alerting_escalates_warning_and_surfaces_in_healt
         assert "resource_health" in payload
         assert payload["resource_health"]["alerts"], "handle_health must expose active resource alerts"
         assert any(issue.get("code") == "slow_database_work" for issue in payload["issues"])
+        # Performance warnings MUST NOT break normal service availability contract!
+        assert payload["ready"] is True
+        assert payload["status"] == "ready"
+        assert payload["degraded"] is False
     finally:
         frontend_database.reset_database_work_metrics()
+
+
+# ---------------------------------------------------------------------------
+# 9. P2 Multi-Agent SQLite scan isolation across 6 stress/correctness scenarios
+# ---------------------------------------------------------------------------
+
+
+def test_multi_agent_telegram_scan_isolation_and_ordering(tmp_path: Path):
+    db_path = tmp_path / "multi_agent.sqlite3"
+    store = SessionStore(db_path, instance_id="HASHI_ISO")
+    owner = "user:1"
+    sess_a1 = store.ensure_default_session(owner_id=owner, agent_id="agent_a")
+    sess_b1 = store.ensure_default_session(owner_id=owner, agent_id="agent_b")
+    sess_c1 = store.ensure_default_session(owner_id=owner, agent_id="agent_c")
+    sess_c2 = store.create_session(owner_id=owner, agent_id="agent_c", title="second")
+    sess_d1 = store.ensure_default_session(owner_id=owner, agent_id="agent_d")
+    sess_e1 = store.ensure_default_session(owner_id=owner, agent_id="agent_e")
+
+    route_json = json.dumps({"delivery_route": _telegram_route(chat_id=9001)})
+
+    with sqlite3.connect(db_path) as conn:
+        # 1) 10,000 completed historical rows
+        conn.executemany(
+            """INSERT INTO run_events(event_id, session_id, run_id, sequence, kind, status, phase, summary, detail_json, created_at)
+               VALUES (?, ?, NULL, ?, 'assistant.output.available', 'completed', 'delivery', 'done', ?, ?)""",
+            [(f"ev_comp_{i}", sess_a1["session_id"], 100 + i, route_json, f"2026-09-01T00:{(i // 60) % 60:02d}:{i % 60:02d}Z") for i in range(10_000)],
+        )
+        conn.executemany(
+            """INSERT INTO connector_delivery_tasks(task_id, session_id, run_id, event_id, connector_id, endpoint_id, role, content_modes_json, retry_class, state, created_at)
+               VALUES (?, ?, NULL, ?, 'telegram', 'ep-tg-a', 'primary', '["text"]', 'query_before_retry', 'completed', ?)""",
+            [(f"del_comp_{i}", sess_a1["session_id"], f"ev_comp_{i}", f"2026-09-01T00:{(i // 60) % 60:02d}:{i % 60:02d}Z") for i in range(10_000)],
+        )
+        # 2) 20,000 active pending rows belonging ONLY to Agent A
+        conn.executemany(
+            """INSERT INTO run_events(event_id, session_id, run_id, sequence, kind, status, phase, summary, detail_json, created_at)
+               VALUES (?, ?, NULL, ?, 'assistant.output.available', 'completed', 'delivery', 'pending', ?, ?)""",
+            [(f"ev_a_{i}", sess_a1["session_id"], 20_000 + i, route_json, f"2026-10-{(i // 86400) + 1:02d}T{(i // 3600) % 24:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z") for i in range(20_000)],
+        )
+        conn.executemany(
+            """INSERT INTO connector_delivery_tasks(task_id, session_id, run_id, event_id, connector_id, endpoint_id, role, content_modes_json, retry_class, state, created_at)
+               VALUES (?, ?, NULL, ?, 'telegram', 'ep-tg-a', 'primary', '["text"]', 'query_before_retry', 'pending', ?)""",
+            [(f"del_a_{i:05d}", sess_a1["session_id"], f"ev_a_{i}", f"2026-10-{(i // 86400) + 1:02d}T{(i // 3600) % 24:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z") for i in range(20_000)],
+        )
+        # 3) Agent C: interleaved pending tasks across 2 sessions (verify exact global created_at/task_id order + limit)
+        c_rows = [
+            ("ev_c_1", sess_c1["session_id"], 100, "del_c_1", "2026-11-01T00:00:01Z"),
+            ("ev_c_2", sess_c2["session_id"], 100, "del_c_2", "2026-11-01T00:00:02Z"),
+            ("ev_c_3", sess_c1["session_id"], 101, "del_c_3", "2026-11-01T00:00:03Z"),
+            ("ev_c_4", sess_c2["session_id"], 101, "del_c_4", "2026-11-01T00:00:04Z"),
+            ("ev_c_5", sess_c1["session_id"], 102, "del_c_5", "2026-11-01T00:00:05Z"),
+        ]
+        for eid, sid, seq, tid, ts in c_rows:
+            conn.execute(
+                """INSERT INTO run_events(event_id, session_id, run_id, sequence, kind, status, phase, summary, detail_json, created_at)
+                   VALUES (?, ?, NULL, ?, 'assistant.output.available', 'completed', 'delivery', 'c', ?, ?)""",
+                (eid, sid, seq, route_json, ts),
+            )
+            conn.execute(
+                """INSERT INTO connector_delivery_tasks(task_id, session_id, run_id, event_id, connector_id, endpoint_id, role, content_modes_json, retry_class, state, created_at)
+                   VALUES (?, ?, NULL, ?, 'telegram', 'ep-tg-c', 'primary', '["text"]', 'query_before_retry', 'pending', ?)""",
+                (tid, sid, eid, ts),
+            )
+        # 4) Agent D: expired claimed + retry + unexpired claimed + unknown (unknown MUST NEVER be returned!)
+        d_rows = []
+        for i in range(400):
+            eid = f"ev_d_exp_{i}"
+            conn.execute(
+                """INSERT INTO run_events(event_id, session_id, run_id, sequence, kind, status, phase, summary, detail_json, created_at)
+                   VALUES (?, ?, NULL, ?, 'assistant.output.available', 'completed', 'delivery', 'd', ?, ?)""",
+                (eid, sess_d1["session_id"], 100 + i, route_json, f"2026-11-02T00:{(i // 60) % 60:02d}:{i % 60:02d}Z"),
+            )
+            state = "claimed" if i % 2 == 0 else "retry"
+            lease = "2020-01-01T00:00:00Z" if state == "claimed" else None
+            d_rows.append((f"del_d_exp_{i:04d}", sess_d1["session_id"], eid, state, lease, f"2026-11-02T00:{(i // 60) % 60:02d}:{i % 60:02d}Z"))
+        conn.executemany(
+            """INSERT INTO connector_delivery_tasks(task_id, session_id, run_id, event_id, connector_id, endpoint_id, role, content_modes_json, retry_class, state, lease_expires_at, created_at)
+               VALUES (?, ?, NULL, ?, 'telegram', 'ep-tg-d', 'primary', '["text"]', 'query_before_retry', ?, ?, ?)""",
+            d_rows,
+        )
+        # Add an unexpired claimed row and an unknown row for Agent D
+        for seq, eid, tid, st, lease in (
+            (9000, "ev_d_active_claim", "del_d_active_claim", "claimed", "2099-01-01T00:00:00Z"),
+            (9001, "ev_d_unknown", "del_d_unknown", "unknown", None),
+        ):
+            conn.execute(
+                """INSERT INTO run_events(event_id, session_id, run_id, sequence, kind, status, phase, summary, detail_json, created_at)
+                   VALUES (?, ?, NULL, ?, 'assistant.output.available', 'completed', 'delivery', 'd', ?, '2026-11-01T00:00:00Z')""",
+                (eid, sess_d1["session_id"], seq, route_json),
+            )
+            conn.execute(
+                """INSERT INTO connector_delivery_tasks(task_id, session_id, run_id, event_id, connector_id, endpoint_id, role, content_modes_json, retry_class, state, lease_expires_at, created_at)
+                   VALUES (?, ?, NULL, ?, 'telegram', 'ep-tg-d', 'primary', '["text"]', 'query_before_retry', ?, ?, '2026-11-01T00:00:00Z')""",
+                (tid, sess_d1["session_id"], eid, st, lease),
+            )
+
+    # Scenario A: Agent B has ZERO pending while Agent A has 20,000 pending + 10,000 completed -> must be < 5ms!
+    t0 = time.perf_counter()
+    for _ in range(50):
+        assert store.pending_incremental_telegram_deliveries(agent_id="agent_b") == []
+    avg_b_ms = ((time.perf_counter() - t0) / 50.0) * 1000.0
+    assert avg_b_ms < 5.0, f"Agent B scan impacted by Agent A's 20k backlog: avg={avg_b_ms:.2f}ms"
+
+    # Scenario B: Agent A with 20,000 active pending returns exact top 20 in created_at order rapidly!
+    t0 = time.perf_counter()
+    a_items = store.pending_incremental_telegram_deliveries(agent_id="agent_a", limit=20)
+    a_ms = (time.perf_counter() - t0) * 1000.0
+    assert len(a_items) == 20
+    assert [it["event_id"] for it in a_items[:3]] == ["ev_a_0", "ev_a_1", "ev_a_2"]
+    assert a_ms < 25.0, f"Agent A 20k-pending top-20 query too slow: {a_ms:.2f}ms"
+
+    # Scenario C: Multi-session Agent C preserves global (created_at, task_id) order and exact limit
+    c_top3 = store.pending_incremental_telegram_deliveries(agent_id="agent_c", limit=3)
+    assert [it["event_id"] for it in c_top3] == ["ev_c_1", "ev_c_2", "ev_c_3"]
+    c_all = store.pending_incremental_telegram_deliveries(agent_id="agent_c", limit=20)
+    assert [it["event_id"] for it in c_all] == ["ev_c_1", "ev_c_2", "ev_c_3", "ev_c_4", "ev_c_5"]
+
+    # Scenario D: Expired claimed + retry returned; unexpired claimed & unknown NEVER returned
+    d_items = store.pending_incremental_telegram_deliveries(agent_id="agent_d", limit=10)
+    assert len(d_items) == 10
+    d_ids = {it["event_id"] for it in d_items}
+    assert "ev_d_unknown" not in d_ids
+    assert "ev_d_active_claim" not in d_ids
+
+    # Scenario E: Zero-task Agent E
+    assert store.pending_incremental_telegram_deliveries(agent_id="agent_e") == []
+
+
+# ---------------------------------------------------------------------------
+# PIT A: Connected idle worker (in 60s backoff) wakes IMMEDIATELY on new output
+#        (strictly post-commit; rolled-back writes never wake)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pit_a_idle_worker_in_60s_backoff_wakes_immediately_on_committed_output(
+    tmp_path: Path, monkeypatch
+):
+    store = _new_store(tmp_path)
+    owner = "user:1"
+    session = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    route = _telegram_route(chat_id=1001)
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="zelda",
+        request_id="req-pit-a",
+        source="telegram",
+        idempotency_key="idem-pit-a",
+        text="hello",
+        delivery_route=route,
+    )
+
+    delivered_events: list[str] = []
+    delivered_event = asyncio.Event()
+
+    async def fake_dispatch(rt, *, limit=20):
+        rows = rt.session_store.pending_incremental_telegram_deliveries(agent_id=rt.name, limit=limit)
+        if not rows:
+            return 0
+        for row in rows:
+            delivered_events.append(row["event_id"])
+        delivered_event.set()
+        return len(rows)
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_pending_telegram_deliverables", fake_dispatch)
+    # Force base idle delay to 60s to prove delivery wakes from signal, NOT timer!
+    monkeypatch.setattr(frontend_incremental_delivery, "IDLE_SWEEP_BASE_SECONDS", 60.0)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        is_shutting_down=False,
+        telegram_connected=True,
+        app=SimpleNamespace(bot=object()),
+        session_store=store,
+        global_config=SimpleNamespace(instance_id="HASHI_EFF_TEST"),
+        logger=logging.getLogger("test.pit_a"),
+    )
+
+    frontend_incremental_delivery.start_incremental_telegram_delivery(runtime)
+    try:
+        # Let initial sweep finish and enter the 60s wait.
+        await asyncio.sleep(0.05)
+        assert delivered_events == []
+
+        # Verify rollback NEVER wakes the loop!
+        with pytest.raises(RuntimeError, match="abort"):
+            with store._connection() as conn:
+                store._append_event(
+                    conn,
+                    session_id=session["session_id"],
+                    run_id=accepted.run_id,
+                    kind="assistant.output.available",
+                    status="completed",
+                    phase="delivery",
+                    summary="rolled back",
+                    detail={"delivery_route": route},
+                    outbox=True,
+                )
+                raise RuntimeError("abort")
+        await asyncio.sleep(0.05)
+        assert not delivered_event.is_set()
+
+        # Commit genuine output -> must wake and deliver in << 1s (NOT 60s)!
+        t0 = time.monotonic()
+        store.finish_request(accepted.request_id, success=True, assistant_text="Instant delivery!")
+        await asyncio.wait_for(delivered_event.wait(), timeout=1.0)
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        assert delivered_events, "Expected committed output to be delivered"
+        assert latency_ms < 500.0, f"Delivery waited too long: {latency_ms:.1f}ms"
+    finally:
+        runtime.is_shutting_down = True
+        frontend_incremental_delivery.unbind_telegram_delivery_wakeup(runtime)
+        frontend_incremental_delivery.notify_incremental_telegram_delivery(runtime)
+        await asyncio.wait_for(runtime._incremental_telegram_delivery_task, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# PIT B: Cross-process output wakes owning Worker over existing IPC pipe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pit_b_cross_process_output_wakes_worker_via_existing_ipc(
+    tmp_path: Path, monkeypatch
+):
+    import multiprocessing
+    from orchestrator.function_worker_host import FunctionWorkerHost
+    from orchestrator.function_worker_protocol import JsonConnectionPeer
+    from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
+    from orchestrator.workbench_api import WorkbenchApiServer
+
+    config_path = tmp_path / "agents.json"
+    config_path.write_text(
+        json.dumps({"global": {}, "agents": [{"name": "zelda", "workspace_dir": "workspaces/zelda"}]}),
+        encoding="utf-8",
+    )
+    global_cfg = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        instance_id="HASHI_PIT_B",
+        authorized_id=1,
+        deployment_profile="personal",
+        api_host="127.0.0.1",
+        workbench_port=0,
+        api_gateway_port=None,
+    )
+
+    # Worker side with real JsonConnectionPeer over multiprocessing.Pipe
+    worker_store = SessionStore(tmp_path / "state" / "sessions.sqlite3", instance_id="HASHI_PIT_B")
+    delivered = asyncio.Event()
+
+    async def fake_dispatch(rt, *, limit=20):
+        rows = rt.session_store.pending_incremental_telegram_deliveries(agent_id=rt.name, limit=limit)
+        if rows:
+            delivered.set()
+            return len(rows)
+        return 0
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_pending_telegram_deliverables", fake_dispatch)
+    monkeypatch.setattr(frontend_incremental_delivery, "IDLE_SWEEP_BASE_SECONDS", 60.0)
+
+    worker_runtime = SimpleNamespace(
+        name="zelda",
+        is_shutting_down=False,
+        telegram_connected=True,
+        app=SimpleNamespace(bot=object()),
+        session_store=worker_store,
+        global_config=global_cfg,
+        logger=logging.getLogger("test.pit_b.worker"),
+    )
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.agent_name = "zelda"
+    host.runtime = worker_runtime
+    host.facade = None
+    host.phase = "ACTIVE"
+
+    left, right = multiprocessing.Pipe()
+    core_peer = JsonConnectionPeer(left, label="pit-b-core")
+    worker_peer = JsonConnectionPeer(
+        right,
+        label="pit-b-worker",
+        request_handler=host.handle_request,
+        event_handler=host.handle_event,
+    )
+    core_peer.start()
+    worker_peer.start()
+
+    client = SimpleNamespace(agent_name="zelda", peer=core_peer, closed=False)
+    handle = AgentRuntimeHandle.__new__(AgentRuntimeHandle)
+    handle.name = "zelda"
+    handle._client = client
+    handle.metadata = {"telegram_connected": True}
+
+    supervisor = FunctionWorkerSupervisor.__new__(FunctionWorkerSupervisor)
+    supervisor.kernel = SimpleNamespace(_runtime_map=lambda: {"zelda": handle})
+    orchestrator = SimpleNamespace(function_workers=supervisor, runtimes=[handle])
+
+    # Shared Functions / Workbench API side (separate SessionStore instance!)
+    server = WorkbenchApiServer(
+        config_path=config_path,
+        global_config=global_cfg,
+        orchestrator=orchestrator,
+        reconcile_session_runs=False,
+    )
+
+    frontend_incremental_delivery.start_incremental_telegram_delivery(worker_runtime)
+    try:
+        await asyncio.sleep(0.05)
+        assert not delivered.is_set()
+
+        # Persist output from WorkbenchApiServer's separate SessionStore (simulating functions_host process)
+        session = server.session_store.ensure_default_session(owner_id="user:1", agent_id="zelda")
+        accepted = server.session_store.accept_run(
+            session_id=session["session_id"],
+            owner_id="user:1",
+            agent_id="zelda",
+            request_id="req-pit-b",
+            source="workbench",
+            idempotency_key="idem-pit-b",
+            text="cross process",
+            delivery_route=_telegram_route(chat_id=777),
+        )
+        t0 = time.monotonic()
+        server.session_store.finish_request(accepted.request_id, success=True, assistant_text="Cross-process output!")
+        await asyncio.wait_for(delivered.wait(), timeout=2.0)
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        assert latency_ms < 1000.0, f"Cross-process wake took too long: {latency_ms:.1f}ms"
+    finally:
+        worker_runtime.is_shutting_down = True
+        frontend_incremental_delivery.unbind_telegram_delivery_wakeup(worker_runtime)
+        frontend_incremental_delivery.notify_incremental_telegram_delivery(worker_runtime)
+        await asyncio.wait_for(worker_runtime._incremental_telegram_delivery_task, timeout=1.0)
+        await asyncio.gather(core_peer.close(), worker_peer.close())
+
+
+# ---------------------------------------------------------------------------
+# PIT C: 24 idle workers keep polling near-zero (never flat 2s spin)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pit_c_24_idle_workers_do_not_spin_every_2s(tmp_path: Path, monkeypatch):
+    # Scale time 100x faster (base=0.02s, max=0.60s) to simulate 60s of real idle across 24 workers in 0.6s!
+    monkeypatch.setattr(frontend_incremental_delivery, "IDLE_SWEEP_BASE_SECONDS", 0.02)
+    monkeypatch.setattr(frontend_incremental_delivery, "IDLE_SWEEP_MAX_SECONDS", 0.60)
+    scan_counts = {f"agent_{i}": 0 for i in range(24)}
+    disconnected_scans = 0
+
+    async def fake_dispatch(rt, *, limit=20):
+        nonlocal disconnected_scans
+        if not rt.telegram_connected:
+            disconnected_scans += 1
+        else:
+            scan_counts[rt.name] += 1
+        return 0
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_pending_telegram_deliverables", fake_dispatch)
+
+    runtimes = []
+    tasks = []
+    for i in range(24):
+        rt = SimpleNamespace(
+            name=f"agent_{i}",
+            is_shutting_down=False,
+            telegram_connected=(i < 12),  # 12 connected idle + 12 disconnected
+            app=SimpleNamespace(bot=object() if i < 12 else None),
+            global_config=SimpleNamespace(instance_id="HASHI_24"),
+            logger=logging.getLogger(f"test.pit_c.{i}"),
+        )
+        runtimes.append(rt)
+        tasks.append(asyncio.create_task(frontend_incremental_delivery.incremental_telegram_delivery_loop(rt)))
+
+    try:
+        # 0.65s scaled = ~65s real wall time.
+        # Old flat 2s polling (0.02s scaled) would do ~32 scans per worker (~384 scans for 12 workers).
+        # With exponential backoff (0.02 -> 0.04 -> 0.08 -> 0.16 -> 0.32 -> 0.60), each connected worker
+        # does <= 7 scans total (~5x+ reduction even in minute 1, and 30x reduction in steady state)!
+        await asyncio.sleep(0.65)
+    finally:
+        for rt in runtimes:
+            rt.is_shutting_down = True
+            frontend_incremental_delivery.notify_incremental_telegram_delivery(rt)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert disconnected_scans == 0, "Disconnected workers must perform 0 scans"
+    total_connected_scans = sum(scan_counts[f"agent_{i}"] for i in range(12))
+    assert total_connected_scans < 12 * 10, f"24 idle workers polled too aggressively: {total_connected_scans}"
+
+
+# ---------------------------------------------------------------------------
+# PIT D: New run.question.created wakes idle worker immediately
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pit_d_run_question_created_wakes_idle_worker_immediately(
+    tmp_path: Path, monkeypatch
+):
+    store = _new_store(tmp_path)
+    owner = "user:1"
+    session = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="zelda",
+        request_id="req-pit-d",
+        source="telegram",
+        idempotency_key="idem-pit-d",
+        text="ask me",
+        delivery_route=_telegram_route(chat_id=4004),
+    )
+
+    question_delivered = asyncio.Event()
+    seen_questions: list[str] = []
+
+    async def fake_dispatch(rt, *, limit=20):
+        qs = RunQuestions(rt.session_store).pending_telegram_deliveries(agent_id=rt.name, limit=limit)
+        if qs:
+            seen_questions.extend(q["event_id"] for q in qs)
+            question_delivered.set()
+            return len(qs)
+        return 0
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_pending_telegram_deliverables", fake_dispatch)
+    monkeypatch.setattr(frontend_incremental_delivery, "IDLE_SWEEP_BASE_SECONDS", 60.0)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        is_shutting_down=False,
+        telegram_connected=True,
+        app=SimpleNamespace(bot=object()),
+        session_store=store,
+        global_config=SimpleNamespace(instance_id="HASHI_EFF_TEST"),
+        logger=logging.getLogger("test.pit_d"),
+    )
+
+    frontend_incremental_delivery.start_incremental_telegram_delivery(runtime)
+    try:
+        await asyncio.sleep(0.05)
+        assert not question_delivered.is_set()
+
+        t0 = time.monotonic()
+        with store._connection() as conn:
+            conn.execute("UPDATE runs SET state='running' WHERE run_id=?", (accepted.run_id,))
+        RunQuestions(store).create(
+            request_id=accepted.request_id,
+            agent_id="zelda",
+            payload={
+                "idempotency_key": "q-pit-d-1",
+                "question": "Pick a color?",
+                "options": [
+                    {"id": "chartreuse", "label": "Chartreuse"},
+                    {"id": "blue", "label": "Blue"},
+                ],
+                "allow_free_text": True,
+                "purpose": "preference",
+            },
+        )
+        await asyncio.wait_for(question_delivered.wait(), timeout=1.0)
+        assert seen_questions
+        assert (time.monotonic() - t0) * 1000.0 < 500.0
+    finally:
+        runtime.is_shutting_down = True
+        frontend_incremental_delivery.unbind_telegram_delivery_wakeup(runtime)
+        frontend_incremental_delivery.notify_incremental_telegram_delivery(runtime)
+        await asyncio.wait_for(runtime._incremental_telegram_delivery_task, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# PIT E: Detached HERV3 background requests are recognized as active runs
+# ---------------------------------------------------------------------------
+
+
+def test_pit_e_detached_herv3_background_request_not_treated_as_idle():
+    rt_idle = SimpleNamespace(
+        is_generating=False,
+        is_processing=False,
+        current_request_meta=None,
+        _background_request_ids=set(),
+        _outstanding_request_ids=set(),
+    )
+    assert frontend_incremental_delivery._runtime_has_active_run(rt_idle) is False
+
+    rt_detached = SimpleNamespace(
+        is_generating=False,
+        is_processing=False,
+        current_request_meta=None,
+        _background_request_ids={"req-herv3-detached-1"},
+    )
+    assert frontend_incremental_delivery._runtime_has_active_run(rt_detached) is True
+
+    rt_detached._background_request_ids.clear()
+    assert frontend_incremental_delivery._runtime_has_active_run(rt_detached) is False
+
+
+# ---------------------------------------------------------------------------
+# PIT F: Concurrent notify + recovery sweep never duplicates sends & preserves unknown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pit_f_no_duplicate_send_under_concurrent_wakeup_and_preserves_unknown(
+    tmp_path: Path, monkeypatch
+):
+    store = _new_store(tmp_path)
+    owner = "user:1"
+    session = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    route = _telegram_route(chat_id=5005)
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="zelda",
+        request_id="req-pit-f-1",
+        source="telegram",
+        idempotency_key="idem-pit-f-1",
+        text="once only",
+        delivery_route=route,
+    )
+    store.finish_request(accepted.request_id, success=True, assistant_text="Deliver exactly once.")
+
+    sent_event_ids: list[str] = []
+
+    async def fake_claimed_dispatch(rt, *, chat_id, store, claim, **_kwargs):
+        sent_event_ids.append(str(claim["event_id"]))
+        store.complete_delivery_outbox(
+            session_id=str(claim["session_id"]),
+            owner_id=owner,
+            task_id=str(claim["task_id"]),
+            lease_token=str(claim["lease_token"]),
+            status="completed",
+            proof={"message_id": 123},
+        )
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_claimed_telegram_event", fake_claimed_dispatch)
+    monkeypatch.setattr("orchestrator.frontend_run_questions.refresh_telegram_question_renditions", lambda _r, _s: asyncio.sleep(0))
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        is_shutting_down=False,
+        telegram_connected=True,
+        app=SimpleNamespace(bot=object()),
+        session_store=store,
+        global_config=SimpleNamespace(instance_id="HASHI_EFF_TEST"),
+        logger=logging.getLogger("test.pit_f"),
+    )
+
+    # Fire two concurrent sweeps (simulating notification + recovery sweep colliding).
+    r1, r2 = await asyncio.gather(
+        frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime),
+        frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime),
+    )
+    assert r1 + r2 >= 1
+    assert len(sent_event_ids) == len(set(sent_event_ids)), f"Duplicate sends detected: {sent_event_ids}"
+
+    # Verify unknown outcome is NEVER resent on subsequent sweeps!
+    accepted2 = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="zelda",
+        request_id="req-pit-f-unknown",
+        source="telegram",
+        idempotency_key="idem-pit-f-unknown",
+        text="uncertain send",
+        delivery_route=route,
+    )
+    store.finish_request(accepted2.request_id, success=True, assistant_text="Uncertain transport.")
+    unknown_calls = 0
+
+    async def fake_unknown_dispatch(rt, *, chat_id, store, claim, **_kwargs):
+        nonlocal unknown_calls
+        unknown_calls += 1
+        store.complete_delivery_outbox(
+            session_id=str(claim["session_id"]),
+            owner_id=owner,
+            task_id=str(claim["task_id"]),
+            lease_token=str(claim["lease_token"]),
+            status="unknown",
+            error_code="telegram_send_outcome_unknown",
+        )
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_claimed_telegram_event", fake_unknown_dispatch)
+    await frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime)
+    first_count = unknown_calls
+    assert first_count >= 1
+    # Subsequent sweeps MUST NOT retry the unknown task!
+    assert await frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime) == 0
+    assert unknown_calls == first_count
+
+
+# ---------------------------------------------------------------------------
+# PIT G: Worker alert propagates via metadata IPC, expires automatically,
+#        and never breaks service availability (ready/status/degraded)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pit_g_worker_alert_propagates_expires_and_preserves_availability(
+    tmp_path: Path, monkeypatch
+):
+    from orchestrator.function_worker_host import FunctionWorkerHost
+    from orchestrator.workbench_api import WorkbenchApiServer
+
+    frontend_database.reset_database_work_metrics()
+    published_metadata: list[dict] = []
+    published_event = asyncio.Event()
+
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.agent_name = "zelda"
+    host.phase = "ACTIVE"
+    host.runtime = SimpleNamespace(name="zelda")
+    host._resource_alert_listener = None
+    host._resource_metadata_publish_task = None
+
+    async def fake_publish():
+        snap = frontend_database.database_work_health_snapshot()
+        published_metadata.append({"resource_health": snap})
+        published_event.set()
+
+    host.publish_metadata = fake_publish
+    host._install_resource_alert_bridge()
+
+    try:
+        # Trigger slow DB alert inside Worker -> edge-triggered metadata push fires immediately!
+        frontend_database.record_database_work_sample(
+            operation="telegram.scan",
+            instance="TEST",
+            role="worker",
+            duration_s=0.75,
+        )
+        await asyncio.wait_for(published_event.wait(), timeout=1.0)
+        assert published_metadata and published_metadata[-1]["resource_health"]["alerts"]
+        worker_meta = published_metadata[-1]
+
+        # Reset host-local metrics so ONLY the Worker's cached metadata carries the alert.
+        frontend_database.reset_database_work_metrics()
+
+        worker_proxy = SimpleNamespace(
+            name="zelda",
+            startup_success=True,
+            is_function_worker_proxy=True,
+            worker_pid=4242,
+            generation_id="gen-1",
+            metadata={"worker_phase": "ACTIVE", "worker_accepting": True, **worker_meta},
+            client=None,
+        )
+        config_path = tmp_path / "agents.json"
+        config_path.write_text(
+            json.dumps({"global": {}, "agents": [{"name": "zelda", "workspace_dir": "workspaces/zelda"}]}),
+            encoding="utf-8",
+        )
+        server = WorkbenchApiServer(
+            config_path=config_path,
+            global_config=SimpleNamespace(
+                bridge_home=tmp_path,
+                project_root=tmp_path,
+                instance_id="TEST",
+                authorized_id=1,
+                deployment_profile="personal",
+                api_host="127.0.0.1",
+                workbench_port=0,
+                api_gateway_port=None,
+            ),
+            orchestrator=SimpleNamespace(
+                runtimes=[worker_proxy],
+                startup_status={"ready": True, "degraded": False, "phase": "ready", "issues": []},
+            ),
+            reconcile_session_runs=False,
+        )
+
+        # 1. While alert is active: visible in resource_health & issues, yet service remains ready & NOT degraded!
+        resp = await server.handle_health(SimpleNamespace())
+        payload = json.loads(resp.text)
+        assert payload["resource_health"]["alert_count"] == 1
+        assert any(i.get("code") == "slow_database_work" and i.get("agent") == "zelda" for i in payload["issues"])
+        assert payload["ready"] is True
+        assert payload["status"] == "ready"
+        assert payload["degraded"] is False
+
+        # 2. Once alert's expires_at is in the past: /api/health automatically expires it
+        #    even without another Worker IPC message!
+        worker_proxy.metadata["resource_health"]["alerts"][0]["expires_at"] = time.time() - 5.0
+        resp2 = await server.handle_health(SimpleNamespace())
+        payload2 = json.loads(resp2.text)
+        assert payload2["resource_health"]["alert_count"] == 0
+        assert payload2["resource_health"]["workers"]["zelda"]["alerts"] == []
+        assert not any(i.get("code") == "slow_database_work" for i in payload2["issues"])
+        assert payload2["ready"] is True
+        assert payload2["status"] == "ready"
+        assert payload2["degraded"] is False
+    finally:
+        host._remove_resource_alert_bridge()
+        frontend_database.reset_database_work_metrics()
+
+
+# ---------------------------------------------------------------------------
+# PIT H: Legacy Schema 37 -> 38 migration with thousands of zombie rows is fast
+# ---------------------------------------------------------------------------
+
+
+def test_pit_h_schema_37_to_38_large_zombie_migration_is_fast_and_usable(tmp_path: Path):
+    db_path = tmp_path / "legacy37.sqlite3"
+    store = SessionStore(db_path, instance_id="HASHI_MIG_PERF")
+    owner = "user:1"
+    session = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    route = _telegram_route(chat_id=8008)
+    accepted = store.accept_run(
+        session_id=session["session_id"],
+        owner_id=owner,
+        agent_id="zelda",
+        request_id="req-leg-real",
+        source="telegram",
+        idempotency_key="idem-leg-real",
+        text="real work",
+        delivery_route=route,
+    )
+    store.finish_request(accepted.request_id, success=True, assistant_text="Real output survives migration.")
+
+    # Inject 5,000 zombie telegram/pending tasks (run.accepted, run.stopped, session.title_updated)
+    # + 200 route-less frontend.message.recorded rows and downgrade marker to v37.
+    with sqlite3.connect(db_path) as conn:
+        zombie_kinds = ("run.accepted", "run.stopped", "session.title_updated", "run.superseded")
+        events = [
+            (f"ev_z_{i}", session["session_id"], accepted.run_id, 500 + i, zombie_kinds[i % 4], "queued", "admission", "z", "{}", "2026-10-01T00:00:00Z")
+            for i in range(5_000)
+        ] + [
+            (f"ev_nr_{i}", session["session_id"], None, 10_000 + i, "frontend.message.recorded", "recorded", "presentation", "nr", "{}", "2026-10-01T00:00:00Z")
+            for i in range(200)
+        ]
+        tasks = [
+            (f"del_z_{i}", session["session_id"], accepted.run_id, f"ev_z_{i}", "telegram", "ep-tg", "primary", '["text"]', "query_before_retry", "pending", "2026-10-01T00:00:00Z")
+            for i in range(5_000)
+        ] + [
+            (f"del_nr_{i}", session["session_id"], None, f"ev_nr_{i}", "telegram", "ep-tg", "primary", '["text"]', "query_before_retry", "pending", "2026-10-01T00:00:00Z")
+            for i in range(200)
+        ]
+        conn.executemany(
+            """INSERT INTO run_events(event_id, session_id, run_id, sequence, kind, status, phase, summary, detail_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            events,
+        )
+        conn.executemany(
+            """INSERT INTO connector_delivery_tasks(task_id, session_id, run_id, event_id, connector_id, endpoint_id, role, content_modes_json, retry_class, state, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            tasks,
+        )
+        conn.execute("DROP INDEX IF EXISTS connector_delivery_tasks_telegram_active")
+        conn.execute("UPDATE schema_metadata SET value='37' WHERE key='schema_version'")
+
+    t0 = time.perf_counter()
+    upgraded = SessionStore(db_path, instance_id="HASHI_MIG_PERF")
+    migration_ms = (time.perf_counter() - t0) * 1000.0
+    assert migration_ms < 2000.0, f"Schema 37->38 migration blocked startup too long: {migration_ms:.1f}ms"
+
+    with sqlite3.connect(db_path) as conn:
+        zombies_left = conn.execute(
+            """SELECT COUNT(*) FROM connector_delivery_tasks AS t
+               JOIN run_events AS e ON e.event_id=t.event_id
+               WHERE t.connector_id='telegram' AND t.state='pending'
+                 AND e.kind IN ('run.accepted','run.stopped','session.title_updated','run.superseded')"""
+        ).fetchone()[0]
+        assert zombies_left == 0
+
+    # Real deliverable survived and is immediately queryable in < 5ms!
+    t1 = time.perf_counter()
+    deliverables = upgraded.pending_incremental_telegram_deliveries(agent_id="zelda")
+    scan_ms = (time.perf_counter() - t1) * 1000.0
+    assert len(deliverables) >= 1
+    assert scan_ms < 10.0, f"Post-migration scan too slow: {scan_ms:.2f}ms"

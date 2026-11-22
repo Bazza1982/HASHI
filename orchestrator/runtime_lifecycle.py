@@ -198,6 +198,7 @@ async def initialize(runtime: Any) -> bool:
 async def shutdown(runtime: Any) -> None:
     runtime.logger.info(f"Shutting down flex agent '{runtime.name}'...")
     runtime.is_shutting_down = True
+    frontend_incremental_delivery.unbind_telegram_delivery_wakeup(runtime)
     frontend_incremental_delivery.notify_incremental_telegram_delivery(runtime)
     speech_tasks = getattr(runtime, "_speech_tasks", None)
     clean_speech = True

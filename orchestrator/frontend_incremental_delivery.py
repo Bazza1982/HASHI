@@ -31,12 +31,40 @@ def _telegram_outbound_ready(runtime: Any) -> bool:
     )
 
 
+def _has_active_tasks(mapping: Any) -> bool:
+    if not isinstance(mapping, dict):
+        return False
+    for task in mapping.values():
+        if isinstance(task, asyncio.Task) and not task.done():
+            return True
+    return False
+
+
 def _runtime_has_active_run(runtime: Any) -> bool:
-    return bool(
+    if (
         getattr(runtime, "is_generating", False)
         or getattr(runtime, "is_processing", False)
         or getattr(runtime, "current_request_meta", None) is not None
-    )
+    ):
+        return True
+    if getattr(runtime, "_background_request_ids", None):
+        return True
+    if getattr(runtime, "_outstanding_request_ids", None):
+        return True
+    if _has_active_tasks(
+        getattr(runtime, "_background_completion_tasks_by_request", None)
+    ) or _has_active_tasks(
+        getattr(runtime, "_generation_tasks_by_request", None)
+    ):
+        return True
+    queue = getattr(runtime, "queue", None)
+    if queue is not None and callable(getattr(queue, "empty", None)):
+        try:
+            if not queue.empty():
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def _get_wake_event(runtime: Any) -> asyncio.Event:
@@ -54,6 +82,83 @@ def notify_incremental_telegram_delivery(runtime: Any) -> None:
     event = getattr(runtime, "_incremental_telegram_wake_event", None)
     if isinstance(event, asyncio.Event):
         event.set()
+
+
+def bind_telegram_delivery_wakeup(
+    runtime: Any, *, peer_notifier: Any = None
+) -> None:
+    """Bind post-commit SessionStore notifications to wake Telegram delivery.
+
+    Fires only AFTER SQLite commit of a genuine Telegram-deliverable task.
+    Disconnected workers remain completely silent (zero wakeups/SQLite polls).
+    Cross-agent writes from this Worker forward through ``peer_notifier`` if
+    provided (reusing the existing Function Worker IPC channel).
+    """
+    if runtime is None:
+        return
+    if peer_notifier is not None:
+        runtime._telegram_delivery_peer_notifier = peer_notifier
+    try:
+        store = ensure_store(runtime)
+    except Exception:
+        return
+    register = getattr(store, "register_telegram_delivery_listener", None)
+    if not callable(register):
+        return
+    unbind_telegram_delivery_wakeup(runtime)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    own_agent = str(getattr(runtime, "name", "") or "").lower()
+
+    def _on_committed_telegram_task(
+        agent_id: str, _event_id: str, _kind: str
+    ) -> None:
+        target_agent = str(agent_id or "").lower()
+        if target_agent == own_agent:
+            if not (
+                getattr(runtime, "is_shutting_down", False)
+                or _telegram_outbound_ready(runtime)
+            ):
+                return
+            if loop is not None and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(
+                        notify_incremental_telegram_delivery, runtime
+                    )
+                    return
+                except RuntimeError:
+                    pass
+            notify_incremental_telegram_delivery(runtime)
+            return
+        notifier = getattr(runtime, "_telegram_delivery_peer_notifier", None)
+        if callable(notifier) and target_agent:
+            if loop is not None and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(notifier, target_agent)
+                    return
+                except RuntimeError:
+                    pass
+            notifier(target_agent)
+
+    register(_on_committed_telegram_task)
+    runtime._telegram_delivery_store_listener = (store, _on_committed_telegram_task)
+
+
+def unbind_telegram_delivery_wakeup(runtime: Any) -> None:
+    if runtime is None:
+        return
+    binding = getattr(runtime, "_telegram_delivery_store_listener", None)
+    if isinstance(binding, tuple) and len(binding) == 2:
+        store, listener = binding
+        unregister = getattr(store, "unregister_telegram_delivery_listener", None)
+        if callable(unregister):
+            try:
+                unregister(listener)
+            except Exception:
+                pass
+    runtime._telegram_delivery_store_listener = None
 
 
 async def dispatch_incremental_telegram_event(
@@ -244,6 +349,7 @@ async def incremental_telegram_delivery_loop(runtime: Any) -> None:
 
 def start_incremental_telegram_delivery(runtime: Any) -> None:
     _get_wake_event(runtime)
+    bind_telegram_delivery_wakeup(runtime)
     task = getattr(runtime, "_incremental_telegram_delivery_task", None)
     if isinstance(task, asyncio.Task) and not task.done():
         return

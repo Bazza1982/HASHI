@@ -49,6 +49,10 @@ _COUNTERS: dict[str, int] = {
     "severe_calls": 0,
     "alerts_emitted": 0,
 }
+# Edge-triggered resource alert listeners: callback(alerts_list) called when
+# active alert keys transition (appear or clear). Zero background threads.
+_ACTIVE_ALERT_KEYS: set[tuple[str, str]] = set()
+_ALERT_LISTENERS: list[Any] = []
 
 
 class DatabaseWorkBusy(RuntimeError):
@@ -61,12 +65,29 @@ def is_sqlite_busy(error):
     ) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
 
-def reset_database_work_metrics() -> None:
+def register_resource_alert_listener(listener: Any) -> None:
+    """Register an edge-triggered callback invoked when active alerts change."""
+    with _METRICS_LOCK:
+        if listener not in _ALERT_LISTENERS:
+            _ALERT_LISTENERS.append(listener)
+
+
+def unregister_resource_alert_listener(listener: Any) -> None:
+    with _METRICS_LOCK:
+        _ALERT_LISTENERS[:] = [
+            existing for existing in _ALERT_LISTENERS if existing != listener
+        ]
+
+
+def reset_database_work_metrics(*, clear_listeners: bool = False) -> None:
     """Reset in-process sliding-window metrics (intended for unit tests)."""
     with _METRICS_LOCK:
         _OP_SAMPLES.clear()
         _LOOP_SPIN.clear()
         _LAST_ALERT_LOG.clear()
+        _ACTIVE_ALERT_KEYS.clear()
+        if clear_listeners:
+            _ALERT_LISTENERS.clear()
         for key in _COUNTERS:
             _COUNTERS[key] = 0
 
@@ -172,6 +193,10 @@ def record_database_work_sample(
                     duty_cycle * 100.0,
                 ),
             )
+        notify_listeners, alerts_snapshot = _detect_alert_transition_locked(
+            ts, wall_now=time.time()
+        )
+    _invoke_alert_listeners(notify_listeners, alerts_snapshot)
 
 
 def record_loop_zero_progress(
@@ -189,143 +214,200 @@ def record_loop_zero_progress(
     with _METRICS_LOCK:
         if items_processed > 0:
             _LOOP_SPIN.pop(operation, None)
-            return
-        entry = _LOOP_SPIN.get(operation)
-        if entry is None or (ts - float(entry["last_ts"])) > SUSTAINED_SLOW_WINDOW_SECONDS:
-            entry = {
-                "streak": 0,
-                "total_s": 0.0,
-                "last_ts": ts,
-                "instance": instance,
-                "role": role,
-            }
-            _LOOP_SPIN[operation] = entry
-        entry["streak"] += 1
-        entry["total_s"] += dur
-        entry["last_ts"] = ts
-        entry["instance"] = instance
-        entry["role"] = role
-        avg_s = entry["total_s"] / max(1, entry["streak"])
-        if (
-            entry["streak"] >= ZERO_PROGRESS_SPIN_STREAK_THRESHOLD
-            and avg_s >= ZERO_PROGRESS_SPIN_AVG_SECONDS
-        ):
-            _maybe_warn_locked(
-                now=ts,
-                operation=operation,
-                code="idle_loop_spin",
-                message=(
-                    "Resource alert [idle_loop_spin]: operation=%s instance=%s pid=%s "
-                    "role=%s zero_progress_streak=%d avg_ms=%.1f"
-                ),
-                args=(
-                    operation,
-                    instance,
-                    os.getpid(),
-                    role,
-                    entry["streak"],
-                    avg_s * 1000.0,
-                ),
+            notify_listeners, alerts_snapshot = _detect_alert_transition_locked(
+                ts, wall_now=time.time()
             )
+        else:
+            entry = _LOOP_SPIN.get(operation)
+            if entry is None or (ts - float(entry["last_ts"])) > SUSTAINED_SLOW_WINDOW_SECONDS:
+                entry = {
+                    "streak": 0,
+                    "total_s": 0.0,
+                    "last_ts": ts,
+                    "instance": instance,
+                    "role": role,
+                }
+                _LOOP_SPIN[operation] = entry
+            entry["streak"] += 1
+            entry["total_s"] += dur
+            entry["last_ts"] = ts
+            entry["instance"] = instance
+            entry["role"] = role
+            avg_s = entry["total_s"] / max(1, entry["streak"])
+            if (
+                entry["streak"] >= ZERO_PROGRESS_SPIN_STREAK_THRESHOLD
+                and avg_s >= ZERO_PROGRESS_SPIN_AVG_SECONDS
+            ):
+                _maybe_warn_locked(
+                    now=ts,
+                    operation=operation,
+                    code="idle_loop_spin",
+                    message=(
+                        "Resource alert [idle_loop_spin]: operation=%s instance=%s pid=%s "
+                        "role=%s zero_progress_streak=%d avg_ms=%.1f"
+                    ),
+                    args=(
+                        operation,
+                        instance,
+                        os.getpid(),
+                        role,
+                        entry["streak"],
+                        avg_s * 1000.0,
+                    ),
+                )
+            notify_listeners, alerts_snapshot = _detect_alert_transition_locked(
+                ts, wall_now=time.time()
+            )
+    _invoke_alert_listeners(notify_listeners, alerts_snapshot)
 
 
-def resource_alerts(*, now: float | None = None) -> list[dict[str, Any]]:
-    """Return active abnormal DB/idle-spin alerts within the sliding window (read-only)."""
-    ts = time.monotonic() if now is None else float(now)
+def _collect_alerts_locked(ts: float, *, wall_now: float) -> list[dict[str, Any]]:
     cutoff = ts - SUSTAINED_SLOW_WINDOW_SECONDS
     alerts: list[dict[str, Any]] = []
-    with _METRICS_LOCK:
-        for operation, samples in list(_OP_SAMPLES.items()):
-            _prune_samples_locked(samples, cutoff)
-            if not samples:
-                continue
-            latest_instance = samples[-1][3]
-            latest_role = samples[-1][4]
-            max_total_s = max(s[1] + s[2] for s in samples)
-            slow_count = sum(1 for s in samples if (s[1] + s[2]) >= SLOW_DB_INFO_SECONDS)
-            window_db_s = sum(s[1] for s in samples)
-            duty_cycle = window_db_s / SUSTAINED_SLOW_WINDOW_SECONDS
-            if max_total_s >= SEVERE_DB_WARN_SECONDS or slow_count >= SUSTAINED_SLOW_COUNT_THRESHOLD:
-                alerts.append(
-                    {
-                        "code": "slow_database_work",
-                        "component": "database",
-                        "severity": "warning",
+    for operation, samples in list(_OP_SAMPLES.items()):
+        _prune_samples_locked(samples, cutoff)
+        if not samples:
+            continue
+        latest_ts = samples[-1][0]
+        latest_instance = samples[-1][3]
+        latest_role = samples[-1][4]
+        remaining_ttl_s = max(
+            1.0,
+            SUSTAINED_SLOW_WINDOW_SECONDS - max(0.0, ts - latest_ts),
+        )
+        observed_at = round(wall_now, 3)
+        expires_at = round(wall_now + remaining_ttl_s, 3)
+        max_total_s = max(s[1] + s[2] for s in samples)
+        slow_count = sum(1 for s in samples if (s[1] + s[2]) >= SLOW_DB_INFO_SECONDS)
+        window_db_s = sum(s[1] for s in samples)
+        duty_cycle = window_db_s / SUSTAINED_SLOW_WINDOW_SECONDS
+        if max_total_s >= SEVERE_DB_WARN_SECONDS or slow_count >= SUSTAINED_SLOW_COUNT_THRESHOLD:
+            alerts.append(
+                {
+                    "code": "slow_database_work",
+                    "category": "performance",
+                    "component": "database",
+                    "severity": "warning",
+                    "operation": operation,
+                    "instance": latest_instance,
+                    "role": latest_role,
+                    "pid": os.getpid(),
+                    "observed_at": observed_at,
+                    "expires_at": expires_at,
+                    "summary": (
+                        f"Slow database work detected on {operation} "
+                        f"(slow_calls_60s={slow_count}, max_ms={max_total_s * 1000.0:.1f})."
+                    ),
+                    "details": {
                         "operation": operation,
-                        "instance": latest_instance,
-                        "role": latest_role,
-                        "pid": os.getpid(),
-                        "summary": (
-                            f"Slow database work detected on {operation} "
-                            f"(slow_calls_60s={slow_count}, max_ms={max_total_s * 1000.0:.1f})."
-                        ),
-                        "details": {
-                            "operation": operation,
-                            "slow_calls_60s": slow_count,
-                            "calls_60s": len(samples),
-                            "max_ms": round(max_total_s * 1000.0, 1),
-                            "window_db_ms": round(window_db_s * 1000.0, 1),
-                        },
-                    }
-                )
-            if duty_cycle >= HIGH_DUTY_CYCLE_THRESHOLD:
-                alerts.append(
-                    {
-                        "code": "high_database_duty_cycle",
-                        "component": "database",
-                        "severity": "warning",
+                        "slow_calls_60s": slow_count,
+                        "calls_60s": len(samples),
+                        "max_ms": round(max_total_s * 1000.0, 1),
+                        "window_db_ms": round(window_db_s * 1000.0, 1),
+                    },
+                }
+            )
+        if duty_cycle >= HIGH_DUTY_CYCLE_THRESHOLD:
+            alerts.append(
+                {
+                    "code": "high_database_duty_cycle",
+                    "category": "performance",
+                    "component": "database",
+                    "severity": "warning",
+                    "operation": operation,
+                    "instance": latest_instance,
+                    "role": latest_role,
+                    "pid": os.getpid(),
+                    "observed_at": observed_at,
+                    "expires_at": expires_at,
+                    "summary": (
+                        f"High database duty cycle on {operation} "
+                        f"({duty_cycle * 100.0:.1f}% over 60s)."
+                    ),
+                    "details": {
                         "operation": operation,
-                        "instance": latest_instance,
-                        "role": latest_role,
-                        "pid": os.getpid(),
-                        "summary": (
-                            f"High database duty cycle on {operation} "
-                            f"({duty_cycle * 100.0:.1f}% over 60s)."
-                        ),
-                        "details": {
-                            "operation": operation,
-                            "duty_cycle_pct": round(duty_cycle * 100.0, 2),
-                            "window_db_ms": round(window_db_s * 1000.0, 1),
-                            "calls_60s": len(samples),
-                        },
-                    }
-                )
-        for operation, entry in list(_LOOP_SPIN.items()):
-            if (ts - float(entry["last_ts"])) > SUSTAINED_SLOW_WINDOW_SECONDS:
-                continue
-            streak = int(entry["streak"])
-            avg_s = float(entry["total_s"]) / max(1, streak)
-            if streak >= ZERO_PROGRESS_SPIN_STREAK_THRESHOLD and avg_s >= ZERO_PROGRESS_SPIN_AVG_SECONDS:
-                alerts.append(
-                    {
-                        "code": "idle_loop_spin",
-                        "component": "background_loop",
-                        "severity": "warning",
+                        "duty_cycle_pct": round(duty_cycle * 100.0, 2),
+                        "window_db_ms": round(window_db_s * 1000.0, 1),
+                        "calls_60s": len(samples),
+                    },
+                }
+            )
+    for operation, entry in list(_LOOP_SPIN.items()):
+        age_s = ts - float(entry["last_ts"])
+        if age_s > SUSTAINED_SLOW_WINDOW_SECONDS:
+            continue
+        streak = int(entry["streak"])
+        avg_s = float(entry["total_s"]) / max(1, streak)
+        if streak >= ZERO_PROGRESS_SPIN_STREAK_THRESHOLD and avg_s >= ZERO_PROGRESS_SPIN_AVG_SECONDS:
+            remaining_ttl_s = max(1.0, SUSTAINED_SLOW_WINDOW_SECONDS - max(0.0, age_s))
+            alerts.append(
+                {
+                    "code": "idle_loop_spin",
+                    "category": "performance",
+                    "component": "background_loop",
+                    "severity": "warning",
+                    "operation": operation,
+                    "instance": entry["instance"],
+                    "role": entry["role"],
+                    "pid": os.getpid(),
+                    "observed_at": round(wall_now, 3),
+                    "expires_at": round(wall_now + remaining_ttl_s, 3),
+                    "summary": (
+                        f"Zero-progress background loop spin on {operation} "
+                        f"(streak={streak}, avg_ms={avg_s * 1000.0:.1f})."
+                    ),
+                    "details": {
                         "operation": operation,
-                        "instance": entry["instance"],
-                        "role": entry["role"],
-                        "pid": os.getpid(),
-                        "summary": (
-                            f"Zero-progress background loop spin on {operation} "
-                            f"(streak={streak}, avg_ms={avg_s * 1000.0:.1f})."
-                        ),
-                        "details": {
-                            "operation": operation,
-                            "zero_progress_streak": streak,
-                            "avg_ms": round(avg_s * 1000.0, 1),
-                        },
-                    }
-                )
+                        "zero_progress_streak": streak,
+                        "avg_ms": round(avg_s * 1000.0, 1),
+                    },
+                }
+            )
     return alerts
 
 
-def database_work_health_snapshot(*, now: float | None = None) -> dict[str, Any]:
+def _detect_alert_transition_locked(
+    ts: float, *, wall_now: float
+) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+    alerts = _collect_alerts_locked(ts, wall_now=wall_now)
+    current_keys = {(str(a["operation"]), str(a["code"])) for a in alerts}
+    if current_keys == _ACTIVE_ALERT_KEYS:
+        return (), []
+    _ACTIVE_ALERT_KEYS.clear()
+    _ACTIVE_ALERT_KEYS.update(current_keys)
+    return tuple(_ALERT_LISTENERS), [dict(a) for a in alerts]
+
+
+def _invoke_alert_listeners(
+    listeners: tuple[Any, ...], alerts: list[dict[str, Any]]
+) -> None:
+    for listener in listeners:
+        try:
+            listener(alerts)
+        except Exception:
+            continue
+
+
+def resource_alerts(
+    *, now: float | None = None, wall_now: float | None = None
+) -> list[dict[str, Any]]:
+    """Return active abnormal DB/idle-spin alerts within the sliding window (read-only)."""
+    ts = time.monotonic() if now is None else float(now)
+    wall = time.time() if wall_now is None else float(wall_now)
+    with _METRICS_LOCK:
+        return _collect_alerts_locked(ts, wall_now=wall)
+
+
+def database_work_health_snapshot(
+    *, now: float | None = None, wall_now: float | None = None
+) -> dict[str, Any]:
     """Read-only process-local DB & idle-loop health projection."""
     ts = time.monotonic() if now is None else float(now)
+    wall = time.time() if wall_now is None else float(wall_now)
     cutoff = ts - SUSTAINED_SLOW_WINDOW_SECONDS
-    alerts = resource_alerts(now=ts)
     operations: dict[str, dict[str, Any]] = {}
     with _METRICS_LOCK:
+        alerts = _collect_alerts_locked(ts, wall_now=wall)
         counters = dict(_COUNTERS)
         for operation, samples in list(_OP_SAMPLES.items()):
             _prune_samples_locked(samples, cutoff)
@@ -344,6 +426,7 @@ def database_work_health_snapshot(*, now: float | None = None) -> dict[str, Any]
             }
     return {
         "pid": os.getpid(),
+        "observed_at": round(wall, 3),
         "counters": counters,
         "operations": operations,
         "alerts": alerts,

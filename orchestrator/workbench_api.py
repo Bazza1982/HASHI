@@ -473,6 +473,12 @@ class WorkbenchApiServer:
         self._standalone_agent_management = None
         self._static_connectors = list(connectors or [])
         self.session_store = SessionStore.from_global_config(self.global_config)
+        self._event_loop: asyncio.AbstractEventLoop | None = None
+        try:
+            self._event_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._event_loop = None
+        self._bind_session_store_telegram_wakeup()
         self.ingress_confirmation = IngressConfirmationService(self.session_store)
         self.reconciled_session_runs = []
         self._reconcile_session_runs = bool(reconcile_session_runs)
@@ -515,6 +521,8 @@ class WorkbenchApiServer:
         )
         @web.middleware
         async def runtime_admission(request, handler):
+            if self._event_loop is None:
+                self._event_loop = asyncio.get_running_loop()
             if getattr(self.orchestrator, "_handoff_draining", False):
                 return web.json_response({"error": "shared_functions_draining"}, status=503,
                                          headers={"Retry-After": "1", "Connection": "close"})
@@ -2364,7 +2372,56 @@ class WorkbenchApiServer:
             return bool(is_connected())
         return getattr(wa, "_client", None) is not None
 
+    def _bind_session_store_telegram_wakeup(self) -> None:
+        register = getattr(
+            self.session_store, "register_telegram_delivery_listener", None
+        )
+        if not callable(register):
+            return
+
+        def _on_committed_telegram_task(
+            agent_id: str, _event_id: str, _kind: str
+        ) -> None:
+            loop = self._event_loop
+            if loop is None or loop.is_closed():
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._event_loop = loop
+                except RuntimeError:
+                    loop = None
+            if loop is not None and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(
+                        self._notify_agent_telegram_delivery, agent_id
+                    )
+                    return
+                except RuntimeError:
+                    pass
+            self._notify_agent_telegram_delivery(agent_id)
+
+        register(_on_committed_telegram_task)
+        self._telegram_delivery_store_listener = _on_committed_telegram_task
+
+    def _notify_agent_telegram_delivery(self, agent_id: str) -> None:
+        target = str(agent_id or "").strip().lower()
+        if not target:
+            return
+        supervisor = getattr(self.orchestrator, "function_workers", None)
+        notifier = getattr(supervisor, "notify_telegram_delivery", None)
+        if callable(notifier):
+            notifier(target)
+            return
+        from orchestrator.frontend_incremental_delivery import (
+            notify_incremental_telegram_delivery,
+        )
+
+        for runtime in self._runtime_list():
+            if str(getattr(runtime, "name", "") or "").strip().lower() == target:
+                notify_incremental_telegram_delivery(runtime)
+                return
+
     async def start(self):
+        self._event_loop = asyncio.get_running_loop()
         if getattr(self.global_config, "permission_frontend", None) is not None:
             from orchestrator.permissions.frontend_transition import build_frontend_transition
 
@@ -15602,7 +15659,10 @@ class WorkbenchApiServer:
             payload["function_worker_activity"] = activity()
         from orchestrator import frontend_database
 
-        host_resource_health = frontend_database.database_work_health_snapshot()
+        now_wall = time.time()
+        host_resource_health = frontend_database.database_work_health_snapshot(
+            wall_now=now_wall
+        )
         worker_resource_health: dict[str, Any] = {}
         aggregated_resource_alerts: list[dict[str, Any]] = [
             dict(alert) for alert in host_resource_health.get("alerts", ())
@@ -15612,12 +15672,24 @@ class WorkbenchApiServer:
                 continue
             worker_rh = (getattr(runtime, "metadata", {}) or {}).get("resource_health")
             if isinstance(worker_rh, dict):
-                worker_resource_health[runtime.name] = worker_rh
+                active_worker_alerts: list[dict[str, Any]] = []
                 for alert in worker_rh.get("alerts") or ():
-                    if isinstance(alert, dict):
-                        entry = dict(alert)
-                        entry.setdefault("agent", runtime.name)
-                        aggregated_resource_alerts.append(entry)
+                    if not isinstance(alert, dict):
+                        continue
+                    expires_at = alert.get("expires_at")
+                    if expires_at is not None:
+                        try:
+                            if float(expires_at) <= now_wall:
+                                continue
+                        except (TypeError, ValueError):
+                            pass
+                    entry = dict(alert)
+                    entry.setdefault("agent", runtime.name)
+                    active_worker_alerts.append(entry)
+                    aggregated_resource_alerts.append(entry)
+                worker_copy = dict(worker_rh)
+                worker_copy["alerts"] = active_worker_alerts
+                worker_resource_health[runtime.name] = worker_copy
         payload["resource_health"] = {
             "host": host_resource_health,
             "workers": worker_resource_health,
@@ -15638,6 +15710,7 @@ class WorkbenchApiServer:
                 payload["issues"].append(
                     {
                         "code": str(alert.get("code") or "resource_alert"),
+                        "category": str(alert.get("category") or "performance"),
                         "component": str(alert.get("component") or "database"),
                         "severity": str(alert.get("severity") or "warning"),
                         "operation": alert.get("operation"),
@@ -15646,9 +15719,10 @@ class WorkbenchApiServer:
                         "details": dict(alert.get("details") or {}),
                     }
                 )
-            payload["degraded"] = True
-            if payload.get("status") == "ready":
-                payload["status"] = "degraded"
+        # Note: performance resource warnings are surfaced via WARNING logs,
+        # payload["resource_health"], and payload["issues"] WITHOUT mutating
+        # payload["ready"], payload["status"], or payload["degraded"] so
+        # healthy services remain available to Workbench and API consumers.
         capability_broker = getattr(orchestrator, "capability_broker", None)
         payload["device_capabilities"] = (
             capability_broker.status()
