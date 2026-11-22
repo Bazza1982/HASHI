@@ -193,7 +193,7 @@ def test_packaged_source_requires_matching_known_clean_provenance(tmp_path: Path
     source = tmp_path / "package"
     source.mkdir()
     (source / "pyproject.toml").write_text(
-        '[project]\\nname = "hashi-bridge"\\nversion = "4.0.0a2"\\n', encoding="utf-8"
+        '[project]\nname = "hashi-bridge"\nversion = "4.0.0a2"\n', encoding="utf-8"
     )
     commit = "a" * 40
     info = {"release_channel": "portable", "commit": commit, "dirty_at_build": False}
@@ -210,7 +210,9 @@ def test_packaged_source_requires_matching_known_clean_provenance(tmp_path: Path
         "provenance": {"commit": commit, "dirty_at_build": False},
     })
 
-    assert collect_version_payload(owner)["state"]["code"] == "packaged_release"
+    matching = collect_version_payload(owner)
+    assert matching["state"]["code"] == "packaged_release"
+    assert matching["product"]["version"] == "4.0.0a2"
     info["commit"] = "b" * 40
     info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
     different = collect_version_payload(owner)
