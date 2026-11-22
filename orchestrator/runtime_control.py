@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import re
 import time
@@ -903,18 +904,129 @@ def _user_is_authorized(runtime: Any, update: Any) -> bool:
     return user_id == authorized_id
 
 
-async def _reply(runtime: Any, update: Any, text: str) -> None:
+_REPLY_DELIVERY_SINK: contextvars.ContextVar[list[dict[str, Any]] | None] = (
+    contextvars.ContextVar("hashi_reply_delivery_sink", default=None)
+)
+
+
+def record_reply_delivery_outcome(outcome: dict[str, Any]) -> None:
+    """Record the truthful outcome of a transport reply for the active task."""
+    sink = _REPLY_DELIVERY_SINK.get()
+    if sink is not None:
+        sink.append(dict(outcome))
+
+
+async def _reply(runtime: Any, update: Any, text: str) -> Any:
     if hasattr(runtime, "_reply_text"):
-        await runtime._reply_text(update, text)
-        return
+        return await runtime._reply_text(update, text)
     message = getattr(update, "effective_message", None) or getattr(update, "message", None)
     if message is not None and hasattr(message, "reply_text"):
-        await message.reply_text(text)
-        return
+        return await message.reply_text(text)
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
     if chat_id is not None and hasattr(runtime, "send_long_message"):
-        await runtime.send_long_message(chat_id, text, purpose="steer-command")
+        return await runtime.send_long_message(chat_id, text, purpose="steer-command")
+    return None
+
+
+async def _deliver_post_effect_reply(
+    runtime: Any,
+    update: Any,
+    text: str,
+    *,
+    command_name: str,
+) -> dict[str, Any]:
+    """Deliver a confirmation reply after a command's side effects already committed.
+
+    Reply persistence/delivery errors (such as a transport-reference
+    ``SessionConflict`` after Telegram already sent the message, or suppressed /
+    rate-limited / failed replies) are recorded truthfully as an independent
+    delivery status instead of failing the already-executed command, leaving its
+    admission ticket in ``outcome_unknown``, or fabricating ``delivered=True``
+    when the underlying reply path returned ``None``.
+    """
+    from orchestrator.session_store import SessionConflict
+    from orchestrator.telegram_delivery_errors import telegram_request_not_submitted
+
+    logger = getattr(runtime, "logger", None)
+    sink: list[dict[str, Any]] = []
+    token = _REPLY_DELIVERY_SINK.set(sink)
+    try:
+        sent = await _reply(runtime, update, text)
+    except SessionConflict as exc:
+        if sink:
+            observed = dict(sink[-1])
+        else:
+            sent_ok = getattr(exc, "sent_message", None) is not None
+            delivery_state = str(
+                getattr(exc, "delivery_state", None)
+                or ("sent_reference_conflict" if sent_ok else "reference_conflict")
+            )
+            transport_message_id = getattr(exc, "transport_message_id", None)
+            observed = {
+                "status": delivery_state,
+                "sent": sent_ok,
+                "transport_message_id": (
+                    str(transport_message_id) if transport_message_id is not None else None
+                ),
+                "error_code": "telegram_transport_reference_conflict",
+                "error": str(exc),
+            }
+        if logger is not None:
+            logger.warning(
+                "Post-effect /%s reply hit transport reference conflict "
+                "(sent=%s, transport_message_id=%s): %s",
+                command_name,
+                observed.get("sent"),
+                observed.get("transport_message_id"),
+                exc,
+            )
+        return observed
+    except Exception as exc:
+        if sink:
+            observed = dict(sink[-1])
+        else:
+            not_submitted = telegram_request_not_submitted(exc)
+            observed = {
+                "status": "delivery_failed" if not_submitted else "outcome_unknown",
+                "sent": False if not_submitted else None,
+                "transport_message_id": None,
+                "error_code": type(exc).__name__,
+                "error": str(exc),
+            }
+        if logger is not None:
+            logger.warning(
+                "Post-effect /%s reply delivery did not confirm delivery after command "
+                "execution (status=%s): %s",
+                command_name,
+                observed.get("status"),
+                exc,
+            )
+        return observed
+    finally:
+        _REPLY_DELIVERY_SINK.reset(token)
+
+    if sink:
+        return dict(sink[-1])
+    if sent is not None:
+        msg_id = (
+            getattr(sent, "_hashi_transport_message_id", None)
+            or getattr(sent, "message_id", None)
+        )
+        return {
+            "status": "delivered",
+            "sent": True,
+            "transport_message_id": (
+                str(msg_id) if isinstance(msg_id, (int, str)) else None
+            ),
+            "error_code": None,
+        }
+    return {
+        "status": "not_observed",
+        "sent": None,
+        "transport_message_id": None,
+        "error_code": None,
+    }
 
 
 def _agent_is_busy(runtime: Any) -> bool:
@@ -1010,14 +1122,38 @@ async def cmd_steer(
         message = getattr(update, "effective_message", None) or getattr(update, "message", None)
         chat_id = getattr(getattr(message, "chat", None), "id", None)
     if chat_id is None:
-        await _reply(runtime, update, "Steer aborted: could not resolve chat id.")
-        return
+        delivery = await _deliver_post_effect_reply(
+            runtime,
+            update,
+            "Steer aborted: could not resolve chat id.",
+            command_name=command_name,
+        )
+        return {
+            "ok": False,
+            "error_code": f"{command_name}_missing_chat_id",
+            "error_message": "Could not resolve chat id.",
+            "request_id": None,
+            "reply_delivery": delivery,
+            "transport_delivery_state": delivery["status"],
+        }
 
     if not busy and not focus_mode:
         # Idle: plain new direction — no mid-task wrapper, no interrupt path.
         if not hasattr(runtime, "enqueue_request"):
-            await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
-            return
+            delivery = await _deliver_post_effect_reply(
+                runtime,
+                update,
+                "Steer aborted: runtime has no enqueue_request path.",
+                command_name=command_name,
+            )
+            return {
+                "ok": False,
+                "error_code": "steer_enqueue_unavailable",
+                "error_message": "Runtime has no enqueue_request path.",
+                "request_id": None,
+                "reply_delivery": delivery,
+                "transport_delivery_state": delivery["status"],
+            }
         request_id = await _enqueue_command_request(
             runtime,
             update,
@@ -1025,13 +1161,35 @@ async def cmd_steer(
             "text",
             direction[:80],
         )
-        await _reply(
+        request_id_str = str(request_id or "").strip() or None
+        if not request_id_str:
+            delivery = await _deliver_post_effect_reply(
+                runtime,
+                update,
+                "⚠️ Steer failed: agent was idle and your request could not be queued.",
+                command_name=command_name,
+            )
+            return {
+                "ok": False,
+                "error_code": "steer_enqueue_failed",
+                "error_message": "Agent was idle and the new request could not be queued.",
+                "request_id": None,
+                "reply_delivery": delivery,
+                "transport_delivery_state": delivery["status"],
+            }
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             f"🧭 Agent was idle — queued your text as a new request"
-            f"{f' ({request_id})' if request_id else ''} (no steer wrapper).",
+            f" ({request_id_str}) (no steer wrapper).",
+            command_name=command_name,
         )
-        return
+        return {
+            "ok": True,
+            "request_id": request_id_str,
+            "reply_delivery": delivery,
+            "transport_delivery_state": delivery["status"],
+        }
 
     if not busy:
         if not original_prompt:
@@ -1041,6 +1199,21 @@ async def cmd_steer(
                 "🎯 Agent is already idle and no recent task was found. Nothing was queued.",
             )
             return
+        if not hasattr(runtime, "enqueue_request"):
+            delivery = await _deliver_post_effect_reply(
+                runtime,
+                update,
+                "Focus aborted: runtime has no enqueue_request path.",
+                command_name=command_name,
+            )
+            return {
+                "ok": False,
+                "error_code": "focus_enqueue_unavailable",
+                "error_message": "Runtime has no enqueue_request path.",
+                "request_id": None,
+                "reply_delivery": delivery,
+                "transport_delivery_state": delivery["status"],
+            }
         request_id = await _enqueue_command_request(
             runtime,
             update,
@@ -1048,15 +1221,37 @@ async def cmd_steer(
             "focus",
             "Focus: narrow the most recent task to user intent",
         )
-        await _reply(
+        request_id_str = str(request_id or "").strip() or None
+        if not request_id_str:
+            delivery = await _deliver_post_effect_reply(
+                runtime,
+                update,
+                "⚠️ Focus failed: agent was idle and a continuation could not be queued.",
+                command_name=command_name,
+            )
+            return {
+                "ok": False,
+                "error_code": "focus_enqueue_failed",
+                "error_message": "Agent was idle and the focus continuation could not be queued.",
+                "request_id": None,
+                "reply_delivery": delivery,
+                "transport_delivery_state": delivery["status"],
+            }
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             "🎯 Focus applied to the most recent task.\n"
             "Queued a one-off continuation that must keep working on the original outcome "
             "within its requested scope"
-            f"{f' ({request_id})' if request_id else ''}.",
+            f" ({request_id_str}).",
+            command_name=command_name,
         )
-        return
+        return {
+            "ok": True,
+            "request_id": request_id_str,
+            "reply_delivery": delivery,
+            "transport_delivery_state": delivery["status"],
+        }
 
     native_evidence = None
     if not focus_mode:
@@ -1100,7 +1295,7 @@ async def cmd_steer(
             },
             "continuation": continuation,
         }
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             "🧭 Steered in place.\n"
@@ -1115,7 +1310,10 @@ async def cmd_steer(
             + f"New Run: {active_run_id or 'unavailable'} (same Run, continued in place)\n"
             + "Continuation evidence: "
             + f"{continuation.get('evidence_ref') or 'unavailable'}.",
+            command_name=command_name,
         )
+        steer_receipt["reply_delivery"] = delivery
+        steer_receipt["transport_delivery_state"] = delivery["status"]
         return steer_receipt
 
     # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
@@ -1169,8 +1367,39 @@ async def cmd_steer(
         else f"Steer: {direction[:80]}"
     )
     if not hasattr(runtime, "enqueue_request"):
-        await _reply(runtime, update, "Steer aborted: runtime has no enqueue_request path.")
-        return
+        delivery = await _deliver_post_effect_reply(
+            runtime,
+            update,
+            f"⚠️ {command_name.capitalize()} interrupted the active task, "
+            "but runtime has no enqueue_request path to queue a continuation.",
+            command_name=command_name,
+        )
+        return {
+            "ok": False,
+            "error_code": f"{command_name}_enqueue_unavailable",
+            "error_message": "Active work was interrupted, but runtime has no enqueue_request path.",
+            "type": (
+                "hashi.focus-receipt" if focus_mode else "hashi.steer-receipt"
+            ),
+            "version": 2,
+            "status": "failed",
+            "interrupted": True,
+            "old_run": {
+                "request_id": active_request_id or None,
+                "run_id": active_run_id or None,
+                "terminal": "steered",
+            },
+            "new_run": {
+                "request_id": None,
+                "run_id": None,
+                "parent_run_id": active_run_id or None,
+                "continues_run_id": active_run_id or None,
+                "relationship": "linked_successor",
+                "created": False,
+            },
+            "reply_delivery": delivery,
+            "transport_delivery_state": delivery["status"],
+        }
     request_id = await _enqueue_command_request(
         runtime,
         update,
@@ -1189,9 +1418,84 @@ async def cmd_steer(
         },
     )
 
-    if request_id:
-        context.derived_request_id = request_id
-    new_run_id = _request_run_id(runtime, str(request_id or ""))
+    request_id_str = str(request_id or "").strip() or None
+    if not request_id_str:
+        error_code = (
+            "focus_continuation_enqueue_failed"
+            if focus_mode
+            else "steer_continuation_enqueue_failed"
+        )
+        linked_continuation = {
+            **continuation_evidence,
+            "old_run_id": active_run_id or None,
+            "new_run_id": None,
+            "parent_run_id": active_run_id or None,
+            "relationship": "linked_successor",
+            "queued": False,
+        }
+        steer_receipt = {
+            "ok": False,
+            "error_code": error_code,
+            "error_message": (
+                f"Active work was interrupted, but the /{command_name} continuation could not be queued."
+            ),
+            "type": (
+                "hashi.focus-receipt" if focus_mode else "hashi.steer-receipt"
+            ),
+            "version": 2,
+            "status": "failed",
+            "interrupted": True,
+            "old_run": {
+                "request_id": active_request_id or None,
+                "run_id": active_run_id or None,
+                "terminal": "steered",
+            },
+            "new_run": {
+                "request_id": None,
+                "run_id": None,
+                "parent_run_id": active_run_id or None,
+                "continues_run_id": active_run_id or None,
+                "relationship": "linked_successor",
+                "created": False,
+            },
+            "continuation": linked_continuation,
+        }
+        if focus_mode:
+            delivery = await _deliver_post_effect_reply(
+                runtime,
+                update,
+                "⚠️ Focus interrupted the active task, but could not queue a continuation.\n"
+                f"Cleared {dropped} queued message(s).\n"
+                + (
+                    f"Preserved {delayed_preserved} delayed message(s); use /recall to cancel them.\n"
+                    if delayed_preserved
+                    else ""
+                )
+                + "Existing progress and workspace artefacts were kept; no continuation was queued.",
+                command_name=command_name,
+            )
+        else:
+            delivery = await _deliver_post_effect_reply(
+                runtime,
+                update,
+                "⚠️ Steer interrupted active work, but could not queue the continuation.\n"
+                f"Cleared {dropped} queued message(s).\n"
+                + (
+                    f"Preserved {delayed_preserved} delayed message(s); use /recall to cancel them.\n"
+                    if delayed_preserved
+                    else ""
+                )
+                + "Kept interim progress, thinking, and workspace artefacts.\n"
+                + f"Old Run: {active_run_id or 'unavailable'}\n"
+                + "New Run: not created (continuation enqueue failed).",
+                command_name=command_name,
+            )
+        steer_receipt["reply_delivery"] = delivery
+        steer_receipt["transport_delivery_state"] = delivery["status"]
+        return steer_receipt
+
+    context.derived_request_id = request_id_str
+    new_run_id = _request_run_id(runtime, request_id_str)
     linked_continuation = {
         **continuation_evidence,
         "old_run_id": active_run_id or None,
@@ -1200,29 +1504,30 @@ async def cmd_steer(
         "relationship": "linked_successor",
     }
     steer_receipt = {
+        "ok": True,
         "type": (
             "hashi.focus-receipt" if focus_mode else "hashi.steer-receipt"
         ),
         "version": 2,
-        "status": "accepted" if request_id and new_run_id else "outcome_unknown",
+        "status": "accepted" if new_run_id else "outcome_unknown",
         "old_run": {
             "request_id": active_request_id or None,
             "run_id": active_run_id or None,
             "terminal": "steered",
         },
         "new_run": {
-            "request_id": str(request_id or "") or None,
+            "request_id": request_id_str,
             "run_id": new_run_id or None,
             "parent_run_id": active_run_id or None,
             "continues_run_id": active_run_id or None,
             "relationship": "linked_successor",
-            "created": bool(request_id and new_run_id),
+            "created": bool(new_run_id),
         },
         "continuation": linked_continuation,
     }
 
     if focus_mode:
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             "🎯 Focus applied.\n"
@@ -1235,10 +1540,11 @@ async def cmd_steer(
             + "Preserved existing progress and queued an immediate continuation restricted "
             "to the original user-requested scope. The task must continue until its "
             "requested outcome is complete or genuinely blocked"
-            f"{f' (request {request_id})' if request_id else ''}.",
+            f" (request {request_id_str}).",
+            command_name=command_name,
         )
     else:
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             f"🧭 Steered.\n"
@@ -1253,7 +1559,10 @@ async def cmd_steer(
             + f"New Run: {new_run_id or 'unavailable'}\n"
             + "Continuation evidence: "
             + f"{linked_continuation.get('evidence_ref') or 'unavailable'}.",
+            command_name=command_name,
         )
+    steer_receipt["reply_delivery"] = delivery
+    steer_receipt["transport_delivery_state"] = delivery["status"]
     return steer_receipt
 
 

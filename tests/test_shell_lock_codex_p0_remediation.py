@@ -10,7 +10,7 @@ import pytest
 from adapters.codex_cli import CodexCLIAdapter
 from orchestrator.execution_resources import (
     _is_strictly_readonly_shell_command,
-    _shell_lock_targets,
+    _shell_file_write_targets,
     tool_resource,
 )
 
@@ -143,16 +143,17 @@ def test_t29_shell_lock_targets_never_exclusively_lock_drive_root_and_allow_git_
     ws_a.mkdir()
     ws_b.mkdir()
 
-    reg_a = SimpleNamespace(
-        workspace_dir=ws_a,
-        access_roots=[drive_root],
-        _effective_audit_context=lambda: {},
-    )
-    targets = _shell_lock_targets(reg_a, {"command": "pytest -q"}, [str(drive_root), str(ws_a)])
+    # Opaque shell commands (e.g. pytest -q) must lock neither drive roots nor whole directories.
+    targets = _shell_file_write_targets("pytest -q", ws_a.resolve())
+    assert targets == []
     assert drive_root not in targets
-    assert ws_a.resolve() in targets
+    assert ws_a.resolve() not in targets
 
-    # Additional read-only git subcommands must classify True (shared lease),
+    # Literal file redirection locks ONLY that concrete file.
+    redir_targets = _shell_file_write_targets("echo hi > out.txt", ws_a.resolve())
+    assert redir_targets == [(ws_a / "out.txt").resolve()]
+
+    # Additional read-only git subcommands must classify True (no lease),
     # while dangerous flags still return False.
     for cmd in (
         "git grep -n pattern src/",

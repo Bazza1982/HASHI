@@ -693,79 +693,214 @@ def _is_strictly_readonly_shell_command(command: str) -> bool:
 
 
 def _resolve_tool_target(raw_value: object, workspace_dir: Path) -> Path | None:
-    text = str(raw_value or '').strip()
-    if not text:
+    if raw_value is None or isinstance(raw_value, bool):
         return None
-    raw_path = Path(text)
-    return raw_path.resolve() if raw_path.is_absolute() else (workspace_dir / raw_path).resolve()
+    text = str(raw_value).strip()
+    if not text or "\x00" in text:
+        return None
+    try:
+        raw_path = Path(text)
+        return raw_path.resolve() if raw_path.is_absolute() else (workspace_dir / raw_path).resolve()
+    except (OSError, ValueError):
+        return None
 
 
 def _is_filesystem_root(path: Path) -> bool:
     """Return True when ``path`` is a drive or filesystem root (e.g. ``C:\\`` or ``/``)."""
-    resolved = path.resolve()
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError):
+        return True
     return resolved == resolved.parent
 
 
-def _shell_lock_targets(registry, arguments: dict, roots: list[str]) -> list[Path]:
-    """Conservative lock targets for shell commands across accessible Workzones.
-
-    Arbitrary scripts can mutate any accessible writable Workzone even when
-    its literal path does not appear in the command string, so unknown/mutating
-    shell commands lock all non-root authorized Workzones (plus workspace/cwd).
-    Drive/filesystem roots added by ``access_scope='drive'`` (e.g. ``C:\\``)
-    must never be exclusively locked by a single workspace shell call, or one
-    Agent running tests would stall every unrelated Agent on the machine.
-    """
-    workspace = Path(registry.workspace_dir).resolve()
-    raw_cwd = str(arguments.get('cwd') or '').strip()
-    exec_dir = _resolve_tool_target(raw_cwd, workspace) if raw_cwd else workspace
-    seen: set[str] = set()
-    targets: list[Path] = []
-    candidates = [*(Path(p) for p in roots), *([exec_dir] if exec_dir is not None else [])]
-    for candidate in candidates:
-        if _is_filesystem_root(candidate):
-            continue
-        norm = os.path.normcase(str(candidate))
-        if norm not in seen:
-            seen.add(norm)
-            targets.append(candidate)
-    if not targets:
-        targets.append(workspace)
-    return targets
+_WSL_MNT_PATH = re.compile(r"^/mnt/([A-Za-z])(/.*)?$")
+_SHELL_DIR_CHANGE_CMDS = frozenset({"cd", "chdir", "set-location", "sl", "push-location", "pushd"})
+_SHELL_NESTED_LAUNCHERS = frozenset({"bash", "sh", "zsh", "dash", "wsl", "powershell", "pwsh", "cmd"})
+_SHELL_SEGMENT_SEP_CHARS = frozenset(";|&\n")
+_SHELL_REDIR_TOKENS = frozenset({">", ">>", ">|"})
+_SHELL_NULL_DEVICES = frozenset({"nul", "/dev/null"})
+_SHELL_UNSAFE_PATH_CHARS = "$%*?[]{}()`"
 
 
-def _shell_redirect_targets(command: str, exec_dir: Path, shell: str = "") -> list[Path]:
-    """Resolve literal output-redirection targets; this is not a shell parser.
+def _is_shell_segment_sep(token: str) -> bool:
+    return bool(token) and all(ch in _SHELL_SEGMENT_SEP_CHARS for ch in token)
 
-    An opaque script may write other paths. These cooperative leases cover only
-    the explicit targets we can identify and do not replace OS authorization.
-    """
+
+def _strip_outer_quotes(raw_value: str) -> str:
+    value = str(raw_value or "")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _normalize_shell_path_token(raw_value: str) -> str | None:
+    value = _strip_outer_quotes(str(raw_value or "").strip()).strip()
+    if (
+        not value
+        or value in {"-", "~"}
+        or value.startswith(("~/", "~\\", "-"))
+        or _is_shell_segment_sep(value)
+        or value in {"<", ">", ">>", ">|"}
+        or value.casefold() in _SHELL_NULL_DEVICES
+        or any(char in value for char in _SHELL_UNSAFE_PATH_CHARS)
+        or "\x00" in value
+    ):
+        return None
+    if os.name == "nt":
+        match = _WSL_MNT_PATH.match(value)
+        if match:
+            drive = match.group(1).upper()
+            rest = (match.group(2) or "/").replace("/", "\\")
+            value = f"{drive}:{rest}"
+    return value
+
+
+def _lex_shell_tokens(command: str, shell: str = "") -> list[str]:
+    if not command:
+        return []
+    # Normalize CRLF/CR to LF and remove '\n' from whitespace so shlex emits
+    # newlines as explicit punctuation tokens outside quotes (multiline scripts).
+    normalized = command.replace("\r\n", "\n").replace("\r", "\n")
     try:
         lexer = shlex.shlex(
-            command,
+            normalized,
             posix=(str(shell).casefold() == "bash" or os.name != "nt"),
-            punctuation_chars="<>|&;",
+            punctuation_chars="<>|&;\n",
         )
+        lexer.whitespace = " \t"
         lexer.whitespace_split = True
         lexer.commenters = ""
-        tokens = list(lexer)
+        return list(lexer)
     except ValueError:
         return []
-    targets = []
-    for index, token in enumerate(tokens[:-1]):
-        if token not in {">", ">>"}:
+
+
+def _shell_file_write_targets(
+    command: str,
+    workspace_dir: Path,
+    shell: str = "",
+    *,
+    _depth: int = 0,
+) -> list[Path]:
+    """Identify concrete, literal file write targets for cooperative shell locking.
+
+    Shell commands always start in ``workspace_dir`` (matching ``execute_shell``).
+    Directory changes (``cd`` / ``Set-Location`` / ``pushd``) are tracked solely
+    to resolve subsequent relative file write targets (such as literal ``>`` /
+    ``>>`` redirections and ``git ... --output=...``). Directories themselves are
+    NEVER locked: opaque scripts and long commands (e.g. ``pytest``) must not
+    hold exclusive directory/Workzone locks that block unrelated file edits.
+    """
+    tokens = _lex_shell_tokens(command, shell)
+    if not tokens:
+        return []
+    current_dir = workspace_dir
+    targets: list[Path] = []
+    seen: set[str] = set()
+
+    def _record(path: Path | None) -> None:
+        if path is None or _is_filesystem_root(path):
+            return
+        norm = os.path.normcase(str(path))
+        if norm not in seen:
+            seen.add(norm)
+            targets.append(path)
+
+    idx = 0
+    at_cmd_start = True
+    current_cmd = ""
+    git_dir: Path | None = None
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if _is_shell_segment_sep(tok):
+            at_cmd_start = True
+            current_cmd = ""
+            git_dir = None
+            idx += 1
             continue
-        value = tokens[index + 1]
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        # Expansions, descriptors and globbing are not stable file identities.
-        if (not value or value.startswith("~")
-                or value in {"&", "|", ";", "<", ">", ">>"}
-                or any(char in value for char in "$%*?[]{}()`")):
+
+        raw_unquoted = _strip_outer_quotes(tok)
+        cmd_lower = Path(raw_unquoted).name.casefold()
+        cmd_base = cmd_lower[:-4] if cmd_lower.endswith(".exe") else cmd_lower
+        if at_cmd_start:
+            current_cmd = cmd_base
+
+        if at_cmd_start and cmd_base in _SHELL_DIR_CHANGE_CMDS:
+            arg_idx = idx + 1
+            while arg_idx < len(tokens):
+                flag = tokens[arg_idx].casefold()
+                if flag in {"-path", "-literalpath", "/d", "--"}:
+                    arg_idx += 1
+                    continue
+                break
+            if arg_idx < len(tokens) and not _is_shell_segment_sep(tokens[arg_idx]):
+                normalized = _normalize_shell_path_token(tokens[arg_idx])
+                if normalized:
+                    resolved = _resolve_tool_target(normalized, current_dir)
+                    if resolved is not None:
+                        current_dir = resolved
+                idx = arg_idx + 1
+                at_cmd_start = False
+                continue
+
+        if current_cmd == "git" and not at_cmd_start:
+            if raw_unquoted == "-C" and idx + 1 < len(tokens):
+                normalized = _normalize_shell_path_token(tokens[idx + 1])
+                if normalized:
+                    resolved = _resolve_tool_target(normalized, git_dir or current_dir)
+                    if resolved is not None:
+                        git_dir = resolved
+                idx += 2
+                continue
+            if raw_unquoted.startswith("-C") and len(raw_unquoted) > 2:
+                normalized = _normalize_shell_path_token(raw_unquoted[2:])
+                if normalized:
+                    resolved = _resolve_tool_target(normalized, git_dir or current_dir)
+                    if resolved is not None:
+                        git_dir = resolved
+                idx += 1
+                continue
+            if raw_unquoted == "--output" and idx + 1 < len(tokens):
+                normalized = _normalize_shell_path_token(tokens[idx + 1])
+                if normalized:
+                    _record(_resolve_tool_target(normalized, git_dir or current_dir))
+                idx += 2
+                continue
+            if raw_unquoted.startswith("--output="):
+                normalized = _normalize_shell_path_token(raw_unquoted[len("--output="):])
+                if normalized:
+                    _record(_resolve_tool_target(normalized, git_dir or current_dir))
+                idx += 1
+                continue
+
+        if tok in _SHELL_REDIR_TOKENS and idx + 1 < len(tokens):
+            normalized = _normalize_shell_path_token(tokens[idx + 1])
+            if normalized:
+                _record(_resolve_tool_target(normalized, current_dir))
+            idx += 2
+            at_cmd_start = False
             continue
-        target = _resolve_tool_target(value, exec_dir)
-        if target is not None and not _is_filesystem_root(target):
-            targets.append(target)
+
+        # Inspect one level of nested `bash -lc '...'` / `sh -c '...'` / `wsl ... bash -lc '...'`
+        # strictly for concrete file write targets.
+        if (
+            _depth < 1
+            and current_cmd in _SHELL_NESTED_LAUNCHERS
+            and tok.casefold() in {"-c", "-lc", "-command", "/c"}
+            and idx + 1 < len(tokens)
+        ):
+            inner = _strip_outer_quotes(tokens[idx + 1])
+            inner_shell = "bash" if tok.casefold() in {"-c", "-lc"} else shell
+            for nested in _shell_file_write_targets(inner, current_dir, inner_shell, _depth=_depth + 1):
+                _record(nested)
+            idx += 2
+            at_cmd_start = False
+            continue
+
+        at_cmd_start = False
+        idx += 1
+
     return targets
 
 
@@ -774,7 +909,8 @@ async def tool_resource(registry, name, arguments):
     """Synchronize mutating filesystem tools without over-locking independent work.
 
     - Known file mutations (`file_write`, `text_replace`, `apply_patch`) take
-      shared parent-directory leases plus exclusive target-file leases.
+      shared parent-directory leases plus exclusive target-file leases so two
+      different files in the same repository always run in parallel.
     - `file_manage` locks exact destinations/subtrees:
       * `mkdir`: exclusive destination directory.
       * single-file `copy`: shared source file, exclusive resolved destination
@@ -783,10 +919,12 @@ async def tool_resource(registry, name, arguments):
       * recursive directory `copy`: exclusive source and destination subtrees
         so concurrent child-file edits cannot interleave with tree copying.
       * `move`: exclusive source and destination (file or directory subtree).
-    - Provably read-only `shell`/`bash` commands take shared leases.
-    - Arbitrary/mutating `shell`/`bash` commands take exclusive leases across
-      accessible non-root Workzones and literal output-redirection targets.
-      Opaque scripts may also write paths that cannot be derived here.
+    - Invalid/missing path arguments never escalate to full-Workzone locks.
+    - `shell`/`bash` commands NEVER hold whole-directory or whole-Workzone
+      locks merely because they run in or `cd` into a repository. Read-only
+      commands take no lease; other commands coordinate only on concrete,
+      reliably identified literal file write targets (e.g. `>` / `>>` and
+      `git ... --output=...`) resolved from ``workspace_dir``.
     - Pure read tools take no lease.
     """
     arguments = arguments if isinstance(arguments, dict) else {}
@@ -800,7 +938,6 @@ async def tool_resource(registry, name, arguments):
     config = context.get('global_config')
     root = getattr(config, 'bridge_home', None) or getattr(config, 'project_root', None) or registry.workspace_dir
     workspace_dir = Path(registry.workspace_dir).resolve()
-    roots = sorted({str(Path(p).resolve()) for p in [workspace_dir, *registry.access_roots]})
     scopes: dict[str, bool] = {}
 
     def scope(path: Path, shared: bool):
@@ -814,25 +951,25 @@ async def tool_resource(registry, name, arguments):
 
     if name in {'file_write', 'text_replace', 'apply_patch'}:
         target = _resolve_tool_target(arguments.get('path'), workspace_dir)
-        if target is not None:
+        if target is not None and not _is_filesystem_root(target):
             lock_path(target, shared=False)
-        else:
-            for raw_scope in roots:
-                lock_path(Path(raw_scope), shared=False)
     elif name == 'file_manage':
         op = str(arguments.get('operation') or '').strip().casefold()
-        locked_any = False
         if op == 'mkdir':
             target = _resolve_tool_target(arguments.get('destination'), workspace_dir)
-            if target is not None:
+            if target is not None and not _is_filesystem_root(target):
                 lock_path(target, shared=False)
-                locked_any = True
         elif op == 'copy':
             src = _resolve_tool_target(arguments.get('source'), workspace_dir)
             dst = _resolve_tool_target(arguments.get('destination'), workspace_dir)
             recursive = arguments.get('recursive') is True
             src_is_dir = bool(src is not None and src.exists() and src.is_dir())
-            if src is not None and dst is not None:
+            if (
+                src is not None
+                and dst is not None
+                and not _is_filesystem_root(src)
+                and not _is_filesystem_root(dst)
+            ):
                 if recursive or src_is_dir:
                     # Recursive directory copy must conflict with concurrent
                     # writes to child files inside source or destination.
@@ -840,30 +977,31 @@ async def tool_resource(registry, name, arguments):
                     lock_path(dst, shared=False)
                 else:
                     actual_dst = (dst / src.name).resolve() if (dst.exists() and dst.is_dir()) else dst
-                    lock_path(src, shared=True)
-                    lock_path(actual_dst, shared=False)
-                locked_any = True
+                    if not _is_filesystem_root(actual_dst):
+                        lock_path(src, shared=True)
+                        lock_path(actual_dst, shared=False)
         elif op == 'move':
             src = _resolve_tool_target(arguments.get('source'), workspace_dir)
             dst = _resolve_tool_target(arguments.get('destination'), workspace_dir)
-            if src is not None and dst is not None:
+            if (
+                src is not None
+                and dst is not None
+                and not _is_filesystem_root(src)
+                and not _is_filesystem_root(dst)
+            ):
                 lock_path(src, shared=False)
                 lock_path(dst, shared=False)
-                locked_any = True
-        if not locked_any:
-            for raw_scope in roots:
-                lock_path(Path(raw_scope), shared=False)
     else:
         command = str(arguments.get('command') or '')
-        readonly_shell = _is_strictly_readonly_shell_command(command)
-        for target_root in _shell_lock_targets(registry, arguments, roots):
-            lock_path(target_root, shared=readonly_shell)
-        if not readonly_shell:
-            raw_cwd = str(arguments.get('cwd') or '').strip()
-            exec_dir = _resolve_tool_target(raw_cwd, workspace_dir) if raw_cwd else workspace_dir
-            if exec_dir is not None:
-                for target in _shell_redirect_targets(command, exec_dir, str(arguments.get('shell') or '')):
-                    lock_path(target, shared=False)
+        if not _is_strictly_readonly_shell_command(command):
+            for target in _shell_file_write_targets(
+                command, workspace_dir, str(arguments.get('shell') or '')
+            ):
+                lock_path(target, shared=False)
+
+    if not scopes:
+        yield 0
+        return
 
     groups = [(key, 1, shared) for key, shared in scopes.items()]
     async with leases(Path(root) / 'state' / 'instance', groups) as elapsed:
