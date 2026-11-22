@@ -773,7 +773,7 @@
     "safevoice.send": "发送转写文字",
     "safevoice.discard": "放弃转写文字",
     "safevoice.keep": "保留并编辑",
-    "safevoice.draft_instruction": "转写内容如下：请复制到输入框继续编辑，再决定发送或丢弃。内容尚未发送给 Agent。",
+    "safevoice.draft_instruction": "转写内容如下：请复制到输入框继续编辑，再决定发送或丢弃。内容尚未发送给代理。",
     "safevoice.draft_ready": "转写内容已保留在下方。复制到输入框后可以编辑，再决定发送或丢弃。",
     "safevoice.draft_failed": "无法保留转写内容，请重试。",
     "safevoice.confirm": "🛡️ 安全语音——确认转写内容：",

@@ -2073,7 +2073,9 @@ def test_reboot_notices_use_names_for_one_target_and_counts_for_many():
     starting = render_notice(many, starting=True)
     completed = render_notice(many)
     assert starting == "🔄 Starting hot reboot. This usually completes within 1 minute."
-    assert "20 agents online" in completed and "Remote" not in completed
+    assert "20 agents online" in completed
+    assert "Remote is outside this reboot" in completed
+    assert "/version" in completed
     assert "/reboot status" not in starting
 
     partial = {

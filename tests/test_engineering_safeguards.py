@@ -215,7 +215,7 @@ def test_installed_hook_checks_main_merge_against_approved_upstream(
 
     baseline = git(repository, "rev-parse", "HEAD").stdout.strip()
     git(repository, "checkout", "-qb", "upstream")
-    (repository / "main.py").write_text("approved upstream Core\n")
+    (repository / "main.py").write_text("approved upstream Core\n", newline="\n")
     git(repository, "add", "main.py")
     git(repository, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
         "commit", "-qm", "reviewed upstream")
