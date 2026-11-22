@@ -142,6 +142,22 @@ def test_source_checkout_uses_commit_ancestry_not_timestamps(tmp_path: Path) -> 
     assert status["commit"] != running
 
 
+def test_failed_git_ancestry_check_is_unknown_not_diverged(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = _checkout(tmp_path)
+    original = build_provenance._run_git
+
+    def failed_ancestry(root, *args, **kwargs):
+        if args and args[0] == "merge-base":
+            return SimpleNamespace(returncode=128)
+        return original(root, *args, **kwargs)
+
+    monkeypatch.setattr(build_provenance, "_run_git", failed_ancestry)
+    status = inspect_source_checkout(source, running_commit="f" * 40)
+    assert status["relation"] == "unknown"
+
+
 def test_packaged_provenance_never_invents_a_branch(tmp_path: Path) -> None:
     root = _checkout(tmp_path) / "package"
     root.mkdir()
@@ -228,6 +244,76 @@ def test_payload_distinguishes_source_ahead_mixed_and_legacy(
     assert unavailable["state"]["code"] == "provenance_unavailable"
 
 
+def test_packaged_unknown_build_status_stays_unknown(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "BUILD_INFO.json").write_text(json.dumps({"provenance": {
+        "release_channel": "portable", "commit": "f" * 40,
+        "dirty_at_build": None, "change_count_at_build": None,
+    }}), encoding="utf-8")
+
+    provenance = capture_build_provenance(package, artifact_kind="hashi-remote")
+    assert provenance["dirty_at_build"] is None
+    assert provenance["change_count_at_build"] is None
+
+
+def test_inaccessible_git_checkout_is_not_misreported_as_a_package(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = _checkout(tmp_path)
+    (source / "BUILD_INFO.json").write_text(json.dumps({"provenance": {
+        "commit": "f" * 40, "dirty_at_build": False,
+    }}), encoding="utf-8")
+    monkeypatch.setattr(build_provenance, "_git_text", lambda *_: None)
+    provenance = capture_build_provenance(source, artifact_kind="hashi-remote")
+    checkout = inspect_source_checkout(source, running_commit="f" * 40)
+    assert provenance["release_channel"] == "git"
+    assert provenance["commit"] is None
+    assert provenance["dirty_at_build"] is None
+    assert checkout["available"] is True
+    assert checkout["reason"] == "source_status_unavailable"
+    assert checkout["dirty"] is None
+    assert checkout["relation"] == "unknown"
+
+
+def test_unavailable_git_status_never_claims_a_clean_checkout(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = _checkout(tmp_path)
+    original = build_provenance._git_text
+
+    def timed_out_status(root, *args):
+        if args and args[0] == "status":
+            return None
+        return original(root, *args)
+
+    monkeypatch.setattr(build_provenance, "_git_text", timed_out_status)
+    provenance = capture_build_provenance(source, artifact_kind="hashi-remote")
+    checkout = inspect_source_checkout(source, running_commit=provenance["commit"])
+    assert provenance["dirty_at_build"] is None
+    assert provenance["change_count_at_build"] is None
+    assert checkout["dirty"] is None
+    assert checkout["change_count"] is None
+
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    function_provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, function_provenance)
+    owner = _owner(source, home, generation)
+    monkeypatch.setattr("orchestrator.version_info._remote_fact",
+                        lambda *_: {"status": "active", "pid": 23, "provenance": provenance})
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["state"]["code"] == "component_unverified"
+    assert "source_status_unavailable" in payload["state"]["reasons"]
+    assert "remote_build_status_unknown" in payload["state"]["reasons"]
+    assert "function_worker_build_status_unknown" in payload["state"]["reasons"]
+    rendered = render_version_card(payload, locale="en").lower()
+    assert "unknown" in rendered
+    assert "source has uncommitted changes" not in rendered
+
+
 def test_version_names_remote_mismatch_and_reports_unavailable_remote(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -244,7 +330,7 @@ def test_version_names_remote_mismatch_and_reports_unavailable_remote(
     remote = {
         "status": "active",
         "pid": 23,
-        "provenance": {"commit": remote_commit},
+        "provenance": {"commit": remote_commit, "dirty_at_build": False},
     }
     monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
 
@@ -291,7 +377,8 @@ def test_version_requires_live_matching_remote_health(tmp_path: Path, monkeypatc
     owner = _owner(source, home, generation)
     claim = {
         "instance_id": "HASHI2", "root": str(home.resolve()), "pid": 23,
-        "started_at": 123456.0, "provenance": {"commit": provenance["commit"]},
+        "started_at": 123456.0,
+        "provenance": {"commit": provenance["commit"], "dirty_at_build": False},
     }
     response = {"ok": True, "trusted_view": True, "status": "ready",
                 "instance": {"instance_id": "HASHI2", "runtime_claim": dict(claim)}}

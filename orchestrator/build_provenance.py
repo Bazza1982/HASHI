@@ -136,8 +136,8 @@ def _git_source(root: Path) -> dict[str, Any] | None:
         "branch": branch or None,
         "tag": tag or None,
         "commit_time": commit_time or None,
-        "dirty": bool(rows),
-        "change_count": len(rows),
+        "dirty": bool(rows) if status is not None else None,
+        "change_count": len(rows) if status is not None else None,
     }
 
 
@@ -179,9 +179,15 @@ def _packaged_source(root: Path) -> tuple[str, dict[str, Any]]:
             or ""
         ).strip()
         or None,
-        "dirty": bool(provenance.get("dirty_at_build", False)),
-        "change_count": _nonnegative_int(
-            provenance.get("change_count_at_build")
+        "dirty": (
+            provenance.get("dirty_at_build")
+            if isinstance(provenance.get("dirty_at_build"), bool)
+            else None
+        ),
+        "change_count": (
+            _nonnegative_int(provenance["change_count_at_build"])
+            if provenance.get("change_count_at_build") is not None
+            else None
         ),
     }
 
@@ -198,7 +204,11 @@ def capture_build_provenance(
 
     root = Path(code_root).resolve()
     source = _git_source(root)
-    if source is None:
+    if source is None and (root / ".git").exists():
+        # An inaccessible checkout is not a packaged installation. Do not
+        # use potentially stale package metadata as its build identity.
+        channel, source = "git", {}
+    elif source is None:
         channel, source = _packaged_source(root)
     else:
         channel = "git"
@@ -213,8 +223,8 @@ def capture_build_provenance(
         "tag": source.get("tag"),
         "commit_time": source.get("commit_time"),
         "build_time": build_time,
-        "dirty_at_build": bool(source.get("dirty")),
-        "change_count_at_build": int(source.get("change_count") or 0),
+        "dirty_at_build": source.get("dirty"),
+        "change_count_at_build": source.get("change_count"),
         "generation_id": str(generation_id) if generation_id else None,
         "verifiable": bool(source.get("commit")),
     }
@@ -237,6 +247,18 @@ def inspect_source_checkout(
 
     root = Path(code_root).resolve()
     source = _git_source(root)
+    if source is None and (root / ".git").exists():
+        return {
+            "available": True,
+            "release_channel": "git",
+            "branch": None,
+            "commit": None,
+            "commit_time": None,
+            "dirty": None,
+            "change_count": None,
+            "relation": "unknown",
+            "reason": "source_status_unavailable",
+        }
     if source is None:
         channel, packaged = _packaged_source(root)
         return {
@@ -258,19 +280,19 @@ def inspect_source_checkout(
         relation = "same"
     elif running:
         try:
-            source_ahead = _run_git(
+            source_result = _run_git(
                 root, "merge-base", "--is-ancestor", running, current
-            ).returncode == 0
-            running_ahead = _run_git(
+            ).returncode
+            running_result = _run_git(
                 root, "merge-base", "--is-ancestor", current, running
-            ).returncode == 0
+            ).returncode
         except (OSError, subprocess.SubprocessError):
-            source_ahead = running_ahead = False
-        if source_ahead:
+            source_result = running_result = None
+        if source_result == 0:
             relation = "source_ahead"
-        elif running_ahead:
+        elif running_result == 0:
             relation = "running_ahead"
-        else:
+        elif source_result == 1 and running_result == 1:
             relation = "diverged"
     return {
         "available": True,
@@ -279,8 +301,9 @@ def inspect_source_checkout(
         "tag": source.get("tag"),
         "commit": current or None,
         "commit_time": source.get("commit_time"),
-        "dirty": bool(source.get("dirty")),
-        "change_count": int(source.get("change_count") or 0),
+        "dirty": source.get("dirty"),
+        "change_count": source.get("change_count"),
         "relation": relation,
         "reason": None,
     }
+# HASHI-Fingerprint: hfp_8e5784438033432dafd9eba3c6dd9404

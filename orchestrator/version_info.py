@@ -456,17 +456,24 @@ def collect_version_payload(
     reasons: list[str] = []
     mixed_workers = len(generations) > 1 or len(adopted_commits) > 1
     mixed = mixed_workers
-    if any(_mapping(item.get("provenance")).get("dirty_at_build") is True
-           for item in [shared, *workers]):
+    component_provenance = [_mapping(item.get("provenance")) for item in [shared, *workers]]
+    if any(item.get("dirty_at_build") is True for item in component_provenance):
         reasons.append("function_worker_dirty_at_build")
+    if any(item.get("dirty_at_build") is not True and item.get("dirty_at_build") is not False
+           for item in component_provenance):
+        reasons.append("function_worker_build_status_unknown")
     if len(generations) > 1:
         reasons.append("function_worker_generations_differ")
     if len(adopted_commits) > 1:
         reasons.append("function_worker_commits_differ")
     remote_commit = _adopted_component_commit(remote)
     shared_commit = _adopted_component_commit(shared)
-    if _mapping(remote.get("provenance")).get("dirty_at_build") is True:
+    remote_provenance = _mapping(remote.get("provenance"))
+    if remote_provenance.get("dirty_at_build") is True:
         reasons.append("remote_dirty_at_build")
+    elif (remote.get("status") in {"active", "degraded"}
+          and remote_provenance.get("dirty_at_build") is not False):
+        reasons.append("remote_build_status_unknown")
     if shared_commit and remote_commit and shared_commit != remote_commit:
         mixed = True
         reasons.append("remote_commit_differs")
@@ -485,6 +492,9 @@ def collect_version_payload(
         reasons.append("remote_degraded")
     elif not remote_commit:
         reasons.append("remote_provenance_unavailable")
+
+    if source.get("available") and source.get("dirty") is None:
+        reasons.append("source_status_unavailable")
 
     if mixed:
         state_code = "mixed_generations"

@@ -217,8 +217,9 @@ identity, and compares Remote to that shared target. A Worker's identity cannot
 fill a missing Functions identity. It names mismatching components and their
 observed and target identities; missing component evidence is unverified, not
 green. A recorded uncommitted source tree at adoption makes the affected
-Functions or Worker identity unverified. For the local Remote, a live, bounded
-loopback health read must report
+Functions or Worker identity unverified. A failed or timed-out Git status read
+is unknown, never a clean tree; unknown current or adoption status also remains
+unverified. For the local Remote, a live, bounded loopback health read must report
 a trusted view and the same instance, root, port, PID, start time and provenance
 as the process claim; an unreachable, degraded or mismatching response is not
 green. Remote started from a source tree with uncommitted changes is also

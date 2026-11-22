@@ -68,8 +68,10 @@ def _source_ref(payload: Mapping[str, Any], locale: str) -> str:
         return _tr("version.packaged_source", locale)
     commit = _short(source.get("commit")) or _tr("version.unavailable", locale)
     branch = source.get("branch") or source.get("tag") or _tr("version.detached", locale)
+    dirty = source.get("dirty")
     cleanliness = _tr(
-        "version.source.dirty" if source.get("dirty") else "version.source.clean",
+        "version.source.unknown" if dirty is None
+        else "version.source.dirty" if dirty else "version.source.clean",
         locale,
     )
     if source.get("dirty") and source.get("change_count"):
@@ -125,6 +127,8 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
         lines.append(_tr("version.issue.worker_unverified", locale))
     if "function_worker_dirty_at_build" in reasons:
         lines.append(_tr("version.issue.worker_dirty_at_build", locale))
+    if "function_worker_build_status_unknown" in reasons:
+        lines.append(_tr("version.issue.worker_build_status_unknown", locale))
     remote = running.get("remote") or {}
     if "remote_commit_differs" in reasons:
         remote_commit = (remote.get("provenance") or {}).get("commit")
@@ -151,6 +155,8 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
         lines.append(_tr("version.issue.remote_check", locale))
     if "remote_dirty_at_build" in reasons:
         lines.append(_tr("version.issue.remote_dirty_at_build", locale))
+    if "remote_build_status_unknown" in reasons:
+        lines.append(_tr("version.issue.remote_build_status_unknown", locale))
     return [html.escape(line) for line in lines]
 
 
