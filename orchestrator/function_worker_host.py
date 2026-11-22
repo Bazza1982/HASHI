@@ -1291,7 +1291,6 @@ class FunctionWorkerHost:
             )
         return list(reconciled)
 
-    @timed("worker.activate")
     def _schedule_peer_telegram_wake(self, target_agent_id: str) -> None:
         target = str(target_agent_id or "").strip().lower()
         if not target or target == self.agent_name.lower() or self.phase in {"STOPPING", "STOPPED"}:
@@ -1355,6 +1354,7 @@ class FunctionWorkerHost:
             pending.cancel()
         self._resource_metadata_publish_task = None
 
+    @timed("worker.activate")
     async def activate(self) -> dict[str, Any]:
         if self.phase != "READY":
             raise FunctionWorkerStateError(

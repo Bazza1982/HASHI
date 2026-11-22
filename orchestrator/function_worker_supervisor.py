@@ -2401,8 +2401,10 @@ class FunctionWorkerSupervisor:
     def notify_telegram_delivery(self, agent_id: str) -> None:
         """Forward a committed Telegram deliverable wakeup to the owning Worker.
 
-        Reuses the existing Function Worker IPC channel (one-way event).
-        Coalesces bursts per Agent and skips disconnected Workers completely.
+        Reuses the existing Function Worker IPC channel (one-way event) and
+        skips disconnected Workers completely. Does not drop concurrent wakeups
+        while a previous emit Task is still settling; the Worker's asyncio.Event
+        coalesces signals safely on the receiving side.
         """
         target = str(agent_id or "").strip().lower()
         if not target:
@@ -2430,17 +2432,14 @@ class FunctionWorkerSupervisor:
         peer = getattr(client, "peer", None)
         if peer is None or getattr(peer, "is_closed", True):
             return
-        pending = getattr(self, "_telegram_wake_tasks", None)
-        if not isinstance(pending, dict):
-            pending = {}
-            self._telegram_wake_tasks = pending
-        existing = pending.get(target)
-        if isinstance(existing, asyncio.Task) and not existing.done():
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        tasks = getattr(self, "_telegram_wake_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._telegram_wake_tasks = tasks
 
         async def _emit() -> None:
             try:
@@ -2452,12 +2451,8 @@ class FunctionWorkerSupervisor:
                 pass
 
         task = loop.create_task(_emit(), name=f"core-tg-wake:{target}")
-        pending[target] = task
-        task.add_done_callback(
-            lambda done, key=target: pending.pop(key, None)
-            if pending.get(key) is done
-            else None
-        )
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def handle_worker_event(
         self,

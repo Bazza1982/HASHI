@@ -1145,9 +1145,6 @@ class SessionStore:
                     ON connector_delivery_tasks(
                         session_id, connector_id, endpoint_id, state, created_at
                     );
-                CREATE INDEX IF NOT EXISTS connector_delivery_tasks_telegram_active
-                    ON connector_delivery_tasks(session_id, connector_id, created_at, task_id)
-                    WHERE connector_id = 'telegram' AND state IN ('pending', 'retry', 'claimed');
 
                 CREATE TABLE IF NOT EXISTS connector_delivery_receipts (
                     event_id TEXT NOT NULL,
@@ -1907,6 +1904,13 @@ class SessionStore:
                 self._revert_legacy_terminal_recovery(connection)
             if stored_schema_version < 38:
                 self._suppress_legacy_non_deliverable_telegram_tasks(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS connector_delivery_tasks_telegram_active
+                    ON connector_delivery_tasks(session_id, connector_id, created_at, task_id)
+                    WHERE connector_id = 'telegram' AND state IN ('pending', 'retry', 'claimed')
+                """
+            )
             from orchestrator import attachment_catalogue
             attachment_catalogue.install_schema(connection)
             from orchestrator.standby.store import install_schema as install_standby_schema
@@ -1968,19 +1972,6 @@ class SessionStore:
               )
             """,
             (now,),
-        )
-        # Ensure the Agent/session-scoped partial index is compact and uses
-        # (session_id, connector_id, created_at, task_id) after suppressing
-        # historical zombies so SQLite always prefers it over full indexes.
-        connection.execute(
-            "DROP INDEX IF EXISTS connector_delivery_tasks_telegram_active"
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS connector_delivery_tasks_telegram_active
-                ON connector_delivery_tasks(session_id, connector_id, created_at, task_id)
-                WHERE connector_id = 'telegram' AND state IN ('pending', 'retry', 'claimed')
-            """
         )
 
     def _revert_legacy_terminal_recovery(

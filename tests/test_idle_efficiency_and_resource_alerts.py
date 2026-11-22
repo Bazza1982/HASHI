@@ -1090,7 +1090,7 @@ def test_pit_e_detached_herv3_background_request_not_treated_as_idle():
 
 @pytest.mark.asyncio
 async def test_pit_f_no_duplicate_send_under_concurrent_wakeup_and_preserves_unknown(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ):
     store = _new_store(tmp_path)
     owner = "user:1"
@@ -1109,17 +1109,17 @@ async def test_pit_f_no_duplicate_send_under_concurrent_wakeup_and_preserves_unk
     store.finish_request(accepted.request_id, success=True, assistant_text="Deliver exactly once.")
 
     sent_event_ids: list[str] = []
+    completed_outbox_ids: list[str] = []
 
     async def fake_claimed_dispatch(rt, *, chat_id, store, claim, **_kwargs):
         sent_event_ids.append(str(claim["event_id"]))
-        store.complete_delivery_outbox(
-            session_id=str(claim["session_id"]),
-            owner_id=owner,
-            task_id=str(claim["task_id"]),
+        completed_outbox_ids.append(str(claim["outbox_id"]))
+        result = store.complete_delivery_outbox(
+            outbox_id=str(claim["outbox_id"]),
             lease_token=str(claim["lease_token"]),
             status="completed",
-            proof={"message_id": 123},
         )
+        assert result["state"] == "completed"
 
     monkeypatch.setattr(frontend_incremental_delivery, "dispatch_claimed_telegram_event", fake_claimed_dispatch)
     monkeypatch.setattr("orchestrator.frontend_run_questions.refresh_telegram_question_renditions", lambda _r, _s: asyncio.sleep(0))
@@ -1135,14 +1135,28 @@ async def test_pit_f_no_duplicate_send_under_concurrent_wakeup_and_preserves_unk
     )
 
     # Fire two concurrent sweeps (simulating notification + recovery sweep colliding).
-    r1, r2 = await asyncio.gather(
-        frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime),
-        frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime),
-    )
+    with caplog.at_level(logging.WARNING, logger="test.pit_f"):
+        r1, r2 = await asyncio.gather(
+            frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime),
+            frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime),
+        )
+    assert not caplog.records, f"Unexpected warning/error swallowed during dispatch: {[r.message for r in caplog.records]}"
     assert r1 + r2 >= 1
+    assert sent_event_ids, "Expected at least one event to be dispatched"
     assert len(sent_event_ids) == len(set(sent_event_ids)), f"Duplicate sends detected: {sent_event_ids}"
 
-    # Verify unknown outcome is NEVER resent on subsequent sweeps!
+    # Verify REAL SQLite state transitioned to 'completed' (NOT stuck in 'claimed'!).
+    with sqlite3.connect(store.db_path) as conn:
+        for oid in completed_outbox_ids:
+            row = conn.execute(
+                "SELECT state, completed_at FROM connector_delivery_tasks WHERE task_id=?",
+                (oid,),
+            ).fetchone()
+            assert row is not None and row[0] == "completed" and row[1], f"Expected completed in SQLite, got {row}"
+    # Subsequent sweep must return 0 (already completed).
+    assert await frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime) == 0
+
+    # Verify unknown outcome is persisted in SQLite and NEVER resent on subsequent sweeps!
     accepted2 = store.accept_run(
         session_id=session["session_id"],
         owner_id=owner,
@@ -1155,23 +1169,38 @@ async def test_pit_f_no_duplicate_send_under_concurrent_wakeup_and_preserves_unk
     )
     store.finish_request(accepted2.request_id, success=True, assistant_text="Uncertain transport.")
     unknown_calls = 0
+    unknown_outbox_ids: list[str] = []
 
     async def fake_unknown_dispatch(rt, *, chat_id, store, claim, **_kwargs):
         nonlocal unknown_calls
         unknown_calls += 1
-        store.complete_delivery_outbox(
-            session_id=str(claim["session_id"]),
-            owner_id=owner,
-            task_id=str(claim["task_id"]),
+        unknown_outbox_ids.append(str(claim["outbox_id"]))
+        result = store.complete_delivery_outbox(
+            outbox_id=str(claim["outbox_id"]),
             lease_token=str(claim["lease_token"]),
             status="unknown",
             error_code="telegram_send_outcome_unknown",
         )
+        assert result["state"] == "unknown"
 
     monkeypatch.setattr(frontend_incremental_delivery, "dispatch_claimed_telegram_event", fake_unknown_dispatch)
-    await frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="test.pit_f"):
+        await frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime)
+    assert not caplog.records, f"Unexpected warning/error during unknown dispatch: {[r.message for r in caplog.records]}"
     first_count = unknown_calls
     assert first_count >= 1
+    assert unknown_outbox_ids
+
+    # Verify REAL SQLite state is persisted as 'unknown'!
+    with sqlite3.connect(store.db_path) as conn:
+        for oid in unknown_outbox_ids:
+            row = conn.execute(
+                "SELECT state, last_error_code FROM connector_delivery_tasks WHERE task_id=?",
+                (oid,),
+            ).fetchone()
+            assert row == ("unknown", "telegram_send_outcome_unknown"), f"Expected unknown in SQLite, got {row}"
+
     # Subsequent sweeps MUST NOT retry the unknown task!
     assert await frontend_incremental_delivery.dispatch_pending_telegram_deliverables(runtime) == 0
     assert unknown_calls == first_count
@@ -1336,10 +1365,29 @@ def test_pit_h_schema_37_to_38_large_zombie_migration_is_fast_and_usable(tmp_pat
         conn.execute("DROP INDEX IF EXISTS connector_delivery_tasks_telegram_active")
         conn.execute("UPDATE schema_metadata SET value='37' WHERE key='schema_version'")
 
-    t0 = time.perf_counter()
-    upgraded = SessionStore(db_path, instance_id="HASHI_MIG_PERF")
-    migration_ms = (time.perf_counter() - t0) * 1000.0
+    traced_sql: list[str] = []
+    orig_connect = SessionStore._connect
+
+    def tracing_connect(self):
+        conn = orig_connect(self)
+        conn.set_trace_callback(traced_sql.append)
+        return conn
+
+    orig_cls_connect = SessionStore._connect
+    SessionStore._connect = tracing_connect
+    try:
+        t0 = time.perf_counter()
+        upgraded = SessionStore(db_path, instance_id="HASHI_MIG_PERF")
+        migration_ms = (time.perf_counter() - t0) * 1000.0
+    finally:
+        SessionStore._connect = orig_cls_connect
+
     assert migration_ms < 2000.0, f"Schema 37->38 migration blocked startup too long: {migration_ms:.1f}ms"
+    # Verify NO duplicate DROP/CREATE of connector_delivery_tasks_telegram_active during upgrade!
+    tg_idx_drops = [s for s in traced_sql if "DROP INDEX" in s.upper() and "connector_delivery_tasks_telegram_active" in s]
+    tg_idx_creates = [s for s in traced_sql if "CREATE INDEX" in s.upper() and "connector_delivery_tasks_telegram_active" in s]
+    assert len(tg_idx_drops) == 0, f"Unexpected DROP INDEX on upgrade: {tg_idx_drops}"
+    assert len(tg_idx_creates) == 1, f"Expected exactly 1 CREATE INDEX on upgrade, got {len(tg_idx_creates)}"
 
     with sqlite3.connect(db_path) as conn:
         zombies_left = conn.execute(
@@ -1356,3 +1404,159 @@ def test_pit_h_schema_37_to_38_large_zombie_migration_is_fast_and_usable(tmp_pat
     scan_ms = (time.perf_counter() - t1) * 1000.0
     assert len(deliverables) >= 1
     assert scan_ms < 10.0, f"Post-migration scan too slow: {scan_ms:.2f}ms"
+
+
+# ---------------------------------------------------------------------------
+# P1 Deterministic IPC Race Test: second deliverable while first emit Task
+# still in flight must NOT be dropped (never waits for 60s recovery sweep)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ipc_wakeup_race_second_output_never_dropped_while_first_emit_in_flight(
+    tmp_path: Path, monkeypatch
+):
+    from orchestrator.function_worker_supervisor import AgentRuntimeHandle, FunctionWorkerSupervisor
+
+    store = _new_store(tmp_path)
+    owner = "user:1"
+    session = store.ensure_default_session(owner_id=owner, agent_id="zelda")
+    route = _telegram_route(chat_id=6006)
+
+    seen_events: list[str] = []
+    scan1_done = asyncio.Event()
+    scan2_done = asyncio.Event()
+    release_first_emit = asyncio.Event()
+
+    async def fake_dispatch(rt, *, limit=20):
+        rows = rt.session_store.pending_incremental_telegram_deliveries(agent_id=rt.name, limit=limit)
+        if not rows:
+            return 0
+        for row in rows:
+            eid = str(row["event_id"])
+            if eid not in seen_events:
+                seen_events.append(eid)
+        with rt.session_store._connection() as c:
+            c.executemany(
+                "UPDATE connector_delivery_tasks SET state='completed' WHERE event_id=? AND connector_id='telegram'",
+                [(str(row["event_id"]),) for row in rows],
+            )
+        if len(seen_events) >= 1:
+            scan1_done.set()
+        if len(seen_events) >= 2:
+            scan2_done.set()
+        return len(rows)
+
+    monkeypatch.setattr(frontend_incremental_delivery, "dispatch_pending_telegram_deliverables", fake_dispatch)
+    monkeypatch.setattr(frontend_incremental_delivery, "IDLE_SWEEP_BASE_SECONDS", 60.0)
+
+    worker_runtime = SimpleNamespace(
+        name="zelda",
+        is_shutting_down=False,
+        telegram_connected=True,
+        app=SimpleNamespace(bot=object()),
+        session_store=store,
+        global_config=SimpleNamespace(instance_id="HASHI_EFF_TEST"),
+        logger=logging.getLogger("test.ipc_race"),
+    )
+
+    emit_count = 0
+
+    class RacingPeer:
+        is_closed = False
+
+        async def emit(self, event: str, payload: dict):
+            nonlocal emit_count
+            emit_count += 1
+            call_num = emit_count
+            assert event == "core.telegram_delivery_wake"
+            # Worker receives wake immediately...
+            frontend_incremental_delivery.notify_incremental_telegram_delivery(worker_runtime)
+            if call_num == 1:
+                # ...but first emit Task stays unfinished while Worker finishes scan #1
+                # and re-enters the 60s wait!
+                await release_first_emit.wait()
+
+    client = SimpleNamespace(agent_name="zelda", peer=RacingPeer(), closed=False)
+    handle = AgentRuntimeHandle.__new__(AgentRuntimeHandle)
+    handle.name = "zelda"
+    handle._client = client
+    handle.metadata = {"telegram_connected": True}
+
+    supervisor = FunctionWorkerSupervisor.__new__(FunctionWorkerSupervisor)
+    supervisor.kernel = SimpleNamespace(_runtime_map=lambda: {"zelda": handle})
+
+    # Start worker loop WITHOUT in-process store binding so ONLY supervisor IPC wakes it!
+    loop_task = asyncio.create_task(
+        frontend_incremental_delivery.incremental_telegram_delivery_loop(worker_runtime)
+    )
+    try:
+        await asyncio.sleep(0.05)
+
+        # Deliverable #1 commits -> notify #1 wakes Worker -> Worker finishes scan #1 and goes back to 60s sleep,
+        # while emit #1 Task is STILL in flight!
+        acc1 = store.accept_run(
+            session_id=session["session_id"],
+            owner_id=owner,
+            agent_id="zelda",
+            request_id="req-race-1",
+            source="workbench",
+            idempotency_key="idem-race-1",
+            text="first",
+            delivery_route=route,
+        )
+        store.finish_request(acc1.request_id, success=True, assistant_text="First output.")
+        supervisor.notify_telegram_delivery("zelda")
+        await asyncio.wait_for(scan1_done.wait(), timeout=1.0)
+        # Allow Worker loop to finish scan #1 and re-enter 60s wait_for().
+        await asyncio.sleep(0.05)
+        assert len(supervisor._telegram_wake_tasks) == 1, "First emit Task must still be in-flight for the race!"
+
+        # Deliverable #2 commits WHILE first emit Task is STILL unfinished!
+        acc2 = store.accept_run(
+            session_id=session["session_id"],
+            owner_id=owner,
+            agent_id="zelda",
+            request_id="req-race-2",
+            source="workbench",
+            idempotency_key="idem-race-2",
+            text="second",
+            delivery_route=route,
+        )
+        store.finish_request(acc2.request_id, success=True, assistant_text="Second output.")
+        t0 = time.monotonic()
+        supervisor.notify_telegram_delivery("zelda")
+
+        # Second output MUST trigger scan #2 immediately (NOT dropped / NOT waiting 60s)!
+        await asyncio.wait_for(scan2_done.wait(), timeout=1.0)
+        assert (time.monotonic() - t0) * 1000.0 < 500.0
+        assert emit_count == 2
+    finally:
+        release_first_emit.set()
+        worker_runtime.is_shutting_down = True
+        frontend_incremental_delivery.notify_incremental_telegram_delivery(worker_runtime)
+        await asyncio.wait_for(loop_task, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# P2 Decorator Placement Test: @timed("worker.activate") belongs on activate()
+# ---------------------------------------------------------------------------
+
+
+def test_worker_activate_decorator_placement_and_timing_tag():
+    import inspect
+    from orchestrator.function_worker_host import FunctionWorkerHost
+
+    wake_fn = FunctionWorkerHost._schedule_peer_telegram_wake
+    activate_fn = FunctionWorkerHost.activate
+
+    # _schedule_peer_telegram_wake must NOT be wrapped by @timed(...)
+    assert not hasattr(wake_fn, "__wrapped__"), "_schedule_peer_telegram_wake must not carry @timed('worker.activate')"
+    # activate() MUST be an async coroutine wrapped by @timed('worker.activate')
+    assert hasattr(activate_fn, "__wrapped__"), "activate() must retain @timed('worker.activate')"
+    assert inspect.iscoroutinefunction(activate_fn)
+    closure_values = [
+        cell.cell_contents
+        for cell in (activate_fn.__closure__ or ())
+    ]
+    assert "worker.activate" in closure_values, f"Expected 'worker.activate' timing label, got {closure_values}"
