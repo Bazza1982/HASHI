@@ -832,9 +832,8 @@ async def _present_safe_voice_transcript(
     )
     await runtime._reply_text(
         update,
-        f"*{ui_language.tr('safevoice.confirm', locale=locale)}*\n\n_{preview}_",
+        f"{ui_language.tr('safevoice.confirm', locale=locale)}\n\n{preview}",
         reply_markup=keyboard,
-        parse_mode="Markdown",
     )
 
 
@@ -1407,15 +1406,14 @@ async def handle_voice_or_audio(
             ])
             phase = "publish"
             safevoice_title = (
-                f"*{ui_language.tr('safevoice.confirm_long', locale=locale)}*"
+                ui_language.tr("safevoice.confirm_long", locale=locale)
                 if batch_pending_key
-                else f"*{ui_language.tr('safevoice.confirm', locale=locale)}*"
+                else ui_language.tr("safevoice.confirm", locale=locale)
             )
             await runtime._reply_text(
                 update,
-                f"{safevoice_title}\n\n_{preview}_",
+                f"{safevoice_title}\n\n{preview}",
                 reply_markup=keyboard,
-                parse_mode="Markdown",
             )
         else:
             if runtime_long.collect_media(
