@@ -268,6 +268,86 @@ def test_version_names_remote_mismatch_and_reports_unavailable_remote(
     assert "Remote" in render_version_card(unavailable, locale="en")
 
 
+def test_version_requires_live_matching_remote_health(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    claim = {
+        "instance_id": "HASHI2", "root": str(home.resolve()), "pid": 23,
+        "started_at": 123456.0, "provenance": {"commit": provenance["commit"]},
+    }
+    response = {"ok": True, "trusted_view": True, "status": "ready",
+                "instance": {"instance_id": "HASHI2", "runtime_claim": dict(claim)}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    claim["port"] = server.server_port
+    response["instance"]["runtime_claim"]["port"] = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr("orchestrator.version_info.read_runtime_claim", lambda _root: claim)
+    monkeypatch.setattr("orchestrator.version_info.pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr("orchestrator.remote_lifecycle.load_settings",
+                        lambda _root: SimpleNamespace(use_tls=False))
+    try:
+        matching = collect_version_payload(owner, agent_name="akane")
+        assert matching["state"]["code"] == "running_matches_source"
+        assert matching["running"]["remote"]["status"] == "active"
+
+        response["instance"]["runtime_claim"]["pid"] = 99
+        wrong_process = collect_version_payload(owner, agent_name="akane")
+        assert wrong_process["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in wrong_process["state"]["reasons"]
+        assert "进程身份" in render_version_card(wrong_process, locale="zh-CN")
+
+        response["instance"]["runtime_claim"]["pid"] = 23
+        response["trusted_view"] = False
+        untrusted = collect_version_payload(owner, agent_name="akane")
+        assert untrusted["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in untrusted["state"]["reasons"]
+
+        response["trusted_view"] = True
+        response["instance"]["runtime_claim"]["provenance"] = {"commit": "b" * 40}
+        wrong_provenance = collect_version_payload(owner, agent_name="akane")
+        assert wrong_provenance["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in wrong_provenance["state"]["reasons"]
+
+        response["instance"]["runtime_claim"]["provenance"] = dict(claim["provenance"])
+        response["status"] = "degraded"
+        degraded = collect_version_payload(owner, agent_name="akane")
+        assert degraded["state"]["code"] == "component_unverified"
+        assert "remote_degraded" in degraded["state"]["reasons"]
+        assert "状态异常" in render_version_card(degraded, locale="zh-CN")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    unreachable = collect_version_payload(owner, agent_name="akane")
+    assert unreachable["state"]["code"] == "component_unverified"
+    assert "remote_unreachable" in unreachable["state"]["reasons"]
+    assert "本机服务无响应" in render_version_card(unreachable, locale="zh-CN")
+
+
 def test_old_worker_does_not_make_matching_remote_appear_old(tmp_path: Path, monkeypatch) -> None:
     source = _checkout(tmp_path)
     home = tmp_path / "data"

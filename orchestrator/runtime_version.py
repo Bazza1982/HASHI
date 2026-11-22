@@ -132,8 +132,17 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
             expected=_short(shared_commit),
         ))
         lines.append(_tr("version.issue.remote_update", locale))
-    elif "remote_unavailable" in reasons:
+    if "remote_unavailable" in reasons:
         lines.append(_tr("version.issue.remote_unavailable", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_unreachable" in reasons:
+        lines.append(_tr("version.issue.remote_unreachable", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_identity_unverified" in reasons:
+        lines.append(_tr("version.issue.remote_identity_unverified", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_degraded" in reasons:
+        lines.append(_tr("version.issue.remote_degraded", locale))
         lines.append(_tr("version.issue.remote_check", locale))
     elif "remote_provenance_unavailable" in reasons:
         lines.append(_tr("version.issue.remote_unverified", locale))

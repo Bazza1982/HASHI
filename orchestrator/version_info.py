@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import json
 import os
 import platform
+import ssl
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -256,17 +259,86 @@ def _subject_context(
     return owner, runtime, agent_name, topology
 
 
+def _local_remote_health(bridge_home: Path, claim: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Read only the claimed local Remote endpoint, with bounded time and body."""
+    from orchestrator.remote_lifecycle import load_settings
+
+    try:
+        port = int(claim.get("port") or 0)
+        if not 0 < port < 65536:
+            return None
+        settings = load_settings(bridge_home)
+        bind_host = str(claim.get("bind_host") or "")
+        try:
+            host = bind_host if ipaddress.ip_address(bind_host).is_loopback else "127.0.0.1"
+        except ValueError:
+            host = "127.0.0.1"
+        if settings.use_tls:
+            connection = http.client.HTTPSConnection(
+                host, port, timeout=0.8, context=ssl._create_unverified_context()
+            )
+        else:
+            connection = http.client.HTTPConnection(host, port, timeout=0.8)
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            if response.status != 200:
+                return None
+            body = response.read(512 * 1024 + 1)
+        finally:
+            connection.close()
+        if len(body) > 512 * 1024:
+            return None
+        value = json.loads(body.decode("utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, TypeError, http.client.HTTPException):
+        return None
+
+
+def _remote_health_matches_claim(
+    health: Mapping[str, Any], claim: Mapping[str, Any], bridge_home: Path, instance_id: str
+) -> bool:
+    """Require the live loopback response to identify the exact recorded process."""
+    if health.get("ok") is not True or health.get("trusted_view") is not True:
+        return False
+    instance = health.get("instance")
+    if not isinstance(instance, Mapping):
+        return False
+    live = instance.get("runtime_claim")
+    if not isinstance(live, Mapping):
+        return False
+    try:
+        return (
+            str(instance.get("instance_id") or "").strip().upper() == instance_id.upper()
+            and str(live.get("instance_id") or "").strip().upper() == instance_id.upper()
+            and str(claim.get("instance_id") or "").strip().upper() == instance_id.upper()
+            and Path(str(live.get("root") or "")).resolve() == bridge_home.resolve()
+            and Path(str(claim.get("root") or "")).resolve() == bridge_home.resolve()
+            and int(live.get("pid") or 0) == int(claim.get("pid") or 0) > 0
+            and int(live.get("port") or 0) == int(claim.get("port") or 0) > 0
+            and live.get("started_at") is not None
+            and live.get("started_at") == claim.get("started_at")
+            and live.get("provenance") == claim.get("provenance")
+        )
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return False
+
+
 def _remote_fact(bridge_home: Path, instance_id: str) -> dict[str, Any]:
     claim = read_runtime_claim(bridge_home)
     if not isinstance(claim, dict):
         return {"status": "offline", "pid": None, "started_at": None, "provenance": None}
-    pid = int(claim.get("pid") or 0)
-    if (
-        not pid_is_alive(pid)
-        or str(claim.get("instance_id") or "").strip().upper()
-        not in {"", instance_id.upper()}
-    ):
+    try:
+        pid = int(claim.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if not pid_is_alive(pid):
         return {"status": "offline", "pid": pid or None, "started_at": None, "provenance": None}
+    health = _local_remote_health(bridge_home, claim)
+    if health is None:
+        return {"status": "unreachable", "pid": pid, "started_at": None, "provenance": None}
+    if not _remote_health_matches_claim(health, claim, bridge_home, instance_id):
+        return {"status": "unverified", "pid": pid, "started_at": None, "provenance": None}
     started = claim.get("started_at")
     if isinstance(started, (int, float)):
         started = (
@@ -284,7 +356,8 @@ def _remote_fact(bridge_home: Path, instance_id: str) -> dict[str, Any]:
             if key in _PROVENANCE_FIELDS
         }
     return {
-        "status": "active" if provenance else "legacy",
+        "status": ("degraded" if health.get("status") != "ready"
+                   else "active" if provenance else "legacy"),
         "pid": pid,
         "started_at": started,
         "generation_id": (
@@ -397,6 +470,12 @@ def collect_version_payload(
         reasons.append("function_worker_identity_unavailable")
     if remote.get("status") == "offline":
         reasons.append("remote_unavailable")
+    elif remote.get("status") == "unreachable":
+        reasons.append("remote_unreachable")
+    elif remote.get("status") == "unverified":
+        reasons.append("remote_identity_unverified")
+    elif remote.get("status") == "degraded":
+        reasons.append("remote_degraded")
     elif not remote_commit:
         reasons.append("remote_provenance_unavailable")
 
