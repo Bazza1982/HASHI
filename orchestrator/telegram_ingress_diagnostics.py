@@ -71,7 +71,8 @@ are deliberately withheld at the first boundary, including the console.
 
     reason, code = "unknown", None
     if stage == "watchdog": reason = "watchdog_timeout"
-    elif isinstance(exc, TelegramBotIdentityMismatch): reason = "bot_identity_mismatch"
+    elif isinstance(exc, TelegramBotIdentityMismatch):
+        reason = "bot_identity_mismatch"
     elif isinstance(exc, InvalidToken): reason, code = "invalid_token", 401
     elif isinstance(exc, Forbidden): reason, code = "forbidden", 403
     elif isinstance(exc, Conflict): reason, code = "conflict", 409

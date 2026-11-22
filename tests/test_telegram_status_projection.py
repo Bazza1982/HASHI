@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from orchestrator.telegram_access import access_snapshot
 from orchestrator.telegram_actor_scope import _delegated_owner
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
@@ -121,9 +123,6 @@ async def _summary_command_fixture(tmp_path):
         _is_command_allowed=lambda name: name == "telegram",
     )
     return runtime, calls, supervisor, client
-
-
-import pytest
 
 
 @pytest.mark.asyncio
