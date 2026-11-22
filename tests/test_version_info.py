@@ -254,7 +254,8 @@ def test_version_names_remote_mismatch_and_reports_unavailable_remote(
     rendered = render_version_card(mismatch, locale="en")
     assert "Remote" in rendered
     assert remote_commit[:12] in rendered and target_commit[:12] in rendered
-    assert "restart" in rendered.lower()
+    assert "/remote off" in rendered and "/remote on" in rendered
+    assert "disconnect" in rendered.lower()
 
     remote["provenance"]["commit"] = target_commit
     matching = collect_version_payload(owner, agent_name="akane")

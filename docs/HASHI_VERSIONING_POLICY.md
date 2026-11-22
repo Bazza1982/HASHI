@@ -221,8 +221,10 @@ a trusted view and the same instance, root, port, PID, start time and provenance
 as the process claim; an unreachable, degraded or mismatching response is not
 green. This confirms the local health response, not an authenticated peer
 connection or a successful user interaction. Remote has a separate lifecycle
-from `/reboot max`; checks and updates use the instance's Remote controller
-and require their own operational scope.
+from `/reboot max`. Once the intended source has been adopted, an authorized
+operator can use a local channel independent of Remote to run `/remote off`,
+then `/remote on`, and recheck `/version`; Direct/LAN and Exchange disconnect
+during the operation. Checks and updates require their own operational scope.
 
 ## 6. Acceptance, implementation, and rollout boundary
 
