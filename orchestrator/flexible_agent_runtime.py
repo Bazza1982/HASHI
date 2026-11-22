@@ -1252,6 +1252,7 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_delivery import (
             RUN_DELIVERY_ROUTE_METADATA_KEY,
+            TELEGRAM_OWNER_MIRROR_AT_ADMISSION,
             configured_owner_mirror_destinations,
             configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
@@ -1381,6 +1382,17 @@ class FlexibleAgentRuntime:
                 "session_surface": resolved_surface,
                 "session_channel_key": resolved_channel_key,
             }
+        )
+        # Capture the authoritative owner preference and scoped revision,
+        # replacing any caller value, before the Run's route is frozen.
+        from orchestrator.connector_delivery_preferences import get_connector_preference_snapshot
+
+        metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION] = get_connector_preference_snapshot(
+            getattr(self.global_config, "bridge_home", None),
+            resolved_owner,
+            "telegram",
+            "mirror",
+            default=True,
         )
         telegram_requested = telegram_delivery_for_admission(
             source=source,

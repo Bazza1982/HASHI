@@ -929,6 +929,63 @@ async def test_disabling_mirror_stops_remaining_chunks_but_keeps_telegram_primar
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("initial", "change", "expected"), [
+    (True, "off", 1),
+    (False, "none", 3),
+    (False, "on_then_off", 1),
+    (False, "other_owner", 3),
+    (True, "corrupt", 1),
+])
+async def test_owner_turning_off_stops_an_always_on_agents_current_mirror(
+    tmp_path, initial, change, expected
+):
+    from orchestrator.connector_delivery_preferences import (
+        get_connector_preference_snapshot, set_connector_preference,
+    )
+    from orchestrator.frontend_delivery import freeze_run_delivery_route
+
+    runtime = _runtime(tmp_path)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.global_config.config_path = tmp_path / "agents.json"
+    runtime.global_config.config_path.write_text(json.dumps({"agents": [{
+        "name": "test-agent", "telegram_mirror_policy": "always_on",
+    }]}), encoding="utf-8")
+    set_connector_preference(tmp_path, "user:42", "telegram", "mirror", initial)
+    snapshot = get_connector_preference_snapshot(
+        tmp_path, "user:42", "telegram", "mirror", default=True
+    )
+    route = freeze_run_delivery_route(message_source_id="api", session_surface="workbench",
+        session_channel_key="default", chat_id=123, telegram_requested=True)
+    runtime._request_meta_by_id = {"req-always": {
+        "request_id": "req-always", "owner_id": "user:42", "source": "api",
+        "request_metadata": {"owner_id": "user:42", "_run_delivery_route": route,
+                             "_telegram_owner_mirror_at_admission": snapshot},
+    }}
+    send = runtime.app.bot.send_message
+
+    async def change_after_first(**kwargs):
+        result = await send(**kwargs)
+        if len(runtime.app.bot.messages) == 1:
+            if change == "on_then_off":
+                set_connector_preference(tmp_path, "user:42", "telegram", "mirror", True)
+            if change in {"off", "on_then_off"}:
+                set_connector_preference(tmp_path, "user:42", "telegram", "mirror", False)
+            if change == "other_owner":
+                set_connector_preference(tmp_path, "user:99", "telegram", "mirror", False)
+            if change == "corrupt":
+                (tmp_path / "state" / "frontend_delivery_preferences.json").write_text(
+                    "{unreadable", encoding="utf-8"
+                )
+        return result
+
+    runtime.app.bot.send_message = change_after_first
+    _elapsed, count = await runtime_delivery.send_long_message(
+        runtime, chat_id=123, text="a" * 9000, request_id="req-always", purpose="response"
+    )
+    assert count == expected
+
+
+@pytest.mark.asyncio
 async def test_send_long_message_preserves_pre_rendered_html(tmp_path):
     runtime = _runtime(tmp_path)
 

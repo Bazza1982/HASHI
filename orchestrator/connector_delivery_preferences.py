@@ -65,7 +65,26 @@ def _normalize_state(raw: Any) -> dict[str, Any]:
                     raise ValueError("connector preferences must be named boolean values")
                 normalized_preferences[preference_key] = value
             normalized_connectors[connector] = normalized_preferences
-        normalized["owners"][owner_id] = {"connectors": normalized_connectors}
+        normalized_owner: dict[str, Any] = {"connectors": normalized_connectors}
+        revisions = owner_value.get("preference_revisions")
+        if revisions is not None:
+            if not isinstance(revisions, dict):
+                raise ValueError("invalid connector preference revisions")
+            normalized_revisions: dict[str, dict[str, int]] = {}
+            for connector_id, entries in revisions.items():
+                connector = str(connector_id).strip().casefold()
+                if not _CONNECTOR_ID.fullmatch(connector) or not isinstance(entries, dict):
+                    raise ValueError("invalid connector preference revision entry")
+                normalized_entries: dict[str, int] = {}
+                for key, changed_at in entries.items():
+                    name = str(key).strip().casefold()
+                    if (not _PREFERENCE_KEY.fullmatch(name) or type(changed_at) is not int
+                            or not 0 <= changed_at <= revision):
+                        raise ValueError("invalid preference revision")
+                    normalized_entries[name] = changed_at
+                normalized_revisions[connector] = normalized_entries
+            normalized_owner["preference_revisions"] = normalized_revisions
+        normalized["owners"][owner_id] = normalized_owner
     return normalized
 
 
@@ -127,6 +146,35 @@ def get_connector_preference(
         return default
 
 
+def get_connector_preference_snapshot(
+    bridge_home: Any,
+    owner_id: Any,
+    connector_id: str,
+    preference: str,
+    *,
+    default: bool,
+) -> dict[str, Any] | None:
+    """Read one preference and its owner-scoped change revision atomically.
+
+    Legacy documents may not contain per-preference revisions; the document
+    revision permits conservative handling until their next successful write.
+    """
+    try:
+        state = load_preferences(bridge_home)
+        owner = state["owners"].get(str(owner_id).strip(), {})
+        connector_id = str(connector_id).strip().casefold()
+        preference = str(preference).strip().casefold()
+        value = owner.get("connectors", {}).get(connector_id, {}).get(preference, default)
+        changed_at = owner.get("preference_revisions", {}).get(connector_id, {}).get(preference)
+        return {
+            "value": value if type(value) is bool else default,
+            "revision": changed_at,
+            "document_revision": state["revision"],
+        }
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def set_connector_preference(
     bridge_home: Any,
     owner_id: Any,
@@ -151,6 +199,7 @@ def set_connector_preference(
     connector_entry = owner_entry["connectors"].setdefault(connector, {})
     connector_entry[key] = enabled
     state["revision"] += 1
+    owner_entry.setdefault("preference_revisions", {}).setdefault(connector, {})[key] = state["revision"]
     target = state_path(bridge_home)
     target.parent.mkdir(parents=True, exist_ok=True)
     if document is None:
@@ -166,8 +215,10 @@ __all__ = [
     "LEGACY_STATE_FILENAME",
     "STATE_FILENAME",
     "get_connector_preference",
+    "get_connector_preference_snapshot",
     "legacy_state_path",
     "load_preferences",
     "set_connector_preference",
     "state_path",
 ]
+# HASHI-Fingerprint: hfp_c548ea08a6a44831a1330eaca6eb3d98

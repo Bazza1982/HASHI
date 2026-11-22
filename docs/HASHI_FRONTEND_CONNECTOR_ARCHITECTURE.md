@@ -351,8 +351,13 @@ and do not themselves request a Worker switch. A Run retains its admitted
 primary destination, but each unsent Telegram mirror rechecks the current
 effective owner/Agent mirror policy immediately before transport. Turning it
 off suppresses remaining chunks, cards and attachments; already sent content
-is not recalled. Telegram-origin replies and explicit notification tools retain
-their normal delivery.
+is not recalled. When an Agent is set to `always_on`, an owner switch-off during
+the Run also suppresses its remaining mirrors, while an owner setting already
+off at admission retains the Agent's existing override. A preference-specific,
+owner-scoped revision detects subsequent changes without conflating other owners;
+legacy Runs or unreadable preference state are treated conservatively. If the
+owner enables mirroring again, later unsent items may be delivered. Telegram-origin
+replies and explicit notification tools retain their normal delivery.
 
 ## 3. External-client boundary
 

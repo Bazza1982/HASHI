@@ -33,6 +33,7 @@ TUI_MUTATING_PROXY_OPERATIONS = frozenset(
 FRONTEND_CLIENT_METADATA_KEY = "frontend_client"
 FRONTEND_DELIVERY_METADATA_KEY = "frontend_delivery_policy"
 RUN_DELIVERY_ROUTE_METADATA_KEY = "_run_delivery_route"
+TELEGRAM_OWNER_MIRROR_AT_ADMISSION = "_telegram_owner_mirror_at_admission"
 RUN_DELIVERY_ROUTE_TYPE = "hashi.run-delivery-route"
 RUN_DELIVERY_ROUTE_VERSION = 1
 
@@ -608,6 +609,14 @@ def telegram_delivery_for_admission(
         connector_id="telegram",
         default=True,
     )
+    return _resolve_agent_telegram_mirror(
+        instance_enabled, agent_id=agent_id, agent_config_path=agent_config_path
+    )
+
+
+def _resolve_agent_telegram_mirror(
+    instance_enabled: bool, *, agent_id: Any, agent_config_path: Any
+) -> bool:
     if agent_config_path is None or not str(agent_id or "").strip():
         return instance_enabled
     try:
@@ -617,10 +626,7 @@ def telegram_delivery_for_admission(
         )
 
         policy = load_agent_telegram_mirror_policy(agent_config_path, agent_id)
-        return resolve_telegram_mirror_policy(
-            policy,
-            instance_enabled=instance_enabled,
-        )
+        return resolve_telegram_mirror_policy(policy, instance_enabled=instance_enabled)
     except (OSError, TypeError, ValueError):
         # A missing/corrupt Agent policy must not accidentally enable a mirror.
         # Telegram-origin traffic was returned above and remains deliverable.
@@ -654,10 +660,37 @@ def telegram_mirror_allowed_for_run(
         return False
     global_config = getattr(runtime, "global_config", None)
     owner = str(owner_id or run.get("owner_id") or metadata.get("owner_id") or "").strip()
-    return telegram_delivery_for_admission(
-        source="api",
-        request_metadata={**metadata, "owner_id": owner},
-        state_root=getattr(global_config, "bridge_home", None),
+    state_root = getattr(global_config, "bridge_home", None)
+    # An explicit owner switch-off during this Run takes effect even for an
+    # Agent configured to override the owner's normal admission preference.
+    # The per-preference revision detects an off/on/off sequence without
+    # confusing another owner's changes with this Run's policy.
+    from orchestrator.connector_delivery_preferences import get_connector_preference_snapshot
+
+    current = get_connector_preference_snapshot(
+        state_root, owner, "telegram", "mirror", default=True,
+    )
+    if current is None:
+        return False
+    if current["value"] is False:
+        admitted = metadata.get(TELEGRAM_OWNER_MIRROR_AT_ADMISSION)
+        if not isinstance(admitted, Mapping) or admitted.get("value") is not False:
+            return False
+        before_revision = admitted.get("revision")
+        current_revision = current.get("revision")
+        before_document = admitted.get("document_revision")
+        if type(before_document) is not int:
+            return False
+        if type(current_revision) is int:
+            reference = before_revision if type(before_revision) is int else before_document
+            if current_revision > reference:
+                return False
+        elif current["document_revision"] != before_document:
+            # An older writer omitted scoped revisions; do not infer that an
+            # off switch was unchanged from the unrelated document revision.
+            return False
+    return _resolve_agent_telegram_mirror(
+        current["value"],
         agent_id=getattr(runtime, "name", None),
         agent_config_path=getattr(global_config, "config_path", None),
     )
