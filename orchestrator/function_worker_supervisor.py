@@ -2496,6 +2496,17 @@ class FunctionWorkerSupervisor:
         if event == "worker.telegram_delivery_wake":
             self.notify_telegram_delivery(str(payload.get("agent_id") or ""))
             return
+        if event == "worker.session_event":
+            workbench = getattr(self.kernel, "workbench_api", None)
+            publisher = getattr(workbench, "publish_frontend_session_event", None)
+            if callable(publisher):
+                publisher(
+                    agent_id=str(payload.get("agent_id") or client.agent_name),
+                    session_id=str(payload.get("session_id") or ""),
+                    kind=str(payload.get("kind") or ""),
+                    run_id=payload.get("run_id"),
+                )
+            return
         if event == "worker.log":
             from orchestrator.bootstrap_logging import receive_worker_log
 

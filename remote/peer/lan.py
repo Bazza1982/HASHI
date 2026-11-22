@@ -531,6 +531,9 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
         addresses = info.parsed_addresses()
         host = _pick_best_peer_host(addresses, address_candidates, observed_candidates, info.server.rstrip("."))
 
+        hashi_state = _decode_txt_value(props, "hashi_state", "").strip().lower()
+        can_start_raw = _decode_txt_value(props, "can_start_hashi", "").strip().lower()
+        can_start_hashi = can_start_raw in {"1", "true", "yes"} if can_start_raw else None
         return PeerInfo(
             instance_id=instance_id,
             display_name=_decode_txt_value(props, "display_name", instance_id),
@@ -550,6 +553,9 @@ def _service_info_to_peer(info: ServiceInfo, self_instance_id: str) -> Optional[
                 "environment_kind": _decode_txt_value(props, "environment_kind", "").strip().lower(),
                 "agent_snapshot_version": _decode_txt_value(props, "agent_snapshot_version", ""),
                 "directory_state": _decode_txt_value(props, "directory_state", ""),
+                "hashi_state": hashi_state or "unknown",
+                "hashi_running": (hashi_state == "active") if hashi_state else None,
+                "can_start_hashi": can_start_hashi,
                 "identity_digest": _decode_txt_value(props, "identity_digest", ""),
                 "capabilities_digest": _decode_txt_value(props, "capabilities_digest", ""),
                 "address_candidates_digest": _decode_txt_value(props, "address_candidates_digest", ""),
@@ -740,6 +746,11 @@ class LanDiscovery(PeerDiscovery):
             "environment_kind": str(network_profile.get("environment_kind") or ""),
             "agent_snapshot_version": str(extra.get("agent_snapshot_version") or ""),
             "directory_state": str(extra.get("directory_state") or ""),
+            "hashi_state": str(extra.get("hashi_state") or ""),
+            "can_start_hashi": "1" if (
+                extra.get("can_start_hashi") is True
+                or str(extra.get("can_start_hashi") or "").strip().lower() in {"1", "true", "yes"}
+            ) else "0",
         }
         identity_digest = _metadata_digest(
             {

@@ -23,6 +23,7 @@ replaced with hchat relay and terminal execution.
 import asyncio
 import base64
 import binascii
+import errno
 import hashlib
 import json
 import logging
@@ -33,6 +34,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -44,8 +46,24 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+
+_ORIGINAL_URLOPEN = urllib_request.urlopen
+_LOCAL_HTTP_LOCK = threading.Lock()
+_LOCAL_HTTP_CLIENT: Any = None
+_LOCAL_ASYNC_HTTP_CLIENT: Any = None
+_CACHED_LOCAL_WORKBENCH_HOST: str | None = None
+_HASHI_LIVENESS_LOCK = threading.Lock()
+_HASHI_LIVENESS_STATE: dict[str, Any] = {
+    "hashi_state": "unknown",
+    "hashi_running": False,
+    "checked_at": 0.0,
+    "health": None,
+}
+_HASHI_LIVENESS_LISTENER: Any = None
+HASHI_LIVENESS_CACHE_TTL_SECONDS = 5.0
+HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS = 1.5
 
 from orchestrator.agent_move.package import (
     AGENT_MOVE_CAPABILITY,
@@ -309,6 +327,7 @@ API_PROTOCOL_CAPABILITIES = [
     "protocol_ack_v1",
     "protocol_reply_v1",
     "workbench_gateway_v1",
+    "frontend_events_sse_v1",
     "version_query_v1",
     "tui_proxy_v1",
     "restart_origin_delivery_v1",
@@ -2481,6 +2500,240 @@ def _workbench_upstream_failure(error: Exception, *, method: str, phase: str, de
     )
 
 
+def _get_local_workbench_http_client():
+    """Return a shared persistent HTTP/1.1 Keep-Alive client for loopback hops."""
+    global _LOCAL_HTTP_CLIENT
+    with _LOCAL_HTTP_LOCK:
+        if _LOCAL_HTTP_CLIENT is None or getattr(_LOCAL_HTTP_CLIENT, "is_closed", False):
+            import httpx
+
+            _LOCAL_HTTP_CLIENT = httpx.Client(
+                limits=httpx.Limits(
+                    max_connections=32,
+                    max_keepalive_connections=16,
+                    keepalive_expiry=60.0,
+                ),
+                follow_redirects=False,
+                trust_env=False,
+            )
+        return _LOCAL_HTTP_CLIENT
+
+
+def _get_local_workbench_async_client():
+    """Return a shared async HTTP/1.1 Keep-Alive client for SSE proxy streaming."""
+    global _LOCAL_ASYNC_HTTP_CLIENT
+    with _LOCAL_HTTP_LOCK:
+        if _LOCAL_ASYNC_HTTP_CLIENT is None or getattr(
+            _LOCAL_ASYNC_HTTP_CLIENT, "is_closed", False
+        ):
+            import httpx
+
+            _LOCAL_ASYNC_HTTP_CLIENT = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=32,
+                    max_keepalive_connections=16,
+                    keepalive_expiry=60.0,
+                ),
+                follow_redirects=False,
+                trust_env=False,
+            )
+        return _LOCAL_ASYNC_HTTP_CLIENT
+
+
+def set_hashi_liveness_listener(listener: Any) -> None:
+    """Register an edge-triggered callback invoked when local HASHI state changes."""
+    global _HASHI_LIVENESS_LISTENER
+    with _HASHI_LIVENESS_LOCK:
+        _HASHI_LIVENESS_LISTENER = listener
+
+
+def reset_local_workbench_transport_state() -> None:
+    """Reset cached loopback host and liveness state (for tests/restarts)."""
+    global _CACHED_LOCAL_WORKBENCH_HOST
+    with _LOCAL_HTTP_LOCK:
+        _CACHED_LOCAL_WORKBENCH_HOST = None
+    with _HASHI_LIVENESS_LOCK:
+        _HASHI_LIVENESS_STATE.update(
+            {
+                "hashi_state": "unknown",
+                "hashi_running": False,
+                "checked_at": 0.0,
+                "health": None,
+            }
+        )
+
+
+def _derive_hashi_state(
+    health: dict[str, Any] | None, *, pid_alive: bool | None = None
+) -> str:
+    if isinstance(health, dict) and health.get("ok") is True:
+        return "active"
+    if pid_alive is None:
+        try:
+            pid_alive = bool(_read_hashi_pid_state().get("pid_alive"))
+        except Exception:
+            pid_alive = False
+    return "starting" if pid_alive else "inactive"
+
+
+def record_hashi_liveness(
+    *,
+    hashi_state: str,
+    health: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Update cached local HASHI state and notify discovery immediately on transitions."""
+    ts = time.monotonic() if now is None else float(now)
+    normalized = str(hashi_state or "unknown").strip().lower()
+    if normalized not in {"active", "starting", "inactive", "unknown"}:
+        normalized = "unknown"
+    listener = None
+    changed = False
+    with _HASHI_LIVENESS_LOCK:
+        previous = str(_HASHI_LIVENESS_STATE.get("hashi_state") or "unknown")
+        _HASHI_LIVENESS_STATE["hashi_state"] = normalized
+        _HASHI_LIVENESS_STATE["hashi_running"] = normalized == "active"
+        _HASHI_LIVENESS_STATE["checked_at"] = ts
+        if health is not None or normalized != "active":
+            _HASHI_LIVENESS_STATE["health"] = health if normalized == "active" else None
+        snapshot = dict(_HASHI_LIVENESS_STATE)
+        if normalized != previous and normalized != "unknown":
+            changed = True
+            listener = _HASHI_LIVENESS_LISTENER
+    if changed and callable(listener):
+        try:
+            listener(snapshot)
+        except Exception:
+            pass
+    return snapshot
+
+
+def peek_hashi_liveness_snapshot() -> dict[str, Any]:
+    """Return the current in-memory local HASHI liveness snapshot without I/O."""
+    with _HASHI_LIVENESS_LOCK:
+        return dict(_HASHI_LIVENESS_STATE)
+
+
+def get_hashi_liveness_snapshot(
+    *, max_age_seconds: float | None = HASHI_LIVENESS_CACHE_TTL_SECONDS
+) -> dict[str, Any]:
+    """Return cached local HASHI liveness, refreshing if stale."""
+    now = time.monotonic()
+    with _HASHI_LIVENESS_LOCK:
+        snap = dict(_HASHI_LIVENESS_STATE)
+    age = now - float(snap.get("checked_at") or 0.0)
+    if (
+        snap.get("hashi_state") != "unknown"
+        and max_age_seconds is not None
+        and age <= max_age_seconds
+    ):
+        return snap
+    return refresh_hashi_liveness()
+
+
+def refresh_hashi_liveness(*, timeout: float = 0.8) -> dict[str, Any]:
+    """Actively probe local HASHI loopback health + PID and update cached state."""
+    health = _fetch_workbench_health(timeout=timeout)
+    if isinstance(health, dict) and health.get("ok") is True:
+        return record_hashi_liveness(hashi_state="active", health=health)
+    state = _derive_hashi_state(None)
+    return record_hashi_liveness(hashi_state=state, health=None)
+
+
+def _ordered_local_workbench_hosts(*, max_fallbacks: int = 2) -> tuple[str, ...]:
+    """Return loopback hosts with the cached working host first and bounded fallbacks."""
+    raw = tuple(local_http_hosts())
+    if not raw:
+        return ("127.0.0.1",)
+    with _LOCAL_HTTP_LOCK:
+        cached = _CACHED_LOCAL_WORKBENCH_HOST
+    ordered: list[str] = []
+    if cached and cached in raw:
+        ordered.append(cached)
+    for host in raw:
+        if host not in ordered:
+            ordered.append(host)
+    # Keep total candidate attempts tightly bounded (primary + at most max_fallbacks)
+    # so an offline local HASHI fails in milliseconds instead of walking 11 dead
+    # network interface aliases for 42+ seconds.
+    if len(ordered) > 1 + max_fallbacks and urllib_request.urlopen is _ORIGINAL_URLOPEN:
+        return tuple(ordered[: 1 + max_fallbacks])
+    return tuple(ordered)
+
+
+class _KeepAliveResponseAdapter:
+    """Minimal urlopen-compatible wrapper around a persistent httpx.Response."""
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self.status = int(response.status_code)
+        self.headers = response.headers
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._response.content
+        if size is not None and size >= 0:
+            return data[:size]
+        return data
+
+    def __enter__(self) -> "_KeepAliveResponseAdapter":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def _open_local_workbench_request(
+    req: urllib_request.Request,
+    *,
+    timeout: float,
+    connect_timeout: float | None = None,
+):
+    """Execute one loopback Workbench request via shared Keep-Alive httpx pool.
+
+    Preserves monkeypatched ``urllib_request.urlopen`` in unit tests seamlessly.
+    """
+    if urllib_request.urlopen is not _ORIGINAL_URLOPEN:
+        return urllib_request.urlopen(req, timeout=timeout)
+    import httpx
+    import io
+
+    client = _get_local_workbench_http_client()
+    eff_connect = min(float(timeout), 1.0 if connect_timeout is None else float(connect_timeout))
+    httpx_timeout = httpx.Timeout(
+        timeout=float(timeout),
+        connect=max(0.1, eff_connect),
+    )
+    try:
+        resp = client.request(
+            method=req.get_method(),
+            url=req.full_url,
+            headers=dict(req.header_items()),
+            content=req.data,
+            timeout=httpx_timeout,
+        )
+    except httpx.ConnectTimeout as exc:
+        raise TimeoutError(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(str(exc)) from exc
+    except httpx.ConnectError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, OSError):
+            raise URLError(cause) from exc
+        raise URLError(ConnectionRefusedError(errno.ECONNREFUSED, str(exc))) from exc
+    except httpx.HTTPError as exc:
+        raise URLError(exc) from exc
+
+    if resp.status_code >= 400:
+        raise HTTPError(
+            req.full_url,
+            int(resp.status_code),
+            resp.reason_phrase or "HTTP Error",
+            resp.headers,
+            io.BytesIO(resp.content),
+        )
+    return _KeepAliveResponseAdapter(resp)
+
+
 def _workbench_gateway_failure_payload(error: WorkbenchGatewayError, *, method: str):
     from orchestrator.api_failures import operation_failure_payload
     from orchestrator.operation_failures import OperationRejected, operation_failure
@@ -2490,9 +2743,24 @@ def _workbench_gateway_failure_payload(error: WorkbenchGatewayError, *, method: 
         operation="workbench_gateway", phase="validate" if error.accepted is False else "request",
         unconfirmed=effect == "unconfirmed")
     _workbench_gateway_log("operation_failed", **failure.diagnostic())
-    return {**operation_failure_payload(failure, error_code=error.code, effect_state=effect),
-        "code": error.code, "detail": error.code, "error": error.code,
-        "retryable": error.retryable}
+    with _HASHI_LIVENESS_LOCK:
+        liveness = dict(_HASHI_LIVENESS_STATE)
+    hashi_state = str(liveness.get("hashi_state") or "inactive")
+    if hashi_state == "unknown":
+        hashi_state = "inactive"
+    return {
+        **operation_failure_payload(failure, error_code=error.code, effect_state=effect),
+        "code": error.code,
+        "detail": error.code,
+        "error": error.code,
+        "retryable": error.retryable,
+        "remote_status": "ready",
+        "remote_alive": True,
+        "hashi_status": hashi_state,
+        "hashi_running": hashi_state == "active",
+        "can_start": bool(_control_hashi_root),
+        "reason_code": "hashi_inactive" if hashi_state == "inactive" else "hashi_starting" if hashi_state == "starting" else error.code,
+    }
 
 
 def _desktop_workbench_host(instance_id: str, port: int) -> str:
@@ -2519,6 +2787,155 @@ def _desktop_workbench_host(instance_id: str, port: int) -> str:
             and identity.get("workbench_port") == port):
             return host
     raise WorkbenchGatewayError("local_workbench_identity_unverified", accepted=False, retryable=True, status=503)
+
+
+def _cache_local_workbench_host(host: str | None) -> None:
+    global _CACHED_LOCAL_WORKBENCH_HOST
+    with _LOCAL_HTTP_LOCK:
+        _CACHED_LOCAL_WORKBENCH_HOST = host
+
+
+def _clear_cached_local_workbench_host(host: str | None = None) -> None:
+    global _CACHED_LOCAL_WORKBENCH_HOST
+    with _LOCAL_HTTP_LOCK:
+        if host is None or _CACHED_LOCAL_WORKBENCH_HOST == host:
+            _CACHED_LOCAL_WORKBENCH_HOST = None
+
+
+def _should_fast_fail_inactive_hashi(*, method: str, route_path: str) -> bool:
+    if urllib_request.urlopen is not _ORIGINAL_URLOPEN:
+        return False
+    if method not in {"GET", "HEAD"} or route_path == "/api/health":
+        return False
+    now = time.monotonic()
+    with _HASHI_LIVENESS_LOCK:
+        state = str(_HASHI_LIVENESS_STATE.get("hashi_state") or "unknown")
+        checked_at = float(_HASHI_LIVENESS_STATE.get("checked_at") or 0.0)
+    return state == "inactive" and (now - checked_at) <= HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS
+
+
+async def _stream_workbench_gateway_sse(
+    *,
+    api_path: str,
+    query: str,
+    request_headers: dict[str, str],
+    trace_headers: dict[str, str],
+    trace_facts: dict[str, Any],
+    route_started: float,
+    safe_api_path: str | None,
+) -> Response:
+    """Pass through a live local Workbench SSE stream without buffering."""
+    import httpx
+
+    upstream_path = _validate_workbench_gateway_path(api_path)
+    if query:
+        upstream_path = f"{upstream_path}?{query}"
+    route_path = upstream_path.split("?", 1)[0]
+    if _should_fast_fail_inactive_hashi(method="GET", route_path=route_path):
+        failure = _workbench_upstream_failure(
+            ConnectionRefusedError(errno.ECONNREFUSED, "local HASHI inactive"),
+            method="GET",
+            phase="request",
+        )
+        return JSONResponse(
+            status_code=503,
+            content=_workbench_gateway_failure_payload(failure, method="GET"),
+            headers={**trace_headers, "Cache-Control": "no-store"},
+        )
+
+    headers = {
+        name: value
+        for name, value in request_headers.items()
+        if name.lower() in _WORKBENCH_GATEWAY_REQUEST_HEADERS
+    }
+    headers["Accept"] = "text/event-stream"
+    admin_token = _workbench_admin_token()
+    if admin_token:
+        headers["X-Workbench-Token"] = admin_token
+
+    client = _get_local_workbench_async_client()
+    hosts = _ordered_local_workbench_hosts(max_fallbacks=2)
+    last_exc: Exception | None = None
+    for attempt, host in enumerate(hosts, start=1):
+        url = local_http_url(_workbench_port, upstream_path, host=host)
+        stream_ctx = client.stream(
+            "GET",
+            url,
+            headers=headers,
+            timeout=httpx.Timeout(connect=1.5 if attempt == 1 else 0.5, read=None, write=10.0, pool=5.0),
+        )
+        try:
+            upstream_resp = await stream_ctx.__aenter__()
+        except (httpx.HTTPError, OSError, TimeoutError) as exc:
+            last_exc = exc
+            _clear_cached_local_workbench_host(host)
+            if _control_hashi_root and not _read_hashi_pid_state().get("pid_alive"):
+                break
+            continue
+
+        _cache_local_workbench_host(host)
+        record_hashi_liveness(hashi_state="active")
+        if upstream_resp.status_code != 200:
+            try:
+                content = await upstream_resp.aread()
+                resp_headers = {
+                    name.lower(): value
+                    for name, value in upstream_resp.headers.items()
+                    if name.lower() in _WORKBENCH_GATEWAY_RESPONSE_HEADERS
+                }
+            finally:
+                await stream_ctx.__aexit__(None, None, None)
+            resp_headers.update(trace_headers)
+            return Response(
+                content=content,
+                status_code=int(upstream_resp.status_code),
+                headers=resp_headers,
+            )
+
+        async def _iter_sse():
+            try:
+                async for chunk in upstream_resp.aiter_raw():
+                    if chunk:
+                        yield chunk
+            except (httpx.HTTPError, OSError, asyncio.CancelledError):
+                return
+            finally:
+                try:
+                    await stream_ctx.__aexit__(None, None, None)
+                except Exception:
+                    pass
+
+        _workbench_gateway_log(
+            "proxy_response_ready",
+            **trace_facts,
+            method="GET",
+            api_path=safe_api_path,
+            status=200,
+            duration_ms=int((time.monotonic() - route_started) * 1000),
+            response_producer="local_workbench_sse",
+        )
+        return StreamingResponse(
+            _iter_sse(),
+            status_code=200,
+            media_type="text/event-stream",
+            headers={
+                **trace_headers,
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
+    failure = _workbench_upstream_failure(
+        last_exc or ConnectionRefusedError(errno.ECONNREFUSED, "local HASHI unavailable"),
+        method="GET",
+        phase="request",
+    )
+    return JSONResponse(
+        status_code=503,
+        content=_workbench_gateway_failure_payload(failure, method="GET"),
+        headers={**trace_headers, "Cache-Control": "no-store"},
+    )
 
 
 def _forward_workbench_gateway_request(
@@ -2555,11 +2972,32 @@ def _forward_workbench_gateway_request(
 
     desktop_request = upstream_path.split("?", 1)[0].startswith("/api/v1/desktop/")
     speech_request = route_path == "/api/tui/speech" and normalized_method == "POST"
+    if not desktop_request and _should_fast_fail_inactive_hashi(
+        method=normalized_method, route_path=route_path
+    ):
+        fast_error = _workbench_upstream_failure(
+            ConnectionRefusedError(errno.ECONNREFUSED, "local HASHI inactive"),
+            method=normalized_method,
+            phase="request",
+        )
+        _workbench_gateway_log(
+            "forward_failed",
+            **trace_facts,
+            method=normalized_method,
+            api_path=_workbench_gateway_token(route_path),
+            duration_ms=0,
+            error_code=fast_error.code,
+            response_producer="remote_gateway_fast_fail",
+            failure=fast_error.failure.diagnostic() if fast_error.failure else None,
+        )
+        raise fast_error
+
     hosts = (
         (_desktop_workbench_host(str(_instance_info.get("instance_id") or ""), _workbench_port),)
         if desktop_request
-        else local_http_hosts()
+        else _ordered_local_workbench_hosts(max_fallbacks=2)
     )
+    eff_timeout = _workbench_gateway_timeout() if timeout is None else timeout
     total_started = time.monotonic()
     _workbench_gateway_log(
         "forward_started",
@@ -2568,7 +3006,7 @@ def _forward_workbench_gateway_request(
         api_path=_workbench_gateway_token(route_path),
         request_bytes=len(body_bytes),
         attempt_count=len(hosts),
-        timeout_ms=int(1000 * (_workbench_gateway_timeout() if timeout is None else timeout)),
+        timeout_ms=int(1000 * eff_timeout),
     )
     last_error: WorkbenchGatewayError | None = None
     for attempt, host in enumerate(hosts, start=1):
@@ -2590,11 +3028,14 @@ def _forward_workbench_gateway_request(
             host_kind=host_kind,
         )
         try:
-            with urllib_request.urlopen(
+            with _open_local_workbench_request(
                 upstream,
-                timeout=_workbench_gateway_timeout() if timeout is None else timeout,
+                timeout=eff_timeout,
+                connect_timeout=1.0 if attempt == 1 else 0.5,
             ) as response:
                 phase = "read"
+                _cache_local_workbench_host(host)
+                record_hashi_liveness(hashi_state="active")
                 _workbench_gateway_log(
                     "local_response_headers",
                     **trace_facts,
@@ -2632,6 +3073,8 @@ def _forward_workbench_gateway_request(
                 )
                 return response.status, content, response_headers
         except HTTPError as exc:
+            _cache_local_workbench_host(host)
+            record_hashi_liveness(hashi_state="active")
             _workbench_gateway_log(
                 "local_response_headers",
                 **trace_facts,
@@ -2672,6 +3115,7 @@ def _forward_workbench_gateway_request(
             )
             return exc.code, content, response_headers
         except (URLError, TimeoutError, OSError, HTTPClientError) as exc:
+            _clear_cached_local_workbench_host(host)
             last_error = _workbench_upstream_failure(exc, method=normalized_method, phase=phase, desktop=desktop_request)
             _workbench_gateway_log(
                 "local_request_failed",
@@ -2686,7 +3130,15 @@ def _forward_workbench_gateway_request(
             # refusal/name-resolution failure. Missing acknowledgements are not replay permission.
             if desktop_request or speech_request or (normalized_method not in {"GET", "HEAD"} and last_error.accepted is None):
                 break
+            if (
+                urllib_request.urlopen is _ORIGINAL_URLOPEN
+                and _control_hashi_root
+                and not _read_hashi_pid_state().get("pid_alive")
+            ):
+                break
             continue
+    if not desktop_request and (last_error is None or last_error.accepted is False or normalized_method in {"GET", "HEAD"}):
+        record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
     _workbench_gateway_log(
         "forward_failed",
         **trace_facts,
@@ -2980,21 +3432,38 @@ def _fetch_workbench_json(
     timeout: float = 1.0,
 ) -> dict[str, Any] | None:
     normalized = path if str(path).startswith("/") else f"/{path}"
-    for host in local_http_hosts():
+    for attempt, host in enumerate(_ordered_local_workbench_hosts(max_fallbacks=2), start=1):
         req = urllib_request.Request(
             local_http_url(_workbench_port, normalized, host=host), method="GET"
         )
         try:
-            with urllib_request.urlopen(req, timeout=timeout) as resp:
+            with _open_local_workbench_request(
+                req,
+                timeout=timeout,
+                connect_timeout=min(timeout, 0.8 if attempt == 1 else 0.4),
+            ) as resp:
                 value = json.loads(resp.read().decode("utf-8"))
+                _cache_local_workbench_host(host)
                 return value if isinstance(value, dict) else None
         except Exception:
+            _clear_cached_local_workbench_host(host)
+            if (
+                urllib_request.urlopen is _ORIGINAL_URLOPEN
+                and _control_hashi_root
+                and not _read_hashi_pid_state().get("pid_alive")
+            ):
+                break
             continue
     return None
 
 
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
-    return _fetch_workbench_json("/api/health", timeout=timeout)
+    health = _fetch_workbench_json("/api/health", timeout=timeout)
+    if isinstance(health, dict) and health.get("ok") is True:
+        record_hashi_liveness(hashi_state="active", health=health)
+    elif health is None:
+        record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
+    return health
 
 
 def _request_workbench_agent_lifecycle(
@@ -3135,6 +3604,7 @@ def create_app(
     _hashi_root = hashi_root
     _control_hashi_root = control_hashi_root or hashi_root
     _control_code_root = control_code_root or _control_hashi_root
+    reset_local_workbench_transport_state()
     _attachment_store = AttachmentStore(
         root=Path(hashi_root) if hashi_root else Path.cwd(),
         instance_id=str(instance_info.get("instance_id") or "hashi"),
@@ -3182,6 +3652,11 @@ def create_app(
             if not discovery_status or discovery_status.get("readiness") in {"ready", "disabled"}
             else "degraded"
         )
+        with _HASHI_LIVENESS_LOCK:
+            liveness = dict(_HASHI_LIVENESS_STATE)
+        hashi_status = str(liveness.get("hashi_state") or "unknown")
+        hashi_running = bool(liveness.get("hashi_running"))
+        can_start_hashi = bool(_control_hashi_root)
         if not authenticated:
             instance_view = {
                 "instance_id": _instance_info.get("instance_id"),
@@ -3190,6 +3665,9 @@ def create_app(
                 "platform": _instance_info.get("platform"),
                 "hashi_version": _instance_info.get("hashi_version"),
                 "remote_port": _instance_info.get("remote_port"),
+                "hashi_status": hashi_status,
+                "hashi_running": hashi_running,
+                "can_start_hashi": can_start_hashi,
             }
             if _protocol_manager:
                 instance_view["capabilities"] = _protocol_capabilities_with_api_endpoints(
@@ -3213,15 +3691,29 @@ def create_app(
                 "trusted_view": False,
                 "shared_token_configured": has_shared_token(),
                 "status": health_state,
+                "remote_status": health_state,
+                "hashi_status": hashi_status,
+                "hashi_running": hashi_running,
+                "can_start_hashi": can_start_hashi,
                 "discovery": discovery_status,
                 "lan_readiness": (
                     _lan_readiness_cache.projection() if _lan_readiness_cache else None
                 ),
             }
+        authenticated_instance_view = {
+            **_instance_info,
+            "hashi_status": hashi_status,
+            "hashi_running": hashi_running,
+            "can_start_hashi": can_start_hashi,
+        }
         return {
             "ok": True,
             "status": health_state,
-            "instance": _instance_info,
+            "remote_status": health_state,
+            "hashi_status": hashi_status,
+            "hashi_running": hashi_running,
+            "can_start_hashi": can_start_hashi,
+            "instance": authenticated_instance_view,
             "hostname": socket.gethostname(),
             "platform": platform.system().lower(),
             "ts": time.time(),
@@ -3367,10 +3859,16 @@ def create_app(
                     else "Remote authentication failed. Check the connection credential, clock and signed request.",
             })
         health = await asyncio.to_thread(_fetch_workbench_health, 1.0)
+        hashi_status = _derive_hashi_state(health)
+        record_hashi_liveness(hashi_state=hashi_status, health=health)
         return _shared_token_response(request, {
             "ok": True,
             "gateway": "workbench_v1",
             "authenticated_instance": authenticated_instance,
+            "remote_status": "ready",
+            "hashi_status": hashi_status,
+            "hashi_running": health is not None,
+            "can_start_hashi": bool(_control_hashi_root),
             "instance": {
                 "instance_id": _instance_info.get("instance_id"),
                 "display_name": _instance_info.get("display_name"),
@@ -3378,6 +3876,9 @@ def create_app(
                 "platform": _instance_info.get("platform"),
                 "remote_port": _instance_info.get("remote_port"),
                 "workbench_port": _instance_info.get("workbench_port", _workbench_port),
+                "hashi_status": hashi_status,
+                "hashi_running": health is not None,
+                "can_start_hashi": bool(_control_hashi_root),
             },
             "workbench_online": health is not None,
             "workbench_health": health,
@@ -3427,6 +3928,21 @@ def create_app(
             "proxy_authenticated", **trace_facts, method=request.method,
             api_path=safe_api_path,
         )
+        normalized_rel_path = str(api_path or "").strip().strip("/")
+        wants_sse = request.method.upper() == "GET" and (
+            normalized_rel_path == "v2/frontend/events/stream"
+            or "text/event-stream" in str(request_headers.get("accept") or "").lower()
+        )
+        if wants_sse:
+            return await _stream_workbench_gateway_sse(
+                api_path=api_path,
+                query=request.url.query,
+                request_headers=request_headers,
+                trace_headers=trace_headers,
+                trace_facts=trace_facts,
+                route_started=route_started,
+                safe_api_path=safe_api_path,
+            )
         forward_task = asyncio.create_task(asyncio.to_thread(
             _forward_workbench_gateway_request,
             method=request.method,
@@ -4743,8 +5259,10 @@ def create_app(
             }
 
         try:
+            record_hashi_liveness(hashi_state="starting", health=None)
             started = _start_hashi_process()
         except Exception as exc:
+            record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
             logger.exception("HASHI rescue start failed")
             _append_rescue_audit(
                 requester=client_id,
@@ -4944,6 +5462,7 @@ def create_app(
                     ),
                 }
                 try:
+                    record_hashi_liveness(hashi_state="starting", health=None)
                     started = await asyncio.to_thread(_restart_hashi_process)
                 finally:
                     _restart_launch_request = None

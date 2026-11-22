@@ -38,6 +38,8 @@ def _entry_from_peer(peer: Any, *, now: float) -> tuple[str, dict[str, Any]] | N
         "discovery": str(properties.get("preferred_backend") or properties.get("discovery") or "unknown"),
         "host_identity": str(properties.get("host_identity") or ""),
         "environment_kind": str(properties.get("environment_kind") or ""),
+        "hashi_state": str(properties.get("hashi_state") or "unknown"),
+        "can_start_hashi": bool(properties.get("can_start_hashi", False)),
         "updated_at": now,
     }
 

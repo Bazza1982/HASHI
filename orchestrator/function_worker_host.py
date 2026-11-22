@@ -829,6 +829,8 @@ class FunctionWorkerHost:
         self._resource_alert_listener: Any = None
         self._resource_metadata_publish_task: asyncio.Task[Any] | None = None
         self._peer_telegram_wake_tasks: set[asyncio.Task[Any]] = set()
+        self._session_event_store_binding: tuple[Any, Any] | None = None
+        self._session_event_emit_tasks: set[asyncio.Task[Any]] = set()
 
     @timed("worker.prepare")
     async def prepare(self) -> None:
@@ -1362,6 +1364,72 @@ class FunctionWorkerHost:
             pending.cancel()
         self._resource_metadata_publish_task = None
 
+    def _install_session_event_bridge(self, runtime: Any) -> None:
+        self._remove_session_event_bridge()
+        try:
+            from orchestrator.runtime_session import ensure_store
+
+            store = ensure_store(runtime)
+            loop = asyncio.get_running_loop()
+        except Exception:
+            return
+        register = getattr(store, "register_session_change_listener", None)
+        if not callable(register):
+            return
+
+        def _schedule_emit(
+            agent_id: str, session_id: str, kind: str, run_id: str | None
+        ) -> None:
+            if self.phase in {"STOPPING", "STOPPED"}:
+                return
+
+            async def _emit() -> None:
+                try:
+                    await self.peer.emit(
+                        "worker.session_event",
+                        {
+                            "agent_id": agent_id,
+                            "session_id": session_id,
+                            "kind": kind,
+                            "run_id": run_id,
+                        },
+                    )
+                except Exception:
+                    pass
+
+            task = loop.create_task(_emit(), name=f"worker-session-event:{kind}")
+            self._session_event_emit_tasks.add(task)
+            task.add_done_callback(self._session_event_emit_tasks.discard)
+
+        def _on_session_change(
+            agent_id: str, session_id: str, kind: str, run_id: str | None
+        ) -> None:
+            if loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(
+                    _schedule_emit, agent_id, session_id, kind, run_id
+                )
+            except RuntimeError:
+                pass
+
+        register(_on_session_change)
+        self._session_event_store_binding = (store, _on_session_change)
+
+    def _remove_session_event_bridge(self) -> None:
+        binding = getattr(self, "_session_event_store_binding", None)
+        if isinstance(binding, tuple) and len(binding) == 2:
+            store, listener = binding
+            unregister = getattr(store, "unregister_session_change_listener", None)
+            if callable(unregister):
+                try:
+                    unregister(listener)
+                except Exception:
+                    pass
+        self._session_event_store_binding = None
+        for task in tuple(getattr(self, "_session_event_emit_tasks", ())):
+            task.cancel()
+
     @timed("worker.activate")
     async def activate(self) -> dict[str, Any]:
         if self.phase != "READY":
@@ -1385,6 +1453,7 @@ class FunctionWorkerHost:
             runtime, peer_notifier=self._schedule_peer_telegram_wake
         )
         self._install_resource_alert_bridge()
+        self._install_session_event_bridge(runtime)
         runtime.process_task = asyncio.create_task(
             runtime.process_queue(),
             name=f"queue-{runtime.name}",
@@ -1507,6 +1576,7 @@ class FunctionWorkerHost:
         self.phase = "STOPPING"
         self.accepting = False
         self._remove_resource_alert_bridge()
+        self._remove_session_event_bridge()
         for task in tuple(getattr(self, "_peer_telegram_wake_tasks", ())):
             task.cancel()
         await self._cancel_connector_tasks()

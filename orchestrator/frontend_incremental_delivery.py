@@ -20,7 +20,7 @@ from orchestrator.runtime_session import ensure_store
 
 IDLE_SWEEP_BASE_SECONDS = 2.0
 IDLE_SWEEP_MAX_SECONDS = 60.0
-ACTIVE_RUN_SWEEP_SECONDS = 2.0
+ACTIVE_RUN_SWEEP_SECONDS = 15.0
 
 
 def _telegram_outbound_ready(runtime: Any) -> bool:

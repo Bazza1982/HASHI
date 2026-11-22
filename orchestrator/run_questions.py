@@ -362,11 +362,15 @@ class RunQuestions:
     def pending_telegram_deliveries(self, *, agent_id, limit=20, busy_timeout_ms=None):
         """Derived outbox view; unknown outcomes never become retry candidates."""
         def read(c):
-            return c.execute('''SELECT q.*, e.event_id FROM run_questions q
-                JOIN run_events e ON e.run_id=q.run_id AND e.kind='run.question.created'
+            # CROSS JOIN preserves join order so SQLite starts from the compact
+            # run_questions_active_by_agent partial index instead of full-scanning
+            # connector_delivery_tasks (SCAN d + TEMP B-TREE).
+            return c.execute('''SELECT q.*, e.event_id FROM run_questions AS q
+                CROSS JOIN run_events AS e ON e.run_id=q.run_id AND e.kind='run.question.created'
                     AND json_extract(e.detail_json,'$.question_id')=q.question_id
-                JOIN connector_delivery_tasks d ON d.event_id=e.event_id
-                WHERE q.instance_id=? AND q.agent_id=? AND q.state='pending'
+                CROSS JOIN connector_delivery_tasks AS d ON d.event_id=e.event_id
+                WHERE q.instance_id=? AND q.agent_id=?
+                    AND q.state IN ('pending','answered') AND q.state='pending'
                     AND d.connector_id='telegram' AND (d.state IN ('pending','retry')
                         OR (d.state='claimed' AND d.lease_expires_at<=?))
                 ORDER BY q.created_at LIMIT ?''', (self.store.instance_id, str(agent_id).lower(),

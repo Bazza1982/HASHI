@@ -495,6 +495,30 @@ class SessionStore:
         }
     )
 
+    FRONTEND_STREAM_EVENT_KINDS = frozenset(
+        {
+            "run.accepted",
+            "run.started",
+            "run.completed",
+            "run.failed",
+            "run.cancelled",
+            "run.stopped",
+            "run.interrupted",
+            "assistant.output.available",
+            "frontend.message.recorded",
+            "frontend.command_result",
+            "command.completed",
+            "run.question.created",
+            "run.question.answered",
+            "run.question.expired",
+            "run.question.cancelled",
+            "session.title_updated",
+            "permission.requested",
+            "permission.resolved",
+            "approval.requested",
+        }
+    )
+
     def __init__(
         self,
         db_path: str | Path,
@@ -521,7 +545,58 @@ class SessionStore:
         self._lock = threading.RLock()
         self._telegram_delivery_listeners: list[Any] = []
         self._pending_telegram_notifications = threading.local()
+        self._session_change_listeners: list[Any] = []
+        self._pending_session_changes = threading.local()
         self._initialize()
+
+    def register_session_change_listener(self, listener: Any) -> None:
+        """Register post-commit callback ``listener(agent_id, session_id, kind, run_id)``."""
+        with self._lock:
+            if listener not in self._session_change_listeners:
+                self._session_change_listeners.append(listener)
+
+    def unregister_session_change_listener(self, listener: Any) -> None:
+        with self._lock:
+            self._session_change_listeners = [
+                existing
+                for existing in self._session_change_listeners
+                if existing != listener
+            ]
+
+    def _queue_session_change_notification(
+        self, agent_id: str, session_id: str, kind: str, run_id: str | None
+    ) -> None:
+        stack = getattr(self._pending_session_changes, "stack", None)
+        if stack:
+            stack[-1].append(
+                (
+                    str(agent_id).lower(),
+                    str(session_id),
+                    str(kind),
+                    str(run_id) if run_id else None,
+                )
+            )
+
+    def _dispatch_session_change_notifications(
+        self, items: list[tuple[str, str, str, str | None]]
+    ) -> None:
+        if not items:
+            return
+        with self._lock:
+            listeners = tuple(self._session_change_listeners)
+        if not listeners:
+            return
+        seen: set[tuple[str, str, str, str | None]] = set()
+        for entry in items:
+            if entry in seen:
+                continue
+            seen.add(entry)
+            agent_id, session_id, kind, run_id = entry
+            for listener in listeners:
+                try:
+                    listener(agent_id, session_id, kind, run_id)
+                except Exception:
+                    continue
 
     def register_telegram_delivery_listener(self, listener: Any) -> None:
         """Register a post-commit callback ``listener(agent_id, event_id, kind)``."""
@@ -612,6 +687,12 @@ class SessionStore:
             self._pending_telegram_notifications.stack = stack
         pending: list[tuple[str, str, str]] = []
         stack.append(pending)
+        change_stack = getattr(self._pending_session_changes, "stack", None)
+        if change_stack is None:
+            change_stack = []
+            self._pending_session_changes.stack = change_stack
+        pending_changes: list[tuple[str, str, str, str | None]] = []
+        change_stack.append(pending_changes)
         committed = False
         try:
             with connection:
@@ -620,9 +701,13 @@ class SessionStore:
         finally:
             if stack and stack[-1] is pending:
                 stack.pop()
+            if change_stack and change_stack[-1] is pending_changes:
+                change_stack.pop()
             connection.close()
         if committed and pending:
             self._dispatch_telegram_delivery_notifications(pending)
+        if committed and pending_changes:
+            self._dispatch_session_change_notifications(pending_changes)
 
     def _initialize(self) -> None:
         with self._lock, self._connection() as connection:
@@ -2955,6 +3040,18 @@ class SessionStore:
             kind=kind,
             run_id=run_id,
         )
+        if kind in self.FRONTEND_STREAM_EVENT_KINDS and self._session_change_listeners:
+            agent_row = connection.execute(
+                "SELECT agent_id FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if agent_row is not None and agent_row["agent_id"]:
+                self._queue_session_change_notification(
+                    str(agent_row["agent_id"]),
+                    session_id,
+                    kind,
+                    run_id,
+                )
         if outbox:
             connection.execute(
                 """
