@@ -1695,6 +1695,10 @@ class FunctionWorkerSupervisor:
             return False
         from orchestrator.telegram_transport import bot_api_root, bot_api_kwargs
         handle = self.kernel._runtime_map().get(name)
+        projection = self._telegram_summary()
+        if projection is not None:
+            projection.refresh_configuration()
+            projection.update_handle(name, handle)
         config = getattr(handle, "config", None)
         # A route handle exposes only a partial configuration descriptor.
         # Connector endpoints come from the trusted instance-config owner.
@@ -1706,6 +1710,8 @@ class FunctionWorkerSupervisor:
                 config = SimpleNamespace(extra=dict(row.get("extra") or {}))
         api_root = bot_api_root(config)
         existing = self._telegram_ingress.get(name)
+        if projection is not None and existing is not None:
+            projection.update_ingress(name, existing)
         if (existing is not None and existing.token == str(token)
                 and getattr(existing, "api_root", None) == api_root
                 and (
@@ -1725,6 +1731,8 @@ class FunctionWorkerSupervisor:
             instance_id=str(getattr(self.kernel.global_cfg, "instance_id", "unknown")),
             agent=name, generation_id=str(getattr(self.kernel, "shared_generation_id", "unknown")), token=str(token))
         self._telegram_ingress_diagnostics[name] = diagnostics
+        if projection is not None:
+            projection.update_diagnostics(name, diagnostics)
         transport = {}
         if api_root:
             from telegram import Bot
@@ -1760,6 +1768,8 @@ class FunctionWorkerSupervisor:
         ingress.drop_pending_on_start = drop_pending_updates
         # Register before start so a failed initialization remains queryable.
         self._telegram_ingress[name] = ingress
+        if projection is not None:
+            projection.update_ingress(name, ingress)
         self._checkpoint_telegram_offset(
             name, ingress.offset, bot_fingerprint=telegram_bot_fingerprint(token)
         )
@@ -1782,10 +1792,28 @@ class FunctionWorkerSupervisor:
             ingress = self._telegram_ingress.pop(str(agent_name), None)
             if ingress is not None:
                 await ingress.stop(notify_status=False)
+            projection = self._telegram_summary()
+            if projection is not None:
+                projection.update_ingress(str(agent_name), None)
 
     def telegram_ingress_running(self, agent_name: str) -> bool:
         ingress = self._telegram_ingress.get(str(agent_name))
         return bool(ingress is not None and ingress.is_running)
+
+    def _telegram_summary(self):
+        projection = getattr(self, "_telegram_summary_projection", None)
+        if projection is not None:
+            return projection
+        paths = getattr(self.kernel, "paths", None)
+        config_path = getattr(paths, "config_path", None)
+        secrets_path = getattr(paths, "secrets_path", None)
+        if not config_path or not secrets_path:
+            return None
+        from orchestrator.telegram_status_projection import TelegramStatusProjection
+
+        projection = TelegramStatusProjection(config_path, secrets_path)
+        self._telegram_summary_projection = projection
+        return projection
 
     def telegram_ingress_snapshot(self, agent_name: str) -> dict[str, Any]:
         ingress = self._telegram_ingress.get(str(agent_name))
@@ -1797,7 +1825,7 @@ class FunctionWorkerSupervisor:
             "configured": ingress is not None or diagnostics is not None or bool(self._telegram_token(agent_name)),
             "running": bool(ingress is not None and ingress.is_running),
             "connected": bool(ingress is not None and ingress.connected
-                              and (not expected or fingerprint == expected)),
+                              and expected and fingerprint == expected),
             "bot_fingerprint": fingerprint,
             "offset": None if ingress is None else ingress.offset,
             "diagnostics": None if diagnostics is None else diagnostics.snapshot(),
@@ -2246,6 +2274,9 @@ class FunctionWorkerSupervisor:
                         type(exc).__name__,
                     )
 
+        projection = self._telegram_summary()
+        if projection is not None:
+            projection.refresh_configuration()
         selected_names: list[str] = []
         for handle in list(self.kernel.runtimes):
             if not isinstance(handle, AgentRuntimeHandle):
@@ -2253,6 +2284,8 @@ class FunctionWorkerSupervisor:
             if selected is not None and handle.name not in selected:
                 continue
             selected_names.append(handle.name)
+            if projection is not None:
+                projection.update_handle(handle.name, handle)
             token = self._telegram_token(handle.name)
             try:
                 if token:
@@ -2422,6 +2455,9 @@ class FunctionWorkerSupervisor:
             )
             return
         if event == "core.config_changed":
+            projection = self._telegram_summary()
+            if projection is not None:
+                projection.refresh_configuration()
             directory = getattr(self.kernel, "agent_directory", None)
             if directory is not None:
                 directory.refresh()
@@ -2445,6 +2481,26 @@ class FunctionWorkerSupervisor:
                 return self.kernel.reboot_manager.latest(actor_id=params.get("actor_id"), chat_id=params.get("chat_id"), thread_id=params.get("thread_id"), surface=params.get("surface") or "telegram")
             allowed = {key: params[key] for key in ("mode", "agent_number", "targets", "origin", "locale", "request_key") if key in params}
             return self.kernel.reboot_manager.submit({**allowed, "agent_name": client.agent_name})
+        if method == "core.telegram.summary":
+            handle = self.kernel._runtime_map().get(client.agent_name)
+            if handle is None or handle.client is not client:
+                raise FunctionWorkerProtocolError("Telegram summary came from an inactive Worker")
+            owner = str(params.get("owner_id") or "").strip()
+            actor = params.get("actor_id")
+            if not owner or len(owner) > 256 or (actor is not None and
+                    (type(actor) is not int or not 0 < actor < 2**52)):
+                raise ValueError("invalid Telegram summary owner")
+            from orchestrator.connector_delivery_preferences import get_connector_preference_snapshot
+
+            preference = get_connector_preference_snapshot(
+                self.kernel.paths.bridge_home, owner, "telegram", "mirror", default=True
+            )
+            projection = self._telegram_summary()
+            if preference is None or projection is None:
+                return {"ok": False, "reason": "status_unavailable"}
+            summary = projection.snapshot(owner, actor_id=actor, mirror_enabled=preference["value"])
+            summary["instance"] = str(getattr(self.kernel.global_cfg, "instance_id", "HASHI") or "HASHI")
+            return summary
         if method == "core.start_agent":
             return list(await self.kernel.start_agent(str(params["agent_name"])))
         if method == "core.stop_agent":

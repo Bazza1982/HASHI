@@ -204,6 +204,33 @@ async def test_agentpresence_safe_voice_uses_current_primary_session_with_ap_onl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("surface,source_channel", [
+    ("workbench", "workbench_api"),
+    ("agentpresence", "agentpresence_api"),
+])
+async def test_keep_transcript_as_draft_never_admits_a_request(
+    tmp_path, monkeypatch, surface, source_channel
+):
+    target, session, metadata, _clock = _runtime(tmp_path, surface=surface)
+    await _upload(
+        tmp_path, monkeypatch, target, metadata, key="recording-draft:0",
+        transcript="please edit this", source=surface,
+    )
+    read = await try_execute_slash_command_text(
+        target, _wire(op="read", idempotency_key="recording-draft:0"),
+        source_channel=source_channel,
+    )
+    decision = _wire(
+        op="decide", pending_id=read["confirmation"]["pending_id"], decision="keep"
+    )
+    first = await execute_local_command(target, decision, source_channel=source_channel)
+    replay = await execute_local_command(target, decision, source_channel=source_channel)
+    assert first["state"] == replay["state"] == "draft"
+    assert first["session_id"] == session["session_id"]
+    target.enqueue_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_discard_expiry_scope_change_and_safevoice_off_never_admit(tmp_path, monkeypatch):
     for case in ("discard", "expired", "scope", "safevoice_off"):
         target, session, metadata, clock = _runtime(tmp_path / case)
@@ -310,3 +337,4 @@ async def test_confirmation_admission_exception_and_missing_receipt_are_uncertai
     )
     assert missing["error_code"] == "voice_confirmation_not_found"
     assert missing["accepted"] is None
+# HASHI-Fingerprint: hfp_88d2057284c84a8f813beacc4cabbd9f

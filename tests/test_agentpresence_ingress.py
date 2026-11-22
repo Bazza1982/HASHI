@@ -227,6 +227,62 @@ async def test_agentpresence_text_and_voice_use_hashi_selected_agent_current_ses
 
 
 @pytest.mark.asyncio
+async def test_agentpresence_saved_draft_cannot_follow_a_changed_session(tmp_path):
+    server, runtime = _server(tmp_path)
+    owner_id = SessionStore.owner_id_for(server.global_config)
+    first = server.session_store.create_session(owner_id=owner_id, agent_id="agent1", title="first")
+    second = server.session_store.create_session(owner_id=owner_id, agent_id="agent1", title="second")
+    server.session_store.bind_primary_session(owner_id=owner_id, agent_id="agent1", session_id=second["session_id"])
+    payload = {
+        "text": "a saved voice draft",
+        "source": "agentpresence",
+        "surface": "agentpresence",
+        "instance_id": "TEST",
+        "expected_session_id": first["session_id"],
+        "expected_context_generation": first["context_generation"],
+    }
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            "/api/agentpresence/draft", json=payload,
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        )
+        assert response.status == 403
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post(
+            "/api/agentpresence/draft", json={**payload, "source": "api", "surface": "workbench"},
+        )
+        assert response.status == 400
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post("/api/agentpresence/draft", json=payload)
+        assert response.status == 409
+        assert (await response.json())["error_code"] == "agentpresence_draft_session_changed"
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post("/api/agentpresence/draft", json={
+            **payload, "expected_session_id": second["session_id"],
+            "expected_context_generation": second["context_generation"] + 1,
+        })
+        assert response.status == 409
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post("/api/agentpresence/draft", json={
+            **payload, "expected_session_id": None, "expected_context_generation": None,
+        })
+        assert response.status == 400
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post("/api/agentpresence/draft", json={
+            "text": "unscoped", "source": "agentpresence", "surface": "agentpresence",
+            "instance_id": "TEST",
+        })
+        assert response.status == 400
+        runtime.enqueue_api_text.assert_not_awaited()
+        response = await client.post("/api/agentpresence/draft", json={
+            **payload, "expected_session_id": second["session_id"],
+            "expected_context_generation": second["context_generation"],
+        })
+        assert response.status == 200
+        runtime.enqueue_api_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_agentpresence_safe_voice_returns_transcript_and_accepts_explicit_decision(
     tmp_path, monkeypatch
 ):

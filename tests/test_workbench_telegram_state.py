@@ -76,6 +76,21 @@ def test_set_mirror_roundtrip_and_revision(tmp_path):
     assert raw["revision"] == 2
 
 
+def test_mirror_snapshot_tracks_only_its_owners_preference_writes(tmp_path):
+    from orchestrator.connector_delivery_preferences import get_connector_preference_snapshot
+
+    set_mirror(tmp_path, "owner-a", False)
+    original = get_connector_preference_snapshot(tmp_path, "owner-a", "telegram", "mirror", default=True)
+    set_mirror(tmp_path, "owner-b", False)
+    other_owner = get_connector_preference_snapshot(tmp_path, "owner-a", "telegram", "mirror", default=True)
+    assert original == {"value": False, "revision": 1, "document_revision": 1}
+    assert other_owner == {"value": False, "revision": 1, "document_revision": 2}
+    set_mirror(tmp_path, "owner-a", True)
+    set_mirror(tmp_path, "owner-a", False)
+    changed = get_connector_preference_snapshot(tmp_path, "owner-a", "telegram", "mirror", default=True)
+    assert changed == {"value": False, "revision": 4, "document_revision": 4}
+
+
 def test_per_owner_isolation(tmp_path):
     set_mirror(tmp_path, "owner-a", False)
     assert mirror_enabled(tmp_path, "owner-a") is False

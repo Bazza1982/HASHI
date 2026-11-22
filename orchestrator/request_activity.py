@@ -481,7 +481,9 @@ class RequestActivityStore:
             if record.get("terminal"):
                 return
             now = float(timestamp if timestamp is not None else time.time())
-            normal_discard = not success and termination_reason == "safe_voice_discarded"
+            normal_discard = not success and termination_reason in {
+                "safe_voice_discarded", "safe_voice_kept_as_draft"
+            }
             status = "interrupted" if normal_discard else "completed" if success else "failed"
             record["state"] = status
             record["terminal"] = True
@@ -489,7 +491,9 @@ class RequestActivityStore:
             event = self._append_unlocked(
                 record,
                 kind="interrupted" if normal_discard else "completed" if success else "error",
-                summary=("Safe Voice transcript discarded" if normal_discard else
+                summary=("Safe Voice transcript kept as draft"
+                         if termination_reason == "safe_voice_kept_as_draft" else
+                         "Safe Voice transcript discarded" if normal_discard else
                          "Completed" if success else (_safe_text(error, limit=2_000) or "Failed")),
                 detail="" if success or normal_discard else error,
                 status=status,

@@ -142,6 +142,22 @@ def test_source_checkout_uses_commit_ancestry_not_timestamps(tmp_path: Path) -> 
     assert status["commit"] != running
 
 
+def test_failed_git_ancestry_check_is_unknown_not_diverged(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = _checkout(tmp_path)
+    original = build_provenance._run_git
+
+    def failed_ancestry(root, *args, **kwargs):
+        if args and args[0] == "merge-base":
+            return SimpleNamespace(returncode=128)
+        return original(root, *args, **kwargs)
+
+    monkeypatch.setattr(build_provenance, "_run_git", failed_ancestry)
+    status = inspect_source_checkout(source, running_commit="f" * 40)
+    assert status["relation"] == "unknown"
+
+
 def test_packaged_provenance_never_invents_a_branch(tmp_path: Path) -> None:
     root = _checkout(tmp_path) / "package"
     root.mkdir()
@@ -173,6 +189,52 @@ def test_packaged_provenance_never_invents_a_branch(tmp_path: Path) -> None:
     assert source["reason"] == "packaged_install"
 
 
+def test_packaged_source_requires_matching_known_clean_provenance(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "pyproject.toml").write_text(
+        '[project]\nname = "hashi-bridge"\nversion = "4.0.0a2"\n', encoding="utf-8"
+    )
+    commit = "a" * 40
+    info = {"release_channel": "portable", "commit": commit, "dirty_at_build": False}
+    info_path = source / "BUILD_INFO.json"
+    info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = {"schema_version": 1, "generation_id": generation,
+                  "commit": commit, "dirty_at_build": False}
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: {
+        "status": "active", "pid": 23,
+        "provenance": {"commit": commit, "dirty_at_build": False},
+    })
+
+    matching = collect_version_payload(owner)
+    assert matching["state"]["code"] == "packaged_release"
+    assert matching["product"]["version"] == "4.0.0a2"
+    info["commit"] = "b" * 40
+    info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+    different = collect_version_payload(owner)
+    assert different["state"]["code"] == "mixed_generations"
+    assert "packaged_source_commit_differs" in different["state"]["reasons"]
+    assert "package" in render_version_card(different, locale="en").lower()
+
+    info["commit"] = None
+    info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+    missing = collect_version_payload(owner)
+    assert missing["state"]["code"] == "provenance_unavailable"
+    assert "packaged_source_commit_unavailable" in missing["state"]["reasons"]
+
+    info["commit"] = commit
+    for dirty in (True, None):
+        info["dirty_at_build"] = dirty
+        info_path.write_text(json.dumps({"provenance": info}), encoding="utf-8")
+        uncertain = collect_version_payload(owner)
+        assert uncertain["state"]["code"] == "component_unverified"
+        assert ("packaged_source_dirty" if dirty else "packaged_source_status_unknown") in uncertain["state"]["reasons"]
+
+
 def test_payload_distinguishes_source_ahead_mixed_and_legacy(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -192,7 +254,8 @@ def test_payload_distinguishes_source_ahead_mixed_and_legacy(
 
     matching = collect_version_payload(owner, agent_name="akane")
     assert matching["running"]["commit"] == provenance["commit"]
-    assert matching["state"]["code"] == "running_matches_source"
+    assert matching["state"]["code"] == "component_unverified"
+    assert "remote_unavailable" in matching["state"]["reasons"]
     assert matching["compatibility"]["core_api"] == 4
 
     (source / "source.txt").write_text("two\n", encoding="utf-8")
@@ -225,6 +288,301 @@ def test_payload_distinguishes_source_ahead_mixed_and_legacy(
     assert generation_provenance(home, legacy) is None
     assert unavailable["running"]["commit"] is None
     assert unavailable["state"]["code"] == "provenance_unavailable"
+
+
+def test_packaged_unknown_build_status_stays_unknown(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "BUILD_INFO.json").write_text(json.dumps({"provenance": {
+        "release_channel": "portable", "commit": "f" * 40,
+        "dirty_at_build": None, "change_count_at_build": None,
+    }}), encoding="utf-8")
+
+    provenance = capture_build_provenance(package, artifact_kind="hashi-remote")
+    assert provenance["dirty_at_build"] is None
+    assert provenance["change_count_at_build"] is None
+
+
+def test_inaccessible_git_checkout_is_not_misreported_as_a_package(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = _checkout(tmp_path)
+    (source / "BUILD_INFO.json").write_text(json.dumps({"provenance": {
+        "commit": "f" * 40, "dirty_at_build": False,
+    }}), encoding="utf-8")
+    monkeypatch.setattr(build_provenance, "_git_text", lambda *_: None)
+    provenance = capture_build_provenance(source, artifact_kind="hashi-remote")
+    checkout = inspect_source_checkout(source, running_commit="f" * 40)
+    assert provenance["release_channel"] == "git"
+    assert provenance["commit"] is None
+    assert provenance["dirty_at_build"] is None
+    assert checkout["available"] is True
+    assert checkout["reason"] == "source_status_unavailable"
+    assert checkout["dirty"] is None
+    assert checkout["relation"] == "unknown"
+
+
+def test_broken_git_link_does_not_fall_back_to_packaged_metadata(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "BUILD_INFO.json").write_text(json.dumps({"provenance": {
+        "commit": "f" * 40, "dirty_at_build": False,
+    }}), encoding="utf-8")
+    marker = source / ".git"
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda path: path == marker or original_is_symlink(path))
+    monkeypatch.setattr(build_provenance, "_git_text", lambda *_: None)
+    provenance = capture_build_provenance(source, artifact_kind="hashi-remote")
+    checkout = inspect_source_checkout(source, running_commit="f" * 40)
+    assert provenance["release_channel"] == "git" and provenance["commit"] is None
+    assert checkout["available"] is True and checkout["reason"] == "source_status_unavailable"
+
+
+def test_unavailable_git_status_never_claims_a_clean_checkout(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = _checkout(tmp_path)
+    original = build_provenance._git_text
+
+    def timed_out_status(root, *args):
+        if args and args[0] == "status":
+            return None
+        return original(root, *args)
+
+    monkeypatch.setattr(build_provenance, "_git_text", timed_out_status)
+    provenance = capture_build_provenance(source, artifact_kind="hashi-remote")
+    checkout = inspect_source_checkout(source, running_commit=provenance["commit"])
+    assert provenance["dirty_at_build"] is None
+    assert provenance["change_count_at_build"] is None
+    assert checkout["dirty"] is None
+    assert checkout["change_count"] is None
+
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    function_provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, function_provenance)
+    owner = _owner(source, home, generation)
+    monkeypatch.setattr("orchestrator.version_info._remote_fact",
+                        lambda *_: {"status": "active", "pid": 23, "provenance": provenance})
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["state"]["code"] == "component_unverified"
+    assert "source_status_unavailable" in payload["state"]["reasons"]
+    assert "remote_build_status_unknown" in payload["state"]["reasons"]
+    assert "function_worker_build_status_unknown" in payload["state"]["reasons"]
+    rendered = render_version_card(payload, locale="en").lower()
+    assert "unknown" in rendered
+    assert "source has uncommitted changes" not in rendered
+
+
+def test_version_names_remote_mismatch_and_reports_unavailable_remote(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    target_commit = provenance["commit"]
+    remote_commit = "b" * 40
+    remote = {
+        "status": "active",
+        "pid": 23,
+        "provenance": {"commit": remote_commit, "dirty_at_build": False},
+    }
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
+
+    mismatch = collect_version_payload(owner, agent_name="akane")
+    assert mismatch["state"]["code"] == "mixed_generations"
+    assert "remote_commit_differs" in mismatch["state"]["reasons"]
+    rendered = render_version_card(mismatch, locale="en")
+    assert "Remote" in rendered
+    assert remote_commit[:12] in rendered and target_commit[:12] in rendered
+    assert "/remote off" in rendered and "/remote on" in rendered
+    assert "disconnect" in rendered.lower()
+
+    remote["provenance"]["commit"] = target_commit
+    matching = collect_version_payload(owner, agent_name="akane")
+    assert matching["state"]["code"] == "running_matches_source"
+
+    remote["provenance"]["dirty_at_build"] = True
+    modified_remote = collect_version_payload(owner, agent_name="akane")
+    assert modified_remote["state"]["code"] == "component_unverified"
+    assert "remote_dirty_at_build" in modified_remote["state"]["reasons"]
+    rendered_dirty = render_version_card(modified_remote, locale="en").lower()
+    assert "uncommitted" in rendered_dirty
+    assert "/reboot max" in rendered_dirty
+    assert "/remote off" in rendered_dirty and "/remote on" in rendered_dirty
+    assert "disconnect" in rendered_dirty
+    rendered_dirty_zh = render_version_card(modified_remote, locale="zh-CN")
+    assert "/reboot max" in rendered_dirty_zh
+    assert "/remote off" in rendered_dirty_zh and "/remote on" in rendered_dirty_zh
+    remote["provenance"]["commit"] = remote_commit
+    dirty_mismatch = render_version_card(collect_version_payload(owner, agent_name="akane"), locale="en")
+    assert dirty_mismatch.count("/remote off") == 1
+    remote["provenance"]["commit"] = target_commit
+    remote["provenance"]["dirty_at_build"] = False
+    assert collect_version_payload(owner, agent_name="akane")["state"]["code"] == "running_matches_source"
+
+    remote.clear()
+    remote["status"] = "offline"
+    unavailable = collect_version_payload(owner, agent_name="akane")
+    assert unavailable["state"]["code"] == "component_unverified"
+    assert "remote_unavailable" in unavailable["state"]["reasons"]
+    assert "Remote" in render_version_card(unavailable, locale="en")
+
+
+def test_version_requires_live_matching_remote_health(tmp_path: Path, monkeypatch) -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    claim = {
+        "instance_id": "HASHI2", "root": str(home.resolve()), "pid": 23,
+        "started_at": 123456.0,
+        "provenance": {"commit": provenance["commit"], "dirty_at_build": False},
+    }
+    response = {"ok": True, "trusted_view": True, "status": "ready",
+                "instance": {"instance_id": "HASHI2", "runtime_claim": dict(claim)}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    claim["port"] = server.server_port
+    response["instance"]["runtime_claim"]["port"] = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr("orchestrator.version_info.read_runtime_claim", lambda _root: claim)
+    monkeypatch.setattr("orchestrator.version_info.pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr("orchestrator.remote_lifecycle.load_settings",
+                        lambda _root: SimpleNamespace(use_tls=False))
+    try:
+        matching = collect_version_payload(owner, agent_name="akane")
+        assert matching["state"]["code"] == "running_matches_source"
+        assert matching["running"]["remote"]["status"] == "active"
+
+        response["instance"]["runtime_claim"]["pid"] = 99
+        wrong_process = collect_version_payload(owner, agent_name="akane")
+        assert wrong_process["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in wrong_process["state"]["reasons"]
+        assert "进程身份" in render_version_card(wrong_process, locale="zh-CN")
+
+        response["instance"]["runtime_claim"]["pid"] = 23
+        response["trusted_view"] = False
+        untrusted = collect_version_payload(owner, agent_name="akane")
+        assert untrusted["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in untrusted["state"]["reasons"]
+
+        response["trusted_view"] = True
+        monkeypatch.chdir(home)
+        claim["root"] = ""
+        response["instance"]["runtime_claim"]["root"] = ""
+        missing_root = collect_version_payload(owner, agent_name="akane")
+        assert missing_root["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in missing_root["state"]["reasons"]
+        claim["root"] = str(home.resolve())
+        response["instance"]["runtime_claim"]["root"] = str(home.resolve())
+
+        response["instance"]["runtime_claim"]["provenance"] = {"commit": "b" * 40}
+        wrong_provenance = collect_version_payload(owner, agent_name="akane")
+        assert wrong_provenance["state"]["code"] == "component_unverified"
+        assert "remote_identity_unverified" in wrong_provenance["state"]["reasons"]
+
+        response["instance"]["runtime_claim"]["provenance"] = dict(claim["provenance"])
+        response["status"] = "degraded"
+        degraded = collect_version_payload(owner, agent_name="akane")
+        assert degraded["state"]["code"] == "component_unverified"
+        assert "remote_degraded" in degraded["state"]["reasons"]
+        assert "状态异常" in render_version_card(degraded, locale="zh-CN")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    unreachable = collect_version_payload(owner, agent_name="akane")
+    assert unreachable["state"]["code"] == "component_unverified"
+    assert "remote_unreachable" in unreachable["state"]["reasons"]
+    assert "本机服务无响应" in render_version_card(unreachable, locale="zh-CN")
+
+
+def test_dirty_function_generation_is_not_reported_as_exact_match(tmp_path: Path, monkeypatch) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    provenance["dirty_at_build"] = True
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    remote = {"status": "active", "pid": 23,
+              "provenance": {"commit": provenance["commit"], "dirty_at_build": False}}
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
+
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["state"]["code"] == "component_unverified"
+    assert "function_worker_dirty_at_build" in payload["state"]["reasons"]
+    assert "uncommitted" in render_version_card(payload, locale="en").lower()
+
+
+def test_old_worker_does_not_make_matching_remote_appear_old(tmp_path: Path, monkeypatch) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "a" * 64
+    provenance = capture_build_provenance(
+        source, artifact_kind="function-generation", generation_id=generation
+    )
+    _generation_record(home, generation, provenance)
+    owner = _owner(source, home, generation)
+    owner.runtimes[0].metadata["source_commit"] = "b" * 40
+    remote = {"status": "active", "pid": 23, "provenance": {"commit": provenance["commit"]}}
+    monkeypatch.setattr("orchestrator.version_info._remote_fact", lambda *_: remote)
+
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["state"]["code"] == "mixed_generations"
+    assert "function_worker_commits_differ" in payload["state"]["reasons"]
+    assert "remote_commit_differs" not in payload["state"]["reasons"]
+    assert "Remote source:" not in render_version_card(payload, locale="en")
+
+
+def test_unknown_functions_identity_is_not_inferred_from_a_worker(tmp_path: Path, monkeypatch) -> None:
+    source = _checkout(tmp_path)
+    home = tmp_path / "data"
+    generation = "sha256:" + "c" * 64
+    _generation_record(home, generation, None)
+    owner = _owner(source, home, generation)
+    commit = _git(source, "rev-parse", "HEAD")
+    owner.runtimes[0].metadata["source_commit"] = commit
+    monkeypatch.setattr("orchestrator.version_info._remote_fact",
+                        lambda *_: {"status": "active", "pid": 23, "provenance": {"commit": commit}})
+
+    payload = collect_version_payload(owner, agent_name="akane")
+    assert payload["running"]["functions"]["source_commit"] is None
+    assert payload["state"]["code"] == "component_unverified"
+    assert "function_worker_identity_unavailable" in payload["state"]["reasons"]
 
 
 def test_payload_reports_live_adoption_commit_for_reused_artifact(
@@ -265,8 +623,8 @@ def test_payload_reports_live_adoption_commit_for_reused_artifact(
     assert artifact_commit != adopted_commit
     assert payload["source"]["commit"] == adopted_commit
     assert payload["state"] == {
-        "code": "running_matches_source",
-        "reasons": [],
+        "code": "component_unverified",
+        "reasons": ["remote_unavailable"],
     }
 
 

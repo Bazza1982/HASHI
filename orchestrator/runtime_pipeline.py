@@ -31,6 +31,7 @@ from orchestrator import (
 from orchestrator.command_ui import card_title
 from orchestrator.canonical_audit import CanonicalAuditConfigurationError
 from orchestrator.flexible_backend_registry import canonical_backend_engine
+from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
 from orchestrator.memory_plus_mode import (
     extract_memory_plus_update_details,
     is_memory_plus_enabled,
@@ -2059,7 +2060,10 @@ async def answer_preview_loop(
         if preview_disabled:
             dirty = False
             return
-        if telegram_delivery_failover.is_delivery_blocked(runtime):
+        if (
+            telegram_delivery_failover.is_delivery_blocked(runtime)
+            or not telegram_mirror_allowed_for_run(runtime, item.request_id)
+        ):
             preview_disabled = True
             dirty = False
             return
@@ -2252,6 +2256,8 @@ def wrap_her_persona_stream(
 
     async def _send_event(event, *, purpose: str, commentary: bool = False):
         await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
+        if not telegram_mirror_allowed_for_run(runtime, item.request_id):
+            return False
         from orchestrator.telegram_actor_scope import delivery_allowed
 
         if not delivery_allowed(
@@ -2442,6 +2448,8 @@ def wrap_her_persona_stream(
         return await _send_event(event, purpose="her_control")
 
     async def _initial_resolution_presenter(event):
+        if not telegram_mirror_allowed_for_run(runtime, item.request_id):
+            return False
         from orchestrator.telegram_actor_scope import delivery_allowed
 
         if not delivery_allowed(
@@ -2681,6 +2689,8 @@ async def _send_live_verbose_placeholder(runtime, item):
             runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
         ):
             return None
+        if not telegram_mirror_allowed_for_run(runtime, item.request_id):
+            return None
         message = await runtime.app.bot.send_message(
             chat_id=item.chat_id,
             text=text,
@@ -2876,6 +2886,7 @@ async def setup_interactive_feedback(
     # on the QueueItem; no Telegram presentation tasks join this call's path.
     delivery_requested = (
         not item.silent and item.deliver_to_telegram and not is_call_request(item)
+        and telegram_mirror_allowed_for_run(runtime, item.request_id)
     )
     from orchestrator.telegram_actor_scope import delivery_allowed
 
@@ -2941,7 +2952,7 @@ async def setup_interactive_feedback(
                 )
             elif delivery_allowed(
                 runtime, owner_id=getattr(item, "owner_id", None), chat_id=item.chat_id
-            ):
+            ) and telegram_mirror_allowed_for_run(runtime, item.request_id):
                 placeholder_started = time.monotonic()
                 placeholder = await runtime.app.bot.send_message(
                     chat_id=item.chat_id,
@@ -3009,7 +3020,7 @@ async def setup_interactive_feedback(
         _display_preference_events(runtime).add(preference_event)
         if typing_delivery_enabled:
             typing_task = asyncio.create_task(
-                runtime.typing_loop(item.chat_id, stop_typing)
+                runtime.typing_loop(item.chat_id, stop_typing, request_id=item.request_id)
             )
 
         runtime._think_buffer.clear()
@@ -3190,6 +3201,12 @@ async def finalize_streamed_answer(
     stream_state: StreamedAnswerState | None,
     final_text: str,
 ) -> StreamFinalization:
+    if not telegram_mirror_allowed_for_run(runtime, item.request_id):
+        return StreamFinalization(
+            streamed=bool(stream_state and stream_state.has_text),
+            final_delivered=False, fallback_required=False,
+            error="telegram_mirror_disabled",
+        )
     if stream_state is None:
         return StreamFinalization(streamed=False, final_delivered=False, fallback_required=True)
 
@@ -3310,6 +3327,18 @@ async def finalize_streamed_answer(
     first_chunk = (final_text or "")[:max_chars]
     continuation = (final_text or "")[max_chars:]
     try:
+        if not telegram_mirror_allowed_for_run(runtime, item.request_id):
+            if claim is not None:
+                runtime_session.ensure_store(runtime).complete_delivery_outbox(
+                    outbox_id=str(claim["outbox_id"]),
+                    lease_token=str(claim["lease_token"]),
+                    status="suppressed",
+                    error_code="telegram_mirror_disabled",
+                )
+            return StreamFinalization(
+                streamed=True, final_delivered=False, fallback_required=False,
+                error="telegram_mirror_disabled",
+            )
         await runtime.app.bot.edit_message_text(
             chat_id=item.chat_id,
             message_id=stream_state.placeholder.message_id,
@@ -4385,13 +4414,17 @@ async def recover_typed_context_capacity_rejection(
 def is_safe_voice_discard(response: Any) -> bool:
     return (
         not bool(getattr(response, "is_success", False))
-        and getattr(response, "stop_reason", None) == "safe_voice_discarded"
+        and getattr(response, "stop_reason", None) in {
+            "safe_voice_discarded", "safe_voice_kept_as_draft"
+        }
         and not getattr(response, "error", None)
         and not getattr(response, "error_code", None)
     )
 
 
-async def handle_safe_voice_discard(runtime: Any, item: Any) -> None:
+async def handle_safe_voice_discard(
+    runtime: Any, item: Any, *, reason: str = "safe_voice_discarded"
+) -> None:
     """Commit the already recorded decision without producing an error reply."""
     await runtime_delivery_order.wait_for_turn(runtime, item.request_id)
     await runtime._notify_request_listeners(
@@ -4403,10 +4436,10 @@ async def handle_safe_voice_discard(runtime: Any, item: Any) -> None:
             "source": item.source,
             "summary": item.summary,
             "interrupted": True,
-            "interrupt_reason": "safe_voice_discarded",
+            "interrupt_reason": reason,
         },
     )
-    runtime._log_maintenance(item, "safe_voice_discarded")
+    runtime._log_maintenance(item, reason)
 
 
 async def handle_backend_error(
@@ -4868,7 +4901,9 @@ async def handle_success_delivery(
         is_bridge_request=is_bridge_request,
         session_reset_source=session_reset_source,
     )
-    if not item.deliver_to_telegram:
+    if not item.deliver_to_telegram or not telegram_mirror_allowed_for_run(
+        runtime, item.request_id
+    ):
         hchat_delivered = await _route_hchat_reply_with_receipt(
             runtime, item, visible_text
         )
@@ -5152,7 +5187,10 @@ async def handle_success_delivery(
         delivered=bool(final_delivered or hchat_delivered),
         completion_path="foreground",
     )
-    if not native_parts and not call_reply:
+    if (
+        not native_parts and not call_reply
+        and telegram_mirror_allowed_for_run(runtime, item.request_id)
+    ):
         request_metadata = getattr(item, "request_metadata", None)
         voice_origin = bool(
             isinstance(request_metadata, Mapping)
@@ -5186,7 +5224,10 @@ async def handle_success_delivery(
             await runtime._send_voice_reply(
                 item.chat_id, response_text, item.request_id
             )
-    if final_delivered:
+    if final_delivered or (
+        _run_delivery_primary_surface(item) != "telegram"
+        and not telegram_mirror_allowed_for_run(runtime, item.request_id)
+    ):
         await _publish_post_final_presentations(
             runtime,
             item,
@@ -5214,3 +5255,4 @@ async def handle_success_delivery(
         f"chunks={chunk_count})"
     )
     runtime._log_maintenance(item, "send_success", text_len=len(response_text or ""))
+# HASHI-Fingerprint: hfp_1f03d17694684fe18310640df6a5aea7

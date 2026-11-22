@@ -23,7 +23,10 @@ numbered and group scopes replace exactly their selected Workers. Only
 `/reboot max` replaces shared Functions and all running Agent Workers through
 the existing Core handoff. No `/reboot` mode replaces Core or Remote. The new
 shared process skips Remote lifecycle setup. Remote has its own lifecycle;
-`/restart` is the comprehensive instance operation.
+the broad success notice explicitly states this boundary and directs the user
+to `/version`. Update the complete verified source first, then use the exact
+instance's Remote controller when a separate Remote update is authorized.
+An absent Remote identity requires investigation, not an assumed restart.
 See [Function Adoption and Remote Restart](HASHI3_FUNCTION_ADOPTION_AND_REMOTE_RESTART_2026-09-19.md).
 
 ## Observable contract

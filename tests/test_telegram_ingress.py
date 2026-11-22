@@ -121,8 +121,20 @@ async def test_inflight_old_bot_poll_cannot_deliver_to_new_bot_worker():
         await asyncio.wait_for(rejected.wait(), timeout=1)
         assert delivered == []
         assert ingress.offset is None
+        assert ingress.diagnostic_snapshot()["last_failure"]["error"]["reason"] == "bot_identity_mismatch"
     finally:
         await ingress.stop()
+
+
+@pytest.mark.parametrize("worker_fingerprint", [None, "different"])
+def test_ingress_snapshot_does_not_claim_connected_for_unknown_or_wrong_worker(worker_fingerprint):
+    supervisor = object.__new__(FunctionWorkerSupervisor)
+    supervisor._telegram_ingress = {"alpha": SimpleNamespace(token="bot", connected=True, is_running=True, offset=1)}
+    supervisor._telegram_ingress_diagnostics = {}
+    handle = SimpleNamespace(metadata={"telegram_bot_fingerprint": worker_fingerprint},
+                             config=SimpleNamespace(telegram_token_key="alpha"))
+    supervisor.kernel = SimpleNamespace(secrets={"alpha": "bot"}, _runtime_map=lambda: {"alpha": handle})
+    assert supervisor.telegram_ingress_snapshot("alpha")["connected"] is False
 
 
 def test_missing_ingress_with_configured_token_is_not_tokenless_local_mode():

@@ -177,6 +177,8 @@ def render_notice(
         text += "\n" + ui_language.tr(
             "reboot.observation_unconfirmed", locale=language
         )
+    if broad and status in {"online", "succeeded", "succeeded_with_warning"}:
+        text += "\n" + ui_language.tr("reboot.notice.remote_scope", locale=language)
     warning_keys = {
         "connectors_unavailable",
         "old_worker_exit_pending",

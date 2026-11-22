@@ -16,7 +16,11 @@ from typing import Any, Mapping
 
 
 class VoiceTranscriptDiscarded(Exception):
-    """The user declined the transcript-dependent path before model execution."""
+    """The user ended the transcript-dependent path before model execution."""
+
+    def __init__(self, reason: str = "safe_voice_discarded"):
+        self.stop_reason = reason
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -378,26 +382,25 @@ Ordinary audio files retain their existing routing.
     # Cancellation or a changed Session cannot authorize either a late release
     # or a late discard. Recheck the original Run/fence after the wait.
     current_run_attachment_grants(manager, request_id, normalized)
-    if status == "discarded":
+    if status in {"discarded", "draft"}:
         # A memory-only or stale gate result is not an authenticated decision.
-        # Confirm the same Run has a durably discarded input before treating
-        # this as a normal user decision.
         store = runtime.session_store
         run = store.get_run_by_request(request_id, agent_id=manager.config.name)
         with store._lock, store._connection() as connection:
             rows = connection.execute(
                 "SELECT attachment_id FROM voice_transcripts "
                 "WHERE run_id=? AND session_id=? AND message_id=? "
-                "AND safe_voice_state='discarded'",
-                (run["run_id"], run["session_id"], run["user_message_id"]),
+                "AND safe_voice_state=?",
+                (run["run_id"], run["session_id"], run["user_message_id"], status),
             ).fetchall()
         if not any(str(row["attachment_id"]) in attachment_ids for row in rows):
             raise MultimodalContractError(
-                "Voice discard decision was not persisted",
+                "Voice decision was not persisted",
                 code="MEDIA_FALLBACK_UNAVAILABLE",
                 attachment_id=str(voice[0]["attachment_id"]),
             )
-        raise VoiceTranscriptDiscarded()
+        reason = "safe_voice_kept_as_draft" if status == "draft" else "safe_voice_discarded"
+        raise VoiceTranscriptDiscarded(reason)
     if status != "released":
         from orchestrator.voice_transcription_result import TranscriptionFailure
 
@@ -438,3 +441,4 @@ Ordinary audio files retain their existing routing.
         "modality": "audio", "route": "local_transcript", "reason": "local_stt_released",
         "transport": "text", "transcript_id": by_attachment[str(part["attachment_id"])]["transcript_id"]} for part in voice)
     return prompt + "\n\nLOCAL_VOICE_TRANSCRIPT (authorized same-Run user input):\n" + transcript, canonical_request_content(remaining), routes
+# HASHI-Fingerprint: hfp_1f8fcf0b9ba441dc8ad777e07e4c9c62

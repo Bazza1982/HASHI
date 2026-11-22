@@ -503,6 +503,14 @@ class WorkerKernelFacade:
 
         return dict(self._topology)
 
+    async def telegram_summary(self, owner_id: str, actor_id: int | None = None) -> dict[str, Any]:
+        """One bounded read from the shared connector-status projection."""
+        result = await self.peer.request(
+            "core.telegram.summary", {"owner_id": str(owner_id), "actor_id": actor_id},
+            timeout=1.0,
+        )
+        return dict(result) if isinstance(result, Mapping) else {"ok": False}
+
     async def agent_move_preflight(self, agent_name: str) -> dict[str, Any]:
         """Read only the cross-Agent state needed to guard a move."""
 
@@ -1903,13 +1911,14 @@ class FunctionWorkerHost:
         decisions = state.get("transcript_decisions")
         if isinstance(decisions, dict):
             decisions[transcript_id] = (
-                "released" if decision == "confirm" else "discarded"
+                "released" if decision == "confirm"
+                else "draft" if decision == "keep" else "discarded"
             )
             if decision == "discard":
                 state["status"] = "discarded"
-            elif decisions and all(value == "released" for value in decisions.values()):
-                state["status"] = "released"
-        if state.get("status") in {"released", "discarded", "unavailable"}:
+            elif decisions and all(value in {"released", "draft"} for value in decisions.values()):
+                state["status"] = "draft" if "draft" in decisions.values() else "released"
+        if state.get("status") in {"released", "discarded", "draft", "unavailable"}:
             release = state.get("release_event")
             if isinstance(release, asyncio.Event):
                 release.set()

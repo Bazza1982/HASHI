@@ -333,16 +333,45 @@ Worker publishes explicit `telegram_outbound_connected` evidence only while
 its prepared application is running. The supervisor does not infer that fact
 from an older Worker's ambiguous `telegram_connected` field. Public connection
 projections also require a live Worker and a receiver with the same Bot
-fingerprint; the credential service separately checks the currently saved Bot.
+fingerprint; an unknown Worker identity is not a connected receiver, and the
+credential service separately checks the currently saved Bot.
 
 Credential status projects `inbound_connected`, `outbound_connected` and
 `bidirectional_ready` from the live Worker and actual receiver, bound to the
 currently saved Bot fingerprint. Token verification, Worker presence, a saved
 mirror policy, or successful outbound delivery alone cannot assert a two-way
-connection. These transport facts are still distinct from a real user round
-trip. Clients must preserve that distinction, including on older backends
+connection. `mirror_delivery_ready` reports an authorized, live outbound sender
+using the current Bot independently of inbound polling. It does not claim that
+a message was delivered; `resolved_mirror_enabled` is only a preference.
+Explicitly empty credential
+references resolve to the Agent's default key in both configuration and status.
+A present but mismatching Worker/receiver identity yields the safe
+`bot_identity_mismatch` reason without exposing tokens. These transport facts
+are still distinct from a real user round trip. Clients must preserve that distinction, including on older backends
 that do not publish connection facts. Mirror-policy changes remain immediate
-and do not themselves request a Worker switch.
+and do not themselves request a Worker switch. A Run retains its admitted
+primary destination, but each unsent Telegram mirror rechecks the current
+effective owner/Agent mirror policy immediately before transport. Turning it
+off suppresses remaining chunks, cards and attachments; already sent content
+is not recalled. When an Agent is set to `always_on`, an owner switch-off during
+the Run also suppresses its remaining mirrors, while an owner setting already
+off at admission retains the Agent's existing override. A preference-specific,
+owner-scoped revision detects subsequent changes without conflating other owners;
+legacy Runs or unreadable preference state are treated conservatively. If the
+owner enables mirroring again, later unsent items may be delivered. The owner
+preference snapshot is stored with the Run's private delivery route so recovered
+outbox items apply the same decision after a Worker restart. Telegram-origin
+replies and explicit notification tools retain their normal delivery.
+
+The `/telegram` menu also reads one bounded owner-scoped summary from shared
+Functions. It counts only verified Bot identities, deduplicates multiple Agent
+bindings to the same Bot, and distinguishes unknown identities, stale polling,
+ready connections and mirror-ready Bots. The latest successful incoming poll is
+an observation, not a message delivery receipt. Safe current failure reasons
+are shown without credentials or message contents. The projection refreshes on
+configuration and connector lifecycle events; a changed or unreadable config is
+reported unavailable rather than reusing stale authority. Opening the menu does
+not poll Telegram, request individual Workers, scan logs, or rewrite config.
 
 ## 3. External-client boundary
 
@@ -642,10 +671,18 @@ context generation for the AP message. Text, voice transcript, Run and reply
 therefore share the Conversation projected by Workbench instead of creating an
 AP-only chat history. Voice uses the existing STT, Safe Voice and PAO admission
 path. When Safe Voice is enabled, HASHI returns the transcript without admitting
-a Run; AP presents an explicit confirm/discard choice, and only an authenticated
-AP decision bound to the same frozen Conversation Session and generation can
-admit it. A primary-Session change invalidates the pending confirmation. AP
-never silently confirms, and Workbench cannot decide an AP-held transcript.
+a Run; AP presents explicit confirm, discard and keep-as-draft choices.
+Keeping does not admit a Run. AP owns the editable local draft and binds it to
+the instance, Conversation Session and context generation. When a saved draft
+is later sent through `/api/agentpresence/draft`, required expected Session and
+generation fields restrict admission to that same current Conversation; they
+never select an Agent or Session. Missing or invalid scope is rejected, and a
+changed Session or generation returns a conflict without sending. Older HASHI
+versions lack this dedicated endpoint and cannot silently accept an unscoped
+draft.
+An authenticated AP confirmation is also bound to the frozen Conversation.
+A primary-Session change invalidates the pending confirmation. AP never silently
+confirms, and Workbench cannot decide an AP-held transcript.
 AgentPresence owns capture, its instance binding and this local presentation,
 not HASHI Agent, Session, Message, Run, Event, call, STT or voice authority.
 Ingress authentication/routing fails closed; this is separate from the egress
@@ -1517,8 +1554,8 @@ New Workbench voice recordings enter the selected owner-scoped Session as an
 audio attachment with `semantic_role=voice_message`, then one idempotent Session
 Run. The route verifies the Session's Agent and context generation before
 staging bytes. It reads the durable transcript event filtered by that Run ID;
-Safe Voice still presents a confirmation preview, and confirm/discard use the
-typed Session voice-transcript decision endpoint. The audio is never converted
+Safe Voice presents a confirmation preview; confirm, discard and keep-as-draft
+use the typed Session voice-transcript decision endpoint. The audio is never converted
 to plain text by the connector, and no decision is automatic.
 
 Workbench treats the `voice_message` attachment as transport and recovery
@@ -1541,6 +1578,16 @@ generation and the Session's current generation. Session events support a Run-ID
 filter so a replay can find its own durable transcript event without mixing in
 other messages. The Session API does not currently expose a durable transcript
 expiry, so the Workbench does not invent one in its presentation contract.
+
+Keeping a transcript records `voice.input.transcript_draft` and ends the
+transcript-dependent Run without model execution. Workbench first persists the
+text in the existing session-scoped composer draft, preserving prior text and
+attachments; it then makes the idempotent keep decision. A storage failure keeps
+confirmation available. An uncertain decision is not automatically replayed.
+Telegram cannot set its user's input box, so it delivers the entire transcript
+as copyable text and explains how to edit it. The basic Agent Presence transport
+accepts the keep decision without admitting a Run; support in a particular AP
+client requires its own implementation and validation.
 
 The changes are source-only and offline-validated. Running Function adoption,
 real microphone/file delivery, confirmation in the external Workbench, and the

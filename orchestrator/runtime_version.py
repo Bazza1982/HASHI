@@ -68,8 +68,10 @@ def _source_ref(payload: Mapping[str, Any], locale: str) -> str:
         return _tr("version.packaged_source", locale)
     commit = _short(source.get("commit")) or _tr("version.unavailable", locale)
     branch = source.get("branch") or source.get("tag") or _tr("version.detached", locale)
+    dirty = source.get("dirty")
     cleanliness = _tr(
-        "version.source.dirty" if source.get("dirty") else "version.source.clean",
+        "version.source.unknown" if dirty is None
+        else "version.source.dirty" if dirty else "version.source.clean",
         locale,
     )
     if source.get("dirty") and source.get("change_count"):
@@ -89,6 +91,85 @@ def _state_text(code: str, locale: str) -> str:
     key = f"version.state.{code}"
     translated = _tr(key, locale)
     return translated if translated != key else _tr("version.state.provenance_unavailable", locale)
+
+
+def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
+    running = payload.get("running") or {}
+    reasons = set((payload.get("state") or {}).get("reasons") or ())
+    functions = running.get("functions") or {}
+    shared_generation = str(functions.get("generation_id") or "")
+    shared_commit = str(
+        functions.get("source_commit")
+        or (functions.get("provenance") or {}).get("commit")
+        or ""
+    )
+    lines: list[str] = []
+    for worker in running.get("workers") or ():
+        generation = str(worker.get("generation_id") or "")
+        commit = str(
+            worker.get("source_commit")
+            or (worker.get("provenance") or {}).get("commit")
+            or ""
+        )
+        if generation and shared_generation and generation != shared_generation:
+            lines.append(_tr(
+                "version.issue.worker_generation", locale,
+                agent=str(worker.get("agent") or _tr("version.unavailable", locale)),
+                actual=_short(generation), expected=_short(shared_generation),
+            ))
+        if commit and shared_commit and commit != shared_commit:
+            lines.append(_tr(
+                "version.issue.worker_commit", locale,
+                agent=str(worker.get("agent") or _tr("version.unavailable", locale)),
+                actual=_short(commit), expected=_short(shared_commit),
+            ))
+    if "packaged_source_commit_differs" in reasons:
+        lines.append(_tr("version.issue.package_mismatch", locale,
+                         actual=_short((payload.get("source") or {}).get("commit")),
+                         expected=_short(shared_commit or running.get("commit"))))
+    if "packaged_source_commit_unavailable" in reasons:
+        lines.append(_tr("version.issue.package_commit_unknown", locale))
+    if "packaged_source_dirty" in reasons:
+        lines.append(_tr("version.issue.package_dirty", locale))
+    if "packaged_source_status_unknown" in reasons:
+        lines.append(_tr("version.issue.package_status_unknown", locale))
+    if "function_worker_identity_unavailable" in reasons:
+        lines.append(_tr("version.issue.worker_unverified", locale))
+    if "function_worker_dirty_at_build" in reasons:
+        lines.append(_tr("version.issue.worker_dirty_at_build", locale))
+    if "function_worker_build_status_unknown" in reasons:
+        lines.append(_tr("version.issue.worker_build_status_unknown", locale))
+    remote = running.get("remote") or {}
+    if "remote_commit_differs" in reasons:
+        remote_commit = (remote.get("provenance") or {}).get("commit")
+        lines.append(_tr(
+            "version.issue.remote_mismatch", locale,
+            actual=_short(remote_commit),
+            expected=_short(shared_commit),
+        ))
+        lines.append(_tr("version.issue.remote_update", locale))
+    if "remote_unavailable" in reasons:
+        lines.append(_tr("version.issue.remote_unavailable", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_unreachable" in reasons:
+        lines.append(_tr("version.issue.remote_unreachable", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_identity_unverified" in reasons:
+        lines.append(_tr("version.issue.remote_identity_unverified", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_degraded" in reasons:
+        lines.append(_tr("version.issue.remote_degraded", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    elif "remote_provenance_unavailable" in reasons:
+        lines.append(_tr("version.issue.remote_unverified", locale))
+        lines.append(_tr("version.issue.remote_check", locale))
+    if "remote_dirty_at_build" in reasons:
+        lines.append(_tr("version.issue.remote_dirty_at_build", locale))
+        if "remote_commit_differs" not in reasons:
+            lines.append(_tr("version.issue.remote_update", locale))
+    if "remote_build_status_unknown" in reasons:
+        lines.append(_tr("version.issue.remote_build_status_unknown", locale))
+    return [html.escape(line) for line in lines]
 
 
 def render_version_card(
@@ -126,6 +207,7 @@ def render_version_card(
         f"<b>{html.escape(_tr('version.source', locale))}</b> · <code>{html.escape(_source_ref(payload, locale))}</code>",
         f"<b>{html.escape(_tr('version.status', locale))}</b> · {_state_icon(str(state.get('code') or ''))} {html.escape(_state_text(str(state.get('code') or ''), locale))}",
     ]
+    lines.extend(_component_details(payload, locale))
     if not full:
         return "\n".join(lines)
 

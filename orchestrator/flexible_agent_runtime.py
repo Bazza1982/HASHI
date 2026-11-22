@@ -1252,6 +1252,7 @@ class FlexibleAgentRuntime:
         )
         from orchestrator.frontend_delivery import (
             RUN_DELIVERY_ROUTE_METADATA_KEY,
+            TELEGRAM_OWNER_MIRROR_AT_ADMISSION,
             configured_owner_mirror_destinations,
             configured_whatsapp_mirror_channel,
             freeze_run_delivery_route,
@@ -1382,6 +1383,17 @@ class FlexibleAgentRuntime:
                 "session_channel_key": resolved_channel_key,
             }
         )
+        # Capture the authoritative owner preference and scoped revision,
+        # replacing any caller value, before the Run's route is frozen.
+        from orchestrator.connector_delivery_preferences import get_connector_preference_snapshot
+
+        metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION] = get_connector_preference_snapshot(
+            getattr(self.global_config, "bridge_home", None),
+            resolved_owner,
+            "telegram",
+            "mirror",
+            default=True,
+        )
         telegram_requested = telegram_delivery_for_admission(
             source=source,
             request_metadata=metadata,
@@ -1488,6 +1500,7 @@ class FlexibleAgentRuntime:
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
             additional_mirrors=owner_mirror_destinations,
+            telegram_owner_preference_snapshot=metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION],
         )
         parent_run_id = str(metadata.get("parent_run_id") or "").strip()
         parent_request_id = str(
@@ -1545,6 +1558,7 @@ class FlexibleAgentRuntime:
                                 metadata.get("system_exchange_terminal")
                             ),
                             additional_mirrors=owner_mirror_destinations,
+                            telegram_owner_preference_snapshot=metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION],
                         )
         metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = delivery_route
         # The legacy execution flag is now only a derived instruction to the
@@ -2024,8 +2038,10 @@ class FlexibleAgentRuntime:
                 request_id,
                 success=bool(payload.get("success")),
                 error=payload.get("error") or "",
-                **({"termination_reason": "safe_voice_discarded"}
-                   if payload.get("termination_reason") == "safe_voice_discarded" else {}),
+                **({"termination_reason": payload["termination_reason"]}
+                   if payload.get("termination_reason") in {
+                       "safe_voice_discarded", "safe_voice_kept_as_draft"
+                   } else {}),
             )
         except Exception as exc:  # display telemetry must never block delivery
             self.logger.warning(
@@ -2505,7 +2521,9 @@ class FlexibleAgentRuntime:
         purpose = kwargs.pop("_purpose", "send")
         delivery_mode = kwargs.pop("_delivery_mode", "normal_send")
         raise_delivery_error = bool(kwargs.pop("_raise_delivery_error", False))
-        from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
+        from orchestrator.telegram_actor_scope import (
+            current_actor, delivery_allowed, explicit_telegram_purpose,
+        )
 
         delivery_owner = runtime_session.request_owner_id(self, request_id)
         scoped_publication: dict[str, Any] = {}
@@ -2630,6 +2648,20 @@ class FlexibleAgentRuntime:
                         lease_token=str(claim["lease_token"]),
                         status="suppressed",
                         error_code="telegram_access_revoked",
+                    )
+                return None
+            from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+
+            if (
+                not explicit_telegram_purpose(purpose)
+                and not telegram_mirror_allowed_for_run(self, request_id)
+            ):
+                if claim is not None:
+                    self.session_store.complete_delivery_outbox(
+                        outbox_id=str(claim["outbox_id"]),
+                        lease_token=str(claim["lease_token"]),
+                        status="suppressed",
+                        error_code="telegram_mirror_disabled",
                     )
                 return None
             sent = await self.app.bot.send_message(
@@ -3606,6 +3638,8 @@ class FlexibleAgentRuntime:
             return status, str((task or {}).get("state") or ""), str((task or {}).get("error_code") or "")
 
         def delivery_failure(status, task_state, code, exception=None):
+            if code == "telegram_mirror_disabled":
+                return VoiceReplyResult(False, "delivery", code)
             uncertain = status not in {"failed", "skipped"} and task_state not in {"failed", "suppressed", "expired"}
             reason_key = {
                 "telegram_disconnected": "voice.reply.reason.disconnected",
@@ -3623,6 +3657,10 @@ class FlexibleAgentRuntime:
                 reason, uncertain=uncertain, exception=exception,
             )
 
+        from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+
+        if not telegram_mirror_allowed_for_run(self, request_id):
+            return VoiceReplyResult(False, "delivery", "telegram_mirror_disabled")
         if not self.telegram_connected:
             return failed("configuration", "telegram_disconnected", ui_language.tr("voice.reply.reason.disconnected"))
         try:
@@ -3647,6 +3685,8 @@ class FlexibleAgentRuntime:
                 source_language=ui_language.preferred_locale(self),
                 source_surface="telegram",
             )
+            if not telegram_mirror_allowed_for_run(self, request_id):
+                return VoiceReplyResult(False, "delivery", "telegram_mirror_disabled")
             if asset is None:
                 if not force:
                     return VoiceReplyResult(False, "configuration", "voice_replies_disabled")
@@ -6875,6 +6915,51 @@ class FlexibleAgentRuntime:
                     pending["summary"],
                     request_metadata={"ingress_transport": "telegram"},
                 )
+        elif action == "keep" and pending:
+            # Telegram cannot populate a user's composer. Deliver the complete
+            # transcript as copyable text in this same chat, without admitting
+            # a user request. Keep the original confirmation on delivery failure.
+            from orchestrator import runtime_sys_prompts
+
+            locale = ui_language.preferred_locale(self, update)
+            transcript = str(pending.get("transcript") or "")
+            try:
+                if not transcript:
+                    raise ValueError("empty voice transcript")
+                sent = await runtime_sys_prompts._reply_from_callback(
+                    self, update, query,
+                    ui_language.tr("safevoice.draft_instruction", locale=locale),
+                )
+                if sent is None:
+                    raise RuntimeError("voice draft instruction not delivered")
+                for start in range(0, len(transcript), 2000):
+                    sent = await runtime_sys_prompts._reply_from_callback(
+                        self, update, query, transcript[start:start + 2000]
+                    )
+                    if sent is None:
+                        raise RuntimeError("voice draft content not delivered")
+                if pending.get("native_audio"):
+                    request_id = str(pending.get("request_id") or "")
+                    decider = getattr(getattr(self, "session_store", None),
+                                      "decide_voice_transcript", None)
+                    if not request_id or not callable(decider):
+                        raise RuntimeError("native voice transcript is unavailable")
+                    decider(request_id=request_id, confirmed=False, keep_draft=True)
+                    state = getattr(self, "_native_voice_transcripts", {}).get(request_id)
+                    if isinstance(state, dict):
+                        state["status"] = "draft"
+                        release_event = state.get("release_event")
+                        if isinstance(release_event, asyncio.Event):
+                            release_event.set()
+                if is_long_batch_voice:
+                    runtime_long.discard_voice_confirmation(self, chat_key)
+            except Exception:
+                self._pending_voice[chat_key] = pending
+                await query.answer(ui_language.tr("safevoice.draft_failed", locale=locale),
+                                   show_alert=True)
+                return
+            await query.edit_message_text(ui_language.tr("safevoice.draft_ready", locale=locale))
+            await query.answer(ui_language.tr("safevoice.keep", locale=locale))
         elif action == "no":
             if pending and pending.get("native_audio"):
                 request_id = str(pending.get("request_id") or "")
@@ -12469,8 +12554,12 @@ class FlexibleAgentRuntime:
             include_canonical_text=include_canonical_text,
         )
 
-    async def typing_loop(self, chat_id: int, stop_event: asyncio.Event):
-        await runtime_delivery.typing_loop(self, chat_id, stop_event)
+    async def typing_loop(
+        self, chat_id: int, stop_event: asyncio.Event, *, request_id: str | None = None
+    ):
+        await runtime_delivery.typing_loop(
+            self, chat_id, stop_event, request_id=request_id
+        )
 
     async def _escalating_placeholder_loop(
         self,
@@ -12633,8 +12722,11 @@ class FlexibleAgentRuntime:
         locale = ui_language.preferred_locale(self, actor_id=chat_id)
 
         def _display_allowed() -> bool:
+            from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
             from orchestrator.telegram_actor_scope import current_actor, delivery_allowed
 
+            if not telegram_mirror_allowed_for_run(self, request_id):
+                return False
             actor = current_actor(self)
             owner = runtime_session.request_metadata(self, request_id).get("owner_id")
             return delivery_allowed(
@@ -13856,10 +13948,12 @@ class FlexibleAgentRuntime:
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 self._notify_right_brain_interrupted(
                     item, item.prompt, is_bridge_request=is_bridge_request,
-                    reason="safe_voice_discarded", error="",
+                    reason=response.stop_reason, error="",
                 )
-                await runtime_pipeline.handle_safe_voice_discard(self, item)
-                receipt_disposition = "safe_voice_discarded"
+                await runtime_pipeline.handle_safe_voice_discard(
+                    self, item, reason=response.stop_reason
+                )
+                receipt_disposition = response.stop_reason
                 return
 
             if response.is_success and response.text:
@@ -14275,7 +14369,7 @@ class FlexibleAgentRuntime:
                     completion_path="background",
                     disposition=receipt_disposition,
                 )
-            if receipt_disposition != "safe_voice_discarded":
+            if receipt_disposition not in {"safe_voice_discarded", "safe_voice_kept_as_draft"}:
                 runtime_cross_session.record_turn_result(
                     self, item, assistant_text=receipt_text, response=receipt_response,
                     error=receipt_error, delivered=receipt_delivered, completion_path="background",

@@ -1,6 +1,6 @@
 """Typed per-Run delivery routes for HASHI Frontend Connectors.
 
-Mirror preferences belong to the server and are frozen at Run admission.
+Run destinations are frozen at admission; mirror preferences are rechecked at delivery.
 Legacy client-supplied delivery policies remain readable but cannot override
 the owner's connector preferences.
 """
@@ -33,6 +33,7 @@ TUI_MUTATING_PROXY_OPERATIONS = frozenset(
 FRONTEND_CLIENT_METADATA_KEY = "frontend_client"
 FRONTEND_DELIVERY_METADATA_KEY = "frontend_delivery_policy"
 RUN_DELIVERY_ROUTE_METADATA_KEY = "_run_delivery_route"
+TELEGRAM_OWNER_MIRROR_AT_ADMISSION = "_telegram_owner_mirror_at_admission"
 RUN_DELIVERY_ROUTE_TYPE = "hashi.run-delivery-route"
 RUN_DELIVERY_ROUTE_VERSION = 1
 
@@ -116,7 +117,7 @@ def normalize_run_delivery_route(value: Any) -> dict[str, Any]:
         raise ValueError("Run delivery route automatic must be boolean")
     if automatic != bool(primary is not None or mirrors):
         raise ValueError("Run delivery route automatic contradicts its destinations")
-    return {
+    result = {
         "type": RUN_DELIVERY_ROUTE_TYPE,
         "version": RUN_DELIVERY_ROUTE_VERSION,
         "scope": "run",
@@ -124,6 +125,20 @@ def normalize_run_delivery_route(value: Any) -> dict[str, Any]:
         "mirrors": mirrors,
         "automatic": automatic,
     }
+    snapshot = value.get(TELEGRAM_OWNER_MIRROR_AT_ADMISSION)
+    if snapshot is not None:
+        if (not isinstance(snapshot, Mapping) or type(snapshot.get("value")) is not bool
+                or type(snapshot.get("document_revision")) is not int
+                or snapshot["document_revision"] < 0
+                or (snapshot.get("revision") is not None and
+                    (type(snapshot["revision"]) is not int or snapshot["revision"] < 0
+                     or snapshot["revision"] > snapshot["document_revision"]))):
+            raise ValueError("invalid Telegram owner preference snapshot")
+        result[TELEGRAM_OWNER_MIRROR_AT_ADMISSION] = {
+            "value": snapshot["value"], "revision": snapshot.get("revision"),
+            "document_revision": snapshot["document_revision"],
+        }
+    return result
 
 
 def freeze_run_delivery_route(
@@ -138,6 +153,7 @@ def freeze_run_delivery_route(
     primary_channel_key: Any | None = None,
     terminal_exchange: bool = False,
     additional_mirrors: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+    telegram_owner_preference_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve the sole Connector route before PAO persists or projects a Run.
 
@@ -239,6 +255,7 @@ def freeze_run_delivery_route(
             "primary": primary,
             "mirrors": mirrors,
             "automatic": bool(primary is not None or mirrors),
+            TELEGRAM_OWNER_MIRROR_AT_ADMISSION: telegram_owner_preference_snapshot,
         }
     )
 
@@ -608,6 +625,14 @@ def telegram_delivery_for_admission(
         connector_id="telegram",
         default=True,
     )
+    return _resolve_agent_telegram_mirror(
+        instance_enabled, agent_id=agent_id, agent_config_path=agent_config_path
+    )
+
+
+def _resolve_agent_telegram_mirror(
+    instance_enabled: bool, *, agent_id: Any, agent_config_path: Any
+) -> bool:
     if agent_config_path is None or not str(agent_id or "").strip():
         return instance_enabled
     try:
@@ -617,14 +642,83 @@ def telegram_delivery_for_admission(
         )
 
         policy = load_agent_telegram_mirror_policy(agent_config_path, agent_id)
-        return resolve_telegram_mirror_policy(
-            policy,
-            instance_enabled=instance_enabled,
-        )
+        return resolve_telegram_mirror_policy(policy, instance_enabled=instance_enabled)
     except (OSError, TypeError, ValueError):
         # A missing/corrupt Agent policy must not accidentally enable a mirror.
         # Telegram-origin traffic was returned above and remains deliverable.
         return False
+
+
+def telegram_mirror_allowed_for_run(
+    runtime: Any,
+    request_id: str | None,
+    *,
+    frozen_route: Mapping[str, Any] | None = None,
+    owner_id: str | None = None,
+) -> bool:
+    """Recheck the current mirror policy for a Run's frozen Telegram destination."""
+    from orchestrator.runtime_session import request_metadata
+
+    run = request_metadata(runtime, request_id)
+    metadata = run.get("request_metadata") if isinstance(run, Mapping) else None
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    route_value = frozen_route or metadata.get(RUN_DELIVERY_ROUTE_METADATA_KEY)
+    if not route_value:
+        return True
+    try:
+        route = normalize_run_delivery_route(route_value)
+    except ValueError:
+        return False
+    primary = route.get("primary")
+    if isinstance(primary, Mapping) and primary.get("surface") == "telegram":
+        return True
+    if not any(destination.get("surface") == "telegram" for destination in route["mirrors"]):
+        return False
+    global_config = getattr(runtime, "global_config", None)
+    owner = str(owner_id or run.get("owner_id") or metadata.get("owner_id") or "").strip()
+    state_root = getattr(global_config, "bridge_home", None)
+    if state_root is None:
+        # Legacy runtimes without an instance preference store retain their
+        # admitted default; no persisted owner switch is available to read.
+        return _resolve_agent_telegram_mirror(
+            True, agent_id=getattr(runtime, "name", None),
+            agent_config_path=getattr(global_config, "config_path", None),
+        )
+    # An explicit owner switch-off during this Run takes effect even for an
+    # Agent configured to override the owner's normal admission preference.
+    # The per-preference revision detects an off/on/off sequence without
+    # confusing another owner's changes with this Run's policy.
+    from orchestrator.connector_delivery_preferences import get_connector_preference_snapshot
+
+    current = get_connector_preference_snapshot(
+        state_root, owner, "telegram", "mirror", default=True,
+    )
+    if current is None:
+        return False
+    if current["value"] is False:
+        admitted = metadata.get(TELEGRAM_OWNER_MIRROR_AT_ADMISSION)
+        if not isinstance(admitted, Mapping):
+            admitted = route.get(TELEGRAM_OWNER_MIRROR_AT_ADMISSION)
+        if not isinstance(admitted, Mapping) or admitted.get("value") is not False:
+            return False
+        before_revision = admitted.get("revision")
+        current_revision = current.get("revision")
+        before_document = admitted.get("document_revision")
+        if type(before_document) is not int:
+            return False
+        if type(current_revision) is int:
+            reference = before_revision if type(before_revision) is int else before_document
+            if current_revision > reference:
+                return False
+        elif current["document_revision"] != before_document:
+            # An older writer omitted scoped revisions; do not infer that an
+            # off switch was unchanged from the unrelated document revision.
+            return False
+    return _resolve_agent_telegram_mirror(
+        current["value"],
+        agent_id=getattr(runtime, "name", None),
+        agent_config_path=getattr(global_config, "config_path", None),
+    )
 
 
 def configured_whatsapp_mirror_channel(global_config: Any) -> str | None:

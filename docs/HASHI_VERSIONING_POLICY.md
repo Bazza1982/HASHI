@@ -212,6 +212,29 @@ shared Functions generation, and per-Agent Worker generation. Different
 instances may adopt the same release at different times. A repository version
 edit or a successful offline check is not proof of running-version adoption.
 
+`/version` compares each Worker to the independently observed shared Functions
+identity, and compares Remote to that shared target. A Worker's identity cannot
+fill a missing Functions identity. It names mismatching components and their
+observed and target identities; missing component evidence is unverified, not
+green. A recorded uncommitted source tree at adoption makes the affected
+Functions or Worker identity unverified. A failed or timed-out Git status read
+is unknown, never a clean tree; unknown current or adoption status also remains
+unverified. A packaged source also needs a known, clean build record and a
+commit matching the adopted Functions; missing or mismatched package provenance
+cannot become a green packaged release. For the local Remote, a live, bounded
+loopback health read must report
+a trusted view and the same instance, root, port, PID, start time and provenance
+as the process claim; an unreachable, degraded or mismatching response is not
+green. Remote started from a source tree with uncommitted changes is also
+unverified even when its recorded commit matches. A dirty Remote build shows the
+same separate-lifecycle update guidance as a mismatching Remote commit. This
+confirms the local health response, not an authenticated peer
+connection or a successful user interaction. Remote has a separate lifecycle
+from `/reboot max`. Once the intended source has been adopted, an authorized
+operator can use a local channel independent of Remote to run `/remote off`,
+then `/remote on`, and recheck `/version`; Direct/LAN and Exchange disconnect
+during the operation. Checks and updates require their own operational scope.
+
 ## 6. Acceptance, implementation, and rollout boundary
 
 - **Approval:** the user accepted the architecture-based numbering and Portable

@@ -86,6 +86,7 @@ def telegram_replay_decision(
         "user_cancel",
         "cancelled_by_user",
         "safe_voice_discarded",
+        "safe_voice_kept_as_draft",
     }
     reason = str(detail.get("reason") or error.get("error_code") or "").casefold()
     # Older failed Events predate typed termination reasons. Recognize only

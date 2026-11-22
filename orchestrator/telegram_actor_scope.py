@@ -168,7 +168,7 @@ def workzone_owner(
 
 def _safevoice_callback_matches_chat(runtime: Any, data: str, chat_id: int) -> bool:
     parts = data.split(":", 2)
-    if len(parts) != 3 or parts[0] != "safevoice" or parts[1] not in {"yes", "no"}:
+    if len(parts) != 3 or parts[0] != "safevoice" or parts[1] not in {"yes", "no", "keep"}:
         return True
     pending = getattr(runtime, "_pending_voice", None)
     record = pending.get(parts[2]) if isinstance(pending, dict) else None
@@ -203,7 +203,7 @@ async def _handle_scoped_interaction(
             for binding in CALLBACK_BINDINGS
         )
         safevoice_callback = (
-            data.startswith(("safevoice:yes:", "safevoice:no:"))
+            data.startswith(("safevoice:yes:", "safevoice:no:", "safevoice:keep:"))
             and _safevoice_callback_matches_chat(runtime, data, chat_id)
         )
         if conversation_callback or safevoice_callback:

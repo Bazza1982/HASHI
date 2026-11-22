@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import json
 import os
 import platform
+import ssl
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -256,17 +259,88 @@ def _subject_context(
     return owner, runtime, agent_name, topology
 
 
+def _local_remote_health(bridge_home: Path, claim: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Read only the claimed local Remote endpoint, with bounded time and body."""
+    from orchestrator.remote_lifecycle import load_settings
+
+    try:
+        port = int(claim.get("port") or 0)
+        if not 0 < port < 65536:
+            return None
+        settings = load_settings(bridge_home)
+        bind_host = str(claim.get("bind_host") or "")
+        try:
+            host = bind_host if ipaddress.ip_address(bind_host).is_loopback else "127.0.0.1"
+        except ValueError:
+            host = "127.0.0.1"
+        if settings.use_tls:
+            connection = http.client.HTTPSConnection(
+                host, port, timeout=0.8, context=ssl._create_unverified_context()
+            )
+        else:
+            connection = http.client.HTTPConnection(host, port, timeout=0.8)
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            if response.status != 200:
+                return None
+            body = response.read(512 * 1024 + 1)
+        finally:
+            connection.close()
+        if len(body) > 512 * 1024:
+            return None
+        value = json.loads(body.decode("utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, TypeError, http.client.HTTPException):
+        return None
+
+
+def _remote_health_matches_claim(
+    health: Mapping[str, Any], claim: Mapping[str, Any], bridge_home: Path, instance_id: str
+) -> bool:
+    """Require the live loopback response to identify the exact recorded process."""
+    if health.get("ok") is not True or health.get("trusted_view") is not True:
+        return False
+    instance = health.get("instance")
+    if not isinstance(instance, Mapping):
+        return False
+    live = instance.get("runtime_claim")
+    if not isinstance(live, Mapping):
+        return False
+    try:
+        live_root = str(live.get("root") or "").strip()
+        claim_root = str(claim.get("root") or "").strip()
+        return (
+            str(instance.get("instance_id") or "").strip().upper() == instance_id.upper()
+            and str(live.get("instance_id") or "").strip().upper() == instance_id.upper()
+            and str(claim.get("instance_id") or "").strip().upper() == instance_id.upper()
+            and bool(live_root) and Path(live_root).resolve() == bridge_home.resolve()
+            and bool(claim_root) and Path(claim_root).resolve() == bridge_home.resolve()
+            and int(live.get("pid") or 0) == int(claim.get("pid") or 0) > 0
+            and int(live.get("port") or 0) == int(claim.get("port") or 0) > 0
+            and live.get("started_at") is not None
+            and live.get("started_at") == claim.get("started_at")
+            and live.get("provenance") == claim.get("provenance")
+        )
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return False
+
+
 def _remote_fact(bridge_home: Path, instance_id: str) -> dict[str, Any]:
     claim = read_runtime_claim(bridge_home)
     if not isinstance(claim, dict):
         return {"status": "offline", "pid": None, "started_at": None, "provenance": None}
-    pid = int(claim.get("pid") or 0)
-    if (
-        not pid_is_alive(pid)
-        or str(claim.get("instance_id") or "").strip().upper()
-        not in {"", instance_id.upper()}
-    ):
+    try:
+        pid = int(claim.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if not pid_is_alive(pid):
         return {"status": "offline", "pid": pid or None, "started_at": None, "provenance": None}
+    health = _local_remote_health(bridge_home, claim)
+    if health is None:
+        return {"status": "unreachable", "pid": pid, "started_at": None, "provenance": None}
+    if not _remote_health_matches_claim(health, claim, bridge_home, instance_id):
+        return {"status": "unverified", "pid": pid, "started_at": None, "provenance": None}
     started = claim.get("started_at")
     if isinstance(started, (int, float)):
         started = (
@@ -284,7 +358,8 @@ def _remote_fact(bridge_home: Path, instance_id: str) -> dict[str, Any]:
             if key in _PROVENANCE_FIELDS
         }
     return {
-        "status": "active" if provenance else "legacy",
+        "status": ("degraded" if health.get("status") != "ready"
+                   else "active" if provenance else "legacy"),
         "pid": pid,
         "started_at": started,
         "generation_id": (
@@ -359,15 +434,6 @@ def collect_version_payload(
     for worker in workers:
         worker["provenance"] = provenance_for(worker["generation_id"])
 
-    if not shared["source_commit"]:
-        worker_source_commits = {
-            _commit_text(worker.get("source_commit"))
-            for worker in workers
-            if _commit_text(worker.get("source_commit"))
-        }
-        if len(worker_source_commits) == 1:
-            shared["source_commit"] = next(iter(worker_source_commits))
-
     primary_component = current_worker or shared
     primary = _mapping(primary_component.get("provenance"))
     running_commit = _adopted_component_commit(primary_component) or None
@@ -390,14 +456,57 @@ def collect_version_payload(
     reasons: list[str] = []
     mixed_workers = len(generations) > 1 or len(adopted_commits) > 1
     mixed = mixed_workers
+    component_provenance = [_mapping(item.get("provenance")) for item in [shared, *workers]]
+    if any(item.get("dirty_at_build") is True for item in component_provenance):
+        reasons.append("function_worker_dirty_at_build")
+    if any(item.get("dirty_at_build") is not True and item.get("dirty_at_build") is not False
+           for item in component_provenance):
+        reasons.append("function_worker_build_status_unknown")
     if len(generations) > 1:
         reasons.append("function_worker_generations_differ")
     if len(adopted_commits) > 1:
         reasons.append("function_worker_commits_differ")
     remote_commit = _adopted_component_commit(remote)
-    if running_commit and remote_commit and running_commit != remote_commit:
+    shared_commit = _adopted_component_commit(shared)
+    remote_provenance = _mapping(remote.get("provenance"))
+    if remote_provenance.get("dirty_at_build") is True:
+        reasons.append("remote_dirty_at_build")
+    elif (remote.get("status") in {"active", "degraded"}
+          and remote_provenance.get("dirty_at_build") is not False):
+        reasons.append("remote_build_status_unknown")
+    if shared_commit and remote_commit and shared_commit != remote_commit:
         mixed = True
         reasons.append("remote_commit_differs")
+    if not shared.get("generation_id") or not _adopted_component_commit(shared) or any(
+        not row.get("generation_id") or not _adopted_component_commit(row)
+        for row in workers
+    ):
+        reasons.append("function_worker_identity_unavailable")
+    if remote.get("status") == "offline":
+        reasons.append("remote_unavailable")
+    elif remote.get("status") == "unreachable":
+        reasons.append("remote_unreachable")
+    elif remote.get("status") == "unverified":
+        reasons.append("remote_identity_unverified")
+    elif remote.get("status") == "degraded":
+        reasons.append("remote_degraded")
+    elif not remote_commit:
+        reasons.append("remote_provenance_unavailable")
+
+    if source.get("available") and source.get("dirty") is None:
+        reasons.append("source_status_unavailable")
+    packaged_commit = ""
+    if not source.get("available") and source.get("reason") == "packaged_install":
+        packaged_commit = _commit_text(source.get("commit"))
+        if not packaged_commit:
+            reasons.append("packaged_source_commit_unavailable")
+        elif (shared_commit or running_commit) and packaged_commit != (shared_commit or running_commit):
+            mixed = True
+            reasons.append("packaged_source_commit_differs")
+        if source.get("dirty") is True:
+            reasons.append("packaged_source_dirty")
+        elif source.get("dirty") is not False:
+            reasons.append("packaged_source_status_unknown")
 
     if mixed:
         state_code = "mixed_generations"
@@ -418,7 +527,10 @@ def collect_version_payload(
             state_code = "provenance_unavailable"
             reasons.append("commit_relation_unknown")
     else:
-        state_code = "packaged_release"
+        state_code = "packaged_release" if packaged_commit else "provenance_unavailable"
+
+    if state_code in {"running_matches_source", "packaged_release"} and reasons:
+        state_code = "component_unverified"
 
     fingerprint = _fingerprint_mapping(
         getattr(owner, "runtime_fingerprint", None)

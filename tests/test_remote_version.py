@@ -47,6 +47,27 @@ def _headers() -> dict[str, str]:
     )
 
 
+def test_real_remote_health_projects_exact_claim_for_loopback(tmp_path: Path) -> None:
+    from orchestrator.version_info import _remote_health_matches_claim
+
+    claim = {
+        "instance_id": "HASHI2", "root": str(tmp_path.resolve()), "port": 8767,
+        "pid": 23, "started_at": 123456.0, "provenance": {"commit": "a" * 40},
+    }
+    app = create_app(
+        {"instance_id": "HASHI2", "remote_port": 8767, "runtime_claim": claim},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=False),
+        TerminalExecutor(),
+        hashi_root=str(tmp_path),
+    )
+    with TestClient(app, client=("127.0.0.1", 54321)) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    health = response.json()
+    assert health["trusted_view"] is True
+    assert _remote_health_matches_claim(health, claim, tmp_path, "HASHI2")
+
+
 def test_remote_version_requires_hmac_and_signs_structured_facts(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -100,3 +121,4 @@ def test_remote_version_does_not_fabricate_when_workbench_is_offline(
     assert response.status_code == 503
     assert response.json()["ok"] is False
     assert "version facts" in response.json()["error"]
+# HASHI-Fingerprint: hfp_ab22f97f4de44575a570236caa8a8eeb

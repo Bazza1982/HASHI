@@ -1330,7 +1330,7 @@ def _make_foreground_runtime(
     runtime._consume_session_primer = lambda item: item.prompt
     runtime._workzone_prompt_section = lambda: []
     runtime.get_typing_placeholder = lambda: ("typing", None)
-    runtime.typing_loop = lambda chat_id, stop_event: stop_event.wait()
+    runtime.typing_loop = lambda chat_id, stop_event, *, request_id=None: stop_event.wait()
     runtime._strip_transfer_accept_prefix = lambda item, text: text
     runtime._verbose = False
     runtime._think = False

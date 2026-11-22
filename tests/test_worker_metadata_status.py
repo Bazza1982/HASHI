@@ -453,6 +453,167 @@ async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
 
 
 @pytest.mark.asyncio
+async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monkeypatch):
+    """Exercise actual config and Host preparation, Worker IPC, poll and ACK."""
+    from telegram import Bot
+
+    from orchestrator import flexible_agent_runtime, function_worker_host
+    from orchestrator.config import ConfigManager
+    from orchestrator.config_json import write_config_json
+    from orchestrator.telegram_credential import TelegramCredentialService
+    from orchestrator.telegram_ingress import CoreTelegramIngress
+    from tests.test_config import _minimal_flex_agent, _write_base_files
+
+    cfg_root = tmp_path / "config"
+    cfg_root.mkdir()
+    agent = _minimal_flex_agent()
+    agent.update(name="zelda", telegram_token_key="", workspace_dir="workspaces/zelda",
+                 system_md="workspaces/zelda/agent.md")
+    config_path, secrets_path = _write_base_files(cfg_root, agent)
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["authorized_id"] = 42
+    write_config_json(config_path, document)
+    token = "123456:TEST_ONLY_CURRENT_BOT_abcdefghijklmnopqrstuvwxyz"
+    write_config_json(secrets_path, {"authorized_telegram_id": 42, "zelda": token})
+    _, agents, secrets = ConfigManager(config_path, secrets_path, bridge_home=cfg_root).load()
+    loaded = agents[0]
+    assert loaded.telegram_token_key == "zelda"
+
+    stack = await _build_stack(tmp_path, outcome="success")
+    supervisor = stack.client.supervisor
+    kernel = stack.handle.kernel
+    kernel.function_workers = supervisor
+    kernel.secrets = secrets
+    kernel.paths = SimpleNamespace(config_path=config_path, secrets_path=secrets_path, bridge_home=cfg_root)
+    stack.worker_peer.request_handler = stack.host.handle_request
+    runtime = stack.runtime
+
+    # Execute the real Host's config loading and token selection, while keeping
+    # backend initialization and network-facing runtime services isolated.
+    def construct_runtime(agent_config, global_config, worker_token, worker_secrets, _skills):
+        runtime.config = agent_config
+        runtime.global_config = global_config
+        runtime.token = worker_token
+        runtime.secrets = worker_secrets
+        return runtime
+
+    async def initialize_runtime():
+        return True
+
+    monkeypatch.setattr(flexible_agent_runtime, "FlexibleAgentRuntime", construct_runtime)
+    monkeypatch.setattr(function_worker_host, "current_process_runtime", lambda: None)
+    actual = SimpleNamespace(
+        worker_protocol=function_worker_host.FUNCTION_WORKER_PROTOCOL_VERSION,
+        generation_schema=function_worker_host.FUNCTION_GENERATION_SCHEMA_VERSION,
+        runtime_id="runtime-test",
+    )
+    monkeypatch.setattr(function_worker_host, "enforce_runtime_contract", lambda *_args: actual)
+    monkeypatch.setattr(function_worker_host, "compare_runtime_fingerprints", lambda *_args: None)
+    runtime.initialize = initialize_runtime
+    runtime.bind_handlers = lambda: None
+    stack.host.bootstrap = {
+        "protocol": function_worker_host.FUNCTION_WORKER_PROTOCOL_VERSION, "topology": {},
+    }
+    stack.host.code_root = Path(__file__).resolve().parents[1]
+    stack.host.bridge_home = cfg_root
+    stack.host.generation_root = stack.host.code_root
+    stack.host.expected_runtime = actual
+    stack.host._install_generation_import_paths = lambda: None
+    try:
+        await stack.host.prepare()
+        assert runtime.token == token
+        assert runtime.config.telegram_token_key == "zelda"
+    except BaseException:
+        await _close_stack(stack)
+        raise
+    # The fixture supplies an already-committed active route for the ingress.
+    stack.host.phase = "ACTIVE"
+    stack.host.accepting = True
+    runtime.telegram_connected = True
+    runtime._telegram_scoped_access_enabled = False
+    acknowledged = asyncio.Event()
+    continued = asyncio.Event()
+    release_poll = asyncio.Event()
+    payload = {
+        "update_id": 7,
+        "message": {
+            "message_id": 1, "date": 1700000000, "text": "test message",
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False, "first_name": "Test"},
+        },
+    }
+    received = []
+
+    async def process_update(update):
+        received.append((update.update_id, update.effective_user.id))
+        acknowledged.set()
+
+    runtime.app = SimpleNamespace(running=True, bot=Bot(token=token), process_update=process_update)
+    stack.handle.update_metadata(stack.client, stack.host.metadata())
+
+    poll_calls = []
+
+    class PollBot:
+        id = 123456
+
+        async def initialize(self):
+            pass
+
+        async def delete_webhook(self, *, drop_pending_updates):
+            assert not drop_pending_updates
+
+        async def get_updates(self, **kwargs):
+            poll_calls.append(kwargs["offset"])
+            if kwargs["offset"] is None:
+                return [SimpleNamespace(update_id=7, to_dict=lambda: payload)]
+            assert kwargs["offset"] == 8
+            continued.set()
+            await release_poll.wait()
+            return []
+
+        async def shutdown(self):
+            pass
+
+    from orchestrator import function_worker_supervisor
+    kernel.global_cfg = runtime.global_config
+    monkeypatch.setattr(function_worker_supervisor, "CoreTelegramIngress",
+        lambda **kwargs: CoreTelegramIngress(**kwargs, bot_factory=lambda _token: PollBot()))
+    service = TelegramCredentialService(
+        config_path=config_path, secrets_path=secrets_path, state_root=cfg_root,
+    )
+    try:
+        before = service.status("zelda", runtime_active=True,
+                                runtime_metadata=stack.handle.get_runtime_metadata())
+        assert before["configured"] is True
+        assert before["bidirectional_ready"] is False
+        assert await supervisor.start_telegram_ingress("zelda", runtime.token, drop_pending_updates=False)
+        ingress = supervisor._telegram_ingress["zelda"]
+        await asyncio.wait_for(acknowledged.wait(), timeout=5)
+        await asyncio.wait_for(continued.wait(), timeout=5)
+        after = service.status("zelda", runtime_active=True,
+                               runtime_metadata=stack.handle.get_runtime_metadata())
+        assert received == [(7, 42)]
+        assert ingress.offset == 8
+        assert after["activation_status"] == "connected"
+        assert after["bidirectional_ready"] is True
+        assert token not in json.dumps(after)
+        before_summary_polls = list(poll_calls)
+        for _ in range(3):
+            summary = await runtime.orchestrator.telegram_summary("user:42", 42)
+            assert summary["configured_verified"] == 1
+            assert summary["ready"] == 1
+            assert summary["mirror_active"] == 1
+            assert token not in json.dumps(summary)
+        assert poll_calls == before_summary_polls
+        denied = await runtime.orchestrator.telegram_summary("user:42", 99)
+        assert denied["configured_verified"] == 0
+    finally:
+        release_poll.set()
+        await supervisor.stop_telegram_ingress("zelda")
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projects_revisioned_workzone_support(tmp_path):
     stack = await _build_stack(tmp_path, outcome="success")
     try:

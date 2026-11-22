@@ -5595,7 +5595,7 @@ class SessionStore:
         _unsubmitted_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         reason = str(termination_reason or "")
-        if reason not in {"", "safe_voice_discarded"} or (
+        if reason not in {"", "safe_voice_discarded", "safe_voice_kept_as_draft"} or (
             reason and (success or failure_state != "stopped")
         ):
             raise ValueError("invalid normal termination reason")
@@ -5712,15 +5712,16 @@ class SessionStore:
             ):
                 raise StaleFencingToken("executor fencing token is stale")
             session_id = str(run["session_id"])
-            if reason == "safe_voice_discarded":
-                discarded = connection.execute(
+            if reason in {"safe_voice_discarded", "safe_voice_kept_as_draft"}:
+                expected_state = "draft" if reason == "safe_voice_kept_as_draft" else "discarded"
+                decision = connection.execute(
                     """SELECT 1 FROM voice_transcripts
                        WHERE run_id=? AND session_id=? AND message_id=?
-                         AND safe_voice_state='discarded' LIMIT 1""",
-                    (str(run["run_id"]), session_id, str(run["user_message_id"])),
+                         AND safe_voice_state=? LIMIT 1""",
+                    (str(run["run_id"]), session_id, str(run["user_message_id"]), expected_state),
                 ).fetchone()
-                if discarded is None:
-                    raise SessionConflict("Safe Voice discard has not been persisted")
+                if decision is None:
+                    raise SessionConflict("Safe Voice decision has not been persisted")
             unpublished_rows = connection.execute(
                 """SELECT o.*, r.session_id, r.request_id, s.owner_id, r.agent_id
                    FROM run_output_attachments AS o
@@ -5831,7 +5832,7 @@ class SessionStore:
             state = "completed" if success else str(failure_state or "failed")
             if state not in TERMINAL_RUN_STATES:
                 state = "failed"
-            normal_discard = reason == "safe_voice_discarded"
+            normal_discard = reason in {"safe_voice_discarded", "safe_voice_kept_as_draft"}
             error_code = None if success or normal_discard else (
                 "run_superseded" if state == "superseded" else "run_failed"
             )
@@ -5867,6 +5868,8 @@ class SessionStore:
                 phase="terminal",
                 summary="Assistant response completed"
                 if success
+                else "Safe Voice transcript kept as draft"
+                if reason == "safe_voice_kept_as_draft"
                 else "Safe Voice transcript discarded"
                 if normal_discard
                 else str(error_text or "Run failed"),
@@ -8252,6 +8255,7 @@ class SessionStore:
             "ready",
             "pending_confirmation",
             "discarded",
+            "draft",
             "unavailable",
         }:
             raise ValueError("invalid Safe Voice transcript state")
@@ -8283,7 +8287,7 @@ class SessionStore:
                 stored_state = str(existing["safe_voice_state"])
                 state_is_compatible = stored_state == state or (
                     state == "pending_confirmation"
-                    and stored_state in {"released", "discarded"}
+                    and stored_state in {"released", "discarded", "draft"}
                 )
                 if (
                     str(existing["text"]) != clean
@@ -8867,8 +8871,10 @@ class SessionStore:
         return dict(row) if row is not None else None
 
     def decide_voice_transcript(
-        self, *, request_id: str, confirmed: bool
+        self, *, request_id: str, confirmed: bool, keep_draft: bool = False
     ) -> dict[str, Any]:
+        if confirmed and keep_draft:
+            raise ValueError("a transcript cannot be confirmed and kept as a draft")
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
@@ -8880,7 +8886,7 @@ class SessionStore:
             ).fetchall()
             if not rows:
                 raise SessionNotFound("voice transcript not found")
-            state = "released" if confirmed else "discarded"
+            state = "draft" if keep_draft else "released" if confirmed else "discarded"
             eligible = [
                 row
                 for row in rows
@@ -8913,6 +8919,7 @@ class SessionStore:
                     kind=(
                         "voice.input.transcript_confirmed"
                         if confirmed
+                        else "voice.input.transcript_draft" if keep_draft
                         else "voice.input.transcript_discarded"
                     ),
                     status=state,
@@ -8920,6 +8927,7 @@ class SessionStore:
                     summary=(
                         "Safe Voice transcript confirmed"
                         if confirmed
+                        else "Safe Voice transcript kept as draft" if keep_draft
                         else "Safe Voice transcript discarded"
                     ),
                     detail={"transcript_id": str(row["transcript_id"])},
@@ -8939,8 +8947,11 @@ class SessionStore:
         transcript_id: str,
         confirmed: bool,
         expected_context_generation: int | None = None,
+        keep_draft: bool = False,
     ) -> dict[str, Any]:
         """Apply an authenticated generic-client Safe Voice decision."""
+        if confirmed and keep_draft:
+            raise ValueError("a transcript cannot be confirmed and kept as a draft")
 
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -8964,7 +8975,7 @@ class SessionStore:
             ):
                 raise SessionConflict("voice transcript belongs to a stale Session context")
             current = str(row["safe_voice_state"])
-            desired = "released" if confirmed else "discarded"
+            desired = "draft" if keep_draft else "released" if confirmed else "discarded"
             if current not in {"pending_confirmation", desired}:
                 raise SessionConflict(
                     f"voice transcript cannot change from {current} to {desired}"
@@ -8986,15 +8997,15 @@ class SessionStore:
                     session_id=str(row["session_id"]),
                     run_id=str(row["run_id"]),
                     kind=(
-                        "voice.input.transcript_confirmed"
-                        if confirmed
+                        "voice.input.transcript_draft" if keep_draft
+                        else "voice.input.transcript_confirmed" if confirmed
                         else "voice.input.transcript_discarded"
                     ),
                     status=desired,
                     phase="safe_voice",
                     summary=(
-                        "Safe Voice transcript confirmed"
-                        if confirmed
+                        "Safe Voice transcript kept as draft" if keep_draft
+                        else "Safe Voice transcript confirmed" if confirmed
                         else "Safe Voice transcript discarded"
                     ),
                     detail={"transcript_id": str(transcript_id)},

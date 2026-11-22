@@ -601,10 +601,12 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                 item,
                 effective_prompt,
                 is_bridge_request=is_bridge_request,
-                reason="safe_voice_discarded",
+                reason=response.stop_reason,
                 error="",
             )
-            await runtime_pipeline.handle_safe_voice_discard(runtime, item)
+            await runtime_pipeline.handle_safe_voice_discard(
+                runtime, item, reason=response.stop_reason
+            )
         elif response.is_success and not has_deliverable_content:
             runtime._notify_right_brain_interrupted(
                 item,
@@ -884,3 +886,4 @@ async def _cancel_tasks(
         f"{RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS:.1f}s."
     )
     return False
+# HASHI-Fingerprint: hfp_57a03eff450c42bdb22516c695357325

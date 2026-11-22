@@ -1066,6 +1066,7 @@ class WorkbenchApiServer:
             "/api/project-chat/{name}/{project}", self.handle_project_chat_log
         )
         self.app.router.add_post("/api/chat", self.handle_chat)
+        self.app.router.add_post("/api/agentpresence/draft", self.handle_agentpresence_draft)
         self.app.router.add_post(
             "/api/agentpresence/voice-decision",
             self.handle_agentpresence_voice_decision,
@@ -5540,6 +5541,21 @@ class WorkbenchApiServer:
                  agent_id, global_change=True), **snapshot}
         )
 
+    async def _refresh_telegram_status_projection(self) -> None:
+        """Refresh the in-memory summary after a committed config change."""
+        workers = getattr(self.orchestrator, "function_workers", None)
+        provider = getattr(workers, "_telegram_summary", None)
+        if not callable(provider):
+            return
+        try:
+            projection = provider()
+            if projection is not None:
+                await asyncio.to_thread(projection.refresh_configuration)
+        except Exception as exc:
+            # The configuration is already committed; never turn a successful
+            # write into a retryable failure because its view is unavailable.
+            logger.warning("Telegram status projection refresh failed: error_type=%s", type(exc).__name__)
+
     async def handle_admin_agent_telegram_access_change(self, request):
         denied = self._telegram_access_denial(request)
         if denied is not None:
@@ -5568,6 +5584,7 @@ class WorkbenchApiServer:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
+        await self._refresh_telegram_status_projection()
         # A Token may have been saved before the first authorized user. Finish
         # the existing exact-Agent activation only when that prerequisite first
         # becomes available; later access-list edits remain live policy changes.
@@ -5785,6 +5802,7 @@ class WorkbenchApiServer:
                 },
                 status=500,
             )
+        await self._refresh_telegram_status_projection()
         logger.info(
             "telegram_credential.updated agent_name=%s replaced=%s runtime_active=%s",
             result["agent_id"],
@@ -5857,6 +5875,7 @@ class WorkbenchApiServer:
                 },
                 status=500,
             )
+        await self._refresh_telegram_status_projection()
         logger.info(
             "telegram_mirror_policy.updated agent_name=%s policy=%s runtime_active=%s",
             result["agent_id"],
@@ -10890,8 +10909,8 @@ class WorkbenchApiServer:
         try:
             payload = await request.json()
             decision = str(payload.get("decision") or "").strip().casefold()
-            if decision not in {"confirm", "discard"}:
-                raise ValueError("decision must be confirm or discard")
+            if decision not in {"confirm", "discard", "keep"}:
+                raise ValueError("decision must be confirm, discard or keep")
             context_generation = payload.get("session_context_generation")
             if not isinstance(context_generation, int) or isinstance(
                 context_generation, bool
@@ -10913,6 +10932,7 @@ class WorkbenchApiServer:
                 transcript_id=request.match_info["transcript_id"],
                 confirmed=decision == "confirm",
                 expected_context_generation=context_generation,
+                keep_draft=decision == "keep",
             )
             session = self.session_store.get_session(
                 request.match_info["session_id"],
@@ -10932,7 +10952,10 @@ class WorkbenchApiServer:
                 return web.json_response(
                     {
                         "ok": True,
-                        "state": "confirmed" if decision == "confirm" else "discarded",
+                        "state": (
+                            "confirmed" if decision == "confirm"
+                            else "draft" if decision == "keep" else "discarded"
+                        ),
                         "accepted": decision == "confirm",
                         "request_id": str(transcript.get("request_id") or ""),
                         "run_id": str(transcript.get("run_id") or ""),
@@ -10954,24 +10977,30 @@ class WorkbenchApiServer:
                 decisions = state.get("transcript_decisions")
                 if isinstance(decisions, dict):
                     decisions[str(transcript["transcript_id"])] = (
-                        "released" if decision == "confirm" else "discarded"
+                        "released" if decision == "confirm"
+                        else "draft" if decision == "keep" else "discarded"
                     )
                 if decision == "discard":
                     state["status"] = "discarded"
                 elif isinstance(decisions, dict) and decisions and all(
-                    value == "released" for value in decisions.values()
+                    value in {"released", "draft"} for value in decisions.values()
                 ):
-                    state["status"] = "released"
+                    state["status"] = (
+                        "draft" if "draft" in decisions.values() else "released"
+                    )
                 release = state.get("release_event")
                 if (
                     isinstance(release, asyncio.Event)
-                    and state.get("status") in {"released", "discarded", "unavailable"}
+                    and state.get("status") in {"released", "discarded", "draft", "unavailable"}
                 ):
                     release.set()
             return web.json_response(
                 {
                     "ok": True,
-                    "state": "confirmed" if decision == "confirm" else "discarded",
+                    "state": (
+                            "confirmed" if decision == "confirm"
+                            else "draft" if decision == "keep" else "discarded"
+                        ),
                     "accepted": decision == "confirm",
                     "request_id": str(transcript.get("request_id") or ""),
                     "run_id": str(transcript.get("run_id") or ""),
@@ -11994,6 +12023,26 @@ class WorkbenchApiServer:
     def _has_admission_request_id(request_id):
         return isinstance(request_id, str) and bool(request_id.strip())
 
+    async def handle_agentpresence_draft(self, request):
+        """Admit an AP draft only while its original conversation is current."""
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return web.json_response(
+                {"ok": False, "accepted": False, "error_code": "agentpresence_draft_scope_invalid"},
+                status=400,
+            )
+        if (not isinstance(payload, Mapping)
+                or payload.get("source") != "agentpresence"
+                or payload.get("surface") != "agentpresence"
+                or "expected_session_id" not in payload
+                or "expected_context_generation" not in payload):
+            return web.json_response(
+                {"ok": False, "accepted": False, "error_code": "agentpresence_draft_scope_invalid"},
+                status=400,
+            )
+        return await self.handle_chat(request)
+
     async def handle_chat(self, request):
         runtime_map = self._runtime_map()
 
@@ -12347,6 +12396,23 @@ class WorkbenchApiServer:
             )
             if route_rejection is not None:
                 return route_rejection
+            # Saved drafts may restrict admission to their original conversation.
+            # These fields never select a target; HASHI still resolves its own route.
+            expected_session = payload.get("expected_session_id")
+            expected_generation = payload.get("expected_context_generation")
+            if "expected_session_id" in payload or "expected_context_generation" in payload:
+                if (not isinstance(expected_session, str) or not expected_session
+                        or type(expected_generation) is not int or expected_generation < 1):
+                    return web.json_response(
+                        {"ok": False, "accepted": False, "error_code": "agentpresence_draft_scope_invalid"},
+                        status=400,
+                    )
+                if (expected_session != agentpresence_session_metadata["session_id"]
+                        or expected_generation != agentpresence_session_metadata["session_context_generation"]):
+                    return web.json_response(
+                        {"ok": False, "accepted": False, "error_code": "agentpresence_draft_session_changed"},
+                        status=409,
+                    )
         else:
             agentpresence_session_metadata = None
             agent_name = payload.get("agent") or payload.get("agentId")

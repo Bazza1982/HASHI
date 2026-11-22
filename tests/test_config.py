@@ -89,6 +89,36 @@ def _minimal_flex_agent():
     }
 
 
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [(None, "flexy"), ("", "flexy"), ("   ", "flexy"), (17, "flexy"),
+     ({}, "flexy"), ("  custom.telegram  ", "custom.telegram")],
+)
+def test_telegram_reference_is_consistent_for_runtime_and_credential_service(
+    tmp_path, reference, expected
+):
+    from orchestrator.telegram_credential import TelegramCredentialService
+
+    agent = _minimal_flex_agent()
+    agent["telegram_token_key"] = reference
+    config_path, secrets_path = _write_base_files(tmp_path, agent)
+    secrets_path.write_text(
+        json.dumps({"authorized_telegram_id": 0, expected: "synthetic-token"}),
+        encoding="utf-8",
+    )
+
+    _, agents, secrets = ConfigManager(
+        config_path, secrets_path, bridge_home=tmp_path
+    ).load()
+    context = TelegramCredentialService(
+        config_path=config_path, secrets_path=secrets_path, state_root=tmp_path
+    ).context("flexy")
+
+    assert agents[0].telegram_token_key == context.token_key == expected
+    assert secrets[agents[0].telegram_token_key] == "synthetic-token"
+    assert context.configured is True
+
+
 @pytest.mark.parametrize("layout", ["outer_with_extra", "outer_only", "nested", "matching"])
 def test_load_preserves_lifecycle_identity_and_delivery_owner(tmp_path, layout):
     from types import SimpleNamespace

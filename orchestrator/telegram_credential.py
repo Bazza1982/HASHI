@@ -39,6 +39,7 @@ from orchestrator.telegram_configuration_lock import telegram_configuration_lock
 from orchestrator.telegram_identity import (
     resolve_owner_scope_id,
     resolve_telegram_owner_id,
+    resolve_telegram_token_key,
 )
 from orchestrator.telegram_delivery_state import telegram_bot_fingerprint
 
@@ -220,7 +221,9 @@ class TelegramCredentialService:
             )
         row = matches[0]
         canonical_id = str(row.get("name") or "").strip()
-        token_key = str(row.get("telegram_token_key") or canonical_id).strip()
+        token_key = resolve_telegram_token_key(
+            row.get("telegram_token_key"), canonical_id
+        )
         if (
             not token_key
             or len(token_key) > 256
@@ -235,12 +238,9 @@ class TelegramCredentialService:
             str(candidate.get("name") or "").strip()
             for candidate in rows
             if isinstance(candidate, dict)
-            and str(
-                candidate.get("telegram_token_key")
-                or candidate.get("name")
-                or ""
-            ).strip()
-            == token_key
+            and resolve_telegram_token_key(
+                candidate.get("telegram_token_key"), candidate.get("name")
+            ) == token_key
         ]
         configured = isinstance(secrets.get(token_key), str) and bool(
             str(secrets.get(token_key)).strip()
@@ -311,6 +311,11 @@ class TelegramCredentialService:
         inbound = bool(live and adopted and receiver_adopted and ingress.get("running") and ingress.get("connected"))
         outbound = bool(live and adopted and metadata.get("telegram_outbound_connected"))
         ready = inbound and outbound and context.authorized_user_configured
+        identity_mismatch = bool(live and expected_bot and (
+            ("telegram_bot_fingerprint" in metadata and metadata["telegram_bot_fingerprint"] != expected_bot)
+            or ("bot_fingerprint" in ingress and ingress["bot_fingerprint"] != expected_bot
+                and (ingress["bot_fingerprint"] is not None or ingress.get("running")))
+        ))
         activation_status = (
             "unconfigured" if not context.configured else
             "user_required" if not context.authorized_user_configured else
@@ -347,13 +352,12 @@ class TelegramCredentialService:
             "inbound_connected": inbound,
             "outbound_connected": outbound,
             "bidirectional_ready": ready,
+            "connection_reason": "bot_identity_mismatch" if identity_mismatch else None,
             "mirror_policy": context.mirror_policy,
             "mirror_policy_revision": context.mirror_policy_revision,
             "instance_mirror_enabled": instance_mirror_enabled,
             "resolved_mirror_enabled": resolved_mirror_enabled,
-            "mirror_delivery_ready": bool(
-                context.configured and context.authorized_user_configured
-            ),
+            "mirror_delivery_ready": outbound and context.authorized_user_configured,
         }
 
     def update_mirror_policy(

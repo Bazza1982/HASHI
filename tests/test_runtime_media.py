@@ -573,6 +573,20 @@ async def test_photo_and_sticker_join_same_long_batch(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_safevoice_preview_preserves_punctuation_without_telegram_markup(tmp_path):
+    runtime = _runtime(tmp_path)
+    transcript = "A_B * version [1] 中文"
+    await runtime_media._present_safe_voice_transcript(
+        runtime, _update(), transcript=transcript, prompt=transcript, summary="voice"
+    )
+    reply = runtime.replies[-1]
+    assert transcript in reply["text"]
+    assert reply.get("parse_mode") is None
+    assert any(button.callback_data == "safevoice:keep:123"
+               for row in reply["reply_markup"].inline_keyboard for button in row)
+
+
+@pytest.mark.asyncio
 async def test_safevoice_confirmation_adds_local_transcript_to_long_batch(
     tmp_path,
     monkeypatch,
@@ -646,3 +660,4 @@ def test_session_boundary_discards_native_and_workbench_voice_confirmations():
     assert runtime._native_voice_transcripts["req-native"]["status"] == "discarded"
     assert release_event.is_set()
     assert runtime._workbench_voice_confirmations["voice-one"]["state"] == "discarded"
+# HASHI-Fingerprint: hfp_1abf48b3d1444ec5af57fb591df4e663

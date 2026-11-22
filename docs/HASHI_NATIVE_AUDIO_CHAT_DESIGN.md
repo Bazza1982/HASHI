@@ -160,8 +160,8 @@ The following decisions are fixed for the first implementation:
 14. Selecting native audio is explicit authorization for the complete
     voice-origin Turn. Audio Direct, Audio Immediate, Triage, fallback, future
     work stages, and the derived local transcript therefore bypass Safe Voice.
-    Safe Voice retains its confirm-or-discard design only for transcript-first
-    text-model voice routes. No correction editor is added.
+    Transcript-first text-model voice routes support confirm, discard, or a
+    client-owned editable draft. Keeping a transcript does not execute a model.
 15. PAO applies the same-Run voice decision before calling any Engine. A
     durable discard ends the Run normally with `safe_voice_discarded`, without
     a backend error or model/tool execution. Memory-only decisions, stale
@@ -217,8 +217,8 @@ The following decisions are fixed for the first implementation:
 - Letting a frontend provide provider payloads, local file paths, prior
   conversation history, Persona, memory, or authoritative Run identity.
 - Persisting Base64 audio or raw audio bytes in logs or structured Events.
-- Adding transcript editing or correction. Safe Voice remains confirmation or
-  discard.
+- Editing the canonical audio or automatically submitting a corrected transcript.
+  Safe Voice may instead hand the transcript to the frontend's ordinary draft.
 - Treating a model's presence in an available-model list as sufficient proof of
   input, output, format, transcript, streaming, or tool capability.
 - Implementing local transcription of model output in the proof of concept.

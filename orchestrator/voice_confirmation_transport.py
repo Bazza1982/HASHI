@@ -74,7 +74,7 @@ def _decode_transport(text: str) -> dict[str, Any]:
     else:
         if not _ID.fullmatch(str(value.get("pending_id") or "")):
             raise ValueError("invalid pending id")
-        if value.get("decision") not in {"confirm", "discard"}:
+        if value.get("decision") not in {"confirm", "discard", "keep"}:
             raise ValueError("invalid decision")
     return value
 
@@ -292,16 +292,17 @@ async def _decide(
                     "context_generation": entry["context_generation"],
                 }
             return _error("voice_confirmation_already_confirmed", 409)
-        if state == "discarded":
-            if decision == "discard":
+        if state in {"discarded", "draft"}:
+            expected_decision = "keep" if state == "draft" else "discard"
+            if decision == expected_decision:
                 return {
                     "ok": True,
                     "voice_confirmation_version": 1,
-                    "state": "discarded",
+                    "state": state,
                     "session_id": entry["session_id"],
                     "context_generation": entry["context_generation"],
                 }
-            return _error("voice_confirmation_discarded", 409)
+            return _error(f"voice_confirmation_{state}", 409)
         if state == "expired":
             return _error("voice_confirmation_expired", 410)
         if not _binding_matches(entry, session, owner_id, surface=surface):
@@ -311,8 +312,8 @@ async def _decide(
             entry.pop("transcript", None)
             entry.pop("request_metadata", None)
             return _error("voice_session_changed", 409)
-        if decision == "discard":
-            entry["state"] = "discarded"
+        if decision in {"discard", "keep"}:
+            entry["state"] = "draft" if decision == "keep" else "discarded"
             entry["terminal_at"] = _clock(runtime)
             entry.pop("prompt", None)
             entry.pop("transcript", None)
@@ -320,7 +321,7 @@ async def _decide(
             return {
                 "ok": True,
                 "voice_confirmation_version": 1,
-                "state": "discarded",
+                "state": entry["state"],
                 "session_id": entry["session_id"],
                 "context_generation": entry["context_generation"],
             }
@@ -426,3 +427,4 @@ async def try_dispatch_voice_confirmation_transport(
         runtime, entry, decision=payload["decision"], session=session,
         owner_id=owner, surface=surface,
     )
+# HASHI-Fingerprint: hfp_dc67b860ee1f4071abbce53f782cc829

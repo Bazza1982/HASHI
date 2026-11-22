@@ -130,6 +130,54 @@ async def test_live_frames_leave_request_metadata_before_session_admission(
 
 
 @pytest.mark.asyncio
+async def test_real_admission_captures_owner_mirror_state_not_caller_value(tmp_path, monkeypatch):
+    from orchestrator.connector_delivery_preferences import set_connector_preference
+    from orchestrator.frontend_delivery import (
+        TELEGRAM_OWNER_MIRROR_AT_ADMISSION, telegram_mirror_allowed_for_run,
+    )
+
+    runtime = _runtime_for_admission()
+    runtime.name = "visibility"
+    config = tmp_path / "agents.json"
+    config.write_text(json.dumps({"agents": [{
+        "name": "visibility", "telegram_mirror_policy": "always_on",
+    }]}), encoding="utf-8")
+    runtime.global_config = SimpleNamespace(project_root=None, bridge_home=tmp_path,
+                                            config_path=config)
+    runtime.next_request_id = lambda: "req-mirror-admission"
+    runtime.session_store = _admission_store(tmp_path)
+    runtime.message_logger = Mock()
+    runtime.request_activity = Mock()
+    runtime.queue = asyncio.Queue()
+    monkeypatch.setattr(runtime_session, "accept_request", lambda *args, **kwargs: (
+        {"session_id": "session-mirror", "context_generation": 1},
+        _accepted_run("session-mirror", "run-mirror", "message-mirror", "req-mirror-admission"),
+        "user:123", "workbench", "default",
+    ))
+    monkeypatch.setattr(runtime_session, "resolve_request_session", lambda *args, **kwargs: (
+        {"session_id": "session-mirror", "context_generation": 1},
+        "user:123", "workbench", "default",
+    ))
+    monkeypatch.setattr(runtime_session, "session_workzone_state", lambda *args, **kwargs: {})
+    set_connector_preference(tmp_path, "user:123", "telegram", "mirror", True)
+
+    request_id = await runtime.enqueue_request(123, "hello", "api", "mirror test",
+        request_metadata={TELEGRAM_OWNER_MIRROR_AT_ADMISSION: {
+            "value": False, "revision": 99999, "document_revision": 99999,
+        }})
+    item = runtime.queue.get_nowait()
+    snapshot = item.request_metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION]
+    assert snapshot == {"value": True, "revision": 1, "document_revision": 1}
+    assert item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY][TELEGRAM_OWNER_MIRROR_AT_ADMISSION] == snapshot
+    assert item.deliver_to_telegram is True
+    runtime._request_meta_by_id = {request_id: {
+        "owner_id": "user:123", "request_metadata": item.request_metadata,
+    }}
+    set_connector_preference(tmp_path, "user:123", "telegram", "mirror", False)
+    assert telegram_mirror_allowed_for_run(runtime, request_id) is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "source",
     [
