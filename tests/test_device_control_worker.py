@@ -63,7 +63,7 @@ def isolated_desktop_mutex(monkeypatch):
     # These tests use synthetic Workers and must not acquire a real desktop's lock.
     from uuid import uuid4
     session = "test-" + uuid4().hex
-    monkeypatch.setattr(device_worker, "_windows_process_session", lambda: session)
+    monkeypatch.setattr(device_worker, "_windows_process_session", lambda: session if os.name == 'nt' else None)
 
 
 def test_locked_desktop_is_capability_state_not_failed_worker_health(tmp_path, monkeypatch):
