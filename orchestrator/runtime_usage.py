@@ -13,6 +13,8 @@ _USAGE_TOTAL_NUMERIC_FIELDS = (
     "thinking",
     "total_tokens",
     "cost_usd",
+    "known_cost_usd",
+    "known_cost_requests",
     "unknown_cost_requests",
     "requests",
     "provider_requests",

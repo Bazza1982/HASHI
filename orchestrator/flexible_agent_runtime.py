@@ -2107,7 +2107,22 @@ class FlexibleAgentRuntime:
 
         capture = local_command_capture(self)
         if capture is not None:
-            return await capture.capture_send(update.effective_chat.id, text, **kwargs)
+            sent = await capture.capture_send(update.effective_chat.id, text, **kwargs)
+            msg_id = (
+                getattr(sent, "_hashi_transport_message_id", None)
+                or getattr(sent, "message_id", None)
+            )
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "delivered",
+                    "sent": True,
+                    "transport_message_id": (
+                        str(msg_id) if isinstance(msg_id, (int, str)) else None
+                    ),
+                    "error_code": None,
+                }
+            )
+            return sent
         apply_disable_notification_default(self, kwargs)
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "reply")
@@ -2139,6 +2154,14 @@ class FlexibleAgentRuntime:
             or runtime_session.request_owner_id(self, request_id)
         )
         if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "suppressed",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_access_revoked",
+                }
+            )
             return None
         if delivery_mode != "failover_notice":
             if await telegram_delivery_failover.handle_blocked_send(
@@ -2148,8 +2171,24 @@ class FlexibleAgentRuntime:
                 purpose=purpose,
                 text=text,
             ):
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": "suppressed",
+                        "sent": False,
+                        "transport_message_id": None,
+                        "error_code": "telegram_delivery_blocked",
+                    }
+                )
                 return None
         if not delivery_allowed(self, owner_id=delivery_owner, chat_id=chat_id):
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "suppressed",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_access_revoked",
+                }
+            )
             return None
         publication = None
         claim = None
@@ -2202,6 +2241,14 @@ class FlexibleAgentRuntime:
                 limit=1,
             )
             if not claims:
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": "not_sent",
+                        "sent": False,
+                        "transport_message_id": None,
+                        "error_code": "delivery_outbox_not_claimed",
+                    }
+                )
                 return None
             claim = claims[0]
         send_not_submitted = False
@@ -2247,6 +2294,14 @@ class FlexibleAgentRuntime:
                             status="suppressed",
                             error_code="telegram_access_revoked",
                         )
+                    runtime_control.record_reply_delivery_outcome(
+                        {
+                            "status": "suppressed",
+                            "sent": False,
+                            "transport_message_id": None,
+                            "error_code": "telegram_access_revoked",
+                        }
+                    )
                     return None
                 send_not_submitted = False
                 try:
@@ -2274,13 +2329,43 @@ class FlexibleAgentRuntime:
                     or getattr(sent, "message_id", None)
                 )
                 if transport_message_id is not None:
-                    self.session_store.record_frontend_transport_reference(
-                        session_id=str(publication["session_id"]),
-                        owner_id=str(publication["owner_id"]), connector_id=connector_id,
-                        endpoint_id=str(claim["endpoint_id"]),
-                        transport_message_id=str(transport_message_id),
-                        event_id=str(publication["delivery_event_id"]),
-                    )
+                    from orchestrator.session_store import SessionConflict
+
+                    try:
+                        self.session_store.record_frontend_transport_reference(
+                            session_id=str(publication["session_id"]),
+                            owner_id=str(publication["owner_id"]), connector_id=connector_id,
+                            endpoint_id=str(claim["endpoint_id"]),
+                            transport_message_id=str(transport_message_id),
+                            event_id=str(publication["delivery_event_id"]),
+                        )
+                    except SessionConflict as exc:
+                        self.session_store.complete_delivery_outbox(
+                            outbox_id=str(claim["outbox_id"]),
+                            lease_token=str(claim["lease_token"]),
+                            status="unknown",
+                            error_code="telegram_transport_reference_conflict",
+                        )
+                        exc.sent_message = sent
+                        exc.transport_message_id = str(transport_message_id)
+                        exc.delivery_state = "sent_reference_conflict"
+                        runtime_control.record_reply_delivery_outcome(
+                            {
+                                "status": "sent_reference_conflict",
+                                "sent": True,
+                                "transport_message_id": str(transport_message_id),
+                                "error_code": "telegram_transport_reference_conflict",
+                                "error": str(exc),
+                            }
+                        )
+                        self.telegram_logger.warning(
+                            "Telegram reply sent (transport_message_id=%s) but transport "
+                            "reference binding conflicted with an existing Event: %s",
+                            transport_message_id,
+                            exc,
+                        )
+                        claim = None
+                        raise
                 receipt_status = (
                     "delivered" if transport_message_id is not None else "accepted"
                 )
@@ -2331,6 +2416,30 @@ class FlexibleAgentRuntime:
             )
             if callable(bind_presentation) and recorded is not None:
                 bind_presentation(recorded)
+            msg_id = (
+                getattr(sent, "_hashi_transport_message_id", None)
+                or getattr(sent, "message_id", None)
+            )
+            if sent is not None:
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": "delivered",
+                        "sent": True,
+                        "transport_message_id": (
+                            str(msg_id) if isinstance(msg_id, (int, str)) else None
+                        ),
+                        "error_code": None,
+                    }
+                )
+            else:
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": "not_observed",
+                        "sent": None,
+                        "transport_message_id": None,
+                        "error_code": None,
+                    }
+                )
             return sent
         except RetryAfter as exc:
             if claim is not None:
@@ -2348,6 +2457,15 @@ class FlexibleAgentRuntime:
                 purpose=purpose,
                 text=text,
             )
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "retry_after",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_retry_after",
+                    "error": str(exc),
+                }
+            )
             self.telegram_logger.warning(f"Reply failed: {exc}")
             return None
         except Exception as exc:
@@ -2361,6 +2479,22 @@ class FlexibleAgentRuntime:
                         if send_not_submitted
                         else "telegram_reply_outcome_unknown"
                     ),
+                )
+            if getattr(exc, "delivery_state", None) != "sent_reference_conflict":
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": (
+                            "delivery_failed" if send_not_submitted else "outcome_unknown"
+                        ),
+                        "sent": False if send_not_submitted else None,
+                        "transport_message_id": None,
+                        "error_code": (
+                            "telegram_reply_not_submitted"
+                            if send_not_submitted
+                            else "telegram_reply_outcome_unknown"
+                        ),
+                        "error": str(exc),
+                    }
                 )
             self.telegram_logger.warning(f"Reply failed: {exc}")
             raise
