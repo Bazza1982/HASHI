@@ -58,6 +58,14 @@ def _state(tmp_path: Path) -> DeviceWorkerState:
     return state
 
 
+@pytest.fixture(autouse=True)
+def isolated_desktop_mutex(monkeypatch):
+    # These tests use synthetic Workers and must not acquire a real desktop's lock.
+    from uuid import uuid4
+    session = "test-" + uuid4().hex
+    monkeypatch.setattr(device_worker, "_windows_process_session", lambda: session if os.name == 'nt' else None)
+
+
 def test_locked_desktop_is_capability_state_not_failed_worker_health(tmp_path, monkeypatch):
     state = _state(tmp_path)
     state.capability_kind = 'computer_control'
@@ -558,3 +566,87 @@ async def test_computer_worker_forces_persistent_native_backend(
         match="only permits its native provider",
     ):
         await state.execute("info", {"provider": "windows-mcp"})
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named mutex contract")
+def test_device_write_lock_coordinates_with_other_desktop_products(tmp_path):
+    """A separate desktop controller and the worker must never both own input."""
+    import ctypes
+    from ctypes import wintypes
+    from uuid import uuid4
+
+    session = "test-" + uuid4().hex
+    name = "Global" + chr(92) + "LocalDesktopControl-Session-v1-" + session
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    mutex = kernel.CreateMutexW(None, True, name)
+    assert mutex
+    try:
+        blocked = device_worker._DeviceLock(tmp_path / "legacy.lock", windows_session=session)
+        with pytest.raises(device_worker.DeviceWorkerError, match="lock"):
+            blocked.acquire()
+    finally:
+        kernel.ReleaseMutex(mutex)
+        kernel.CloseHandle(mutex)
+
+    first = device_worker._DeviceLock(tmp_path / "legacy.lock", windows_session=session)
+    second = device_worker._DeviceLock(tmp_path / "different-legacy.lock", windows_session=session)
+    try:
+        first.acquire()
+        with pytest.raises(device_worker.DeviceWorkerError, match="lock"):
+            second.acquire()
+        # Desktop watchdogs can release a lease from a different thread.
+        releaser = threading.Thread(target=first.release)
+        releaser.start()
+        releaser.join(timeout=3)
+        assert not releaser.is_alive()
+        second.acquire()
+    finally:
+        first.release()
+        second.release()
+
+    # A legacy file conflict must not leak the new mutex and block others.
+    old_worker = device_worker._DeviceLock(tmp_path / "legacy-conflict.lock")
+    contender = device_worker._DeviceLock(tmp_path / "legacy-conflict.lock", windows_session=session)
+    probe = device_worker._WindowsDesktopMutex(session)
+    try:
+        old_worker.acquire()
+        with pytest.raises(device_worker.DeviceWorkerError, match="lock"):
+            contender.acquire()
+        probe.acquire()
+    finally:
+        old_worker.release()
+        contender.release()
+        probe.release()
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named mutex contract")
+def test_manual_secure_desktop_locks_target_session_not_service_session(tmp_path, monkeypatch):
+    """A SYSTEM Worker in session 0 must contend for its helper's target session."""
+    from uuid import uuid4
+    from tools.windows_helper import secure_desktop
+
+    target_session = 100000 + uuid4().int % 1000000000
+    native = object.__new__(secure_desktop.SecureDesktop)
+    native.configuration = {"session_id": target_session}
+    monkeypatch.setattr(secure_desktop, "native_desktop_for", lambda _home: native)
+    monkeypatch.setattr(device_worker, "_windows_process_session", lambda: 0)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    controller = _state(tmp_path).manual_desktop()
+    owner = controller.lock_factory()
+    competitor = device_worker._WindowsDesktopMutex(target_session)
+    try:
+        owner.acquire()
+        with pytest.raises(DeviceWorkerError, match="lock"):
+            competitor.acquire()
+        competitor.release()
+        owner.release()
+        competitor.acquire()
+    finally:
+        owner.release()
+        competitor.release()
+        controller.close()
+
+
+# HASHI-Fingerprint: hfp_f530098a390146678247e1cfe36cfefa
