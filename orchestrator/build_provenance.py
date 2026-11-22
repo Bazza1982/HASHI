@@ -204,7 +204,7 @@ def capture_build_provenance(
 
     root = Path(code_root).resolve()
     source = _git_source(root)
-    if source is None and (root / ".git").exists():
+    if source is None and ((root / ".git").exists() or (root / ".git").is_symlink()):
         # An inaccessible checkout is not a packaged installation. Do not
         # use potentially stale package metadata as its build identity.
         channel, source = "git", {}
@@ -247,7 +247,7 @@ def inspect_source_checkout(
 
     root = Path(code_root).resolve()
     source = _git_source(root)
-    if source is None and (root / ".git").exists():
+    if source is None and ((root / ".git").exists() or (root / ".git").is_symlink()):
         return {
             "available": True,
             "release_channel": "git",

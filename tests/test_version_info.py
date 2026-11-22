@@ -322,6 +322,24 @@ def test_inaccessible_git_checkout_is_not_misreported_as_a_package(tmp_path: Pat
     assert checkout["relation"] == "unknown"
 
 
+def test_broken_git_link_does_not_fall_back_to_packaged_metadata(tmp_path: Path, monkeypatch) -> None:
+    from orchestrator import build_provenance
+
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "BUILD_INFO.json").write_text(json.dumps({"provenance": {
+        "commit": "f" * 40, "dirty_at_build": False,
+    }}), encoding="utf-8")
+    marker = source / ".git"
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda path: path == marker or original_is_symlink(path))
+    monkeypatch.setattr(build_provenance, "_git_text", lambda *_: None)
+    provenance = capture_build_provenance(source, artifact_kind="hashi-remote")
+    checkout = inspect_source_checkout(source, running_commit="f" * 40)
+    assert provenance["release_channel"] == "git" and provenance["commit"] is None
+    assert checkout["available"] is True and checkout["reason"] == "source_status_unavailable"
+
+
 def test_unavailable_git_status_never_claims_a_clean_checkout(tmp_path: Path, monkeypatch) -> None:
     from orchestrator import build_provenance
 
