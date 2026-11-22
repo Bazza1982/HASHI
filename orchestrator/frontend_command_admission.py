@@ -426,12 +426,22 @@ async def execute_frontend_command_invocation(
             if error_message:
                 response["error_message"] = error_message
         else:
+            raw_delivery = res_dict.get("reply_delivery")
+            delivery_state = str(
+                res_dict.get("transport_delivery_state")
+                or (
+                    raw_delivery.get("status")
+                    if isinstance(raw_delivery, Mapping)
+                    else ""
+                )
+                or "not_observed"
+            )
             response = {
                 "ok": True,
                 "command": normalized_cmd,
                 "execution_state": "completed",
                 "connector_id": connector_id,
-                "transport_delivery_state": "not_observed",
+                "transport_delivery_state": delivery_state,
                 "result": res_dict,
             }
         if "request_outcome" in res_dict:

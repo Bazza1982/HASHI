@@ -917,6 +917,73 @@ async def _reply(runtime: Any, update: Any, text: str) -> None:
         await runtime.send_long_message(chat_id, text, purpose="steer-command")
 
 
+async def _deliver_post_effect_reply(
+    runtime: Any,
+    update: Any,
+    text: str,
+    *,
+    command_name: str,
+) -> dict[str, Any]:
+    """Deliver a confirmation reply after a command's side effects already committed.
+
+    Reply persistence/delivery errors (such as a transport-reference
+    ``SessionConflict`` after Telegram already sent the message) must be
+    recorded as an independent delivery status instead of failing the
+    already-executed command or leaving its admission ticket in
+    ``outcome_unknown``.
+    """
+    from orchestrator.session_store import SessionConflict
+
+    logger = getattr(runtime, "logger", None)
+    try:
+        await _reply(runtime, update, text)
+    except SessionConflict as exc:
+        sent_ok = getattr(exc, "sent_message", None) is not None
+        delivery_state = str(
+            getattr(exc, "delivery_state", None)
+            or ("sent_reference_conflict" if sent_ok else "reference_conflict")
+        )
+        transport_message_id = getattr(exc, "transport_message_id", None)
+        if logger is not None:
+            logger.warning(
+                "Post-effect /%s reply hit transport reference conflict "
+                "(sent=%s, transport_message_id=%s): %s",
+                command_name,
+                sent_ok,
+                transport_message_id,
+                exc,
+            )
+        return {
+            "status": delivery_state,
+            "sent": sent_ok,
+            "transport_message_id": (
+                str(transport_message_id) if transport_message_id is not None else None
+            ),
+            "error_code": "telegram_transport_reference_conflict",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        if logger is not None:
+            logger.warning(
+                "Post-effect /%s reply delivery failed after command execution: %s",
+                command_name,
+                exc,
+            )
+        return {
+            "status": "delivery_failed",
+            "sent": False,
+            "transport_message_id": None,
+            "error_code": type(exc).__name__,
+            "error": str(exc),
+        }
+    return {
+        "status": "delivered",
+        "sent": True,
+        "transport_message_id": None,
+        "error_code": None,
+    }
+
+
 def _agent_is_busy(runtime: Any) -> bool:
     """True when a generation is active or work is already queued."""
     if _active_request_meta(runtime) is not None:
@@ -1025,12 +1092,20 @@ async def cmd_steer(
             "text",
             direction[:80],
         )
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             f"🧭 Agent was idle — queued your text as a new request"
             f"{f' ({request_id})' if request_id else ''} (no steer wrapper).",
+            command_name=command_name,
         )
+        if delivery["status"] != "delivered":
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "reply_delivery": delivery,
+                "transport_delivery_state": delivery["status"],
+            }
         return
 
     if not busy:
@@ -1048,14 +1123,22 @@ async def cmd_steer(
             "focus",
             "Focus: narrow the most recent task to user intent",
         )
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             "🎯 Focus applied to the most recent task.\n"
             "Queued a one-off continuation that must keep working on the original outcome "
             "within its requested scope"
             f"{f' ({request_id})' if request_id else ''}.",
+            command_name=command_name,
         )
+        if delivery["status"] != "delivered":
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "reply_delivery": delivery,
+                "transport_delivery_state": delivery["status"],
+            }
         return
 
     native_evidence = None
@@ -1100,7 +1183,7 @@ async def cmd_steer(
             },
             "continuation": continuation,
         }
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             "🧭 Steered in place.\n"
@@ -1115,7 +1198,10 @@ async def cmd_steer(
             + f"New Run: {active_run_id or 'unavailable'} (same Run, continued in place)\n"
             + "Continuation evidence: "
             + f"{continuation.get('evidence_ref') or 'unavailable'}.",
+            command_name=command_name,
         )
+        steer_receipt["reply_delivery"] = delivery
+        steer_receipt["transport_delivery_state"] = delivery["status"]
         return steer_receipt
 
     # Mark before kill so exit -9 / SIGKILL is not reported as ❌ Backend error.
@@ -1222,7 +1308,7 @@ async def cmd_steer(
     }
 
     if focus_mode:
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             "🎯 Focus applied.\n"
@@ -1236,9 +1322,10 @@ async def cmd_steer(
             "to the original user-requested scope. The task must continue until its "
             "requested outcome is complete or genuinely blocked"
             f"{f' (request {request_id})' if request_id else ''}.",
+            command_name=command_name,
         )
     else:
-        await _reply(
+        delivery = await _deliver_post_effect_reply(
             runtime,
             update,
             f"🧭 Steered.\n"
@@ -1253,7 +1340,10 @@ async def cmd_steer(
             + f"New Run: {new_run_id or 'unavailable'}\n"
             + "Continuation evidence: "
             + f"{linked_continuation.get('evidence_ref') or 'unavailable'}.",
+            command_name=command_name,
         )
+    steer_receipt["reply_delivery"] = delivery
+    steer_receipt["transport_delivery_state"] = delivery["status"]
     return steer_receipt
 
 

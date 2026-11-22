@@ -286,6 +286,7 @@ class UsageReceipt:
             if cost is None or source not in {
                 "pricing_table",
                 "openrouter_reference",
+                "static_fallback",
             }:
                 return None
             total += cost
@@ -359,6 +360,12 @@ class UsageReceipt:
             sum(float(li.cost_usd) for li in self.line_items if li.cost_usd is not None),
             6,
         )
+
+    @property
+    def known_cost_requests(self) -> int:
+        """Physical calls whose provider or pricebook cost was established."""
+
+        return sum(1 for li in self.line_items if li.cost_usd is not None)
 
     @property
     def unknown_cost_requests(self) -> int:
@@ -669,7 +676,7 @@ def _format_breakdown_cost(
 
     model_receipt = UsageReceipt(line_items=line_items)
     cost = model_receipt.cost_usd
-    if cost is None and model_receipt.known_cost_usd > 0:
+    if cost is None and model_receipt.known_cost_requests > 0:
         unknown = model_receipt.unknown_cost_requests
         return _translate(
             (
@@ -803,7 +810,7 @@ def _format_receipt_lines(
 ) -> str:
     cost = receipt.cost_usd
     resolved_label = label or _translate(label_key, locale=locale)
-    if cost is None and receipt.known_cost_usd > 0:
+    if cost is None and receipt.known_cost_requests > 0:
         unknown = receipt.unknown_cost_requests
         cost_line = _translate(
             (

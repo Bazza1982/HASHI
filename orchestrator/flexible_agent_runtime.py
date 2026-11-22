@@ -2274,13 +2274,34 @@ class FlexibleAgentRuntime:
                     or getattr(sent, "message_id", None)
                 )
                 if transport_message_id is not None:
-                    self.session_store.record_frontend_transport_reference(
-                        session_id=str(publication["session_id"]),
-                        owner_id=str(publication["owner_id"]), connector_id=connector_id,
-                        endpoint_id=str(claim["endpoint_id"]),
-                        transport_message_id=str(transport_message_id),
-                        event_id=str(publication["delivery_event_id"]),
-                    )
+                    from orchestrator.session_store import SessionConflict
+
+                    try:
+                        self.session_store.record_frontend_transport_reference(
+                            session_id=str(publication["session_id"]),
+                            owner_id=str(publication["owner_id"]), connector_id=connector_id,
+                            endpoint_id=str(claim["endpoint_id"]),
+                            transport_message_id=str(transport_message_id),
+                            event_id=str(publication["delivery_event_id"]),
+                        )
+                    except SessionConflict as exc:
+                        self.session_store.complete_delivery_outbox(
+                            outbox_id=str(claim["outbox_id"]),
+                            lease_token=str(claim["lease_token"]),
+                            status="unknown",
+                            error_code="telegram_transport_reference_conflict",
+                        )
+                        exc.sent_message = sent
+                        exc.transport_message_id = str(transport_message_id)
+                        exc.delivery_state = "sent_reference_conflict"
+                        self.telegram_logger.warning(
+                            "Telegram reply sent (transport_message_id=%s) but transport "
+                            "reference binding conflicted with an existing Event: %s",
+                            transport_message_id,
+                            exc,
+                        )
+                        claim = None
+                        raise
                 receipt_status = (
                     "delivered" if transport_message_id is not None else "accepted"
                 )

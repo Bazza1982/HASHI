@@ -455,6 +455,9 @@ def record_usage(
         "output": receipt.total_output,
         "thinking": receipt.total_thinking,
         "cost_usd": cost,
+        "known_cost_usd": receipt.known_cost_usd,
+        "known_cost_requests": receipt.known_cost_requests,
+        "unknown_cost_requests": receipt.unknown_cost_requests,
         "cost_known": cost is not None,
         "cost_source": receipt.dominant_cost_source(),
         "total_tokens": receipt.total_tokens,
@@ -538,6 +541,8 @@ def get_summary(
             "thinking": 0,
             "total_tokens": 0,
             "cost_usd": 0.0,
+            "known_cost_usd": 0.0,
+            "known_cost_requests": 0,
             "unknown_cost_requests": 0,
             "requests": 0,
             "provider_requests": 0,
@@ -589,12 +594,50 @@ def _add(acc: dict, record: dict) -> None:
         )
     )
     raw_cost = record.get("cost_usd")
+    raw_known_cost = record.get("known_cost_usd")
+    raw_known_calls = record.get("known_cost_requests")
+    raw_unknown_calls = record.get("unknown_cost_requests")
     if raw_cost is None:
-        acc["unknown_cost_requests"] = int(
-            acc.get("unknown_cost_requests") or 0
-        ) + 1
+        if raw_known_cost is not None:
+            known_delta = float(raw_known_cost)
+            acc["cost_usd"] = round(
+                float(acc.get("cost_usd") or 0.0) + known_delta, 6
+            )
+            acc["known_cost_usd"] = round(
+                float(acc.get("known_cost_usd") or 0.0) + known_delta, 6
+            )
+        if raw_known_calls is not None:
+            acc["known_cost_requests"] = int(
+                acc.get("known_cost_requests") or 0
+            ) + max(0, int(raw_known_calls))
+        elif raw_known_cost is not None and float(raw_known_cost) > 0:
+            acc["known_cost_requests"] = int(
+                acc.get("known_cost_requests") or 0
+            ) + 1
+        unknown_delta = (
+            max(1, int(raw_unknown_calls))
+            if raw_unknown_calls is not None
+            else 1
+        )
+        acc["unknown_cost_requests"] = (
+            int(acc.get("unknown_cost_requests") or 0) + unknown_delta
+        )
     else:
-        acc["cost_usd"] += float(raw_cost)
+        cost_delta = float(raw_cost)
+        acc["cost_usd"] = round(
+            float(acc.get("cost_usd") or 0.0) + cost_delta, 6
+        )
+        acc["known_cost_usd"] = round(
+            float(acc.get("known_cost_usd") or 0.0) + cost_delta, 6
+        )
+        known_calls_delta = (
+            max(1, int(raw_known_calls))
+            if raw_known_calls is not None
+            else max(1, int(record.get("provider_requests") or 1))
+        )
+        acc["known_cost_requests"] = (
+            int(acc.get("known_cost_requests") or 0) + known_calls_delta
+        )
     if "provider_requests" in record:
         acc["provider_metrics_records"] = int(
             acc.get("provider_metrics_records") or 0
@@ -669,8 +712,11 @@ def format_usage_cost(data: dict[str, Any]) -> str:
     if unknown_requests == 0:
         return f"${cost:.4f}"
 
-    total_requests = max(0, int(data.get("requests") or 0))
-    known_requests = max(0, total_requests - unknown_requests)
+    if "known_cost_requests" in data:
+        known_requests = max(0, int(data.get("known_cost_requests") or 0))
+    else:
+        total_requests = max(0, int(data.get("requests") or 0))
+        known_requests = max(0, total_requests - unknown_requests)
     if known_requests == 0 and cost == 0.0:
         return ui_language.tr("usage.cost.unknown")
 
@@ -815,6 +861,8 @@ def get_summary_extended(
             "thinking": 0,
             "total_tokens": 0,
             "cost_usd": 0.0,
+            "known_cost_usd": 0.0,
+            "known_cost_requests": 0,
             "unknown_cost_requests": 0,
             "requests": 0,
             "provider_requests": 0,

@@ -358,7 +358,7 @@ async def test_text_replace_preview_only_does_not_block_same_file_write(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_unknown_shell_script_blocks_competing_edits_across_all_writable_workzones(tmp_path):
+async def test_unknown_shell_script_blocks_competing_edits_in_targeted_workzone_only(tmp_path):
     ws_a = tmp_path / "agents" / "A"
     ws_b = tmp_path / "agents" / "B"
     ws_c = tmp_path / "agents" / "C"
@@ -371,10 +371,28 @@ async def test_unknown_shell_script_blocks_competing_edits_across_all_writable_w
     reg_b = SimpleNamespace(workspace_dir=ws_b, access_roots=[ws_b], _effective_audit_context=shared_ctx)
     reg_c = SimpleNamespace(workspace_dir=ws_c, access_roots=[ws_c], _effective_audit_context=shared_ctx)
 
+    # 1. Opaque shell in ws_a blocks edits inside ws_a, without blocking unrelated ws_b or ws_c.
+    own_entered = asyncio.Event()
+
+    async def own_a():
+        async with tool_resource(reg_a, "text_replace", {"path": "local.py", "find": "a", "replace": "b"}):
+            own_entered.set()
+
+    async with tool_resource(reg_a, "shell", {"command": "python update_project.py"}):
+        t_own = asyncio.create_task(own_a())
+        async with tool_resource(reg_b, "text_replace", {"path": "target.py", "find": "a", "replace": "b"}):
+            pass
+        async with tool_resource(reg_c, "text_replace", {"path": "unrelated.py", "find": "1", "replace": "2"}):
+            pass
+        await asyncio.sleep(0.08)
+        assert not own_entered.is_set(), "text_replace in ws_a must wait for Agent A's shell in ws_a"
+    await asyncio.wait_for(t_own, timeout=3.0)
+    assert own_entered.is_set()
+
+    # 2. Shell explicitly targeting ws_b blocks competing edits in ws_b while leaving ws_c concurrent.
     tr_entered = asyncio.Event()
     fw_entered = asyncio.Event()
     ap_entered = asyncio.Event()
-    own_entered = asyncio.Event()
 
     async def tr_b():
         async with tool_resource(reg_b, "text_replace", {"path": "target.py", "find": "a", "replace": "b"}):
@@ -388,29 +406,21 @@ async def test_unknown_shell_script_blocks_competing_edits_across_all_writable_w
         async with tool_resource(reg_b, "apply_patch", {"path": "target.py", "patch": "@@ -1 +1 @@"}):
             ap_entered.set()
 
-    async def own_a():
-        async with tool_resource(reg_a, "text_replace", {"path": "local.py", "find": "a", "replace": "b"}):
-            own_entered.set()
-
-    # Script command does not mention ws_b literally, yet can write inside ws_b.
-    async with tool_resource(reg_a, "shell", {"command": "python update_project.py"}):
+    async with tool_resource(reg_a, "shell", {"command": "python update_project.py", "cwd": str(ws_b)}):
         tasks = [
             asyncio.create_task(tr_b()),
             asyncio.create_task(fw_b()),
             asyncio.create_task(ap_b()),
-            asyncio.create_task(own_a()),
         ]
-        # Disjoint workzone C (not in Agent A's access_roots) must still proceed concurrently.
         async with tool_resource(reg_c, "text_replace", {"path": "unrelated.py", "find": "1", "replace": "2"}):
             pass
         await asyncio.sleep(0.08)
-        assert not tr_entered.is_set(), "text_replace in ws_b must wait for Agent A's unknown script"
-        assert not fw_entered.is_set(), "file_write in ws_b must wait for Agent A's unknown script"
-        assert not ap_entered.is_set(), "apply_patch in ws_b must wait for Agent A's unknown script"
-        assert not own_entered.is_set(), "text_replace in ws_a must wait for Agent A's unknown script"
+        assert not tr_entered.is_set(), "text_replace in ws_b must wait for Agent A's shell targeting ws_b"
+        assert not fw_entered.is_set(), "file_write in ws_b must wait for Agent A's shell targeting ws_b"
+        assert not ap_entered.is_set(), "apply_patch in ws_b must wait for Agent A's shell targeting ws_b"
 
     await asyncio.wait_for(asyncio.gather(*tasks), timeout=3.0)
-    assert tr_entered.is_set() and fw_entered.is_set() and ap_entered.is_set() and own_entered.is_set()
+    assert tr_entered.is_set() and fw_entered.is_set() and ap_entered.is_set()
 
 
 @pytest.mark.asyncio
@@ -476,7 +486,7 @@ async def test_cross_process_shell_and_file_mutation_locking_on_windows(tmp_path
         workspace_dir=ws_a,
         access_roots=[ws_a, ws_b],
         tool_name="shell",
-        arguments={"command": "python update_project.py"},
+        arguments={"command": "python update_project.py", "cwd": str(ws_b)},
         ready_file=ready,
         release_file=release,
     )

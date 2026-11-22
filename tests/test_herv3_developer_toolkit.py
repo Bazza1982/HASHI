@@ -442,7 +442,12 @@ async def test_file_manage_never_writes_through_destination_links(tmp_path):
     outside = tmp_path / "outside.txt"
     outside.write_text("ORIGINAL", encoding="utf-8")
     link = tmp_path / "dest.txt"
-    link.symlink_to(outside)
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        if getattr(exc, "winerror", None) == 1314 or isinstance(exc, (PermissionError, NotImplementedError)):
+            pytest.skip(f"symlink creation requires privilege in this environment: {exc}")
+        raise
     registry = _with_protected(_registry(tmp_path), outside)
     result = await _run(registry, "file_manage", {
         "operation": "copy", "source": "source.txt", "destination": "dest.txt", "overwrite": True})
