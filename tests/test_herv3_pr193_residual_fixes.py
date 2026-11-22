@@ -1284,6 +1284,246 @@ async def test_p2_real_session_store_steer_delivery_truth_and_replay_protection(
     assert calls_cf == 1 and len(enq_cf) == 1 and upd_cf.message.reply_text.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_p2_steer_and_focus_enqueue_none_and_missing_run_id_truth(
+    tmp_path: Path, monkeypatch
+):
+    """Verify truthful status & frontend admission when enqueue_request() returns None
+    or when request_id is valid while Run ID is temporarily unavailable, plus Telegram
+    replay idempotency via real SessionStore:
+      1. Idle /steer: enqueue succeeds -> ok=True, execution_state=completed
+      2. Idle /steer: enqueue returns None -> ok=False, execution_state=failed, steer_enqueue_failed
+      3. Idle /focus: enqueue returns None -> ok=False, execution_state=failed, focus_enqueue_failed
+      4. Busy /steer: interrupt + continuation enqueue returns None -> ok=False, failed, interrupted=True
+      5. Busy /focus: interrupt + continuation enqueue returns None -> ok=False, failed, interrupted=True
+      6. Busy /steer: valid request_id with Run ID temporarily unavailable -> ok=True, completed (NOT failed!)
+      7. Duplicate Telegram replay on every case -> never re-executes cmd_steer/cmd_focus
+    """
+    # --- 1. Idle /steer: enqueue succeeds ---
+    rt1, upd1, _s1, enq1, _db1 = _make_real_steer_harness(
+        tmp_path, monkeypatch, case_name="idle_steer_ok", busy=False
+    )
+    upd1.update_id = 93001
+    upd1.message.message_id = 15001
+    upd1.message.text = "/steer write release notes"
+    upd1.message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=6001))
+    calls1 = 0
+
+    async def invoke1():
+        nonlocal calls1
+        calls1 += 1
+        return await runtime_control.cmd_steer(
+            rt1, upd1, SimpleNamespace(args=["write", "release", "notes"])
+        )
+
+    res1 = await execute_telegram_command_invocation(
+        rt1, upd1, command_name="steer", arguments=["write", "release", "notes"],
+        transport_id=93001, invoke_handler=invoke1, command_known=True,
+    )
+    assert res1["ok"] is True
+    assert res1["execution_state"] == "completed"
+    assert res1["transport_delivery_state"] == "delivered"
+    assert res1["result"]["request_id"] == "req-steer-idle_steer_ok-1"
+    assert "queued your text" in upd1.message.reply_text.call_args.args[0]
+    rep1 = await execute_telegram_command_invocation(
+        rt1, upd1, command_name="steer", arguments=["write", "release", "notes"],
+        transport_id=93001, invoke_handler=invoke1, command_known=True,
+    )
+    assert rep1["replayed"] is True and calls1 == 1 and len(enq1) == 1
+
+    # --- 2. Idle /steer: enqueue_request returns None ---
+    rt2, upd2, _s2, _enq2, _db2 = _make_real_steer_harness(
+        tmp_path, monkeypatch, case_name="idle_steer_none", busy=False
+    )
+    rt2.enqueue_request = AsyncMock(return_value=None)
+    upd2.update_id = 93002
+    upd2.message.message_id = 15002
+    upd2.message.text = "/steer drop me"
+    upd2.message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=6002))
+    calls2 = 0
+
+    async def invoke2():
+        nonlocal calls2
+        calls2 += 1
+        return await runtime_control.cmd_steer(
+            rt2, upd2, SimpleNamespace(args=["drop", "me"])
+        )
+
+    res2 = await execute_telegram_command_invocation(
+        rt2, upd2, command_name="steer", arguments=["drop", "me"],
+        transport_id=93002, invoke_handler=invoke2, command_known=True,
+    )
+    assert res2["ok"] is False
+    assert res2["execution_state"] == "failed"
+    assert res2["error_code"] == "steer_enqueue_failed"
+    assert res2["transport_delivery_state"] == "delivered"
+    assert res2["result"]["request_id"] is None
+    reply2_text = upd2.message.reply_text.call_args.args[0]
+    assert "could not be queued" in reply2_text
+    assert "queued your text" not in reply2_text
+    rep2 = await execute_telegram_command_invocation(
+        rt2, upd2, command_name="steer", arguments=["drop", "me"],
+        transport_id=93002, invoke_handler=invoke2, command_known=True,
+    )
+    assert rep2["replayed"] is True
+    assert rep2["ok"] is False
+    assert rep2["execution_state"] == "failed"
+    assert rep2["error_code"] == "steer_enqueue_failed"
+    assert calls2 == 1 and rt2.enqueue_request.await_count == 1
+
+    # --- 3. Idle /focus: enqueue_request returns None ---
+    rt3, upd3, _s3, _enq3, _db3 = _make_real_steer_harness(
+        tmp_path, monkeypatch, case_name="idle_focus_none", busy=False
+    )
+    rt3.enqueue_request = AsyncMock(return_value=None)
+    upd3.update_id = 93003
+    upd3.message.message_id = 15003
+    upd3.message.text = "/focus"
+    upd3.message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=6003))
+    calls3 = 0
+
+    async def invoke3():
+        nonlocal calls3
+        calls3 += 1
+        return await runtime_control.cmd_focus(rt3, upd3, SimpleNamespace(args=[]))
+
+    res3 = await execute_telegram_command_invocation(
+        rt3, upd3, command_name="focus", arguments=[],
+        transport_id=93003, invoke_handler=invoke3, command_known=True,
+    )
+    assert res3["ok"] is False
+    assert res3["execution_state"] == "failed"
+    assert res3["error_code"] == "focus_enqueue_failed"
+    assert res3["transport_delivery_state"] == "delivered"
+    assert res3["result"]["request_id"] is None
+    reply3_text = upd3.message.reply_text.call_args.args[0]
+    assert "could not be queued" in reply3_text
+    assert "Focus applied" not in reply3_text
+    rep3 = await execute_telegram_command_invocation(
+        rt3, upd3, command_name="focus", arguments=[],
+        transport_id=93003, invoke_handler=invoke3, command_known=True,
+    )
+    assert rep3["replayed"] is True and rep3["ok"] is False and calls3 == 1
+
+    # --- 4. Busy /steer: active turn interrupted, continuation enqueue returns None ---
+    rt4, upd4, _s4, _enq4, _db4 = _make_real_steer_harness(
+        tmp_path, monkeypatch, case_name="busy_steer_none", busy=True
+    )
+    rt4.enqueue_request = AsyncMock(return_value=None)
+    upd4.update_id = 93004
+    upd4.message.message_id = 15004
+    upd4.message.text = "/steer pivot now"
+    upd4.message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=6004))
+    ctx4 = SimpleNamespace(args=["pivot", "now"])
+    calls4 = 0
+
+    async def invoke4():
+        nonlocal calls4
+        calls4 += 1
+        return await runtime_control.cmd_steer(rt4, upd4, ctx4)
+
+    res4 = await execute_telegram_command_invocation(
+        rt4, upd4, command_name="steer", arguments=["pivot", "now"],
+        transport_id=93004, invoke_handler=invoke4, command_known=True,
+    )
+    assert res4["ok"] is False
+    assert res4["execution_state"] == "failed"
+    assert res4["error_code"] == "steer_continuation_enqueue_failed"
+    assert res4["transport_delivery_state"] == "delivered"
+    assert res4["result"]["status"] == "failed"
+    assert res4["result"]["interrupted"] is True
+    assert res4["result"]["old_run"]["terminal"] == "steered"
+    assert res4["result"]["new_run"]["request_id"] is None
+    assert res4["result"]["new_run"]["created"] is False
+    assert getattr(ctx4, "derived_request_id", None) is None
+    rt4.backend_manager.current_backend.shutdown.assert_awaited_once()
+    reply4_text = upd4.message.reply_text.call_args.args[0]
+    assert "interrupted active work" in reply4_text.casefold()
+    assert "could not queue the continuation" in reply4_text.casefold()
+    assert "🧭 Steered." not in reply4_text
+    rep4 = await execute_telegram_command_invocation(
+        rt4, upd4, command_name="steer", arguments=["pivot", "now"],
+        transport_id=93004, invoke_handler=invoke4, command_known=True,
+    )
+    assert rep4["replayed"] is True
+    assert rep4["ok"] is False
+    assert rep4["execution_state"] == "failed"
+    assert calls4 == 1
+    assert rt4.backend_manager.current_backend.shutdown.await_count == 1
+
+    # --- 5. Busy /focus: active turn interrupted, continuation enqueue returns None ---
+    rt5, upd5, _s5, _enq5, _db5 = _make_real_steer_harness(
+        tmp_path, monkeypatch, case_name="busy_focus_none", busy=True
+    )
+    rt5.enqueue_request = AsyncMock(return_value=None)
+    upd5.update_id = 93005
+    upd5.message.message_id = 15005
+    upd5.message.text = "/focus"
+    upd5.message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=6005))
+    calls5 = 0
+
+    async def invoke5():
+        nonlocal calls5
+        calls5 += 1
+        return await runtime_control.cmd_focus(rt5, upd5, SimpleNamespace(args=[]))
+
+    res5 = await execute_telegram_command_invocation(
+        rt5, upd5, command_name="focus", arguments=[],
+        transport_id=93005, invoke_handler=invoke5, command_known=True,
+    )
+    assert res5["ok"] is False
+    assert res5["execution_state"] == "failed"
+    assert res5["error_code"] == "focus_continuation_enqueue_failed"
+    assert res5["result"]["interrupted"] is True
+    assert res5["result"]["new_run"]["created"] is False
+    rep5 = await execute_telegram_command_invocation(
+        rt5, upd5, command_name="focus", arguments=[],
+        transport_id=93005, invoke_handler=invoke5, command_known=True,
+    )
+    assert rep5["replayed"] is True and rep5["ok"] is False and calls5 == 1
+
+    # --- 6. Busy /steer: request_id valid, Run ID temporarily unavailable -> NOT failed! ---
+    rt6, upd6, _s6, _enq6, _db6 = _make_real_steer_harness(
+        tmp_path, monkeypatch, case_name="busy_steer_no_run_yet", busy=True
+    )
+    rt6.enqueue_request = AsyncMock(return_value="req-valid-no-run-yet")
+    # Real SessionStore lookup returns nothing for a request whose Run isn't visible yet.
+    monkeypatch.setattr(
+        rt6.session_store,
+        "get_run_by_request",
+        lambda request_id, **kw: None,
+    )
+    upd6.update_id = 93006
+    upd6.message.message_id = 15006
+    upd6.message.text = "/steer continue cleanly"
+    upd6.message.reply_text = AsyncMock(return_value=SimpleNamespace(message_id=6006))
+    ctx6 = SimpleNamespace(args=["continue", "cleanly"])
+    calls6 = 0
+
+    async def invoke6():
+        nonlocal calls6
+        calls6 += 1
+        return await runtime_control.cmd_steer(rt6, upd6, ctx6)
+
+    res6 = await execute_telegram_command_invocation(
+        rt6, upd6, command_name="steer", arguments=["continue", "cleanly"],
+        transport_id=93006, invoke_handler=invoke6, command_known=True,
+    )
+    assert res6["ok"] is True
+    assert res6["execution_state"] == "completed"
+    assert res6["transport_delivery_state"] == "delivered"
+    assert res6["result"]["new_run"]["request_id"] == "req-valid-no-run-yet"
+    assert res6["result"]["new_run"]["run_id"] is None
+    assert res6["result"]["new_run"]["created"] is False
+    assert res6["result"]["status"] == "outcome_unknown"
+    assert ctx6.derived_request_id == "req-valid-no-run-yet"
+    rep6 = await execute_telegram_command_invocation(
+        rt6, upd6, command_name="steer", arguments=["continue", "cleanly"],
+        transport_id=93006, invoke_handler=invoke6, command_known=True,
+    )
+    assert rep6["replayed"] is True and rep6["ok"] is True and calls6 == 1
+
+
 # ---------------------------------------------------------------------------
 # Task 6 (PIT Stage 2): 4-Agent Real Subprocess Barrier Overlap Acceptance
 # ---------------------------------------------------------------------------

@@ -407,6 +407,16 @@ async def execute_frontend_command_invocation(
     if isinstance(handler_result, Mapping):
         res_dict = dict(handler_result)
         is_ok = bool(res_dict.get("ok", True))
+        raw_delivery = res_dict.get("reply_delivery")
+        delivery_state = str(
+            res_dict.get("transport_delivery_state")
+            or (
+                raw_delivery.get("status")
+                if isinstance(raw_delivery, Mapping)
+                else ""
+            )
+            or "not_observed"
+        )
         if not is_ok:
             error_code = str(
                 res_dict.get("error_code")
@@ -419,23 +429,13 @@ async def execute_frontend_command_invocation(
                 "execution_state": "failed",
                 "error_code": error_code,
                 "connector_id": connector_id,
-                "transport_delivery_state": "not_observed",
+                "transport_delivery_state": delivery_state,
                 "result": res_dict,
             }
             error_message = str(res_dict.get("error_message") or "").strip()
             if error_message:
                 response["error_message"] = error_message
         else:
-            raw_delivery = res_dict.get("reply_delivery")
-            delivery_state = str(
-                res_dict.get("transport_delivery_state")
-                or (
-                    raw_delivery.get("status")
-                    if isinstance(raw_delivery, Mapping)
-                    else ""
-                )
-                or "not_observed"
-            )
             response = {
                 "ok": True,
                 "command": normalized_cmd,
