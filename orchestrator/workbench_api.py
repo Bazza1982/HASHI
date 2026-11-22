@@ -15600,6 +15600,55 @@ class WorkbenchApiServer:
         )
         if callable(activity):
             payload["function_worker_activity"] = activity()
+        from orchestrator import frontend_database
+
+        host_resource_health = frontend_database.database_work_health_snapshot()
+        worker_resource_health: dict[str, Any] = {}
+        aggregated_resource_alerts: list[dict[str, Any]] = [
+            dict(alert) for alert in host_resource_health.get("alerts", ())
+        ]
+        for runtime in self._runtime_list():
+            if not getattr(runtime, "is_function_worker_proxy", False):
+                continue
+            worker_rh = (getattr(runtime, "metadata", {}) or {}).get("resource_health")
+            if isinstance(worker_rh, dict):
+                worker_resource_health[runtime.name] = worker_rh
+                for alert in worker_rh.get("alerts") or ():
+                    if isinstance(alert, dict):
+                        entry = dict(alert)
+                        entry.setdefault("agent", runtime.name)
+                        aggregated_resource_alerts.append(entry)
+        payload["resource_health"] = {
+            "host": host_resource_health,
+            "workers": worker_resource_health,
+            "alerts": aggregated_resource_alerts,
+            "alert_count": len(aggregated_resource_alerts),
+        }
+        if aggregated_resource_alerts:
+            existing_issue_keys = {
+                (issue.get("code"), issue.get("operation"), issue.get("agent"))
+                for issue in payload["issues"]
+                if isinstance(issue, dict)
+            }
+            for alert in aggregated_resource_alerts:
+                key = (alert.get("code"), alert.get("operation"), alert.get("agent"))
+                if key in existing_issue_keys:
+                    continue
+                existing_issue_keys.add(key)
+                payload["issues"].append(
+                    {
+                        "code": str(alert.get("code") or "resource_alert"),
+                        "component": str(alert.get("component") or "database"),
+                        "severity": str(alert.get("severity") or "warning"),
+                        "operation": alert.get("operation"),
+                        "agent": alert.get("agent"),
+                        "summary": str(alert.get("summary") or "Abnormal resource usage detected."),
+                        "details": dict(alert.get("details") or {}),
+                    }
+                )
+            payload["degraded"] = True
+            if payload.get("status") == "ready":
+                payload["status"] = "degraded"
         capability_broker = getattr(orchestrator, "capability_broker", None)
         payload["device_capabilities"] = (
             capability_broker.status()

@@ -376,6 +376,8 @@ async def test_busy_scan_backs_off_without_treating_busy_as_a_transport_retry(tm
             with pytest.raises(sqlite3.OperationalError) as raised:
                 c.execute("BEGIN IMMEDIATE")
     runtime = SimpleNamespace(is_shutting_down=False,
+                              telegram_connected=True,
+                              app=SimpleNamespace(bot=object()),
                               global_config=SimpleNamespace(instance_id="TEST"),
                               logger=logging.getLogger("test.busy-scan"))
     attempts, delays = [], []

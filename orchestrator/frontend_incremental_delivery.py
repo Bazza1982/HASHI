@@ -4,13 +4,56 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from typing import Any
 
-from orchestrator.frontend_database import DatabaseWorkBusy, is_sqlite_busy, run_database_work
+from orchestrator.frontend_database import (
+    DatabaseWorkBusy,
+    is_sqlite_busy,
+    record_loop_zero_progress,
+    run_database_work,
+)
 from orchestrator.frontend_connector_registry import endpoint_id_for
 from orchestrator.frontend_delivery import route_destination
 from orchestrator.runtime_delivery import dispatch_claimed_telegram_event
 from orchestrator.runtime_session import ensure_store
+
+IDLE_SWEEP_BASE_SECONDS = 2.0
+IDLE_SWEEP_MAX_SECONDS = 60.0
+ACTIVE_RUN_SWEEP_SECONDS = 2.0
+
+
+def _telegram_outbound_ready(runtime: Any) -> bool:
+    return bool(
+        runtime is not None
+        and getattr(runtime, "telegram_connected", False)
+        and getattr(getattr(runtime, "app", None), "bot", None) is not None
+    )
+
+
+def _runtime_has_active_run(runtime: Any) -> bool:
+    return bool(
+        getattr(runtime, "is_generating", False)
+        or getattr(runtime, "is_processing", False)
+        or getattr(runtime, "current_request_meta", None) is not None
+    )
+
+
+def _get_wake_event(runtime: Any) -> asyncio.Event:
+    event = getattr(runtime, "_incremental_telegram_wake_event", None)
+    if not isinstance(event, asyncio.Event):
+        event = asyncio.Event()
+        runtime._incremental_telegram_wake_event = event
+    return event
+
+
+def notify_incremental_telegram_delivery(runtime: Any) -> None:
+    """Wake the incremental Telegram delivery loop immediately (non-blocking)."""
+    if runtime is None:
+        return
+    event = getattr(runtime, "_incremental_telegram_wake_event", None)
+    if isinstance(event, asyncio.Event):
+        event.set()
 
 
 async def dispatch_incremental_telegram_event(
@@ -124,16 +167,54 @@ async def dispatch_pending_telegram_deliverables(
 
 
 async def incremental_telegram_delivery_loop(runtime: Any) -> None:
+    wake_event = _get_wake_event(runtime)
     busy_count = 0
+    idle_streak = 0
     while not getattr(runtime, "is_shutting_down", False):
-        delay = 2.0
-        try:
-            await dispatch_pending_telegram_deliverables(runtime)
+        # Complete Telegram outbound decoupling: disconnected or local-mode
+        # workers must sleep on the wake event with zero SQLite polling.
+        if not _telegram_outbound_ready(runtime):
+            wake_event.clear()
+            if getattr(runtime, "is_shutting_down", False) or _telegram_outbound_ready(runtime):
+                continue
+            await wake_event.wait()
+            wake_event.clear()
             busy_count = 0
+            idle_streak = 0
+            continue
+
+        wake_event.clear()
+        delay = IDLE_SWEEP_BASE_SECONDS
+        busy_backoff = False
+        try:
+            started = time.monotonic()
+            dispatched = int(await dispatch_pending_telegram_deliverables(runtime) or 0)
+            elapsed = time.monotonic() - started
+            record_loop_zero_progress(
+                operation="telegram.scan",
+                instance=str(getattr(runtime.global_config, "instance_id", "unknown")),
+                role="worker",
+                duration_s=elapsed,
+                items_processed=dispatched,
+            )
+            busy_count = 0
+            if dispatched > 0:
+                idle_streak = 0
+                delay = IDLE_SWEEP_BASE_SECONDS
+            elif _runtime_has_active_run(runtime):
+                idle_streak = 0
+                delay = ACTIVE_RUN_SWEEP_SECONDS
+            else:
+                delay = min(
+                    IDLE_SWEEP_MAX_SECONDS,
+                    IDLE_SWEEP_BASE_SECONDS * (2 ** idle_streak),
+                )
+                idle_streak = min(idle_streak + 1, 5)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if isinstance(exc, DatabaseWorkBusy) or is_sqlite_busy(exc):
+                busy_backoff = True
                 busy_count = min(busy_count + 1, 4)
                 delay = random.uniform(2.0, min(30.0, 2.0 * (2 ** busy_count)))
                 runtime.logger.warning(
@@ -143,11 +224,26 @@ async def incremental_telegram_delivery_loop(runtime: Any) -> None:
             else:
                 runtime.logger.exception(
                     "Incremental Telegram FC sweep failed: %s", exc)
-        # Retry discovery after bounded jitter, never a transport effect or answer.
-        await asyncio.sleep(delay)
+        if getattr(runtime, "is_shutting_down", False):
+            break
+        if busy_backoff:
+            # Retry discovery after bounded jitter, never a transport effect or answer.
+            await asyncio.sleep(delay)
+            continue
+        if wake_event.is_set():
+            wake_event.clear()
+            idle_streak = 0
+            continue
+        try:
+            await asyncio.wait_for(wake_event.wait(), timeout=delay)
+            wake_event.clear()
+            idle_streak = 0
+        except asyncio.TimeoutError:
+            pass
 
 
 def start_incremental_telegram_delivery(runtime: Any) -> None:
+    _get_wake_event(runtime)
     task = getattr(runtime, "_incremental_telegram_delivery_task", None)
     if isinstance(task, asyncio.Task) and not task.done():
         return

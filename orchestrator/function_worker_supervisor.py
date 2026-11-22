@@ -547,8 +547,15 @@ class FunctionWorkerClient:
         await self.supervisor.handle_worker_event(self, event, payload)
 
     async def _monitor_process(self) -> None:
+        peer_closed = getattr(getattr(self, "peer", None), "_closed", None)
         while self.process.is_alive() and not self.closed:
-            await asyncio.sleep(0.2)
+            if isinstance(peer_closed, asyncio.Event) and not peer_closed.is_set():
+                try:
+                    await asyncio.wait_for(peer_closed.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    continue
+            else:
+                await asyncio.sleep(2.0)
         try:
             await asyncio.to_thread(self.process.join, 0.2)
         except (AssertionError, RuntimeError):

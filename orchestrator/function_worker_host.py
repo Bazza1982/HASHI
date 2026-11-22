@@ -1058,6 +1058,7 @@ class FunctionWorkerHost:
                 "worker_phase": self.phase,
                 "worker_accepting": self.accepting,
                 "worker_started_at": self.started_at,
+                "resource_health": self._resource_health_snapshot(),
                 "worker_adopted_at": self.adopted_at,
                 "generation_id": self.manifest.generation_id,
                 "generation_module_count": len(self.manifest.entries),
@@ -1194,6 +1195,12 @@ class FunctionWorkerHost:
             await asyncio.wait_for(bot.shutdown(), timeout=5)
         self._telegram_cleanup_required = False
 
+    @staticmethod
+    def _resource_health_snapshot() -> dict[str, Any]:
+        from orchestrator.frontend_database import database_work_health_snapshot
+
+        return database_work_health_snapshot()
+
     async def _prepare_telegram_application(self) -> bool:
         """Validate and start handlers; Core alone owns long polling."""
 
@@ -1212,9 +1219,13 @@ class FunctionWorkerHost:
                 # actual successful API request, not a cached Bot identity.
                 await runtime.app.bot.get_me()
             from orchestrator.telegram_freshness_gate import restore_telegram_confirmation_state
+            from orchestrator.frontend_incremental_delivery import (
+                notify_incremental_telegram_delivery,
+            )
 
             await restore_telegram_confirmation_state(runtime)
             runtime.telegram_connected = True
+            notify_incremental_telegram_delivery(runtime)
             self.command_menu_task = asyncio.create_task(
                 self._sync_telegram_command_menus(runtime),
                 name=f"telegram-command-menu:{self.agent_name}",
@@ -1396,6 +1407,11 @@ class FunctionWorkerHost:
         runtime._persona_background_status_paused = False
         if self.was_telegram_connected:
             runtime.telegram_connected = True
+            from orchestrator.frontend_incremental_delivery import (
+                notify_incremental_telegram_delivery,
+            )
+
+            notify_incremental_telegram_delivery(runtime)
         self.accepting = True
         self.phase = "ACTIVE"
         if getattr(self, "connector_owner", False):
