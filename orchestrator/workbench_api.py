@@ -478,7 +478,10 @@ class WorkbenchApiServer:
             self._event_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._event_loop = None
+        self._frontend_event_subscribers: set[tuple[asyncio.Queue, str | None, str | None]] = set()
+        self._frontend_event_seq: int = 0
         self._bind_session_store_telegram_wakeup()
+        self._bind_session_store_frontend_events()
         self.ingress_confirmation = IngressConfirmationService(self.session_store)
         self.reconciled_session_runs = []
         self._reconcile_session_runs = bool(reconcile_session_runs)
@@ -549,6 +552,11 @@ class WorkbenchApiServer:
 
         self.app = web.Application(client_max_size=64 * 1024 * 1024,
                                    middlewares=[runtime_admission])
+
+        async def _close_sse_on_shutdown(_app):
+            self.close_frontend_event_streams()
+
+        self.app.on_shutdown.append(_close_sse_on_shutdown)
         from orchestrator.desktop_api import register_desktop_api
         register_desktop_api(self)
         from orchestrator.agent_presence_control_api import register_agentpresence_controls
@@ -929,6 +937,11 @@ class WorkbenchApiServer:
                 "GET",
                 "/api/v2/frontend/sessions/{session_id}/feed",
                 self.handle_v2_frontend_feed,
+            ),
+            (
+                "GET",
+                "/api/v2/frontend/events/stream",
+                self.handle_v2_frontend_events_stream,
             ),
             (
                 "POST",
@@ -2420,6 +2433,151 @@ class WorkbenchApiServer:
             if str(getattr(runtime, "name", "") or "").strip().lower() == target:
                 notify_incremental_telegram_delivery(runtime)
                 return
+
+    def _bind_session_store_frontend_events(self) -> None:
+        register = getattr(
+            self.session_store, "register_session_change_listener", None
+        )
+        if not callable(register):
+            return
+
+        def _on_committed_session_change(
+            agent_id: str, session_id: str, kind: str, run_id: str | None
+        ) -> None:
+            loop = self._event_loop
+            if loop is None or loop.is_closed():
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._event_loop = loop
+                except RuntimeError:
+                    loop = None
+            if loop is not None and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(
+                        self.publish_frontend_session_event,
+                        agent_id,
+                        session_id,
+                        kind,
+                        run_id,
+                    )
+                    return
+                except RuntimeError:
+                    pass
+            self.publish_frontend_session_event(
+                agent_id, session_id, kind, run_id
+            )
+
+        register(_on_committed_session_change)
+        self._frontend_session_store_listener = _on_committed_session_change
+
+    def publish_frontend_session_event(
+        self,
+        agent_id: str,
+        session_id: str,
+        kind: str,
+        run_id: str | None = None,
+    ) -> None:
+        """Broadcast a lightweight post-commit change signal to active SSE clients."""
+        if not self._frontend_event_subscribers:
+            return
+        self._frontend_event_seq += 1
+        norm_agent = str(agent_id or "").strip().lower()
+        norm_session = str(session_id or "").strip()
+        payload = {
+            "seq": self._frontend_event_seq,
+            "agent_id": norm_agent,
+            "session_id": norm_session,
+            "kind": str(kind or ""),
+            "run_id": str(run_id) if run_id else None,
+            "ts": round(time.time(), 3),
+        }
+        for queue, filter_session, filter_agent in tuple(
+            self._frontend_event_subscribers
+        ):
+            if filter_session and norm_session and filter_session != norm_session:
+                continue
+            if filter_agent and norm_agent and filter_agent != norm_agent:
+                continue
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+
+    def close_frontend_event_streams(self) -> None:
+        for queue, _fs, _fa in tuple(self._frontend_event_subscribers):
+            while queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    async def handle_v2_frontend_events_stream(self, request):
+        """Read-only SSE change notification stream (zero DB polling)."""
+        owner = self._v1_owner_id(request)
+        if owner is None:
+            return self._v1_error(ValueError("not authenticated"), status=401)
+        if self._event_loop is None:
+            self._event_loop = asyncio.get_running_loop()
+
+        filter_session = str(request.query.get("session_id") or "").strip() or None
+        filter_agent = str(request.query.get("agent") or "").strip().lower() or None
+        keepalive_s = max(
+            1.0,
+            min(60.0, float(request.query.get("keepalive_s") or 25.0)),
+        )
+
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-store",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        sub = (queue, filter_session, filter_agent)
+        self._frontend_event_subscribers.add(sub)
+        try:
+            ready_frame = (
+                "event: ready\n"
+                f"data: {json.dumps({'ok': True, 'instance_id': getattr(self.global_config, 'instance_id', 'HASHI'), 'seq': self._frontend_event_seq}, separators=(',', ':'))}\n\n"
+            )
+            await response.write(ready_frame.encode("utf-8"))
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=keepalive_s)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
+                    continue
+                if event is None:
+                    break
+                frame = (
+                    f"id: {event['seq']}\n"
+                    "event: change\n"
+                    f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+                )
+                await response.write(frame.encode("utf-8"))
+        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+            pass
+        finally:
+            self._frontend_event_subscribers.discard(sub)
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+        return response
 
     async def start(self):
         self._event_loop = asyncio.get_running_loop()
@@ -15597,6 +15755,7 @@ class WorkbenchApiServer:
             "capabilities": [
                 "message_freshness_v1",
                 "hchat_delivery_status_v1",
+                "frontend_events_sse_v1",
             ],
             "instance_id": getattr(self.global_config, "instance_id", None)
             or getattr(orchestrator, "instance_id", None)

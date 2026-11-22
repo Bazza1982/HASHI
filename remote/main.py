@@ -25,6 +25,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -45,7 +46,12 @@ from orchestrator.stable_port_allocator import (
     PortAllocationError,
     StablePortAllocator,
 )
-from remote.api.server import create_app
+from remote.api.server import (
+    create_app,
+    peek_hashi_liveness_snapshot,
+    refresh_hashi_liveness,
+    set_hashi_liveness_listener,
+)
 from remote.api.lan_readiness import LanReadinessCache
 from remote.exchange_transport import ExchangeTransport
 from remote.live_endpoints import remove_live_endpoint, write_live_endpoint
@@ -74,6 +80,7 @@ from remote.terminal.executor import AuthLevel, TerminalExecutor
 logger = logging.getLogger(__name__)
 
 DISCOVERY_MAINTENANCE_SECONDS = 30.0
+HASHI_LIVENESS_PROBE_SECONDS = 5.0
 REMOTE_LOG_MAX_BYTES = 16 * 1024 * 1024
 REMOTE_LOG_BACKUP_COUNT = 3
 REMOTE_LOG_MAX_RECORD_BYTES = 256 * 1024
@@ -433,7 +440,9 @@ class HashiRemoteApplication:
         self._protocol_manager: Optional[ProtocolManager] = None
         self._exchange_transport: Optional[ExchangeTransport] = None
         self._advertisement_task: Optional[asyncio.Task] = None
+        self._liveness_wake_event: Optional[asyncio.Event] = None
         self._last_advertised_agent_snapshot = ""
+        self._last_advertised_hashi_state = ""
         self._advertised_snapshot_by_backend: dict[int, str] = {}
         self._instance_id = ""
         self._last_loaded_shared_token: str | None = None
@@ -551,8 +560,14 @@ class HashiRemoteApplication:
         workbench_port: int,
         local_capabilities: list[str],
         agent_directory: dict | None = None,
+        hashi_state: str | None = None,
     ) -> PeerInfo:
         directory = dict(agent_directory or {})
+        resolved_hashi_state = str(
+            hashi_state
+            if hashi_state is not None
+            else (peek_hashi_liveness_snapshot().get("hashi_state") or "unknown")
+        ).strip().lower() or "unknown"
         peer = PeerInfo(
             instance_id=instance_id,
             display_name=instance_info["display_name"],
@@ -567,6 +582,8 @@ class HashiRemoteApplication:
             properties={
                 "agent_snapshot_version": str(directory.get("version") or ""),
                 "directory_state": str(directory.get("directory_state") or ""),
+                "hashi_state": resolved_hashi_state,
+                "can_start_hashi": bool(self._control_hashi_root),
             },
         )
         profile = build_local_network_profile(peer)
@@ -695,6 +712,10 @@ class HashiRemoteApplication:
             "source": "flag_or_env" if self._supervised else "hashi_child_or_manual",
         }
 
+        # Create FastAPI app first so local workbench port / control root are initialized
+        # before initial liveness probing and mDNS advertisement.
+        lan_readiness_cache = LanReadinessCache(self._hashi_root, instance_id)
+
         # Peer registry + discovery
         self._registry = PeerRegistry(self._hashi_root, instance_id)
         self._discoveries = []
@@ -720,22 +741,6 @@ class HashiRemoteApplication:
                 )
             )
 
-        peer_self = self._build_self_peer(
-            instance_info=instance_info,
-            instance_id=instance_id,
-            workbench_port=workbench_port,
-            local_capabilities=local_capabilities,
-        )
-        write_live_endpoint(self._hashi_root, peer_self)
-
-        # Start discovery/advertising
-        for discovery in self._discoveries:
-            ok = await discovery.advertise(peer_self)
-            if ok:
-                logger.info("%s: advertising as %s", discovery.backend_name, instance_id)
-            else:
-                logger.warning("%s: failed to start discovery/advertising", discovery.backend_name)
-
         instance_info["remote_port"] = self._port
         self._protocol_manager = ProtocolManager(
             hashi_root=self._hashi_root,
@@ -751,6 +756,56 @@ class HashiRemoteApplication:
             token_snapshot.error,
         )
         await self._protocol_manager.start()
+
+        app = create_app(
+            instance_info=instance_info,
+            pairing_manager=pairing_manager,
+            terminal_executor=terminal_executor,
+            peer_registry=self._registry,
+            protocol_manager=self._protocol_manager,
+            exchange_transport=None,
+            lan_readiness_cache=lan_readiness_cache,
+            workbench_port=workbench_port,
+            hashi_root=str(self._hashi_root),
+            control_hashi_root=str(self._control_hashi_root),
+            control_code_root=str(self._control_code_root),
+        )
+
+        # Perform one initial local HASHI liveness probe so initial mDNS TXT and /health
+        # immediately reflect whether local HASHI is active, starting, or inactive.
+        initial_liveness = await asyncio.to_thread(refresh_hashi_liveness, timeout=0.8)
+
+        loop = asyncio.get_running_loop()
+        self._liveness_wake_event = asyncio.Event()
+
+        def _on_hashi_liveness_changed(_snapshot: dict) -> None:
+            wake_event = self._liveness_wake_event
+            if wake_event is None:
+                return
+            try:
+                loop.call_soon_threadsafe(wake_event.set)
+            except RuntimeError:
+                pass
+
+        set_hashi_liveness_listener(_on_hashi_liveness_changed)
+
+        peer_self = self._build_self_peer(
+            instance_info=instance_info,
+            instance_id=instance_id,
+            workbench_port=workbench_port,
+            local_capabilities=local_capabilities,
+            hashi_state=str(initial_liveness.get("hashi_state") or "unknown"),
+        )
+        write_live_endpoint(self._hashi_root, peer_self)
+
+        # Start discovery/advertising
+        for discovery in self._discoveries:
+            ok = await discovery.advertise(peer_self)
+            if ok:
+                logger.info("%s: advertising as %s (hashi_state=%s)", discovery.backend_name, instance_id, peer_self.properties.get("hashi_state"))
+            else:
+                logger.warning("%s: failed to start discovery/advertising", discovery.backend_name)
+
         try:
             from orchestrator.exchange_config import load_exchange_config
 
@@ -762,6 +817,8 @@ class HashiRemoteApplication:
                     workbench_port=workbench_port,
                 )
                 await self._exchange_transport.start()
+                import remote.api.server as _remote_api_server
+                _remote_api_server._exchange_transport = self._exchange_transport
                 logger.info("Exchange transport: enabled (outbound WSS)")
             else:
                 logger.info("Exchange transport: disabled")
@@ -778,25 +835,6 @@ class HashiRemoteApplication:
                 workbench_port=workbench_port,
                 local_capabilities=local_capabilities,
             )
-        )
-
-        # Lan-readiness snapshot cache: updated only by explicit local doctor /
-        # repair reports. /health remains a pure in-memory read.
-        lan_readiness_cache = LanReadinessCache(self._hashi_root, instance_id)
-
-        # Create FastAPI app
-        app = create_app(
-            instance_info=instance_info,
-            pairing_manager=pairing_manager,
-            terminal_executor=terminal_executor,
-            peer_registry=self._registry,
-            protocol_manager=self._protocol_manager,
-            exchange_transport=self._exchange_transport,
-            lan_readiness_cache=lan_readiness_cache,
-            workbench_port=workbench_port,
-            hashi_root=str(self._hashi_root),
-            control_hashi_root=str(self._control_hashi_root),
-            control_code_root=str(self._control_code_root),
         )
 
         # TLS
@@ -839,18 +877,39 @@ class HashiRemoteApplication:
         workbench_port: int,
         local_capabilities: list[str],
     ) -> None:
+        wake_event = self._liveness_wake_event
+        if wake_event is None:
+            wake_event = asyncio.Event()
+            self._liveness_wake_event = wake_event
+        last_maintenance_at = 0.0
         while not self._shutdown_event.is_set():
-            self._discovery_activity["maintenance_cycles"] += 1
+            now = time.monotonic()
+            liveness_changed = wake_event.is_set()
+            if liveness_changed:
+                wake_event.clear()
+            if liveness_changed or last_maintenance_at == 0.0 or (now - last_maintenance_at) >= DISCOVERY_MAINTENANCE_SECONDS:
+                self._discovery_activity["maintenance_cycles"] += 1
+                try:
+                    await self._maintain_discovery_once(
+                        instance_info=instance_info,
+                        instance_id=instance_id,
+                        workbench_port=workbench_port,
+                        local_capabilities=local_capabilities,
+                    )
+                except Exception as exc:
+                    logger.warning("Discovery maintenance failed: %s", exc)
+                last_maintenance_at = time.monotonic()
+            wait_seconds = min(
+                float(HASHI_LIVENESS_PROBE_SECONDS),
+                max(0.2, float(DISCOVERY_MAINTENANCE_SECONDS) - (time.monotonic() - last_maintenance_at)),
+            )
             try:
-                await self._maintain_discovery_once(
-                    instance_info=instance_info,
-                    instance_id=instance_id,
-                    workbench_port=workbench_port,
-                    local_capabilities=local_capabilities,
-                )
-            except Exception as exc:
-                logger.warning("Discovery maintenance failed: %s", exc)
-            await asyncio.sleep(DISCOVERY_MAINTENANCE_SECONDS)
+                await asyncio.wait_for(wake_event.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                try:
+                    await asyncio.to_thread(refresh_hashi_liveness, timeout=0.8)
+                except Exception as exc:
+                    logger.debug("Periodic HASHI liveness probe failed: %s", exc)
 
     async def _maintain_discovery_once(
         self,
@@ -901,14 +960,24 @@ class HashiRemoteApplication:
         )
         version = str(directory.get("version") or "")
         directory_state = str(directory.get("directory_state") or "")
-        advertisement_key = f"{version}:{directory_state}"
-        should_refresh = advertisement_key != self._last_advertised_agent_snapshot
+        hashi_state = str(peek_hashi_liveness_snapshot().get("hashi_state") or "unknown")
+        agent_snapshot_key = f"{version}:{directory_state}"
+        advertisement_key = (
+            agent_snapshot_key
+            if hashi_state == "unknown"
+            else f"{agent_snapshot_key}:{hashi_state}"
+        )
+        should_refresh = (
+            agent_snapshot_key != self._last_advertised_agent_snapshot
+            or (hashi_state != "unknown" and hashi_state != self._last_advertised_hashi_state)
+        )
         peer_self = self._build_self_peer(
             instance_info=instance_info,
             instance_id=instance_id,
             workbench_port=workbench_port,
             local_capabilities=local_capabilities,
             agent_directory=directory,
+            hashi_state=hashi_state,
         )
 
         results: list[tuple[str, bool, bool]] = []
@@ -958,8 +1027,14 @@ class HashiRemoteApplication:
         refreshed = bool(should_refresh and all_backends_current)
         if refreshed:
             write_live_endpoint(self._hashi_root, peer_self)
-            self._last_advertised_agent_snapshot = advertisement_key
-            logger.info("Advertisement refreshed with agent snapshot %s", version or "none")
+            self._last_advertised_agent_snapshot = agent_snapshot_key
+            if hashi_state != "unknown":
+                self._last_advertised_hashi_state = hashi_state
+            logger.info(
+                "Advertisement refreshed with agent snapshot %s (hashi_state=%s)",
+                version or "none",
+                hashi_state,
+            )
         elif should_refresh and attempted_failures:
             logger.warning(
                 "Advertisement refresh remains pending; failed backends: %s",
@@ -993,6 +1068,7 @@ class HashiRemoteApplication:
         if self._shutdown_event.is_set():
             return
         self._shutdown_event.set()
+        set_hashi_liveness_listener(None)
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
         loop = None

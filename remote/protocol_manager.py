@@ -4042,7 +4042,12 @@ class ProtocolManager:
         data["resolved_route_port"] = route_port
         data["display_network_host"] = self._display_network_host(entry, peer)
         data["same_host"] = same_host
-        data["route_kind"] = "same_host" if same_host else str((peer.properties or {}).get("preferred_backend") or (peer.properties or {}).get("discovery") or "unknown")
+        props = dict(peer.properties or {})
+        hashi_state = str(props.get("hashi_state") or "unknown").strip().lower() or "unknown"
+        data["hashi_status"] = hashi_state
+        data["hashi_running"] = hashi_state == "active"
+        data["can_start_hashi"] = bool(props.get("can_start_hashi"))
+        data["route_kind"] = "same_host" if same_host else str(props.get("preferred_backend") or props.get("discovery") or "unknown")
         return data
 
     def _save_inflight(self) -> None:
