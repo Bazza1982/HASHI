@@ -49,11 +49,19 @@ async def test_failed_multi_quota_pass_releases_partial_slots_and_cancellation_r
 @pytest.mark.asyncio
 async def test_file_tools_wait_for_shell_scope_but_independent_files_can_overlap(tmp_path):
     registry=SimpleNamespace(workspace_dir=tmp_path,access_roots=[tmp_path],_effective_audit_context=lambda:{})
+    # Opaque shell must not hold a directory-wide lock blocking unrelated file edits.
+    async with tool_resource(registry,'shell',{'command':'pytest -q'}):
+        async with tool_resource(registry,'file_write',{'path':'one.txt'}):
+            pass
+    # Explicit shell redirection coordinates on the concrete target file while
+    # leaving sibling files in the same workspace concurrent.
     entered=asyncio.Event()
     async def write():
         async with tool_resource(registry,'file_write',{'path':'one.txt'}):entered.set()
-    async with tool_resource(registry,'shell',{'command':'arbitrary mutation'}):
+    async with tool_resource(registry,'shell',{'command':'echo hi > one.txt'}):
         task=asyncio.create_task(write())
+        async with tool_resource(registry,'file_write',{'path':'two.txt'}):
+            pass
         await asyncio.sleep(.08)
         assert not entered.is_set()
     await asyncio.wait_for(task,1)
@@ -70,11 +78,13 @@ async def test_parent_workspace_mutation_blocks_a_nested_worker_without_shared_r
     nested.mkdir()
     outer = SimpleNamespace(workspace_dir=tmp_path,access_roots=[],_effective_audit_context=lambda:{'global_config':SimpleNamespace(bridge_home=tmp_path)})
     inner = SimpleNamespace(workspace_dir=nested,access_roots=[],_effective_audit_context=outer._effective_audit_context)
+    # Explicit parent subtree mutation (file_manage move) or literal shell redirect
+    # targeting nested/same.txt blocks the nested worker on same.txt.
     entered = asyncio.Event()
     async def write():
         async with tool_resource(inner,'file_write',{'path':'same.txt'}):
             entered.set()
-    async with tool_resource(outer,'shell',{}):
+    async with tool_resource(outer,'shell',{'command':'echo hi > nested/same.txt'}):
         task = asyncio.create_task(write())
         await asyncio.sleep(.08)
         assert not entered.is_set()

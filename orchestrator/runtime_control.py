@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import re
 import time
@@ -903,18 +904,29 @@ def _user_is_authorized(runtime: Any, update: Any) -> bool:
     return user_id == authorized_id
 
 
-async def _reply(runtime: Any, update: Any, text: str) -> None:
+_REPLY_DELIVERY_SINK: contextvars.ContextVar[list[dict[str, Any]] | None] = (
+    contextvars.ContextVar("hashi_reply_delivery_sink", default=None)
+)
+
+
+def record_reply_delivery_outcome(outcome: dict[str, Any]) -> None:
+    """Record the truthful outcome of a transport reply for the active task."""
+    sink = _REPLY_DELIVERY_SINK.get()
+    if sink is not None:
+        sink.append(dict(outcome))
+
+
+async def _reply(runtime: Any, update: Any, text: str) -> Any:
     if hasattr(runtime, "_reply_text"):
-        await runtime._reply_text(update, text)
-        return
+        return await runtime._reply_text(update, text)
     message = getattr(update, "effective_message", None) or getattr(update, "message", None)
     if message is not None and hasattr(message, "reply_text"):
-        await message.reply_text(text)
-        return
+        return await message.reply_text(text)
     chat = getattr(update, "effective_chat", None)
     chat_id = getattr(chat, "id", None)
     if chat_id is not None and hasattr(runtime, "send_long_message"):
-        await runtime.send_long_message(chat_id, text, purpose="steer-command")
+        return await runtime.send_long_message(chat_id, text, purpose="steer-command")
+    return None
 
 
 async def _deliver_post_effect_reply(
@@ -927,58 +939,91 @@ async def _deliver_post_effect_reply(
     """Deliver a confirmation reply after a command's side effects already committed.
 
     Reply persistence/delivery errors (such as a transport-reference
-    ``SessionConflict`` after Telegram already sent the message) must be
-    recorded as an independent delivery status instead of failing the
-    already-executed command or leaving its admission ticket in
-    ``outcome_unknown``.
+    ``SessionConflict`` after Telegram already sent the message, or suppressed /
+    rate-limited / failed replies) are recorded truthfully as an independent
+    delivery status instead of failing the already-executed command, leaving its
+    admission ticket in ``outcome_unknown``, or fabricating ``delivered=True``
+    when the underlying reply path returned ``None``.
     """
     from orchestrator.session_store import SessionConflict
+    from orchestrator.telegram_delivery_errors import telegram_request_not_submitted
 
     logger = getattr(runtime, "logger", None)
+    sink: list[dict[str, Any]] = []
+    token = _REPLY_DELIVERY_SINK.set(sink)
     try:
-        await _reply(runtime, update, text)
+        sent = await _reply(runtime, update, text)
     except SessionConflict as exc:
-        sent_ok = getattr(exc, "sent_message", None) is not None
-        delivery_state = str(
-            getattr(exc, "delivery_state", None)
-            or ("sent_reference_conflict" if sent_ok else "reference_conflict")
-        )
-        transport_message_id = getattr(exc, "transport_message_id", None)
+        if sink:
+            observed = dict(sink[-1])
+        else:
+            sent_ok = getattr(exc, "sent_message", None) is not None
+            delivery_state = str(
+                getattr(exc, "delivery_state", None)
+                or ("sent_reference_conflict" if sent_ok else "reference_conflict")
+            )
+            transport_message_id = getattr(exc, "transport_message_id", None)
+            observed = {
+                "status": delivery_state,
+                "sent": sent_ok,
+                "transport_message_id": (
+                    str(transport_message_id) if transport_message_id is not None else None
+                ),
+                "error_code": "telegram_transport_reference_conflict",
+                "error": str(exc),
+            }
         if logger is not None:
             logger.warning(
                 "Post-effect /%s reply hit transport reference conflict "
                 "(sent=%s, transport_message_id=%s): %s",
                 command_name,
-                sent_ok,
-                transport_message_id,
+                observed.get("sent"),
+                observed.get("transport_message_id"),
                 exc,
             )
-        return {
-            "status": delivery_state,
-            "sent": sent_ok,
-            "transport_message_id": (
-                str(transport_message_id) if transport_message_id is not None else None
-            ),
-            "error_code": "telegram_transport_reference_conflict",
-            "error": str(exc),
-        }
+        return observed
     except Exception as exc:
+        if sink:
+            observed = dict(sink[-1])
+        else:
+            not_submitted = telegram_request_not_submitted(exc)
+            observed = {
+                "status": "delivery_failed" if not_submitted else "outcome_unknown",
+                "sent": False if not_submitted else None,
+                "transport_message_id": None,
+                "error_code": type(exc).__name__,
+                "error": str(exc),
+            }
         if logger is not None:
             logger.warning(
-                "Post-effect /%s reply delivery failed after command execution: %s",
+                "Post-effect /%s reply delivery did not confirm delivery after command "
+                "execution (status=%s): %s",
                 command_name,
+                observed.get("status"),
                 exc,
             )
+        return observed
+    finally:
+        _REPLY_DELIVERY_SINK.reset(token)
+
+    if sink:
+        return dict(sink[-1])
+    if sent is not None:
+        msg_id = (
+            getattr(sent, "_hashi_transport_message_id", None)
+            or getattr(sent, "message_id", None)
+        )
         return {
-            "status": "delivery_failed",
-            "sent": False,
-            "transport_message_id": None,
-            "error_code": type(exc).__name__,
-            "error": str(exc),
+            "status": "delivered",
+            "sent": True,
+            "transport_message_id": (
+                str(msg_id) if isinstance(msg_id, (int, str)) else None
+            ),
+            "error_code": None,
         }
     return {
-        "status": "delivered",
-        "sent": True,
+        "status": "not_observed",
+        "sent": None,
         "transport_message_id": None,
         "error_code": None,
     }
@@ -1099,14 +1144,12 @@ async def cmd_steer(
             f"{f' ({request_id})' if request_id else ''} (no steer wrapper).",
             command_name=command_name,
         )
-        if delivery["status"] != "delivered":
-            return {
-                "ok": True,
-                "request_id": request_id,
-                "reply_delivery": delivery,
-                "transport_delivery_state": delivery["status"],
-            }
-        return
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "reply_delivery": delivery,
+            "transport_delivery_state": delivery["status"],
+        }
 
     if not busy:
         if not original_prompt:
@@ -1132,14 +1175,12 @@ async def cmd_steer(
             f"{f' ({request_id})' if request_id else ''}.",
             command_name=command_name,
         )
-        if delivery["status"] != "delivered":
-            return {
-                "ok": True,
-                "request_id": request_id,
-                "reply_delivery": delivery,
-                "transport_delivery_state": delivery["status"],
-            }
-        return
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "reply_delivery": delivery,
+            "transport_delivery_state": delivery["status"],
+        }
 
     native_evidence = None
     if not focus_mode:

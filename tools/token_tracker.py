@@ -615,7 +615,7 @@ def _add(acc: dict, record: dict) -> None:
                 acc.get("known_cost_requests") or 0
             ) + 1
         unknown_delta = (
-            max(1, int(raw_unknown_calls))
+            max(0, int(raw_unknown_calls))
             if raw_unknown_calls is not None
             else 1
         )
@@ -631,13 +631,17 @@ def _add(acc: dict, record: dict) -> None:
             float(acc.get("known_cost_usd") or 0.0) + cost_delta, 6
         )
         known_calls_delta = (
-            max(1, int(raw_known_calls))
+            max(0, int(raw_known_calls))
             if raw_known_calls is not None
             else max(1, int(record.get("provider_requests") or 1))
         )
         acc["known_cost_requests"] = (
             int(acc.get("known_cost_requests") or 0) + known_calls_delta
         )
+        if raw_unknown_calls is not None:
+            acc["unknown_cost_requests"] = int(
+                acc.get("unknown_cost_requests") or 0
+            ) + max(0, int(raw_unknown_calls))
     if "provider_requests" in record:
         acc["provider_metrics_records"] = int(
             acc.get("provider_metrics_records") or 0
