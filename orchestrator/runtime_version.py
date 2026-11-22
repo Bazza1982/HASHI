@@ -165,6 +165,8 @@ def _component_details(payload: Mapping[str, Any], locale: str) -> list[str]:
         lines.append(_tr("version.issue.remote_check", locale))
     if "remote_dirty_at_build" in reasons:
         lines.append(_tr("version.issue.remote_dirty_at_build", locale))
+        if "remote_commit_differs" not in reasons:
+            lines.append(_tr("version.issue.remote_update", locale))
     if "remote_build_status_unknown" in reasons:
         lines.append(_tr("version.issue.remote_build_status_unknown", locale))
     return [html.escape(line) for line in lines]

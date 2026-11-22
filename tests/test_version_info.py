@@ -415,7 +415,18 @@ def test_version_names_remote_mismatch_and_reports_unavailable_remote(
     modified_remote = collect_version_payload(owner, agent_name="akane")
     assert modified_remote["state"]["code"] == "component_unverified"
     assert "remote_dirty_at_build" in modified_remote["state"]["reasons"]
-    assert "uncommitted" in render_version_card(modified_remote, locale="en").lower()
+    rendered_dirty = render_version_card(modified_remote, locale="en").lower()
+    assert "uncommitted" in rendered_dirty
+    assert "/reboot max" in rendered_dirty
+    assert "/remote off" in rendered_dirty and "/remote on" in rendered_dirty
+    assert "disconnect" in rendered_dirty
+    rendered_dirty_zh = render_version_card(modified_remote, locale="zh-CN")
+    assert "/reboot max" in rendered_dirty_zh
+    assert "/remote off" in rendered_dirty_zh and "/remote on" in rendered_dirty_zh
+    remote["provenance"]["commit"] = remote_commit
+    dirty_mismatch = render_version_card(collect_version_payload(owner, agent_name="akane"), locale="en")
+    assert dirty_mismatch.count("/remote off") == 1
+    remote["provenance"]["commit"] = target_commit
     remote["provenance"]["dirty_at_build"] = False
     assert collect_version_payload(owner, agent_name="akane")["state"]["code"] == "running_matches_source"
 

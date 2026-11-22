@@ -226,8 +226,9 @@ loopback health read must report
 a trusted view and the same instance, root, port, PID, start time and provenance
 as the process claim; an unreachable, degraded or mismatching response is not
 green. Remote started from a source tree with uncommitted changes is also
-unverified even when its recorded commit matches. This confirms the local health
-response, not an authenticated peer
+unverified even when its recorded commit matches. A dirty Remote build shows the
+same separate-lifecycle update guidance as a mismatching Remote commit. This
+confirms the local health response, not an authenticated peer
 connection or a successful user interaction. Remote has a separate lifecycle
 from `/reboot max`. Once the intended source has been adopted, an authorized
 operator can use a local channel independent of Remote to run `/remote off`,
