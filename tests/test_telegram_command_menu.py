@@ -20,7 +20,8 @@ def test_telegram_menu_text_uses_standard_card_in_english():
     assert text.startswith("📡 <b>TELEGRAM MIRROR</b>\n" + DIVIDER)
     assert "<b>Current</b> · <b>ON</b>" in text
     assert "Scope" in text
-    assert "mirrored to your Telegram chat" in text
+    assert "enabled as a preference" in text
+    assert "requires a connected Telegram Bot" in text
     assert "/telegram on|off" in text
 
 
@@ -158,3 +159,4 @@ class TelegramCommandMenuIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+# HASHI-Fingerprint: hfp_4a45aa3abdee4a8d8f7a43692561cdb4

@@ -168,6 +168,7 @@ async def test_real_admission_captures_owner_mirror_state_not_caller_value(tmp_p
     item = runtime.queue.get_nowait()
     snapshot = item.request_metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION]
     assert snapshot == {"value": True, "revision": 1, "document_revision": 1}
+    assert item.request_metadata[RUN_DELIVERY_ROUTE_METADATA_KEY][TELEGRAM_OWNER_MIRROR_AT_ADMISSION] == snapshot
     assert item.deliver_to_telegram is True
     runtime._request_meta_by_id = {request_id: {
         "owner_id": "user:123", "request_metadata": item.request_metadata,

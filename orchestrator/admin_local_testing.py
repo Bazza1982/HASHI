@@ -452,10 +452,14 @@ async def _execute_connector_mirror_command(
         )
         owner_id = runtime_session.owner_id(runtime, str(metadata.get("owner_id") or "").strip() or None)
 
-        def _mirror_card_text(mirror: bool) -> str:
+        async def _mirror_card_text(mirror: bool) -> str:
+            summary = None
+            if connector_id == "telegram":
+                from orchestrator.telegram_status_presentation import read_summary
+                summary = await read_summary(runtime, owner_id)
             with ui_language.language_scope(runtime, actor_id=owner_id):
                 if connector_id == "telegram":
-                    return runtime_menu_views.telegram_menu_text(enabled=mirror)
+                    return runtime_menu_views.telegram_menu_text(enabled=mirror, summary=summary)
                 return runtime_menu_views.whatsapp_menu_text(enabled=mirror)
 
         try:
@@ -484,7 +488,7 @@ async def _execute_connector_mirror_command(
                 "messages": [
                     {
                         "channel": "reply",
-                        "text": _mirror_card_text(mirror),
+                        "text": await _mirror_card_text(mirror),
                     }
                 ],
             }
@@ -510,7 +514,7 @@ async def _execute_connector_mirror_command(
             "messages": [
                 {
                     "channel": "reply",
-                    "text": _mirror_card_text(mirror),
+                    "text": await _mirror_card_text(mirror),
                 }
             ],
         }

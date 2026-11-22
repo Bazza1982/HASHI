@@ -69,6 +69,38 @@ async def test_only_proved_prewrite_failures_retry_the_same_event(tmp_path,monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch_off_during_run", [False, True])
+async def test_recovered_always_on_mirror_uses_durable_owner_preference_snapshot(
+    tmp_path, switch_off_during_run
+):
+    import json
+    from orchestrator.connector_delivery_preferences import (
+        get_connector_preference_snapshot, set_connector_preference,
+    )
+
+    owner = "user:7"
+    set_connector_preference(tmp_path, owner, "telegram", "mirror", False)
+    snapshot = get_connector_preference_snapshot(tmp_path, owner, "telegram", "mirror", default=True)
+    route = freeze_run_delivery_route(message_source_id="session_api", session_surface="workbench",
+        session_channel_key="default", chat_id=7, telegram_requested=True,
+        telegram_owner_preference_snapshot=snapshot)
+    store, owner, session, accepted = _running_session(tmp_path, delivery_route=route)
+    runtime = _ToolRuntime(tmp_path, store)
+    runtime.global_config.bridge_home = tmp_path
+    runtime.global_config.config_path = tmp_path / "agents.json"
+    runtime.global_config.config_path.write_text(json.dumps({
+        "global": {"authorized_id": 7},
+        "agents": [{"name": "agent1", "telegram_mirror_policy": "always_on"}],
+    }), encoding="utf-8")
+    store.finish_request(accepted.request_id, success=True, assistant_text="Durable result")
+    if switch_off_during_run:
+        set_connector_preference(tmp_path, owner, "telegram", "mirror", False)
+
+    await dispatch_pending_telegram_deliverables(runtime)
+    assert len(runtime.app.bot.messages) == (0 if switch_off_during_run else 1)
+
+
+@pytest.mark.asyncio
 async def test_offline_lifecycle_notice_retains_its_frozen_destination(tmp_path,monkeypatch):
     from orchestrator import telegram_delivery_failover
     monkeypatch.setattr(telegram_delivery_failover,"handle_blocked_send",AsyncMock(return_value=False))

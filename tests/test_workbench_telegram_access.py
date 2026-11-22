@@ -28,6 +28,34 @@ async def test_access_api_is_admin_only_and_disabled_until_runtime_is_ready(tmp_
 
 
 @pytest.mark.asyncio
+async def test_committed_access_changes_refresh_summary_without_a_menu_scan(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from orchestrator.telegram_access import access_snapshot
+    from orchestrator.telegram_actor_scope import _delegated_owner
+    from orchestrator.telegram_status_projection import TelegramStatusProjection
+
+    server = _server(tmp_path, verifier=None, runtime_active=True)
+    projection = TelegramStatusProjection(tmp_path / "agents.json", tmp_path / "secrets.json")
+    assert projection.refresh_configuration()
+    server.orchestrator.function_workers = SimpleNamespace(_telegram_summary=lambda: projection)
+    monkeypatch.setattr(server, "_telegram_access_management_supported", lambda *_args, **_kwargs: True)
+    headers = {"X-Workbench-Token": ADMIN_TOKEN}
+    status = await server.handle_admin_agent_telegram_access(_Request(headers=headers))
+    revision = json.loads(status.text)["revision"]
+    response = await server.handle_admin_agent_telegram_access_change(_Request(
+        headers=headers, payload={"expected_revision": revision, "scope": "agent",
+                                  "action": "add", "user_id": "200"},
+    ))
+    assert response.status == 200
+    config = read_config_json(tmp_path / "agents.json")
+    secrets = read_config_json(tmp_path / "secrets.json")
+    owner = _delegated_owner(access_snapshot(config, secrets, "lily"), 200)
+    summary = projection.snapshot(owner, actor_id=200, mirror_enabled=True)
+    assert summary["ok"] is True and summary["unverified_bindings"] == 1
+    assert "provider_api_key" not in json.dumps(summary)
+
+
+@pytest.mark.asyncio
 async def test_global_access_gate_requires_all_active_workers(tmp_path):
     from types import SimpleNamespace
     from orchestrator.config_json import write_config_json

@@ -1500,6 +1500,7 @@ class FlexibleAgentRuntime:
             primary_channel_key=primary_channel_key,
             terminal_exchange=bool(metadata.get("system_exchange_terminal")),
             additional_mirrors=owner_mirror_destinations,
+            telegram_owner_preference_snapshot=metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION],
         )
         parent_run_id = str(metadata.get("parent_run_id") or "").strip()
         parent_request_id = str(
@@ -1557,6 +1558,7 @@ class FlexibleAgentRuntime:
                                 metadata.get("system_exchange_terminal")
                             ),
                             additional_mirrors=owner_mirror_destinations,
+                            telegram_owner_preference_snapshot=metadata[TELEGRAM_OWNER_MIRROR_AT_ADMISSION],
                         )
         metadata[RUN_DELIVERY_ROUTE_METADATA_KEY] = delivery_route
         # The legacy execution flag is now only a derived instruction to the

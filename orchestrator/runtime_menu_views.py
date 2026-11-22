@@ -1327,12 +1327,15 @@ def safevoice_keyboard(*, enabled: bool) -> InlineKeyboardMarkup:
     )
 
 
-def telegram_menu_text(*, enabled: bool) -> str:
+def telegram_menu_text(*, enabled: bool, summary: dict[str, Any] | None = None) -> str:
+    from orchestrator.telegram_status_presentation import summary_facts
+
     return setting_card(
         "📡",
         _tr("menu.telegram.title"),
         current=f"<b>{status_label(enabled)}</b>",
-        facts=[_fact("common.scope", html.escape(_tr("menu.telegram.scope")))],
+        facts=[_fact("common.scope", html.escape(_tr("menu.telegram.scope"))),
+               *summary_facts(summary)],
         consequence=(
             _tr("menu.telegram.enabled") if enabled else _tr("menu.telegram.disabled")
         ),
@@ -1473,3 +1476,4 @@ def wol_targets_text(
         lines.extend(["", _tr("menu.wol.none")])
     lines.extend(["", _command_key("/wol <pc_name>", "menu.wol.action.send")])
     return "\n".join(lines)
+# HASHI-Fingerprint: hfp_875fab0a2f0a4f18a6875dfa42f2e057

@@ -5540,6 +5540,21 @@ class WorkbenchApiServer:
                  agent_id, global_change=True), **snapshot}
         )
 
+    async def _refresh_telegram_status_projection(self) -> None:
+        """Refresh the in-memory summary after a committed config change."""
+        workers = getattr(self.orchestrator, "function_workers", None)
+        provider = getattr(workers, "_telegram_summary", None)
+        if not callable(provider):
+            return
+        try:
+            projection = provider()
+            if projection is not None:
+                await asyncio.to_thread(projection.refresh_configuration)
+        except Exception as exc:
+            # The configuration is already committed; never turn a successful
+            # write into a retryable failure because its view is unavailable.
+            logger.warning("Telegram status projection refresh failed: error_type=%s", type(exc).__name__)
+
     async def handle_admin_agent_telegram_access_change(self, request):
         denied = self._telegram_access_denial(request)
         if denied is not None:
@@ -5568,6 +5583,7 @@ class WorkbenchApiServer:
             return self._telegram_credential_response(
                 {"ok": False, "error_code": exc.error_code}, status=exc.status_code
             )
+        await self._refresh_telegram_status_projection()
         # A Token may have been saved before the first authorized user. Finish
         # the existing exact-Agent activation only when that prerequisite first
         # becomes available; later access-list edits remain live policy changes.
@@ -5785,6 +5801,7 @@ class WorkbenchApiServer:
                 },
                 status=500,
             )
+        await self._refresh_telegram_status_projection()
         logger.info(
             "telegram_credential.updated agent_name=%s replaced=%s runtime_active=%s",
             result["agent_id"],
@@ -5857,6 +5874,7 @@ class WorkbenchApiServer:
                 },
                 status=500,
             )
+        await self._refresh_telegram_status_projection()
         logger.info(
             "telegram_mirror_policy.updated agent_name=%s policy=%s runtime_active=%s",
             result["agent_id"],

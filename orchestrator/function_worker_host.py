@@ -503,6 +503,14 @@ class WorkerKernelFacade:
 
         return dict(self._topology)
 
+    async def telegram_summary(self, owner_id: str, actor_id: int | None = None) -> dict[str, Any]:
+        """One bounded read from the shared connector-status projection."""
+        result = await self.peer.request(
+            "core.telegram.summary", {"owner_id": str(owner_id), "actor_id": actor_id},
+            timeout=1.0,
+        )
+        return dict(result) if isinstance(result, Mapping) else {"ok": False}
+
     async def agent_move_preflight(self, agent_name: str) -> dict[str, Any]:
         """Read only the cross-Agent state needed to guard a move."""
 

@@ -43,13 +43,17 @@ def _enabled(runtime: Any, update: Any, connector_id: str = "telegram") -> bool:
     )
 
 
-def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", notice: str | None = None) -> str:
+def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", notice: str | None = None,
+               summary: dict[str, Any] | None = None) -> str:
     enabled = _enabled(runtime, update, connector_id)
     prefix = f"menu.{connector_id}"
     facts = [
         f"<b>{ui_language.tr('common.scope')}</b> · "
         f"{ui_language.tr(prefix + '.scope')}"
     ]
+    if connector_id == "telegram":
+        from orchestrator.telegram_status_presentation import summary_facts
+        facts.extend(summary_facts(summary))
     if notice:
         facts.insert(0, f"✅ {notice}")
     return setting_card(
@@ -102,6 +106,16 @@ async def _send(runtime: Any, update: Any, text: str, *, reply_markup=None) -> N
         )
 
 
+async def _summary(runtime: Any, update: Any, connector_id: str) -> dict[str, Any] | None:
+    if connector_id != "telegram":
+        return None
+    actor = getattr(getattr(update, "effective_user", None), "id", None)
+    if type(actor) is not int or actor <= 0:
+        return {"ok": False}
+    from orchestrator.telegram_status_presentation import read_summary
+    return await read_summary(runtime, _owner_id(runtime, update), actor_id=actor)
+
+
 async def _mirror_command(runtime: Any, update: Any, context: Any, connector_id: str) -> None:
     if not _is_authorized(runtime, update):
         return
@@ -118,7 +132,8 @@ async def _mirror_command(runtime: Any, update: Any, context: Any, connector_id:
         await _send(
             runtime,
             update,
-            _menu_text(runtime, update, connector_id=connector_id),
+            _menu_text(runtime, update, connector_id=connector_id,
+                       summary=await _summary(runtime, update, connector_id)),
             reply_markup=_keyboard(runtime, update, connector_id),
         )
         return
@@ -128,7 +143,9 @@ async def _mirror_command(runtime: Any, update: Any, context: Any, connector_id:
         await _send(
             runtime,
             update,
-            _menu_text(runtime, update, connector_id=connector_id, notice=ui_language.tr(f"menu.{connector_id}.notice.{value}")),
+            _menu_text(runtime, update, connector_id=connector_id,
+                       notice=ui_language.tr(f"menu.{connector_id}.notice.{value}"),
+                       summary=await _summary(runtime, update, connector_id)),
             reply_markup=_keyboard(runtime, update, connector_id),
         )
         return
@@ -173,7 +190,8 @@ async def _mirror_callback(runtime: Any, update: Any, context: Any, connector_id
             f"menu.{connector_id}.notice.{value}"
         )
     await query.edit_message_text(
-        _menu_text(runtime, update, connector_id=connector_id, notice=notice),
+        _menu_text(runtime, update, connector_id=connector_id, notice=notice,
+                   summary=await _summary(runtime, update, connector_id)),
         parse_mode="HTML",
         reply_markup=_keyboard(runtime, update, connector_id),
     )
@@ -197,3 +215,4 @@ CALLBACKS = [
     RuntimeCallback(pattern=r"^telegram:", callback=telegram_callback),
     RuntimeCallback(pattern=r"^whatsapp:", callback=whatsapp_callback),
 ]
+# HASHI-Fingerprint: hfp_6c618b6d6f614e72876c5eb444a9ab88

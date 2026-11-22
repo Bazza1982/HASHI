@@ -484,6 +484,7 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monk
     kernel = stack.handle.kernel
     kernel.function_workers = supervisor
     kernel.secrets = secrets
+    kernel.paths = SimpleNamespace(config_path=config_path, secrets_path=secrets_path, bridge_home=cfg_root)
     stack.worker_peer.request_handler = stack.host.handle_request
     runtime = stack.runtime
 
@@ -550,7 +551,11 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monk
     runtime.app = SimpleNamespace(running=True, bot=Bot(token=token), process_update=process_update)
     stack.handle.update_metadata(stack.client, stack.host.metadata())
 
+    poll_calls = []
+
     class PollBot:
+        id = 123456
+
         async def initialize(self):
             pass
 
@@ -558,6 +563,7 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monk
             assert not drop_pending_updates
 
         async def get_updates(self, **kwargs):
+            poll_calls.append(kwargs["offset"])
             if kwargs["offset"] is None:
                 return [SimpleNamespace(update_id=7, to_dict=lambda: payload)]
             assert kwargs["offset"] == 8
@@ -568,12 +574,10 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monk
         async def shutdown(self):
             pass
 
-    ingress = CoreTelegramIngress(
-        agent_name="zelda", token=runtime.token,
-        handle_lookup=lambda _name: stack.handle, bot_factory=lambda _token: PollBot(),
-        status_callback=lambda connected: supervisor.set_worker_telegram_status("zelda", connected),
-    )
-    supervisor._telegram_ingress["zelda"] = ingress
+    from orchestrator import function_worker_supervisor
+    kernel.global_cfg = runtime.global_config
+    monkeypatch.setattr(function_worker_supervisor, "CoreTelegramIngress",
+        lambda **kwargs: CoreTelegramIngress(**kwargs, bot_factory=lambda _token: PollBot()))
     service = TelegramCredentialService(
         config_path=config_path, secrets_path=secrets_path, state_root=cfg_root,
     )
@@ -582,7 +586,8 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monk
                                 runtime_metadata=stack.handle.get_runtime_metadata())
         assert before["configured"] is True
         assert before["bidirectional_ready"] is False
-        await ingress.start(drop_pending_updates=False)
+        assert await supervisor.start_telegram_ingress("zelda", runtime.token, drop_pending_updates=False)
+        ingress = supervisor._telegram_ingress["zelda"]
         await asyncio.wait_for(acknowledged.wait(), timeout=5)
         await asyncio.wait_for(continued.wait(), timeout=5)
         after = service.status("zelda", runtime_active=True,
@@ -592,9 +597,19 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monk
         assert after["activation_status"] == "connected"
         assert after["bidirectional_ready"] is True
         assert token not in json.dumps(after)
+        before_summary_polls = list(poll_calls)
+        for _ in range(3):
+            summary = await runtime.orchestrator.telegram_summary("user:42", 42)
+            assert summary["configured_verified"] == 1
+            assert summary["ready"] == 1
+            assert summary["mirror_active"] == 1
+            assert token not in json.dumps(summary)
+        assert poll_calls == before_summary_polls
+        denied = await runtime.orchestrator.telegram_summary("user:42", 99)
+        assert denied["configured_verified"] == 0
     finally:
         release_poll.set()
-        await ingress.stop()
+        await supervisor.stop_telegram_ingress("zelda")
         await _close_stack(stack)
 
 

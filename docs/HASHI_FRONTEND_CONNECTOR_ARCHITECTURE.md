@@ -356,8 +356,20 @@ the Run also suppresses its remaining mirrors, while an owner setting already
 off at admission retains the Agent's existing override. A preference-specific,
 owner-scoped revision detects subsequent changes without conflating other owners;
 legacy Runs or unreadable preference state are treated conservatively. If the
-owner enables mirroring again, later unsent items may be delivered. Telegram-origin
+owner enables mirroring again, later unsent items may be delivered. The owner
+preference snapshot is stored with the Run's private delivery route so recovered
+outbox items apply the same decision after a Worker restart. Telegram-origin
 replies and explicit notification tools retain their normal delivery.
+
+The `/telegram` menu also reads one bounded owner-scoped summary from shared
+Functions. It counts only verified Bot identities, deduplicates multiple Agent
+bindings to the same Bot, and distinguishes unknown identities, stale polling,
+ready connections and mirror-ready Bots. The latest successful incoming poll is
+an observation, not a message delivery receipt. Safe current failure reasons
+are shown without credentials or message contents. The projection refreshes on
+configuration and connector lifecycle events; a changed or unreadable config is
+reported unavailable rather than reusing stale authority. Opening the menu does
+not poll Telegram, request individual Workers, scan logs, or rewrite config.
 
 ## 3. External-client boundary
 
