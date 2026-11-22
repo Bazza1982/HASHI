@@ -1731,6 +1731,8 @@ class FunctionWorkerSupervisor:
             instance_id=str(getattr(self.kernel.global_cfg, "instance_id", "unknown")),
             agent=name, generation_id=str(getattr(self.kernel, "shared_generation_id", "unknown")), token=str(token))
         self._telegram_ingress_diagnostics[name] = diagnostics
+        if projection is not None:
+            projection.update_diagnostics(name, diagnostics)
         transport = {}
         if api_root:
             from telegram import Bot

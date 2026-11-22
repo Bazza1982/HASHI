@@ -92,6 +92,24 @@ def test_summary_tracks_disconnect_recovery_and_owner_mirror_without_probes(tmp_
     assert recovered["failure_reasons"] == []
 
 
+def test_summary_exposes_safe_initialization_and_outbound_failures_without_a_bot_id(tmp_path):
+    projection, _config, _secrets = _fixture(tmp_path)
+    projection.update_ingress("alpha", None)
+    projection.update_diagnostics("alpha", SimpleNamespace(summary={
+        "stage": "bot_initialization", "consecutive_failures": 1,
+        "last_failure": {"error": {"reason": "invalid_token", "message": "secret text"}},
+    }))
+    gamma, _ = projection._ingress["gamma"]
+    gamma._initialized = False
+    projection._handles["gamma"].metadata.update(
+        telegram_outbound_connected=False, telegram_connector_permanent_failure="forbidden"
+    )
+    summary = projection.snapshot("user:42", actor_id=42, mirror_enabled=True)
+    assert summary["failure_reasons"] == ["forbidden", "invalid_token"]
+    assert summary["unverified_bindings"] == 2
+    assert "secret text" not in json.dumps(summary)
+
+
 async def _summary_command_fixture(tmp_path):
     from orchestrator.function_worker_host import WorkerKernelFacade
     from orchestrator.function_worker_supervisor import FunctionWorkerSupervisor

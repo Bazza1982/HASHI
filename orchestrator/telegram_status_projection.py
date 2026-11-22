@@ -40,6 +40,7 @@ class TelegramStatusProjection:
         self._bindings: list[dict[str, Any]] | None = None
         self._handles: dict[str, Any] = {}
         self._ingress: dict[str, tuple[Any, str | None]] = {}
+        self._diagnostics: dict[str, Any] = {}
         self._known_ids: dict[str, int] = {}
         self._revision = 0
 
@@ -98,6 +99,7 @@ class TelegramStatusProjection:
         self._known_ids = {key: value for key, value in self._known_ids.copy().items() if key in retained}
         self._handles = {key: value for key, value in self._handles.copy().items() if key in names}
         self._ingress = {key: value for key, value in self._ingress.copy().items() if key in names}
+        self._diagnostics = {key: value for key, value in self._diagnostics.copy().items() if key in names}
         return True
 
     def update_handle(self, name: str, handle: Any | None) -> None:
@@ -118,6 +120,12 @@ class TelegramStatusProjection:
                 return
             fingerprint = telegram_bot_fingerprint(getattr(ingress, "token", None))
             self._ingress[str(name)] = (ingress, fingerprint)
+
+    def update_diagnostics(self, name: str, diagnostics: Any) -> None:
+        if str(name) not in self._diagnostics and len(self._diagnostics) >= _MAX_BINDINGS:
+            self._bindings = None
+            return
+        self._diagnostics[str(name)] = diagnostics
 
     def snapshot(self, owner_id: str, *, actor_id: int | None, mirror_enabled: bool) -> dict[str, Any]:
         """Return only aggregate facts authorised for the requesting owner."""
@@ -147,12 +155,22 @@ class TelegramStatusProjection:
             handle = self._handles.get(name)
             metadata = getattr(handle, "metadata", {}) if handle is not None else {}
             metadata = metadata if isinstance(metadata, Mapping) else {}
-            diagnostic = getattr(getattr(ingress, "diagnostics", None), "summary", {})
-            if isinstance(diagnostic, Mapping) and diagnostic.get("consecutive_failures"):
+            diagnostics = getattr(ingress, "diagnostics", None) or self._diagnostics.get(name)
+            diagnostic = getattr(diagnostics, "summary", {})
+            process = getattr(getattr(handle, "client", None), "process", None)
+            try:
+                alive = bool(process is not None and process.is_alive())
+            except Exception:
+                alive = False
+            outbound_reason = metadata.get("telegram_connector_permanent_failure")
+            if alive and isinstance(outbound_reason, str) and outbound_reason in _SAFE_FAILURE_REASONS:
+                failure_reasons.add(outbound_reason)
+            if (isinstance(diagnostic, Mapping) and diagnostic.get("consecutive_failures")
+                    and diagnostic.get("stage") != "stopped"):
                 failure = diagnostic.get("last_failure")
                 error = failure.get("error") if isinstance(failure, Mapping) else None
                 reason = error.get("reason") if isinstance(error, Mapping) else None
-                if reason in _SAFE_FAILURE_REASONS:
+                if isinstance(reason, str) and reason in _SAFE_FAILURE_REASONS:
                     failure_reasons.add(reason)
             bot_id = None
             if ingress is not None and ingress_fingerprint == fingerprint and getattr(ingress, "_initialized", False):
@@ -183,11 +201,6 @@ class TelegramStatusProjection:
             fresh = last_success is not None and timedelta(0) <= now - last_success <= _MAX_POLL_AGE
             if not fresh:
                 stale += 1
-            process = getattr(getattr(handle, "client", None), "process", None)
-            try:
-                alive = bool(process is not None and process.is_alive())
-            except Exception:
-                alive = False
             ready = bool(
                 alive and metadata.get("worker_accepting") is True
                 and metadata.get("telegram_outbound_connected") is True
