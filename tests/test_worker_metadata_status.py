@@ -453,10 +453,11 @@ async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
 
 
 @pytest.mark.asyncio
-async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path):
-    """Exercise actual config, Worker metadata/IPC, ingress poll and ACK together."""
+async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path, monkeypatch):
+    """Exercise actual config and Host preparation, Worker IPC, poll and ACK."""
     from telegram import Bot
 
+    from orchestrator import flexible_agent_runtime, function_worker_host
     from orchestrator.config import ConfigManager
     from orchestrator.config_json import write_config_json
     from orchestrator.telegram_credential import TelegramCredentialService
@@ -485,9 +486,48 @@ async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path):
     kernel.secrets = secrets
     stack.worker_peer.request_handler = stack.host.handle_request
     runtime = stack.runtime
-    runtime.config = loaded
-    # Follow the actual Worker Host's credential-selection expression.
-    runtime.token = secrets.get(loaded.telegram_token_key) or "local-mode-token"
+
+    # Execute the real Host's config loading and token selection, while keeping
+    # backend initialization and network-facing runtime services isolated.
+    def construct_runtime(agent_config, global_config, worker_token, worker_secrets, _skills):
+        runtime.config = agent_config
+        runtime.global_config = global_config
+        runtime.token = worker_token
+        runtime.secrets = worker_secrets
+        return runtime
+
+    async def initialize_runtime():
+        return True
+
+    monkeypatch.setattr(flexible_agent_runtime, "FlexibleAgentRuntime", construct_runtime)
+    monkeypatch.setattr(function_worker_host, "current_process_runtime", lambda: None)
+    actual = SimpleNamespace(
+        worker_protocol=function_worker_host.FUNCTION_WORKER_PROTOCOL_VERSION,
+        generation_schema=function_worker_host.FUNCTION_GENERATION_SCHEMA_VERSION,
+        runtime_id="runtime-test",
+    )
+    monkeypatch.setattr(function_worker_host, "enforce_runtime_contract", lambda *_args: actual)
+    monkeypatch.setattr(function_worker_host, "compare_runtime_fingerprints", lambda *_args: None)
+    runtime.initialize = initialize_runtime
+    runtime.bind_handlers = lambda: None
+    stack.host.bootstrap = {
+        "protocol": function_worker_host.FUNCTION_WORKER_PROTOCOL_VERSION, "topology": {},
+    }
+    stack.host.code_root = Path(__file__).resolve().parents[1]
+    stack.host.bridge_home = cfg_root
+    stack.host.generation_root = stack.host.code_root
+    stack.host.expected_runtime = actual
+    stack.host._install_generation_import_paths = lambda: None
+    try:
+        await stack.host.prepare()
+        assert runtime.token == token
+        assert runtime.config.telegram_token_key == "zelda"
+    except BaseException:
+        await _close_stack(stack)
+        raise
+    # The fixture supplies an already-committed active route for the ingress.
+    stack.host.phase = "ACTIVE"
+    stack.host.accepting = True
     runtime.telegram_connected = True
     runtime._telegram_scoped_access_enabled = False
     acknowledged = asyncio.Event()
