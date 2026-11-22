@@ -453,6 +453,112 @@ async def test_ingress_rpc_preserves_outbound_readiness_for_saved_bot(
 
 
 @pytest.mark.asyncio
+async def test_blank_bot_reference_reaches_worker_ingress_and_ack(tmp_path):
+    """Exercise actual config, Worker metadata/IPC, ingress poll and ACK together."""
+    from telegram import Bot
+
+    from orchestrator.config import ConfigManager
+    from orchestrator.config_json import write_config_json
+    from orchestrator.telegram_credential import TelegramCredentialService
+    from orchestrator.telegram_ingress import CoreTelegramIngress
+    from tests.test_config import _minimal_flex_agent, _write_base_files
+
+    cfg_root = tmp_path / "config"
+    cfg_root.mkdir()
+    agent = _minimal_flex_agent()
+    agent.update(name="zelda", telegram_token_key="", workspace_dir="workspaces/zelda",
+                 system_md="workspaces/zelda/agent.md")
+    config_path, secrets_path = _write_base_files(cfg_root, agent)
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["global"]["authorized_id"] = 42
+    write_config_json(config_path, document)
+    token = "123456:TEST_ONLY_CURRENT_BOT_abcdefghijklmnopqrstuvwxyz"
+    write_config_json(secrets_path, {"authorized_telegram_id": 42, "zelda": token})
+    _, agents, secrets = ConfigManager(config_path, secrets_path, bridge_home=cfg_root).load()
+    loaded = agents[0]
+    assert loaded.telegram_token_key == "zelda"
+
+    stack = await _build_stack(tmp_path, outcome="success")
+    supervisor = stack.client.supervisor
+    kernel = stack.handle.kernel
+    kernel.function_workers = supervisor
+    kernel.secrets = secrets
+    stack.worker_peer.request_handler = stack.host.handle_request
+    runtime = stack.runtime
+    runtime.config = loaded
+    # Follow the actual Worker Host's credential-selection expression.
+    runtime.token = secrets.get(loaded.telegram_token_key) or "local-mode-token"
+    runtime.telegram_connected = True
+    runtime._telegram_scoped_access_enabled = False
+    acknowledged = asyncio.Event()
+    continued = asyncio.Event()
+    release_poll = asyncio.Event()
+    payload = {
+        "update_id": 7,
+        "message": {
+            "message_id": 1, "date": 1700000000, "text": "test message",
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False, "first_name": "Test"},
+        },
+    }
+    received = []
+
+    async def process_update(update):
+        received.append((update.update_id, update.effective_user.id))
+        acknowledged.set()
+
+    runtime.app = SimpleNamespace(running=True, bot=Bot(token=token), process_update=process_update)
+    stack.handle.update_metadata(stack.client, stack.host.metadata())
+
+    class PollBot:
+        async def initialize(self):
+            pass
+
+        async def delete_webhook(self, *, drop_pending_updates):
+            assert not drop_pending_updates
+
+        async def get_updates(self, **kwargs):
+            if kwargs["offset"] is None:
+                return [SimpleNamespace(update_id=7, to_dict=lambda: payload)]
+            assert kwargs["offset"] == 8
+            continued.set()
+            await release_poll.wait()
+            return []
+
+        async def shutdown(self):
+            pass
+
+    ingress = CoreTelegramIngress(
+        agent_name="zelda", token=runtime.token,
+        handle_lookup=lambda _name: stack.handle, bot_factory=lambda _token: PollBot(),
+        status_callback=lambda connected: supervisor.set_worker_telegram_status("zelda", connected),
+    )
+    supervisor._telegram_ingress["zelda"] = ingress
+    service = TelegramCredentialService(
+        config_path=config_path, secrets_path=secrets_path, state_root=cfg_root,
+    )
+    try:
+        before = service.status("zelda", runtime_active=True,
+                                runtime_metadata=stack.handle.get_runtime_metadata())
+        assert before["configured"] is True
+        assert before["bidirectional_ready"] is False
+        await ingress.start(drop_pending_updates=False)
+        await asyncio.wait_for(acknowledged.wait(), timeout=5)
+        await asyncio.wait_for(continued.wait(), timeout=5)
+        after = service.status("zelda", runtime_active=True,
+                               runtime_metadata=stack.handle.get_runtime_metadata())
+        assert received == [(7, 42)]
+        assert ingress.offset == 8
+        assert after["activation_status"] == "connected"
+        assert after["bidirectional_ready"] is True
+        assert token not in json.dumps(after)
+    finally:
+        release_poll.set()
+        await ingress.stop()
+        await _close_stack(stack)
+
+
+@pytest.mark.asyncio
 async def test_worker_projects_revisioned_workzone_support(tmp_path):
     stack = await _build_stack(tmp_path, outcome="success")
     try:
