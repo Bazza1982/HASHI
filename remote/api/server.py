@@ -3551,8 +3551,10 @@ def _fetch_workbench_json(
     path: str,
     *,
     timeout: float = 1.0,
+    required_instance_id: str = "",
 ) -> dict[str, Any] | None:
     normalized = path if str(path).startswith("/") else f"/{path}"
+    expected = str(required_instance_id or "").strip().upper()
     for attempt, host in enumerate(_ordered_local_workbench_hosts(max_fallbacks=2), start=1):
         req = urllib_request.Request(
             local_http_url(_workbench_port, normalized, host=host), method="GET"
@@ -3564,6 +3566,20 @@ def _fetch_workbench_json(
                 connect_timeout=min(timeout, 0.8 if attempt == 1 else 0.4),
             ) as resp:
                 value = json.loads(resp.read().decode("utf-8"))
+                if expected and isinstance(value, dict):
+                    actual = str(value.get("instance_id") or "").strip().upper()
+                    if actual != expected:
+                        # A foreign instance, or an older Core without the
+                        # identity field, is not proof the controlled instance
+                        # is reachable on this host. Keep scanning the bounded
+                        # candidates instead of caching the first HTTP 200.
+                        _workbench_gateway_log(
+                            "local_health_identity_rejected",
+                            expected_instance=expected,
+                            actual_instance=actual or None,
+                        )
+                        _clear_cached_local_workbench_host(host)
+                        continue
                 _cache_local_workbench_host(host)
                 return value if isinstance(value, dict) else None
         except Exception:
@@ -3579,22 +3595,13 @@ def _fetch_workbench_json(
 
 
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
-    health = _fetch_workbench_json("/api/health", timeout=timeout)
+    expected = _controlled_instance_id()
+    health = _fetch_workbench_json(
+        "/api/health",
+        timeout=timeout,
+        required_instance_id=expected,
+    )
     if isinstance(health, dict) and health.get("ok") is True:
-        actual = str(health.get("instance_id") or "").strip().upper()
-        expected = _controlled_instance_id()
-        if expected and actual and actual != expected:
-            # A different HASHI instance is occupying the expected loopback
-            # port. That is not evidence that the controlled instance is
-            # active — and not confirmation that it is inactive either, so
-            # keep the PID-derived state instead of reporting active.
-            _workbench_gateway_log(
-                "local_health_identity_mismatch",
-                expected_instance=expected,
-                actual_instance=actual,
-            )
-            record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
-            return None
         record_hashi_liveness(hashi_state="active", health=health)
     elif health is None:
         record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)

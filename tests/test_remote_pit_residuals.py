@@ -1,18 +1,75 @@
 """Regression tests for the 2026-11-23 production-pre-release PIT residuals.
 
-Covers two minimal HASHI Remote fixes:
+Covers the minimal HASHI Remote fixes:
 - unknown liveness is never converted into inactive in gateway failure
   payloads (only a confirmed probe may report inactive);
 - a healthy /api/health answered by a *different* HASHI instance on the
   expected loopback port is not evidence that the controlled instance is
-  active.
+  active;
+- a healthy /api/health without an instance_id cannot confirm the
+  controlled instance either;
+- the health probe only caches a loopback host after verifying the
+  response's instance identity, and keeps scanning bounded candidates when
+  the first HTTP 200 belongs to a foreign instance.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
+from urllib import parse as urlparse
 
 from remote.api import server as remote_server
+
+
+class _FakeJsonResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self):
+        return json.dumps(self._payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _install_fake_opener(monkeypatch, by_host):
+    def opener(req, *, timeout, connect_timeout=None):
+        host = urlparse.urlsplit(req.full_url).hostname or ""
+        outcome = by_host.get(host, by_host.get("*"))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _FakeJsonResponse(outcome)
+
+    monkeypatch.setattr(remote_server, "_open_local_workbench_request", opener)
+
+
+def _record_liveness(monkeypatch):
+    recorded: dict = {}
+    monkeypatch.setattr(
+        remote_server,
+        "record_hashi_liveness",
+        lambda *, hashi_state, health=None, now=None: recorded.update(
+            {"hashi_state": hashi_state, "health": health}
+        ),
+    )
+    return recorded
+
+
+def _use_expected_instance(monkeypatch, instance_id):
+    monkeypatch.setattr(
+        remote_server, "_controlled_instance_id", lambda status=None: instance_id
+    )
+
+
+def _use_hosts(monkeypatch, hosts):
+    monkeypatch.setattr(
+        remote_server,
+        "_ordered_local_workbench_hosts",
+        lambda *, max_fallbacks=2: tuple(hosts),
+    )
 
 
 def test_gateway_failure_payload_preserves_unknown_hashi_state(monkeypatch):
@@ -51,93 +108,98 @@ def test_gateway_failure_payload_confirmed_inactive_still_reports_inactive():
     assert payload["reason_code"] == "hashi_inactive"
 
 
-def test_fetch_workbench_health_rejects_foreign_instance_id(monkeypatch):
-    """A healthy /api/health from a *different* instance occupying the expected
-    port must not be reported as this instance being active."""
+def test_fetch_workbench_health_active_when_identity_matches(monkeypatch):
+    """Scenario A: expected HASHI3, response HASHI3 -> active."""
     remote_server.reset_local_workbench_transport_state()
+    recorded = _record_liveness(monkeypatch)
+    _use_expected_instance(monkeypatch, "HASHI3")
+    _use_hosts(monkeypatch, ("127.0.0.1",))
+    _install_fake_opener(monkeypatch, {"127.0.0.1": {"ok": True, "instance_id": "HASHI3"}})
 
-    monkeypatch.setattr(
-        remote_server,
-        "_fetch_workbench_json",
-        lambda path, *, timeout: {"ok": True, "instance_id": "HASHI_FOREIGN"},
-    )
-    monkeypatch.setattr(
-        remote_server, "_controlled_instance_id", lambda status=None: "HASHI_EXPECTED"
-    )
-    recorded: dict = {}
-    monkeypatch.setattr(
-        remote_server,
-        "record_hashi_liveness",
-        lambda *, hashi_state, health=None: recorded.update(
-            {"hashi_state": hashi_state, "health": health}
-        ),
-    )
+    health = remote_server._fetch_workbench_health(timeout=0.5)
 
-    result = remote_server._fetch_workbench_health(timeout=0.5)
+    assert health is not None
+    assert health.get("instance_id") == "HASHI3"
+    assert recorded.get("hashi_state") == "active"
 
-    assert result is None
+
+def test_fetch_workbench_health_rejects_foreign_instance_id(monkeypatch):
+    """Scenario B: expected HASHI3, response HASHI4 -> not active."""
+    remote_server.reset_local_workbench_transport_state()
+    recorded = _record_liveness(monkeypatch)
+    _use_expected_instance(monkeypatch, "HASHI3")
+    _use_hosts(monkeypatch, ("127.0.0.1",))
+    _install_fake_opener(monkeypatch, {"127.0.0.1": {"ok": True, "instance_id": "HASHI4"}})
+
+    health = remote_server._fetch_workbench_health(timeout=0.5)
+
+    assert health is None
     assert recorded.get("health") is None
     assert recorded.get("hashi_state") != "active"
 
 
-def test_fetch_workbench_health_accepts_expected_instance_id(monkeypatch):
-    """The health of the controlled instance is accepted as active, and a
-    health without instance_id keeps the previous (compatible) behaviour."""
+def test_fetch_workbench_health_unverified_when_instance_id_missing(monkeypatch):
+    """Scenario C: expected HASHI3, response without instance_id -> not active."""
     remote_server.reset_local_workbench_transport_state()
+    recorded = _record_liveness(monkeypatch)
+    _use_expected_instance(monkeypatch, "HASHI3")
+    _use_hosts(monkeypatch, ("127.0.0.1",))
+    _install_fake_opener(monkeypatch, {"127.0.0.1": {"ok": True}})
 
-    recorded: dict = {}
-    monkeypatch.setattr(
-        remote_server,
-        "record_hashi_liveness",
-        lambda *, hashi_state, health=None: recorded.update(
-            {"hashi_state": hashi_state, "health": health}
-        ),
-    )
-    monkeypatch.setattr(
-        remote_server, "_controlled_instance_id", lambda status=None: "HASHI_EXPECTED"
-    )
-
-    monkeypatch.setattr(
-        remote_server,
-        "_fetch_workbench_json",
-        lambda path, *, timeout: {"ok": True, "instance_id": "HASHI_EXPECTED"},
-    )
     health = remote_server._fetch_workbench_health(timeout=0.5)
-    assert health is not None and health.get("instance_id") == "HASHI_EXPECTED"
-    assert recorded.get("hashi_state") == "active"
 
-    # No instance_id in health (old backend shape): accepted as before.
-    monkeypatch.setattr(
-        remote_server,
-        "_fetch_workbench_json",
-        lambda path, *, timeout: {"ok": True},
-    )
+    assert health is None
+    assert recorded.get("health") is None
+    assert recorded.get("hashi_state") != "active"
+
+
+def test_fetch_workbench_health_legacy_without_expected_identity(monkeypatch):
+    """Scenario G: no configured expected instance keeps legacy behaviour
+    (any healthy response counts, identity unknown)."""
+    remote_server.reset_local_workbench_transport_state()
+    recorded = _record_liveness(monkeypatch)
+    _use_expected_instance(monkeypatch, "")
+    _use_hosts(monkeypatch, ("127.0.0.1",))
+    _install_fake_opener(monkeypatch, {"127.0.0.1": {"ok": True, "instance_id": "HASHI_ANY"}})
+
     health = remote_server._fetch_workbench_health(timeout=0.5)
+
     assert health is not None
     assert recorded.get("hashi_state") == "active"
 
 
-def test_fetch_workbench_health_skips_check_without_expected_identity(monkeypatch):
-    """Remotes without a configured expected instance keep legacy behaviour:
-    any healthy /api/health response counts as active (identity unknown)."""
+def test_fetch_workbench_json_skips_foreign_candidate(monkeypatch):
+    """Scenario D: first candidate is a foreign instance, second is the
+    controlled instance -> identify the second and cache only its address."""
     remote_server.reset_local_workbench_transport_state()
-
-    recorded: dict = {}
-    monkeypatch.setattr(
-        remote_server,
-        "record_hashi_liveness",
-        lambda *, hashi_state, health=None: recorded.update(
-            {"hashi_state": hashi_state, "health": health}
-        ),
-    )
-    monkeypatch.setattr(remote_server, "_controlled_instance_id", lambda status=None: "")
-    monkeypatch.setattr(
-        remote_server,
-        "_fetch_workbench_json",
-        lambda path, *, timeout: {"ok": True, "instance_id": "HASHI_ANY"},
+    _use_hosts(monkeypatch, ("127.0.0.1", "127.0.0.2"))
+    _install_fake_opener(
+        monkeypatch,
+        {
+            "127.0.0.1": {"ok": True, "instance_id": "HASHI4"},
+            "127.0.0.2": {"ok": True, "instance_id": "HASHI3"},
+        },
     )
 
-    health = remote_server._fetch_workbench_health(timeout=0.5)
-    assert health is not None
-    assert recorded.get("hashi_state") == "active"
+    value = remote_server._fetch_workbench_json(
+        "/api/health", timeout=0.5, required_instance_id="HASHI3"
+    )
+
+    assert value is not None
+    assert value.get("instance_id") == "HASHI3"
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST == "127.0.0.2"
+
+
+def test_fetch_workbench_json_returns_none_when_all_hosts_fail(monkeypatch):
+    """Scenario E: every bounded candidate fails -> fast None, no stale cache."""
+    remote_server.reset_local_workbench_transport_state()
+    _use_hosts(monkeypatch, ("127.0.0.1", "127.0.0.2"))
+    _install_fake_opener(monkeypatch, {"*": OSError("connection refused")})
+
+    value = remote_server._fetch_workbench_json(
+        "/api/health", timeout=0.5, required_instance_id="HASHI3"
+    )
+
+    assert value is None
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST is None
 # HASHI-Fingerprint: hfp_2e30e35452f44f88b7a95f063c63454e
