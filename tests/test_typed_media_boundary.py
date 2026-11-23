@@ -147,3 +147,27 @@ async def test_browser_extension_text_only_keeps_entire_response(monkeypatch):
         {"steps": [{"action": "get_text"}]}, typed_media=True,
     )
     assert result == payload
+
+
+def test_151_tool_results_with_literal_images_and_one_real_image():
+    from adapters.deepseek_api import _validate_deepseek_payload
+
+    messages = [
+        {
+            "role": "tool", "tool_call_id": f"read-{index}",
+            "content": "pytest source code example: " + URL,
+        }
+        for index in range(151)
+    ]
+    messages.append({
+        "role": "tool", "tool_call_id": "real-screenshot",
+        "content": [
+            {"type": "text", "text": "Actual screen capture"},
+            {"type": "image_url", "image_url": {"url": URL}},
+        ],
+    })
+    _validate_deepseek_payload({"messages": messages})
+    assert len(messages) == 152
+    assert all("pytest source code example: " in m["content"]
+               for m in messages[:151])
+    assert messages[-1]["tool_call_id"] == "real-screenshot"
