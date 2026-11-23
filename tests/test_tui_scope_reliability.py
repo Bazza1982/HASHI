@@ -164,6 +164,7 @@ async def test_multiline_composer_sends_complete_pasted_block_with_timestamp(tmp
         field._forward_event(Paste(pasted))
         await pilot.pause(0.1)
         assert field.value == pasted
+        assert client.sent == []
         await pilot.press("enter")
         await pilot.pause(0.3)
 
@@ -244,10 +245,148 @@ async def test_multiline_comment_or_path_is_sent_as_plain_text(tmp_path, message
         assert field.value == ""
 
 
-def test_chat_input_leaves_terminal_paste_shortcuts_unbound():
-    keys = {binding.key for binding in ChatInput.BINDINGS}
-    assert "ctrl+v" not in keys
-    assert "ctrl+shift+v" not in keys
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    (
+        "// ordinary code comment",
+        "/* ordinary code comment */",
+        '"An ordinary English message"',
+    ),
+)
+async def test_single_line_non_paths_bypass_attachment_staging(
+    tmp_path, monkeypatch, message
+):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    staging_attempts = []
+
+    async def unexpected_staging(value):
+        staging_attempts.append(value)
+        raise AssertionError("plain text must not enter attachment staging")
+
+    monkeypatch.setattr(app, "_stage_path_attachment", unexpected_staging)
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = message
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert staging_attempts == []
+        assert client.sent[0][0:2] == ("akane", message)
+
+
+@pytest.mark.asyncio
+async def test_quoted_existing_path_stages_then_sends_attachment_from_composer(tmp_path):
+    source = tmp_path / "composer attachment.txt"
+    source.write_text("attachment content", encoding="utf-8")
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = f'"{source}"'
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert app._pending_attachment is not None
+        assert app._pending_attachment.filename == source.name
+        assert client.sent == []
+
+        field.value = "send this file"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][0:2] == ("akane", "send this file")
+        assert client.sent[0][2]["attachment"]["filename"] == source.name
+        assert client.sent[0][2]["workzone_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_failed_path_staging_keeps_composer_draft(tmp_path):
+    missing = tmp_path / "missing.txt"
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = str(missing)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent == []
+        assert field.value == str(missing)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        ("// comment", False),
+        ("/* comment */", False),
+        ('"ordinary words"', False),
+        ("C:\\Users\\tester\\note.txt", True),
+        ("/mnt/c/Users/tester/note.txt", True),
+        ("/home/tester/note.txt", True),
+        (r"\\server\share\note.txt", True),
+        ("/tmp/note.txt", True),
+    ),
+)
+def test_dropped_path_classifier_keeps_code_text_and_recognizes_real_paths(value, expected):
+    assert HASHITuiApp._looks_like_dropped_path(value) is expected
+
+
+@pytest.mark.asyncio
+async def test_chat_input_runtime_bindings_keep_textual_clipboard_paste(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.focus()
+        await pilot.pause()
+
+        binding = app.active_bindings["ctrl+v"]
+        assert binding.node is field
+        assert binding.binding.action == "paste"
+        assert "ctrl+shift+v" not in app.active_bindings
+
+        app.copy_to_clipboard("clipboard line one\nclipboard line two")
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+
+        assert field.value == "clipboard line one\nclipboard line two"
+        assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_shift_enter_replaces_partial_and_multiline_selection(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    async with app.run_test() as pilot:
+        field = app.query_one(ChatInput)
+        field.focus()
+
+        field.value = "abcd"
+        field.selection = field.selection.__class__((0, 1), (0, 3))
+        await pilot.press("shift+enter")
+        assert field.value == "a\nd"
+
+        field.value = "alpha\nbeta\ngamma"
+        field.selection = field.selection.__class__((0, 2), (2, 2))
+        await pilot.press("shift+enter")
+        assert field.value == "al\nmma"
 
 
 @pytest.mark.asyncio
@@ -406,6 +545,26 @@ async def test_workzone_reference_is_target_relative_and_contains_no_client_path
         await pilot.pause(0.3)
 
         assert client.sent[0][1] == "summarize this"
+        assert client.sent[0][2]["workzone_ref"] == "reports/weekly.pdf"
+        assert client.sent[0][2]["attachment"] is None
+
+
+@pytest.mark.asyncio
+async def test_workzone_multiline_caption_reaches_attachment_submission_unchanged(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    caption = "摘要：你好\n\n  保留此缩进\n结尾"
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = f"@reports/weekly.pdf {caption}"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][0:2] == ("akane", caption)
         assert client.sent[0][2]["workzone_ref"] == "reports/weekly.pdf"
         assert client.sent[0][2]["attachment"] is None
 

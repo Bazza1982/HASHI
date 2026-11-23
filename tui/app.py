@@ -344,8 +344,9 @@ class ChatInput(TextArea):
         self.post_message(self.Submitted(self))
 
     def action_insert_newline(self) -> None:
-        result = self.insert("\n")
-        self.move_cursor(result.end_location)
+        result = self._replace_via_keyboard("\n", *self.selection)
+        if result is not None:
+            self.move_cursor(result.end_location)
 
 
 class CommandPreview(Static):
@@ -3075,9 +3076,18 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         value = str(text or "").strip()
         if "\n" in value or "\r" in value:
             return False
+        candidate = value
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] == '"':
+            candidate = candidate[1:-1].strip()
+        if candidate.startswith(("//", "/*")):
+            return False
         return bool(
-            value.startswith(("/", "./", "../", "~", "\\\\", '"'))
-            or (len(value) >= 3 and value[0].isalpha() and value[1:3] in {":\\", ":/"})
+            candidate.startswith(("/", "./", "../", "~/", "~\\", "\\\\"))
+            or (
+                len(candidate) >= 3
+                and candidate[0].isalpha()
+                and candidate[1:3] in {":\\", ":/"}
+            )
         )
 
     def _voice_target_key(self, agent: str | None = None) -> str:
@@ -3392,18 +3402,40 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     @staticmethod
     def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
-        try:
-            # Workzone references are target-relative protocol paths, never
-            # native Windows paths. Keep caption quote removal platform-neutral.
-            parts = shlex.split(str(text or ""), posix=True)
-        except ValueError:
+        """Split an opening Workzone reference without rewriting its caption."""
+
+        value = str(text or "")
+        if not value.startswith("@"):
             return None, text
-        if not parts or not parts[0].startswith("@") or len(parts[0]) == 1:
+        reference_end = 1
+        while reference_end < len(value) and not value[reference_end].isspace():
+            reference_end += 1
+        reference = value[1:reference_end]
+        if not reference or reference.startswith("@"):
             return None, text
-        reference = parts[0][1:]
-        if reference.startswith("@"):
-            return None, text
-        return reference, " ".join(parts[1:]).strip()
+
+        caption = value[reference_end:]
+        if caption.startswith("\r\n"):
+            caption = caption[2:]
+        elif caption[:1].isspace():
+            caption = caption[1:]
+
+        # Keep legacy single-line quoted captions while preserving all multiline
+        # whitespace, indentation, and Unicode exactly as the user entered it.
+        if "\n" not in caption and "\r" not in caption:
+            stripped = caption.strip()
+            if (
+                len(stripped) >= 2
+                and stripped[0] == stripped[-1]
+                and stripped[0] in {"'", '"'}
+            ):
+                try:
+                    parts = shlex.split(stripped, posix=True)
+                except ValueError:
+                    return reference, caption
+                if len(parts) == 1:
+                    caption = parts[0]
+        return reference, caption
 
     async def _stage_path_attachment(self, value: str) -> bool:
         chat = self.query_one("#chat-history", ChatHistory)
