@@ -3262,6 +3262,7 @@ class HashiStageProvider(StageProvider):
         self._provider_context_recovery = dict(recovery or {})
         self._provider_context_recovery_consumed = False
         self._provider_context_resume_pending = bool(resume_pending_tools)
+        self._provider_recovery_deferred_followups: list[dict[str, Any]] = []
 
     def _bind_provider_context_observer(
         self,
@@ -3376,6 +3377,13 @@ class HashiStageProvider(StageProvider):
                 )
         else:
             continuation.append({"role": "user", "content": stage_prompt})
+        raw_deferred = context.get("deferred_followups")
+        self._provider_recovery_deferred_followups = (
+            [copy.deepcopy(dict(item)) for item in raw_deferred]
+            if isinstance(raw_deferred, list)
+            and all(isinstance(item, Mapping) for item in raw_deferred)
+            else []
+        )
         self._provider_context_recovery_consumed = True
         return continuation
 
@@ -6050,6 +6058,23 @@ class HashiStageProvider(StageProvider):
                     generation_kwargs["continuation_messages"] = (
                         continuation_messages
                     )
+                    recovered_deferred = list(
+                        getattr(
+                            self, "_provider_recovery_deferred_followups", None
+                        )
+                        or []
+                    )
+                    if recovered_deferred:
+                        if (
+                            "deferred_followups" not in parameters
+                            and not accepts_extra_keywords
+                        ):
+                            raise ProviderContextObserverError(
+                                "selected provider cannot restore deferred tool follow-ups"
+                            )
+                        generation_kwargs["deferred_followups"] = (
+                            recovered_deferred
+                        )
                     if (
                         self._provider_context_recovery.get("boundary")
                         == "pending_tool_batch"
@@ -7264,3 +7289,4 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
             fallback=True,
             error_type=reason,
         )
+# HASHI-Fingerprint: hfp_e12bd24318a14e08bdd4753e410d4ea0

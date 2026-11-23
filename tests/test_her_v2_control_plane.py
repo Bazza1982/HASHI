@@ -2113,3 +2113,185 @@ def test_steer_checkpoint_with_valid_digest_still_rejects_stale_source_attempt(
     assert coordinator.store.interruption_evidence_for_request(
         "turn-staleattempt", run_claim=stale_source_claim
     ) is None
+
+
+def test_provider_context_checkpoint_roundtrips_deferred_followups(tmp_path):
+    """The durable pending_tool_batch checkpoint persists completed reads'
+    deferred image/advisory follow-ups across a fresh SessionStore reopen."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    accepted = _accept(coordinator, "turn-deferred", "Do the original work")
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Do the original work"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "read1",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"a.txt"}',
+                    },
+                },
+                {
+                    "id": "read2",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"b.txt"}',
+                    },
+                },
+                {
+                    "id": "write",
+                    "type": "function",
+                    "function": {
+                        "name": "file_write",
+                        "arguments": '{"path":"out.txt","content":"x"}',
+                    },
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "read1", "content": "content-a"},
+        {"role": "tool", "tool_call_id": "read2", "content": "content-b"},
+    ]
+    deferred_followups = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,read1"},
+                }
+            ],
+        },
+        {"role": "system", "content": "smart advisory read1"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,read2"},
+                }
+            ],
+        },
+        {"role": "system", "content": "smart advisory read2"},
+    ]
+    checkpoint = coordinator.record_provider_context_checkpoint(
+        accepted,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "pending_tool_batch",
+            "messages": provider_messages,
+            "reasoning": [],
+            "deferred_followups": deferred_followups,
+            "provider_request_id": "provider-pending",
+            "invocation_id": "turn-deferred:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-deferred",
+                "turn-deferred",
+                input_digest="sha256:deferred-input",
+            ),
+        },
+    )
+    assert checkpoint["available"] is True
+    assert checkpoint["deferred_followup_count"] == 4
+
+    restored = coordinator.store.provider_context_for_turn(
+        accepted.session_id, accepted.turn_id
+    )
+    assert restored["deferred_followups"] == deferred_followups
+    assert restored["deferred_followup_count"] == 4
+    assert restored["messages"] == provider_messages
+
+    # A fresh reopen reads the same segmented items and passes integrity.
+    reopened = HerSessionStore(coordinator.store.path)
+    restored_again = reopened.provider_context_for_turn(
+        accepted.session_id, accepted.turn_id
+    )
+    assert restored_again["deferred_followups"] == deferred_followups
+
+
+def test_provider_context_items_table_migrates_legacy_check_constraint(tmp_path):
+    """A database created before deferred_followup support is rebuilt in place
+    without losing its existing message/reasoning items."""
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    accepted = _accept(coordinator, "turn-migrate", "Do the original work")
+    provider_messages = [
+        {"role": "system", "content": "private system context"},
+        {"role": "user", "content": "Do the original work"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "read",
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "arguments": '{"path":"a.txt"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "read", "content": "old content"},
+    ]
+    coordinator.record_provider_context_checkpoint(
+        accepted,
+        {
+            "provider": "deepseek-api",
+            "model": "deepseek-reasoner",
+            "effort": "high",
+            "stage": "execution",
+            "boundary": "completed_tool_batch",
+            "messages": provider_messages,
+            "reasoning": [],
+            "provider_request_id": "provider-migrate",
+            "invocation_id": "turn-migrate:execution:1",
+            "producer_run_claim": _run_claim(
+                "run-migrate", "turn-migrate", input_digest="sha256:migrate-input"
+            ),
+        },
+    )
+
+    db_path = coordinator.store.path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "ALTER TABLE her_provider_context_items RENAME TO _legacy_items"
+        )
+        connection.execute(
+            """
+            CREATE TABLE her_provider_context_items (
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                item_kind TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                PRIMARY KEY(session_id, turn_id, item_kind, ordinal),
+                CHECK(item_kind IN ('message', 'reasoning')),
+                FOREIGN KEY(session_id, turn_id)
+                    REFERENCES her_turns(session_id, turn_id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO her_provider_context_items SELECT * FROM _legacy_items"
+        )
+        connection.execute("DROP TABLE _legacy_items")
+        connection.commit()
+
+    # Reopening lifts the constraint and preserves the pre-migration items.
+    reopened = HerSessionStore(db_path)
+    restored = reopened.provider_context_for_turn(
+        accepted.session_id, accepted.turn_id
+    )
+    assert restored["messages"] == provider_messages
+    assert restored["reasoning"] == []
+    assert restored["deferred_followups"] == []
+# HASHI-Fingerprint: hfp_084ba73ff0ce433ca5500917c2d50332

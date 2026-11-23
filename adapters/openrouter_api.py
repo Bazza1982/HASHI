@@ -2515,6 +2515,7 @@ class OpenRouterAdapter(BaseBackend):
         request_id: str,
         result: _APIResult,
         provider_request_id: str,
+        deferred_followups: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         observer = getattr(self, "_provider_context_observer", None)
         if observer is None:
@@ -2538,6 +2539,13 @@ class OpenRouterAdapter(BaseBackend):
             "provider_request_id": str(provider_request_id or ""),
             "messages": [copy.deepcopy(dict(item)) for item in messages],
             "reasoning": reasoning,
+            # Completed tools from an earlier interrupted attempt may have
+            # staged image user-parts / smart advisories that must outlive the
+            # Adapter that produced them.  Carrying them on the checkpoint is
+            # the durable recovery source for a fresh Adapter resume.
+            "deferred_followups": [
+                copy.deepcopy(dict(item)) for item in deferred_followups
+            ],
         }
         try:
             observer(checkpoint)
@@ -3791,7 +3799,7 @@ class OpenRouterAdapter(BaseBackend):
         native_local_refs: set[str] | None = None,
         all_media_native: bool = False,
         provider_call_context: Mapping[str, Any] | None = None,
-        before_tool_dispatch: Callable[[], None] | None = None,
+        before_tool_dispatch: Callable[[Sequence[Mapping[str, Any]]], None] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
         completed_bindings = _completed_tool_bindings(messages)
@@ -4003,7 +4011,10 @@ class OpenRouterAdapter(BaseBackend):
             if getattr(self.tool_registry, "permission_durable_wait", False):
                 if before_tool_dispatch is None or self._provider_context_observer is None:
                     raise ProviderContextObserverError("managed Tool dispatch requires a durable pending boundary")
-                before_tool_dispatch()
+                before_tool_dispatch(
+                    list(self._deferred_tool_followups)
+                    + list(deferred_tool_result_messages)
+                )
 
             # Execute only after atomically claiming this Tool ID.
             claim_id = str(tc_id or "")
@@ -4093,7 +4104,10 @@ class OpenRouterAdapter(BaseBackend):
                     # reads. Otherwise a park inside the read segment would
                     # lose the write's completion and replay it on resume.
                     if before_tool_dispatch is not None:
-                        before_tool_dispatch()
+                        before_tool_dispatch(
+                            list(self._deferred_tool_followups)
+                            + list(deferred_tool_result_messages)
+                        )
                     parallel_facts = await self._try_run_parallel_readonly_tool_calls(
                         segment,
                         messages,
@@ -4713,6 +4727,7 @@ class OpenRouterAdapter(BaseBackend):
         request_content: Mapping[str, Any] | None = None,
         continuation_messages: list[dict[str, Any]] | None = None,
         resume_pending_tools: bool = False,
+        deferred_followups: Sequence[Mapping[str, Any]] | None = None,
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
@@ -4725,6 +4740,13 @@ class OpenRouterAdapter(BaseBackend):
         # they can be flushed after its pending tools complete.
         if continuation_messages is None:
             self._deferred_tool_followups = []
+        elif deferred_followups is not None:
+            # A fresh Adapter resume restores the already-completed tools'
+            # follow-ups from the durable checkpoint instead of relying on the
+            # old Adapter's in-memory staging (which no longer exists).
+            self._deferred_tool_followups = [
+                copy.deepcopy(dict(item)) for item in deferred_followups
+            ]
         # Keep placeholder identities scoped to this invocation, including
         # retries and tool loops, even when the adapter handles other requests.
         privacy_gate = getattr(self, "_privacy_gate", None) or OutboundPrivacyGate()
@@ -4841,9 +4863,10 @@ class OpenRouterAdapter(BaseBackend):
                 tool_effect_facts.extend(await self._run_tool_calls(
                     unfinished, messages, on_stream_event,
                     provider_call_context={"provider_request_id": request_id},
-                    before_tool_dispatch=lambda: self._observe_provider_context(
+                    before_tool_dispatch=lambda deferred_followups=(): self._observe_provider_context(
                         boundary="pending_tool_batch", messages=messages, request_id=request_id,
                         result=recovery_result, provider_request_id="",
+                        deferred_followups=deferred_followups,
                     ),
                 ))
                 completed_tool_calls.extend(
@@ -5636,10 +5659,11 @@ class OpenRouterAdapter(BaseBackend):
                             ),
                         },
                         **({
-                            "before_tool_dispatch": lambda: self._observe_provider_context(
+                            "before_tool_dispatch": lambda deferred_followups=(): self._observe_provider_context(
                                 boundary="pending_tool_batch", messages=messages,
                                 request_id=request_id, result=result,
                                 provider_request_id=str(last_provider_call_record.get("provider_request_id", "")),
+                                deferred_followups=deferred_followups,
                             ),
                         } if getattr(self.tool_registry, "permission_durable_wait", False) else {}),
                     )

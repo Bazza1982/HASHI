@@ -361,6 +361,7 @@ class OllamaAdapter(OpenRouterAdapter):
         request_content=None,
         continuation_messages=None,
         resume_pending_tools=False,
+        deferred_followups=None,
         provider_call_limit=None,
         before_provider_call=None,
         transient_images=None,
@@ -378,7 +379,9 @@ class OllamaAdapter(OpenRouterAdapter):
             request_content=request_content,
             continuation_messages=continuation_messages,
             **({"resume_pending_tools": True} if resume_pending_tools else {}),
+            **({"deferred_followups": deferred_followups} if deferred_followups else {}),
             provider_call_limit=provider_call_limit,
             before_provider_call=before_provider_call,
             transient_images=transient_images,
         )
+# HASHI-Fingerprint: hfp_3b97dc785a0241599b268280385c82ea
