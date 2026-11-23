@@ -202,4 +202,69 @@ def test_fetch_workbench_json_returns_none_when_all_hosts_fail(monkeypatch):
 
     assert value is None
     assert remote_server._CACHED_LOCAL_WORKBENCH_HOST is None
+
+
+def test_fetch_workbench_json_recovers_at_sixth_candidate(monkeypatch):
+    """Scenario D: when the API is bound to the 6th interface alias, the
+    identity-verified health probe still recovers and caches the right address
+    via bounded extended discovery (fast 3 + up to 6 extra aliases)."""
+    remote_server.reset_local_workbench_transport_state()
+    _use_expected_instance(monkeypatch, "HASHI3")
+    _use_hosts(monkeypatch, ("127.0.0.1", "127.0.0.2", "127.0.0.3"))
+    # Enable the production-only bounded extended discovery pass.
+    monkeypatch.setattr(remote_server, "_control_hashi_root", "C:/fake-root")
+    monkeypatch.setattr(
+        remote_server,
+        "local_http_hosts",
+        lambda: [
+            "127.0.0.1",
+            "127.0.0.2",
+            "127.0.0.3",
+            "127.0.0.4",
+            "127.0.0.5",
+            "127.0.0.6",
+        ],
+    )
+    monkeypatch.setattr(
+        remote_server, "_read_hashi_pid_state", lambda: {"pid_alive": True}
+    )
+    _install_fake_opener(
+        monkeypatch,
+        {
+            "127.0.0.1": OSError("connection refused"),
+            "127.0.0.2": OSError("connection refused"),
+            "127.0.0.3": OSError("connection refused"),
+            "127.0.0.4": OSError("connection refused"),
+            "127.0.0.5": OSError("connection refused"),
+            "127.0.0.6": {"ok": True, "instance_id": "HASHI3"},
+        },
+    )
+
+    value = remote_server._fetch_workbench_json(
+        "/api/health", timeout=0.5, required_instance_id="HASHI3"
+    )
+
+    assert value == {"ok": True, "instance_id": "HASHI3"}
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST == "127.0.0.6"
+
+
+def test_hashi_control_status_ok_false_is_not_running(monkeypatch):
+    """Scenario E: a health response with ok:false must not confirm running."""
+    remote_server.reset_local_workbench_transport_state()
+    _use_expected_instance(monkeypatch, "HASHI3")
+    _use_hosts(monkeypatch, ("127.0.0.1",))
+    _install_fake_opener(
+        monkeypatch, {"127.0.0.1": {"ok": False, "instance_id": "HASHI3"}}
+    )
+    monkeypatch.setattr(
+        remote_server,
+        "_read_hashi_pid_state",
+        lambda: {"pid_alive": False, "pid_file_exists": False},
+    )
+
+    status = remote_server._hashi_control_status()
+
+    assert status["hashi_running"] is False
+    assert status["state"] != "running"
+    assert status["workbench_health"] == {"ok": False, "instance_id": "HASHI3"}
 # HASHI-Fingerprint: hfp_2e30e35452f44f88b7a95f063c63454e
