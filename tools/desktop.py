@@ -292,7 +292,7 @@ async def _get_display_info(display: str, uc: str | None) -> dict:
 # desktop_screenshot
 # ---------------------------------------------------------------------------
 
-async def execute_desktop_screenshot(args: dict) -> str:
+async def execute_desktop_screenshot(args: dict, *, typed_media: bool = False) -> str:
     logger.info("desktop_screenshot display=%s annotate=%s", args.get("display"), args.get("annotate", False))
     uc = _find_usecomputer()
     if not uc:
@@ -330,18 +330,23 @@ async def execute_desktop_screenshot(args: dict) -> str:
         else:
             saved_note = ""
 
-        b64 = base64.b64encode(png.read_bytes()).decode()
-        size_kb = png.stat().st_size // 1024
+        png_bytes = png.read_bytes()
+        size_kb = len(png_bytes) // 1024
 
         # parse metadata from usecomputer JSON output
         meta = out or "{}"
         extra = await _get_display_info(display, uc)
-        return (
+        description = (
             f"Screenshot OK — DISPLAY={display}, {size_kb}KB\n"
             f"Metadata: {meta}\n"
-            f"Desktop info: {json.dumps(extra, ensure_ascii=False)}{saved_note}\n"
-            f"data:image/png;base64,{b64}"
+            f"Desktop info: {json.dumps(extra, ensure_ascii=False)}{saved_note}"
         )
+        if typed_media:
+            from tools.typed_media_result import screenshot_tool_result
+
+            return screenshot_tool_result(png_bytes, description)
+        b64 = base64.b64encode(png_bytes).decode()
+        return description + f"\ndata:image/png;base64,{b64}"
     finally:
         try:
             Path(tmp).unlink(missing_ok=True)
