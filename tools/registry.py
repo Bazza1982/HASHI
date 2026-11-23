@@ -1325,14 +1325,9 @@ class ToolRegistry:
             details = {**(details or {}), "resource_wait_ms":resource_wait_ms}
         if content_truncated:
             details = {**(details or {}), "content_text_truncated": True}
-        if (
-            tool_name not in _IMAGE_OUTPUT_TOOLS
-            and not (
-                tool_name == "browser_session"
-                and ("[screenshot] base64:" in output or "data:image/" in output)
-            )
-            and len(output) > MAX_TEXT_TOOL_OUTPUT_CHARS
-        ):
+        if len(output) > MAX_TEXT_TOOL_OUTPUT_CHARS:
+            # A screenshot never needs an unbounded Base64 text exception:
+            # image bytes are delivered only in typed ToolResult.content.
             original_chars = len(output)
             output = (
                 output[:MAX_TEXT_TOOL_OUTPUT_CHARS]
@@ -2375,6 +2370,10 @@ class ToolRegistry:
                 "browser_open_play_verify": execute_browser_open_play_verify,
             }
             if tool_name in _browser_dispatch:
+                if tool_name in {"browser_screenshot", "browser_session"}:
+                    return await _browser_dispatch[tool_name](
+                        browser_args, typed_media=True,
+                    )
                 return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
 
@@ -2402,6 +2401,10 @@ class ToolRegistry:
                 "desktop_window_focus": execute_desktop_window_focus,
             }
             if tool_name in _desktop_dispatch:
+                if tool_name == "desktop_screenshot":
+                    return await execute_desktop_screenshot(
+                        arguments, typed_media=True,
+                    )
                 return await _desktop_dispatch[tool_name](arguments)
             return f"Error: unknown desktop tool '{tool_name}'"
 
@@ -2447,6 +2450,10 @@ class ToolRegistry:
                 "windows_window_close": execute_windows_window_close,
             }
             if tool_name in _windows_dispatch:
+                if tool_name == "windows_screenshot":
+                    return await execute_windows_screenshot(
+                        arguments, typed_media=True,
+                    )
                 return await _windows_dispatch[tool_name](arguments)
             return f"Error: unknown windows tool '{tool_name}'"
 
