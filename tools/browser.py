@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -564,7 +565,7 @@ async def execute_browser_open_play_verify(args: dict) -> str:
         ensure_ascii=False,
     )
 
-async def execute_browser_screenshot(args: dict) -> str:
+async def execute_browser_screenshot(args: dict, *, typed_media: bool = False) -> str:
     """
     Navigate to a URL and return a base64-encoded PNG screenshot.
     Returns:  "screenshot:<base64>" on success  or  "Error: ..."
@@ -580,6 +581,15 @@ async def execute_browser_screenshot(args: dict) -> str:
 
     bridge_result = await _maybe_execute_extension_bridge("screenshot", args)
     if bridge_result is not None:
+        if typed_media and bridge_result.startswith("screenshot:"):
+            from tools.typed_media_result import screenshot_tool_result
+            try:
+                payload = base64.b64decode(
+                    bridge_result.partition(":")[2], validate=True,
+                )
+                return screenshot_tool_result(payload, "Browser screenshot captured")
+            except (ValueError, binascii.Error) as exc:
+                return f"Error: browser screenshot returned invalid image bytes: {type(exc).__name__}"
         return bridge_result
 
     pw = browser = context = page = None
@@ -593,6 +603,9 @@ async def execute_browser_screenshot(args: dict) -> str:
             await asyncio.sleep(wait_ms / 1000)
 
         png_bytes = await page.screenshot(full_page=full_page)
+        if typed_media:
+            from tools.typed_media_result import screenshot_tool_result
+            return screenshot_tool_result(png_bytes, "Browser screenshot captured")
         b64 = base64.b64encode(png_bytes).decode()
         return f"screenshot:{b64}"
 
@@ -1130,7 +1143,7 @@ async def execute_browser_upload(args: dict) -> str:
                 pass
 
 
-async def execute_browser_session(args: dict) -> str:
+async def execute_browser_session(args: dict, *, typed_media: bool = False) -> str:
     """
     Execute a multi-step browser session — multiple actions on the same page
     without reloading between steps.
@@ -1163,6 +1176,7 @@ async def execute_browser_session(args: dict) -> str:
 
     pw = browser = context = page = None
     results: list[str] = []
+    screenshots: dict[int, bytes] = {}
 
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -1249,8 +1263,12 @@ async def execute_browser_session(args: dict) -> str:
                 elif action == "screenshot":
                     full_page = bool(step.get("full_page", False))
                     png = await page.screenshot(full_page=full_page)
-                    b64 = base64.b64encode(png).decode()
-                    results.append(f"[screenshot] base64:{b64}")
+                    if typed_media:
+                        screenshots[len(results)] = png
+                        results.append("[screenshot] image attached")
+                    else:
+                        b64 = base64.b64encode(png).decode()
+                        results.append(f"[screenshot] base64:{b64}")
 
                 elif action == "get_text":
                     text = await page.evaluate("() => document.body.innerText")
@@ -1285,6 +1303,22 @@ async def execute_browser_session(args: dict) -> str:
             except Exception as step_err:
                 results.append(f"[{action}] ERROR: {step_err}")
 
+        if typed_media and screenshots:
+            from tools.typed_media_result import screenshot_tool_result
+            from tools.registry import StructuredToolOutput
+
+            # Preserve the original step order with typed text and image parts.
+            parts: list[dict] = []
+            for index, line in enumerate(results):
+                parts.append({"type": "text", "text": line})
+                if index in screenshots:
+                    native = screenshot_tool_result(
+                        screenshots[index], line,
+                    )
+                    parts.append(native.content[-1])
+            return StructuredToolOutput(
+                output="\n".join(results), content=parts,
+            )
         return "\n".join(results)
 
     except Exception as e:
