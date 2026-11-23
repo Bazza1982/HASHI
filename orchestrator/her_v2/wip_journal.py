@@ -92,6 +92,17 @@ def _text(value: Any) -> str:
     return str(value or "")
 
 
+_SUMMARY_BUDGET_CHARS = 2048
+
+
+def _bounded_summary(value: Any) -> str:
+    """Bound a journal request summary so an assembled prompt is never re-fed."""
+    text = str(value or "")
+    if len(text) <= _SUMMARY_BUDGET_CHARS:
+        return text
+    return text[:_SUMMARY_BUDGET_CHARS] + "…[truncated]"
+
+
 def _content_marker(
     value: Any,
     *,
@@ -345,7 +356,12 @@ class WIPJournal:
 
         with self._lock:
             prior = self._read_records_unlocked()
-            summary = str(request_summary or "").strip() or str(prompt or "")
+            summary = str(request_summary or "").strip()
+            if not summary:
+                # Never copy the full assembled provider prompt into the
+                # journal; that re-fed the expanded prompt on recovery and
+                # caused recursive growth. Retain only a bounded excerpt.
+                summary = _bounded_summary(prompt)
             record = {
                 "format": FORMAT,
                 "recorded_at": _now(),
@@ -530,3 +546,4 @@ __all__ = [
     "WIPJournal",
     "WIPSnapshot",
 ]
+# HASHI-Fingerprint: hfp_c6f1fca8e22747a4a443e38b59ba3fc1

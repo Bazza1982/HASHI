@@ -16,6 +16,7 @@ import html
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -143,6 +144,31 @@ def estimate_tokens(value: str) -> int:
     except Exception:
         text = str(value or "")
         return max(1, (len(text.encode("utf-8")) + 2) // 3) if text else 0
+
+
+_CJK_RE = re.compile(
+    r"[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]"
+)
+
+
+def estimate_tokens_conservative(value: str) -> int:
+    """Conservative upper-bound token estimate for preflight rejection.
+
+    ``estimate_tokens`` uses ~0.25 tokens/ASCII char and ~0.667 tokens/CJK
+    char, which can under-count JSON, code and symbol-dense Unicode. This
+    returns at least the named estimate plus a more conservative floor
+    (~0.5 tokens/ASCII char, ~0.9 tokens/CJK char) so clearly oversized
+    requests are rejected before the provider's own 400. It is an estimate,
+    not an exact token count; callers must state that explicitly.
+    """
+    text = str(value or "")
+    if not text:
+        return 0
+    named = estimate_tokens(text)
+    cjk = len(_CJK_RE.findall(text))
+    other = len(text) - cjk
+    floor = int(math.ceil(cjk * 0.9 + other * 0.5))
+    return max(named, floor)
 
 
 def estimate_target_overhead_tokens(runtime: Any) -> int:
@@ -3860,3 +3886,4 @@ __all__ = [
     "schedule_execution_stage",
     "schedule_post_turn",
 ]
+# HASHI-Fingerprint: hfp_2c113ae91f0c410db38ae522b8a31dc2

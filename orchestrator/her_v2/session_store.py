@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.storage_profile import removable_storage_profile
+from orchestrator.her_v2.recovery_projection import bounded_goal
 
 
 _PROVIDER_CONTEXT_STORAGE = "segmented-json-items-v1"
@@ -2379,6 +2380,38 @@ class HerSessionStore:
             )
         return archived
 
+    @staticmethod
+    def _main_model_context_identity(snapshot: Mapping[str, Any]) -> tuple[str, str]:
+        """Return the (provider, model) identity that gates a full provider-context rebuild.
+
+        The primary/main model is the first configured profile
+        (``profiles[0]``). Effort/reasoning, auxiliary profiles, routing_mode
+        and ``voice_origin_active`` changes must NOT force a rebuild; only a
+        change of the main model's provider or model identity does. Falls back
+        to the ``direct`` route target when no profile is present (older
+        snapshots).
+        """
+        snapshot = dict(snapshot) if isinstance(snapshot, Mapping) else {}
+        main: Any = None
+        profiles = snapshot.get("profiles")
+        if isinstance(profiles, (list, tuple)) and profiles:
+            first = profiles[0]
+            if isinstance(first, Mapping):
+                main = first
+        if main is None:
+            routes = snapshot.get("routes")
+            direct = routes.get("direct") if isinstance(routes, Mapping) else None
+            if isinstance(direct, Mapping) and (
+                direct.get("provider") or direct.get("model")
+            ):
+                main = direct
+        if not isinstance(main, Mapping):
+            return ("", "")
+        return (
+            str(main.get("provider") or "").strip(),
+            str(main.get("model") or "").strip(),
+        )
+
     def freeze_turn_routing(
         self,
         *,
@@ -2455,11 +2488,10 @@ class HerSessionStore:
                 (session_id,),
             ).fetchone()
             checkpoint_payload = _object(checkpoint["payload_json"]) if checkpoint else {}
-            previous_revision = int(checkpoint["routing_revision"] or 0) if checkpoint else 0
             previous_snapshot = dict(checkpoint_payload.get("route_snapshot") or {})
             changed = bool(checkpoint) and (
-                previous_revision != int(routing_revision)
-                or bool(previous_snapshot) and previous_snapshot != snapshot
+                self._main_model_context_identity(previous_snapshot)
+                != self._main_model_context_identity(snapshot)
             )
             generation = int(session["provider_context_generation"] or 0)
             if generation <= 0 or changed:
@@ -2589,7 +2621,7 @@ class HerSessionStore:
 
         if event == "request_received":
             remaining = {
-                "goal": str(payload.get("request") or remaining.get("goal") or ""),
+                **bounded_goal(payload.get("request")),
                 "status": "in_progress",
             }
         elif event == "stage_started":
@@ -4074,3 +4106,4 @@ class HerSessionStore:
                 payload={},
             )
             return True
+# HASHI-Fingerprint: hfp_4844f3889c4a4148ba7c66047836585d

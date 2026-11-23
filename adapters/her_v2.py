@@ -58,6 +58,7 @@ from orchestrator.her_v2.models import (
     TerminalState,
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
+from orchestrator.her_v2.recovery_projection import bounded_prompt_projection
 from orchestrator.her_v2.request_policy import resolve_request_effort
 from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
@@ -2094,7 +2095,7 @@ class HERv2Adapter(BaseBackend):
                     "This state survived a process interruption. Investigate unresolved "
                     "side effects before continuing; do not replay them automatically.\n\n"
                     + json.dumps(
-                        canonical_recovery_context,
+                        bounded_prompt_projection(canonical_recovery_context),
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -2251,7 +2252,7 @@ class HERv2Adapter(BaseBackend):
                     "exchanges are already materialised above. This checkpoint is "
                     "context, not a new user request.\n\n"
                     + json.dumps(
-                        checkpoint,
+                        bounded_prompt_projection(checkpoint),
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -3176,3 +3177,4 @@ class HERv2Adapter(BaseBackend):
             self._session_coordinator.store.close_session(self._session_id)
         self._session_id = None
         return True
+# HASHI-Fingerprint: hfp_096db0162453449c93b9e09131c90742

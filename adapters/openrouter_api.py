@@ -2099,7 +2099,10 @@ class OpenRouterAdapter(BaseBackend):
         base64 wire bytes.
         """
 
-        from orchestrator.context_compaction import estimate_tokens, resolve_capacity_profile
+        from orchestrator.context_compaction import (
+            estimate_tokens_conservative,
+            resolve_capacity_profile,
+        )
 
         runtime = getattr(self.config, "_hashi_runtime", None)
         if runtime is None:
@@ -2109,20 +2112,60 @@ class OpenRouterAdapter(BaseBackend):
         if capacity is None:
             return
         serialized = json.dumps(
-            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
+            self._preflight_text_content(payload),
             ensure_ascii=False,
             separators=(",", ":"),
             default=str,
         )
-        if "data:" in serialized or "base64," in serialized:
+        if not serialized or serialized in ("{}", "[]"):
             return
-        estimated = estimate_tokens(serialized)
+        estimated = estimate_tokens_conservative(serialized)
         if estimated > capacity.usable_input_tokens:
             raise ProviderContextCapacityPreflightError(
-                f"Prepared request estimate {estimated} tokens exceeds "
-                f"declared usable input capacity {capacity.usable_input_tokens} "
-                f"for {capacity.provider}/{capacity.model}."
+                f"Prepared request conservative estimate {estimated} tokens "
+                f"exceeds declared usable input capacity "
+                f"{capacity.usable_input_tokens} for "
+                f"{capacity.provider}/{capacity.model}."
             )
+
+    @classmethod
+    def _preflight_text_content(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Return only text-bearing content for capacity estimation.
+
+        Structured multimodal parts (``image_url`` / ``input_audio`` /
+        ``input_image``) use provider-specific token accounting and must not be
+        estimated from their base64 wire bytes; they are excluded. Plain string
+        content and explicit ``text`` parts are kept. ``tools`` schema JSON is
+        always text and kept in full.
+        """
+        media_types = frozenset({"image_url", "input_audio", "input_image"})
+        result: dict[str, Any] = {}
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            text_messages: list[Any] = []
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    text_messages.append(message)
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    text_messages.append(message)
+                elif isinstance(content, list):
+                    kept = [
+                        part
+                        for part in content
+                        if not (
+                            isinstance(part, Mapping)
+                            and part.get("type") in media_types
+                        )
+                    ]
+                    text_messages.append({**dict(message), "content": kept})
+                else:
+                    text_messages.append(message)
+            result["messages"] = text_messages
+        if "tools" in payload:
+            result["tools"] = payload["tools"]
+        return result
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
