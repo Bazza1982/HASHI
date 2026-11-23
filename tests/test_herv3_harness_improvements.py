@@ -16,6 +16,7 @@ import pytest
 from adapters.deepseek_api import DeepSeekAdapter
 from adapters.her_v2_provider import _CognitiveControlToolRegistry
 from adapters.openrouter_api import (
+    _estimate_messages_chars,
     _provider_call_retry_delay,
     compact_intra_turn_tool_messages,
 )
@@ -1103,6 +1104,151 @@ async def test_mixed_write_and_read_batch_remains_strictly_sequential(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mixed_batch_runs_adjacent_read_runs_concurrently_with_serial_boundary(tmp_path):
+    adapter = _deepseek_adapter(tmp_path)
+    inflight = 0
+    peak_inflight = 0
+    order: list[str] = []
+
+    class Registry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            nonlocal inflight, peak_inflight
+            inflight += 1
+            peak_inflight = max(peak_inflight, inflight)
+            try:
+                await asyncio.sleep(0.08)
+                order.append(tool_call_id)
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    output=f"ok:{tool_call_id}",
+                    is_error=False,
+                    details={"smart_status": "success"},
+                )
+            finally:
+                inflight -= 1
+
+    adapter.tool_registry = Registry()
+
+    def _call(name, cid, args):
+        return {
+            "id": cid,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+
+    tool_calls = [
+        _call("file_read", "tc-a", {"path": "a.py"}),
+        _call("file_read", "tc-b", {"path": "b.py"}),
+        _call("text_replace", "tc-c", {"path": "c.py", "find": "x", "replace": "y"}),
+        _call("file_read", "tc-d", {"path": "d.py"}),
+        _call("file_read", "tc-e", {"path": "e.py"}),
+    ]
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+    await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert peak_inflight >= 2, f"expected adjacent read runs to overlap, got peak={peak_inflight}"
+    # The write boundary must land strictly between the two read groups.
+    assert set(order[0:2]) == {"tc-a", "tc-b"}
+    assert order[2] == "tc-c"
+    assert set(order[3:5]) == {"tc-d", "tc-e"}
+    assert adapter._inflight_tool_bindings == {}
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["tc-a", "tc-b", "tc-c", "tc-d", "tc-e"]
+
+
+@pytest.mark.asyncio
+async def test_shell_boundary_keeps_flanking_reads_serial(tmp_path):
+    adapter = _deepseek_adapter(tmp_path)
+    inflight = 0
+    peak_inflight = 0
+    order: list[str] = []
+
+    class Registry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            nonlocal inflight, peak_inflight
+            inflight += 1
+            peak_inflight = max(peak_inflight, inflight)
+            try:
+                await asyncio.sleep(0.04)
+                order.append(tool_call_id)
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    output=f"ok:{tool_call_id}",
+                    is_error=False,
+                    details={"smart_status": "success"},
+                )
+            finally:
+                inflight -= 1
+
+    adapter.tool_registry = Registry()
+
+    def _call(name, cid, args):
+        return {
+            "id": cid,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+
+    tool_calls = [
+        _call("file_read", "tc-a", {"path": "a.py"}),
+        _call("shell", "tc-s", {"command": "echo hi"}),
+        _call("file_read", "tc-b", {"path": "b.py"}),
+    ]
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+    await adapter._run_tool_calls(tool_calls, messages, None)
+
+    # A shell call is a strict serial boundary: neither flanking read may leapfrog it.
+    assert peak_inflight == 1
+    assert order == ["tc-a", "tc-s", "tc-b"]
+
+
+def test_segment_readonly_runs_splits_adjacent_reads_at_write_boundary(tmp_path):
+    adapter = _deepseek_adapter(tmp_path)
+
+    def _call(name, cid, args):
+        return {
+            "id": cid,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+
+    tool_calls = [
+        _call("file_read", "tc-a", {"path": "a.py"}),
+        _call("file_read", "tc-b", {"path": "b.py"}),
+        _call("text_replace", "tc-c", {"path": "c.py", "find": "x", "replace": "y"}),
+        _call("file_read", "tc-d", {"path": "d.py"}),
+        _call("file_read", "tc-e", {"path": "e.py"}),
+    ]
+    segments = adapter._segment_readonly_runs(tool_calls, {})
+    assert [[tc["id"] for tc in segment] for segment in segments] == [
+        ["tc-a", "tc-b"],
+        ["tc-c"],
+        ["tc-d", "tc-e"],
+    ]
+
+
+def test_estimate_messages_chars_counts_reasoning_content_and_reasoning():
+    big = "r" * 100_000
+    messages = [
+        {"role": "assistant", "content": "hi", "reasoning_content": big},
+        {"role": "tool", "tool_call_id": "t1", "content": "ok", "reasoning": "why" * 10},
+    ]
+    got = _estimate_messages_chars(messages)
+    assert got >= len(big)
+    assert got == len("hi") + len(big) + len("ok") + len("why" * 10)
+
+
+def test_estimate_messages_chars_serializes_non_string_reasoning():
+    # A non-string reasoning payload must still be measured, not silently skipped.
+    assert _estimate_messages_chars([{"role": "assistant", "reasoning": [{"t": "x"}]}]) > 0
+    assert _estimate_messages_chars([{"role": "assistant", "content": None}]) == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stage",
     [
@@ -1606,3 +1752,4 @@ def test_missing_task_delta_does_not_emit_noisy_audit_event_while_real_delta_doe
     assert real_app.status == "accepted"
     lines = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert any(item.get("event") == "task_state_delta" for item in lines)
+# HASHI-Fingerprint: hfp_ed8fbcf4a35b4108b3f477c888a61f9c

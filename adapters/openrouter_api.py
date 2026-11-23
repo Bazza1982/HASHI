@@ -1888,6 +1888,16 @@ def _estimate_messages_chars(messages: list[dict[str, Any]]) -> int:
             total += len(content)
         elif content is not None:
             total += len(json.dumps(content, ensure_ascii=False, default=str))
+        # Reasoning fields (DeepSeek/OpenRouter "reasoning_content", plus the
+        # common "reasoning" alias) carry real token budget but were previously
+        # invisible to the estimator, so a turn with a large thinking block was
+        # measured as near-empty and skipped compaction entirely.
+        for key in ("reasoning_content", "reasoning"):
+            value = message.get(key)
+            if isinstance(value, str):
+                total += len(value)
+            elif value is not None:
+                total += len(json.dumps(value, ensure_ascii=False, default=str))
         tool_calls = message.get("tool_calls")
         if tool_calls:
             total += len(json.dumps(tool_calls, ensure_ascii=False, default=str))
@@ -3458,6 +3468,72 @@ class OpenRouterAdapter(BaseBackend):
     # Tool execution with stream events
     # ------------------------------------------------------------------
 
+    def _is_parallel_readonly_candidate(
+        self,
+        tc: dict,
+        completed_bindings: dict[str, tuple[str, str, Any]],
+        seen_ids: set[str],
+    ) -> bool:
+        """Return True when one tool call is safe for bounded read-only concurrency.
+
+        Mirrors the per-call validation inside ``_try_run_parallel_readonly_tool_calls``
+        so segmentation never admits a tool the parallel executor would reject.
+        """
+        fn = tc.get("function", {})
+        tool_name = str(fn.get("name") or "unknown")
+        tc_id = str(tc.get("id") or "")
+        raw_args = fn.get("arguments", "{}")
+        if (
+            not tc_id
+            or tc_id in seen_ids
+            or tc_id in completed_bindings
+            or tool_name not in _PARALLEL_SAFE_READONLY_TOOLS
+            or tool_name in _MEDIA_FALLBACK_TOOL_NAMES
+        ):
+            return False
+        try:
+            arguments = (
+                dict(raw_args)
+                if isinstance(raw_args, Mapping)
+                else (json.loads(raw_args) if raw_args else {})
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(arguments, Mapping):
+            return False
+        if not self._evaluate_tool_policy(tool_name, dict(arguments)).allowed:
+            return False
+        seen_ids.add(tc_id)
+        return True
+
+    def _segment_readonly_runs(
+        self,
+        tool_calls: list[dict],
+        completed_bindings: dict[str, tuple[str, str, Any]],
+    ) -> list[list[dict]]:
+        """Split a tool batch into maximal adjacent read-only runs.
+
+        Any tool that is not a clean, independent, parallel-safe read becomes its
+        own single-tool segment and must run strictly serially (mutation boundary,
+        unparseable call, duplicate id, policy denial, media fallback, etc.).
+        Adjacent read-only runs of two or more tools are eligible for bounded
+        concurrent execution without letting a later read leapfrog a boundary.
+        """
+        segments: list[list[dict]] = []
+        current_run: list[dict] = []
+        seen_ids: set[str] = set()
+        for tc in tool_calls:
+            if self._is_parallel_readonly_candidate(tc, completed_bindings, seen_ids):
+                current_run.append(tc)
+            else:
+                if current_run:
+                    segments.append(current_run)
+                    current_run = []
+                segments.append([tc])
+        if current_run:
+            segments.append(current_run)
+        return segments
+
     async def _try_run_parallel_readonly_tool_calls(
         self,
         tool_calls: list[dict],
@@ -3466,6 +3542,7 @@ class OpenRouterAdapter(BaseBackend):
         *,
         completed_bindings: dict[str, tuple[str, str, Any]],
         provider_call_context: Mapping[str, Any] | None = None,
+        deferred_sink: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], ...] | None:
         """Execute a pure, independent read-only batch concurrently with bounded fan-out.
 
@@ -3661,7 +3738,10 @@ class OpenRouterAdapter(BaseBackend):
             for item, result in zip(prepared, results):
                 _record_result(item, result)
             if deferred_tool_result_messages:
-                messages.extend(deferred_tool_result_messages)
+                if deferred_sink is not None:
+                    deferred_sink.extend(deferred_tool_result_messages)
+                else:
+                    messages.extend(deferred_tool_result_messages)
                 deferred_tool_result_messages.clear()
 
             for item, result in zip(prepared, results):
@@ -3686,7 +3766,10 @@ class OpenRouterAdapter(BaseBackend):
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
             if deferred_tool_result_messages:
-                messages.extend(deferred_tool_result_messages)
+                if deferred_sink is not None:
+                    deferred_sink.extend(deferred_tool_result_messages)
+                else:
+                    messages.extend(deferred_tool_result_messages)
                 deferred_tool_result_messages.clear()
             with self._tool_replay_lock:
                 for claim_id, binding in claimed:
@@ -3707,15 +3790,6 @@ class OpenRouterAdapter(BaseBackend):
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
         completed_bindings = _completed_tool_bindings(messages)
-        parallel_facts = await self._try_run_parallel_readonly_tool_calls(
-            tool_calls,
-            messages,
-            on_stream_event,
-            completed_bindings=completed_bindings,
-            provider_call_context=provider_call_context,
-        )
-        if parallel_facts is not None:
-            return parallel_facts
         effect_facts: list[dict[str, Any]] = []
         deferred_tool_result_messages: list[dict[str, Any]] = []
         current_batch_tool_ids: set[str] = set()
@@ -3729,7 +3803,9 @@ class OpenRouterAdapter(BaseBackend):
                 existing_id = str(existing_msg.get("tool_call_id") or "")
                 if existing_id:
                     current_batch_tool_ids.add(existing_id)
-        for tc in tool_calls:
+
+        async def _run_one(tc: dict) -> None:
+            """Execute exactly one tool call serially into the shared sinks."""
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
             tc_id = tc.get("id", "")
@@ -3780,7 +3856,7 @@ class OpenRouterAdapter(BaseBackend):
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
-                continue
+                return
 
             binding = _canonical_tool_binding(tool_name, arguments)
             completed = completed_bindings.get(str(tc_id or ""))
@@ -3822,7 +3898,7 @@ class OpenRouterAdapter(BaseBackend):
                     tool_name=tool_name,
                     metadata={**correlation, "reused_completed_result": True},
                 )
-                continue
+                return
 
             event_metadata: dict[str, Any] = {}
             event_path = ""
@@ -3880,7 +3956,7 @@ class OpenRouterAdapter(BaseBackend):
                         "content": result_text,
                     }
                 )
-                continue
+                return
 
             policy = self._evaluate_tool_policy(tool_name, arguments)
             if not policy.allowed:
@@ -3917,7 +3993,7 @@ class OpenRouterAdapter(BaseBackend):
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
-                continue
+                return
 
             if getattr(self.tool_registry, "permission_durable_wait", False):
                 if before_tool_dispatch is None or self._provider_context_observer is None:
@@ -4002,6 +4078,23 @@ class OpenRouterAdapter(BaseBackend):
                     binding[1],
                     copy.deepcopy(result.output),
                 )
+
+        segments = self._segment_readonly_runs(tool_calls, completed_bindings)
+        for segment in segments:
+            if len(segment) > 1:
+                parallel_facts = await self._try_run_parallel_readonly_tool_calls(
+                    segment,
+                    messages,
+                    on_stream_event,
+                    completed_bindings=completed_bindings,
+                    provider_call_context=provider_call_context,
+                    deferred_sink=deferred_tool_result_messages,
+                )
+                if parallel_facts is not None:
+                    effect_facts.extend(parallel_facts)
+                    continue
+            for tc in segment:
+                await _run_one(tc)
         # Provider follow-up messages (for example DeepSeek user image parts)
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
