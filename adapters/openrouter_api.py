@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import socket
 import threading
 import time
 import wave
@@ -1763,6 +1764,54 @@ def _transient_provider_call_error(error: Exception) -> bool:
     )
 
 
+def _is_dns_resolution_before_send(error: Exception) -> bool:
+    """Return True only when *error* proves DNS resolution failed before any
+    HTTP request bytes could have been written to the wire.
+
+    A failed ``getaddrinfo`` (``socket.gaierror`` / ``socket.herror``) is
+    raised while establishing the connection, before the request is sent, so
+    re-submitting cannot double-deliver to the provider.  Connection-refused,
+    reset, timeout and TLS failures do not carry that guarantee and keep the
+    ordinary transient retry policy.
+    """
+    if not isinstance(error, httpx.ConnectError):
+        return False
+    cause = error.__cause__
+    depth = 0
+    while cause is not None and depth < 8:
+        if isinstance(cause, (socket.gaierror, socket.herror)):
+            return True
+        cause = cause.__cause__
+        depth += 1
+    lowered = str(error).casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "getaddrinfo",
+            "name resolution",
+            "name or service not known",
+        )
+    )
+
+
+def _provider_call_transport_retry_limit(adapter, error: Exception) -> int:
+    """Effective bounded in-place retry count for one failed provider call.
+
+    A provable pre-send DNS failure may use a wider retry window (longer
+    outage tolerance) because re-submission cannot double-deliver; all other
+    transient errors keep the default, repair-limited budget.
+    """
+    if _is_dns_resolution_before_send(error):
+        retries = getattr(
+            adapter,
+            "TRANSIENT_PROVIDER_CALL_DNS_RETRIES",
+            getattr(adapter, "TRANSIENT_PROVIDER_CALL_RETRIES", 0),
+        )
+        return max(0, int(retries))
+    retries = getattr(adapter, "TRANSIENT_PROVIDER_CALL_RETRIES", 0)
+    return min(INVALID_TOOL_CALL_REPAIR_LIMIT, max(0, int(retries)))
+
+
 def _checkpoint_backed_stream_inactivity_continuation(
     error: Exception,
     *,
@@ -1839,6 +1888,16 @@ def _estimate_messages_chars(messages: list[dict[str, Any]]) -> int:
             total += len(content)
         elif content is not None:
             total += len(json.dumps(content, ensure_ascii=False, default=str))
+        # Reasoning fields (DeepSeek/OpenRouter "reasoning_content", plus the
+        # common "reasoning" alias) carry real token budget but were previously
+        # invisible to the estimator, so a turn with a large thinking block was
+        # measured as near-empty and skipped compaction entirely.
+        for key in ("reasoning_content", "reasoning"):
+            value = message.get(key)
+            if isinstance(value, str):
+                total += len(value)
+            elif value is not None:
+                total += len(json.dumps(value, ensure_ascii=False, default=str))
         tool_calls = message.get("tool_calls")
         if tool_calls:
             total += len(json.dumps(tool_calls, ensure_ascii=False, default=str))
@@ -2046,6 +2105,8 @@ class OpenRouterAdapter(BaseBackend):
     TRANSIENT_PROVIDER_CALL_RETRIES = INVALID_TOOL_CALL_REPAIR_LIMIT
     TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.5
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 16.0
+    TRANSIENT_PROVIDER_CALL_DNS_RETRIES = 6
+    TRANSIENT_PROVIDER_CALL_DNS_RETRY_MAX_DELAY_S = 60.0
     INTRA_TURN_COMPACTION_TRIGGER_TOKENS = 110_000
     INTRA_TURN_COMPACTION_TRIGGER_CHARS = 360_000
     INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS = 12
@@ -2137,6 +2198,11 @@ class OpenRouterAdapter(BaseBackend):
         self._provider_fallback_port: Any = None
         self._tool_replay_lock = threading.RLock()
         self._inflight_tool_bindings: dict[str, tuple[str, str]] = {}
+        # Provider follow-up messages (image user-parts, smart advisories) from
+        # a tool batch that failed part-way.  A later resume flushes these
+        # after the remaining tools complete so completed reads are not
+        # silently stripped of their media/advice.
+        self._deferred_tool_followups: list[dict[str, Any]] = []
 
     async def _protect_outbound_payload(
         self,
@@ -2424,6 +2490,7 @@ class OpenRouterAdapter(BaseBackend):
         request_id: str,
         result: _APIResult,
         provider_request_id: str,
+        deferred_followups: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         observer = getattr(self, "_provider_context_observer", None)
         if observer is None:
@@ -2447,6 +2514,13 @@ class OpenRouterAdapter(BaseBackend):
             "provider_request_id": str(provider_request_id or ""),
             "messages": [copy.deepcopy(dict(item)) for item in messages],
             "reasoning": reasoning,
+            # Completed tools from an earlier interrupted attempt may have
+            # staged image user-parts / smart advisories that must outlive the
+            # Adapter that produced them.  Carrying them on the checkpoint is
+            # the durable recovery source for a fresh Adapter resume.
+            "deferred_followups": [
+                copy.deepcopy(dict(item)) for item in deferred_followups
+            ],
         }
         try:
             observer(checkpoint)
@@ -3382,6 +3456,72 @@ class OpenRouterAdapter(BaseBackend):
     # Tool execution with stream events
     # ------------------------------------------------------------------
 
+    def _is_parallel_readonly_candidate(
+        self,
+        tc: dict,
+        completed_bindings: dict[str, tuple[str, str, Any]],
+        seen_ids: set[str],
+    ) -> bool:
+        """Return True when one tool call is safe for bounded read-only concurrency.
+
+        Mirrors the per-call validation inside ``_try_run_parallel_readonly_tool_calls``
+        so segmentation never admits a tool the parallel executor would reject.
+        """
+        fn = tc.get("function", {})
+        tool_name = str(fn.get("name") or "unknown")
+        tc_id = str(tc.get("id") or "")
+        raw_args = fn.get("arguments", "{}")
+        if (
+            not tc_id
+            or tc_id in seen_ids
+            or tc_id in completed_bindings
+            or tool_name not in _PARALLEL_SAFE_READONLY_TOOLS
+            or tool_name in _MEDIA_FALLBACK_TOOL_NAMES
+        ):
+            return False
+        try:
+            arguments = (
+                dict(raw_args)
+                if isinstance(raw_args, Mapping)
+                else (json.loads(raw_args) if raw_args else {})
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(arguments, Mapping):
+            return False
+        if not self._evaluate_tool_policy(tool_name, dict(arguments)).allowed:
+            return False
+        seen_ids.add(tc_id)
+        return True
+
+    def _segment_readonly_runs(
+        self,
+        tool_calls: list[dict],
+        completed_bindings: dict[str, tuple[str, str, Any]],
+    ) -> list[list[dict]]:
+        """Split a tool batch into maximal adjacent read-only runs.
+
+        Any tool that is not a clean, independent, parallel-safe read becomes its
+        own single-tool segment and must run strictly serially (mutation boundary,
+        unparseable call, duplicate id, policy denial, media fallback, etc.).
+        Adjacent read-only runs of two or more tools are eligible for bounded
+        concurrent execution without letting a later read leapfrog a boundary.
+        """
+        segments: list[list[dict]] = []
+        current_run: list[dict] = []
+        seen_ids: set[str] = set()
+        for tc in tool_calls:
+            if self._is_parallel_readonly_candidate(tc, completed_bindings, seen_ids):
+                current_run.append(tc)
+            else:
+                if current_run:
+                    segments.append(current_run)
+                    current_run = []
+                segments.append([tc])
+        if current_run:
+            segments.append(current_run)
+        return segments
+
     async def _try_run_parallel_readonly_tool_calls(
         self,
         tool_calls: list[dict],
@@ -3390,6 +3530,7 @@ class OpenRouterAdapter(BaseBackend):
         *,
         completed_bindings: dict[str, tuple[str, str, Any]],
         provider_call_context: Mapping[str, Any] | None = None,
+        deferred_sink: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], ...] | None:
         """Execute a pure, independent read-only batch concurrently with bounded fan-out.
 
@@ -3585,7 +3726,10 @@ class OpenRouterAdapter(BaseBackend):
             for item, result in zip(prepared, results):
                 _record_result(item, result)
             if deferred_tool_result_messages:
-                messages.extend(deferred_tool_result_messages)
+                if deferred_sink is not None:
+                    deferred_sink.extend(deferred_tool_result_messages)
+                else:
+                    messages.extend(deferred_tool_result_messages)
                 deferred_tool_result_messages.clear()
 
             for item, result in zip(prepared, results):
@@ -3610,7 +3754,10 @@ class OpenRouterAdapter(BaseBackend):
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
             if deferred_tool_result_messages:
-                messages.extend(deferred_tool_result_messages)
+                if deferred_sink is not None:
+                    deferred_sink.extend(deferred_tool_result_messages)
+                else:
+                    messages.extend(deferred_tool_result_messages)
                 deferred_tool_result_messages.clear()
             with self._tool_replay_lock:
                 for claim_id, binding in claimed:
@@ -3627,19 +3774,10 @@ class OpenRouterAdapter(BaseBackend):
         native_local_refs: set[str] | None = None,
         all_media_native: bool = False,
         provider_call_context: Mapping[str, Any] | None = None,
-        before_tool_dispatch: Callable[[], None] | None = None,
+        before_tool_dispatch: Callable[[Sequence[Mapping[str, Any]]], None] | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Execute all tool_calls and append tool result messages to `messages`."""
         completed_bindings = _completed_tool_bindings(messages)
-        parallel_facts = await self._try_run_parallel_readonly_tool_calls(
-            tool_calls,
-            messages,
-            on_stream_event,
-            completed_bindings=completed_bindings,
-            provider_call_context=provider_call_context,
-        )
-        if parallel_facts is not None:
-            return parallel_facts
         effect_facts: list[dict[str, Any]] = []
         deferred_tool_result_messages: list[dict[str, Any]] = []
         current_batch_tool_ids: set[str] = set()
@@ -3653,7 +3791,20 @@ class OpenRouterAdapter(BaseBackend):
                 existing_id = str(existing_msg.get("tool_call_id") or "")
                 if existing_id:
                     current_batch_tool_ids.add(existing_id)
-        for tc in tool_calls:
+
+        last_checkpoint_message_count = len(messages)
+
+        def _checkpoint_pending() -> None:
+            nonlocal last_checkpoint_message_count
+            if before_tool_dispatch is not None:
+                before_tool_dispatch(
+                    list(self._deferred_tool_followups)
+                    + list(deferred_tool_result_messages)
+                )
+                last_checkpoint_message_count = len(messages)
+
+        async def _run_one(tc: dict) -> None:
+            """Execute exactly one tool call serially into the shared sinks."""
             fn = tc.get("function", {})
             tool_name = fn.get("name", "unknown")
             tc_id = tc.get("id", "")
@@ -3704,7 +3855,7 @@ class OpenRouterAdapter(BaseBackend):
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
-                continue
+                return
 
             binding = _canonical_tool_binding(tool_name, arguments)
             completed = completed_bindings.get(str(tc_id or ""))
@@ -3746,7 +3897,7 @@ class OpenRouterAdapter(BaseBackend):
                     tool_name=tool_name,
                     metadata={**correlation, "reused_completed_result": True},
                 )
-                continue
+                return
 
             event_metadata: dict[str, Any] = {}
             event_path = ""
@@ -3804,7 +3955,7 @@ class OpenRouterAdapter(BaseBackend):
                         "content": result_text,
                     }
                 )
-                continue
+                return
 
             policy = self._evaluate_tool_policy(tool_name, arguments)
             if not policy.allowed:
@@ -3841,12 +3992,12 @@ class OpenRouterAdapter(BaseBackend):
                     "tool_call_id": tc_id,
                     "content": result_text,
                 })
-                continue
+                return
 
             if getattr(self.tool_registry, "permission_durable_wait", False):
                 if before_tool_dispatch is None or self._provider_context_observer is None:
                     raise ProviderContextObserverError("managed Tool dispatch requires a durable pending boundary")
-                before_tool_dispatch()
+                _checkpoint_pending()
 
             # Execute only after atomically claiming this Tool ID.
             claim_id = str(tc_id or "")
@@ -3926,10 +4077,61 @@ class OpenRouterAdapter(BaseBackend):
                     binding[1],
                     copy.deepcopy(result.output),
                 )
+
+        segments = self._segment_readonly_runs(tool_calls, completed_bindings)
+        try:
+            for segment in segments:
+                if len(segment) > 1:
+                    # A managed (durable-wait) batch must checkpoint the
+                    # completed side-effectful tools before launching parallel
+                    # reads. Otherwise a park inside the read segment would
+                    # lose the write's completion and replay it on resume.
+                    if before_tool_dispatch is not None:
+                        _checkpoint_pending()
+                    parallel_facts = await self._try_run_parallel_readonly_tool_calls(
+                        segment,
+                        messages,
+                        on_stream_event,
+                        completed_bindings=completed_bindings,
+                        provider_call_context=provider_call_context,
+                        deferred_sink=deferred_tool_result_messages,
+                    )
+                    if parallel_facts is not None:
+                        effect_facts.extend(parallel_facts)
+                        continue
+                for tc in segment:
+                    await _run_one(tc)
+        except BaseException:
+            # A parallel read may have completed after the last pending
+            # checkpoint while a sibling parked or failed. Persist the real
+            # completed results and follow-ups before allowing recovery to
+            # consume the remaining pending calls in a fresh Adapter.
+            if (
+                before_tool_dispatch is not None
+                and len(messages) > last_checkpoint_message_count
+            ):
+                from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+                try:
+                    pending_tool_calls(messages)
+                except ValueError as exc:
+                    if str(exc) != "the checkpoint contains no pending Tool call":
+                        raise ProviderContextObserverError(
+                            "interrupted Tool checkpoint is invalid"
+                        ) from exc
+                else:
+                    _checkpoint_pending()
+            # Also retain follow-ups if this same Adapter is resumed.
+            if deferred_tool_result_messages:
+                self._deferred_tool_followups.extend(deferred_tool_result_messages)
+            raise
         # Provider follow-up messages (for example DeepSeek user image parts)
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
         # contains more than one call.
+        if self._deferred_tool_followups:
+            messages.extend(self._deferred_tool_followups)
+            self._deferred_tool_followups.clear()
         messages.extend(deferred_tool_result_messages)
         return tuple(effect_facts)
 
@@ -4440,16 +4642,6 @@ class OpenRouterAdapter(BaseBackend):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
-                    wire_evidence["assembly_snapshots"].append(
-                        {
-                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
-                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
-                            "index": idx,
-                            "assembled": json.loads(
-                                json.dumps(acc, ensure_ascii=False)
-                            ),
-                        }
-                    )
                 if tool_calls_acc:
                     protocol_state["tool_calls"] = _tool_call_protocol_summary(
                         list(tool_calls_acc.values())
@@ -4530,12 +4722,26 @@ class OpenRouterAdapter(BaseBackend):
         request_content: Mapping[str, Any] | None = None,
         continuation_messages: list[dict[str, Any]] | None = None,
         resume_pending_tools: bool = False,
+        deferred_followups: Sequence[Mapping[str, Any]] | None = None,
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
+        # A fresh generation (no continuation checkpoint) must not leak
+        # follow-up messages held from a previously failed tool batch into an
+        # unrelated turn; a resume (continuation_messages set) keeps them so
+        # they can be flushed after its pending tools complete.
+        if continuation_messages is None:
+            self._deferred_tool_followups = []
+        elif deferred_followups is not None:
+            # A fresh Adapter resume restores the already-completed tools'
+            # follow-ups from the durable checkpoint instead of relying on the
+            # old Adapter's in-memory staging (which no longer exists).
+            self._deferred_tool_followups = [
+                copy.deepcopy(dict(item)) for item in deferred_followups
+            ]
         # Keep placeholder identities scoped to this invocation, including
         # retries and tool loops, even when the adapter handles other requests.
         privacy_gate = getattr(self, "_privacy_gate", None) or OutboundPrivacyGate()
@@ -4652,9 +4858,10 @@ class OpenRouterAdapter(BaseBackend):
                 tool_effect_facts.extend(await self._run_tool_calls(
                     unfinished, messages, on_stream_event,
                     provider_call_context={"provider_request_id": request_id},
-                    before_tool_dispatch=lambda: self._observe_provider_context(
+                    before_tool_dispatch=lambda deferred_followups=(): self._observe_provider_context(
                         boundary="pending_tool_batch", messages=messages, request_id=request_id,
                         result=recovery_result, provider_request_id="",
+                        deferred_followups=deferred_followups,
                     ),
                 ))
                 completed_tool_calls.extend(
@@ -4897,9 +5104,9 @@ class OpenRouterAdapter(BaseBackend):
                             and provider_attempt_serial >= int(provider_call_limit)
                         ):
                             can_media_fallback = False
-                        retry_limit = min(
-                            INVALID_TOOL_CALL_REPAIR_LIMIT,
-                            max(0, int(self.TRANSIENT_PROVIDER_CALL_RETRIES)),
+                        dns_before_send = _is_dns_resolution_before_send(exc)
+                        retry_limit = _provider_call_transport_retry_limit(
+                            self, exc
                         )
                         effect_recovery = _effect_recovery_summary(
                             tool_effect_facts
@@ -5063,7 +5270,13 @@ class OpenRouterAdapter(BaseBackend):
                                         self.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S
                                     ),
                                     maximum_s=(
-                                        self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S
+                                        getattr(
+                                            self,
+                                            "TRANSIENT_PROVIDER_CALL_DNS_RETRY_MAX_DELAY_S",
+                                            self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S,
+                                        )
+                                        if dns_before_send
+                                        else self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S
                                     ),
                                     attempt=recovery_attempts_used,
                                 )
@@ -5439,10 +5652,11 @@ class OpenRouterAdapter(BaseBackend):
                             ),
                         },
                         **({
-                            "before_tool_dispatch": lambda: self._observe_provider_context(
+                            "before_tool_dispatch": lambda deferred_followups=(): self._observe_provider_context(
                                 boundary="pending_tool_batch", messages=messages,
                                 request_id=request_id, result=result,
                                 provider_request_id=str(last_provider_call_record.get("provider_request_id", "")),
+                                deferred_followups=deferred_followups,
                             ),
                         } if getattr(self.tool_registry, "permission_durable_wait", False) else {}),
                     )
