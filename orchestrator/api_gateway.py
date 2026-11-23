@@ -859,7 +859,9 @@ class _SessionCache:
 
     def set(self, session_id: str, messages: list[dict]) -> bool:
         if _contains_inline_media(messages):
-            self._store.pop(session_id, None)
+            # A rejected cache update must not erase a previous accepted
+            # transcript. Actual inline images are validated at the typed
+            # media boundary before the caller is admitted.
             return False
         self._store[session_id] = {"messages": list(messages), "ts": time.time()}
         return True
