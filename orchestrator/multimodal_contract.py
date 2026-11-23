@@ -41,10 +41,18 @@ INPUT_TRANSPORTS = frozenset(
     {"local_path", "data_url", "remote_url", "inline", "provider_file"}
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_DATA_URL_RE = re.compile(
-    r"(?<![A-Za-z0-9_])data:[^,\s]*,",
-    re.IGNORECASE,
-)
+def _is_inline_media_reference(value: Any) -> bool:
+    """Classify only an explicitly typed media reference, never prose."""
+
+    if isinstance(value, str):
+        return value.lstrip().casefold().startswith("data:")
+    if isinstance(value, Mapping):
+        return any(
+            _is_inline_media_reference(value.get(field))
+            for field in ("url", "image_url", "file_data")
+        )
+    return False
+
 _PERSISTENT_TRANSPORT_FIELDS = frozenset(
     {"update_id", "message_id", "media_group_id"}
 )
@@ -290,19 +298,38 @@ def infer_mime_type(filename: str, *, modality: str = "") -> str:
 
 
 def _contains_forbidden_inline(value: Any) -> bool:
+    """Reject actual binary values or typed inline media, not text examples.
+
+    A message's text, caption, tool output, or source code may legitimately
+    describe an entire data URL. The *part type* is the only media boundary.
+    """
+
     if isinstance(value, (bytes, bytearray, memoryview)):
         return True
-    if isinstance(value, str):
-        return bool(_DATA_URL_RE.search(value))
     if isinstance(value, Mapping):
-        return any(
-            _contains_forbidden_inline(key) or _contains_forbidden_inline(item)
-            for key, item in value.items()
-        )
+        kind = str(value.get("type") or "").strip().casefold()
+        if kind in {"image_url", "input_image"} and (
+            _is_inline_media_reference(value.get("image_url"))
+            or _is_inline_media_reference(value.get("url"))
+            or _is_inline_media_reference(value.get("file_data"))
+        ):
+            return True
+        if kind in {"image", "audio", "video", "input_audio", "input_video",
+                    "file", "input_file"}:
+            # Native binary parts have an explicit media schema. A Base64
+            # field is media even without a data URL prefix.
+            if any(value.get(field) not in (None, "") for field in (
+                "data", "file_data", "input_audio", "audio", "video", "image",
+            )):
+                return True
+            if _is_inline_media_reference(value.get("image_url")):
+                return True
+        if kind == "media" and _is_inline_media_reference(value.get("local_ref")):
+            return True
+        return any(_contains_forbidden_inline(item) for item in value.values())
     if isinstance(value, (list, tuple, set, frozenset)):
         return any(_contains_forbidden_inline(item) for item in value)
     return False
-
 
 def contains_persistent_inline_media(value: Any) -> bool:
     """Detect bytes or data URLs that must not enter durable request state."""
@@ -408,7 +435,7 @@ def canonical_request_content(parts: Sequence[Mapping[str, Any]]) -> dict[str, A
                 "media parts require a persistent local_ref",
                 attachment_id=attachment_id,
             )
-        if _DATA_URL_RE.search(local_ref):
+        if _is_inline_media_reference(local_ref):
             raise MultimodalContractError(
                 "local_ref cannot contain an inline data URL",
                 code="INLINE_MEDIA_PERSISTENCE_FORBIDDEN",
