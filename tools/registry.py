@@ -15,7 +15,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 from uuid import uuid4
