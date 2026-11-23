@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -3063,6 +3064,165 @@ async def test_current_call_checkpoint_continues_without_repeating_a_real_write(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('proof', ['valid', 'missing'])
+async def test_dns_failure_resumes_same_turn_without_repeating_completed_read_and_write(
+    monkeypatch, tmp_path, proof
+):
+    """A3: a DNS-before-send failure on a later provider call uses the 6-attempt
+    budget, resumes the same turn, and never replays the completed read/write;
+    an unproven write makes the recovery fail honestly instead of replaying it."""
+    from orchestrator.her_v2.audit import DurableAuditLog
+
+    adapter = _adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0  # no real sleep in test
+    registry = ToolRegistry(
+        ['file_read', 'file_write'],
+        tmp_path,
+        tmp_path,
+        {},
+        audit_context={'request_id': 'req-dns-recovery'},
+    )
+    evidence = _EvidenceRecordingToolRegistry(
+        registry,
+        StageRequest(
+            turn_id='turn-dns',
+            request_ref='req-dns-recovery',
+            invocation_id='invocation-dns',
+            stage=Stage.EXECUTION,
+            role='primary',
+            attempt=1,
+            goal='Read the canary then write once.',
+            classification=None,
+            effort=Effort.HIGH,
+            allow_tools=True,
+        ),
+        audit_log=DurableAuditLog(
+            tmp_path / 'dns-recovery.jsonl', tmp_path / 'dns-fallback.jsonl'
+        ),
+    )
+    adapter.tool_registry = evidence
+    (tmp_path / 'canary.txt').write_text('read me', encoding='utf-8')
+
+    actual_execute = registry.execute
+    executions = []
+
+    async def execute_once(name, arguments, tool_call_id='', **kwargs):
+        executions.append((name, tool_call_id))
+        return await actual_execute(name, arguments, tool_call_id, **kwargs)
+
+    monkeypatch.setattr(registry, 'execute', execute_once)
+    actual_evidence_execute = evidence.execute
+
+    async def execute_with_proof(name, arguments, tool_call_id='', **kwargs):
+        result = await actual_evidence_execute(name, arguments, tool_call_id, **kwargs)
+        if proof == 'missing' and name == 'file_write':
+            result.details.pop('continuation_checkpoint', None)
+        return result
+
+    monkeypatch.setattr(evidence, 'execute', execute_with_proof)
+
+    seen = []
+    observed_provider_calls = []
+    adapter.set_provider_call_observer(observed_provider_calls.append)
+
+    async def provider(payload, headers, callback):
+        seen.append(json.dumps(payload['messages'], sort_keys=True))
+        if len(seen) == 1:
+            return _APIResult(
+                '',
+                [
+                    {
+                        'id': 'read-1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'file_read',
+                            'arguments': json.dumps({'path': 'canary.txt'}),
+                        },
+                    },
+                    {
+                        'id': 'write-1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'file_write',
+                            'arguments': json.dumps(
+                                {'path': 'dns-write.txt', 'content': 'exactly once'}
+                            ),
+                        },
+                    },
+                ],
+                'tool_calls',
+            )
+        if len(seen) == 2:
+            error = httpx.ConnectError('name resolution failed')
+            error.__cause__ = socket.gaierror(-2, 'Name or service not known')
+            raise error
+        return _APIResult('resumed', None, 'stop')
+
+    monkeypatch.setattr(adapter, '_stream_api_once', provider)
+    response = await adapter.generate_response(
+        'Read then write once', 'req-dns-recovery',
+        on_stream_event=lambda event: asyncio.sleep(0),
+    )
+
+    # Neither the completed read nor the completed write is ever re-executed.
+    assert executions == [('file_read', 'read-1'), ('file_write', 'write-1')]
+    assert (tmp_path / 'dns-write.txt').read_text(encoding='utf-8') == 'exactly once'
+
+    if proof == 'valid':
+        assert response.is_success, response.error
+        assert response.text == 'resumed'
+        # Only the unfinished model request is repeated after the DNS outage.
+        assert seen[1] == seen[2]
+        assert response.stream_metadata['provider_transport_retry_count'] == 1
+        assert response.stream_metadata['provider_local_recovery_limit'] == 3
+        provider_calls = response.stream_metadata['meter']['provider_calls']
+        assert provider_calls == observed_provider_calls
+        assert [call['status'] for call in provider_calls] == [
+            'completed',
+            'failed_without_receipt',
+            'completed',
+        ]
+        dns_call = provider_calls[1]
+        assert dns_call['decision'] == 'retry_current_call_checkpoint'
+        assert [call['retry_count'] for call in provider_calls] == [0, 0, 1]
+        assert dns_call['effect_recovery'] == {
+            'executed_tool_count': 2,
+            'verified_read_count': 1,
+            'unsafe_or_unverified_count': 1,
+            'safe_current_call_continuation': True,
+            'completed_checkpoint_count': 2,
+            'continuation_scope': 'current_provider_call',
+            'tools_replayed': False,
+            'discarded_partial_draft': False,
+        }
+        assert provider_calls[-1]['recovery_kind'] == 'current_call_checkpoint'
+    else:
+        # A write whose checkpoint is absent must not be replayed on a DNS retry.
+        assert not response.is_success
+        assert len(seen) == 2
+        assert response.error_code == 'PROVIDER_CONNECTION_FAILED'
+        assert response.stream_metadata['provider_transport_retry_count'] == 0
+
+    # The durable audit log holds exactly the completed read + write receipts.
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / 'dns-recovery.jsonl').read_text(encoding='utf-8').splitlines()
+    ]
+    completed = [
+        row
+        for row in rows
+        if row.get('event') == 'tool_receipt'
+        and row.get('payload', {}).get('receipt', {}).get('completed')
+    ]
+    assert len(completed) == 2
+    operation_ids = {row['payload']['operation_id'] for row in completed}
+    assert operation_ids == {
+        'invocation-dns:attempt:1:tool:read-1',
+        'invocation-dns:attempt:1:tool:write-1',
+    }
+
+
+@pytest.mark.asyncio
 async def test_network_failure_records_actual_phase_and_sanitised_cause_chain(tmp_path):
     from adapters.openrouter_api import _trace_provider_request, _trace_provider_response
     async def transport(request):
@@ -3777,3 +3937,4 @@ async def test_herv3_stream_inactivity_does_not_retry_after_partial_answer_text(
     assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
     assert response.stream_metadata["provider_transport_retry_count"] == 0
     assert calls == 1
+# HASHI-Fingerprint: hfp_9ddcf188413f48ae81bb6000ab818d3e

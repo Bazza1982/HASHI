@@ -82,6 +82,24 @@ def test_transport_retry_limit_dns_wider_than_default():
     )
 
 
+def test_dns_retry_backoff_cumulative_duration_is_94_5_seconds():
+    from adapters.openrouter_api import _provider_call_retry_delay
+
+    delays = [
+        _provider_call_retry_delay(
+            _dns_connect_error(), default_s=1.5, maximum_s=60.0, attempt=attempt
+        )
+        for attempt in range(1, 7)
+    ]
+    assert delays == [1.5, 3.0, 6.0, 12.0, 24.0, 48.0]
+    # Six retries never sleep less than the advertised 15s DNS-jitter window
+    # and the exponential tail is capped by the 60s DNS maximum.
+    assert sum(delays) == 94.5
+    assert _provider_call_retry_delay(
+        _dns_connect_error(), default_s=1.5, maximum_s=60.0, attempt=12
+    ) == 60.0
+
+
 # --------------------------------------------------------------------------- #
 # A2: shell timeout preserves partial output
 # --------------------------------------------------------------------------- #
@@ -151,6 +169,93 @@ async def test_bounded_communicate_exposes_partial_output_after_cancel():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert partial["stdout_bytes"].startswith(b"line1\nline2\n")
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import subprocess
+
+    probe = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+        capture_output=True,
+        text=True,
+    )
+    return str(pid) in probe.stdout
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows Start-Process handle inheritance")
+async def test_windows_startprocess_background_child_holds_pipes_until_timeout(tmp_path):
+    """A2: reproduce a Start-Process background child inheriting stdout/stderr.
+
+    Asserts the Wave-A guarantees (full Shell timeout, partial output kept,
+    process-tree scoped cleanup) and records the known limitation that a
+    foreground shell which already exited leaves an orphaned background child
+    that ``taskkill /PID <foreground> /T`` cannot reach.
+    """
+    import subprocess
+
+    bg = tmp_path / "bg.ps1"
+    bg.write_text(
+        "Set-Content -Path $env:BG_PID_FILE -Value ([string]$PID); Start-Sleep 45",
+        encoding="utf-8",
+    )
+    pid_file = tmp_path / "bg.pid"
+
+    def _p(path):
+        return str(path).replace("\\", "/")
+
+    command = (
+        "Write-Output 'foreground-started'; "
+        "$env:BG_PID_FILE = '" + _p(pid_file) + "'; "
+        "Start-Process powershell -ArgumentList '-NoProfile','-File','" + _p(bg) + "' "
+        "-NoNewWindow -PassThru | Out-Null; "
+        "Write-Output 'foreground-done'"
+    )
+
+    result = await execute_shell(
+        {"command": command}, tmp_path, timeout_max=3.0, timeout_default=3.0
+    )
+
+    assert isinstance(result, BuiltinExecutionResult)
+    assert "timed out after 3s" in result.output
+    assert "foreground-started" in result.output
+    assert "foreground-done" in result.output
+    assert result.details["partial_output"]
+    cleanup = result.details["foreground_cleanup"]
+    assert cleanup["scope"] == "process_tree"
+
+    # Known limitation: the orphan background child survives because the
+    # foreground shell has already exited and taskkill cannot traverse to it.
+    orphan_alive = False
+    orphan_pid = None
+    try:
+        if pid_file.exists():
+            orphan_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            orphan_alive = _windows_pid_alive(orphan_pid)
+    finally:
+        if orphan_pid:
+            subprocess.run(
+                ["taskkill", "/PID", str(orphan_pid), "/T", "/F"],
+                capture_output=True,
+            )
+
+    # Record reproduction evidence for the review; do not hard-fail the suite
+    # on a limitation that requires a Job Object (documented, not silently
+    # claimed as fixed).
+    (tmp_path / "A2_WINDOWS_ORPHAN_EVIDENCE.txt").write_text(
+        json.dumps(
+            {
+                "background_pid": orphan_pid,
+                "background_alive_after_cleanup": orphan_alive,
+                "foreground_cleanup": cleanup,
+                "note": "Start-Process -NoNewWindow child inherits pipes; after the "
+                "foreground shell exits, taskkill /PID <foreground> /T cannot "
+                "reap the orphan. A Job Object (KILL_ON_JOB_CLOSE) is required.",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -2223,6 +2223,11 @@ class OpenRouterAdapter(BaseBackend):
         self._provider_fallback_port: Any = None
         self._tool_replay_lock = threading.RLock()
         self._inflight_tool_bindings: dict[str, tuple[str, str]] = {}
+        # Provider follow-up messages (image user-parts, smart advisories) from
+        # a tool batch that failed part-way.  A later resume flushes these
+        # after the remaining tools complete so completed reads are not
+        # silently stripped of their media/advice.
+        self._deferred_tool_followups: list[dict[str, Any]] = []
 
     async def _protect_outbound_payload(
         self,
@@ -4080,26 +4085,45 @@ class OpenRouterAdapter(BaseBackend):
                 )
 
         segments = self._segment_readonly_runs(tool_calls, completed_bindings)
-        for segment in segments:
-            if len(segment) > 1:
-                parallel_facts = await self._try_run_parallel_readonly_tool_calls(
-                    segment,
-                    messages,
-                    on_stream_event,
-                    completed_bindings=completed_bindings,
-                    provider_call_context=provider_call_context,
-                    deferred_sink=deferred_tool_result_messages,
-                )
-                if parallel_facts is not None:
-                    effect_facts.extend(parallel_facts)
-                    continue
-            for tc in segment:
-                await _run_one(tc)
+        try:
+            for segment in segments:
+                if len(segment) > 1:
+                    # A managed (durable-wait) batch must checkpoint the
+                    # completed side-effectful tools before launching parallel
+                    # reads. Otherwise a park inside the read segment would
+                    # lose the write's completion and replay it on resume.
+                    if before_tool_dispatch is not None:
+                        before_tool_dispatch()
+                    parallel_facts = await self._try_run_parallel_readonly_tool_calls(
+                        segment,
+                        messages,
+                        on_stream_event,
+                        completed_bindings=completed_bindings,
+                        provider_call_context=provider_call_context,
+                        deferred_sink=deferred_tool_result_messages,
+                    )
+                    if parallel_facts is not None:
+                        effect_facts.extend(parallel_facts)
+                        continue
+                for tc in segment:
+                    await _run_one(tc)
+        except BaseException:
+            # A later segment failed after earlier tools already completed.
+            # Their provider follow-ups (image user-parts, smart advisories)
+            # were only staged locally; hold them so a subsequent resume can
+            # flush them after the remaining tools complete, instead of
+            # silently dropping completed reads' media and advice.
+            if deferred_tool_result_messages:
+                self._deferred_tool_followups.extend(deferred_tool_result_messages)
+            raise
         # Provider follow-up messages (for example DeepSeek user image parts)
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
         # contains more than one call.
         messages.extend(deferred_tool_result_messages)
+        if self._deferred_tool_followups:
+            messages.extend(self._deferred_tool_followups)
+            self._deferred_tool_followups.clear()
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
@@ -4695,6 +4719,12 @@ class OpenRouterAdapter(BaseBackend):
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
+        # A fresh generation (no continuation checkpoint) must not leak
+        # follow-up messages held from a previously failed tool batch into an
+        # unrelated turn; a resume (continuation_messages set) keeps them so
+        # they can be flushed after its pending tools complete.
+        if continuation_messages is None:
+            self._deferred_tool_followups = []
         # Keep placeholder identities scoped to this invocation, including
         # retries and tool loops, even when the adapter handles other requests.
         privacy_gate = getattr(self, "_privacy_gate", None) or OutboundPrivacyGate()

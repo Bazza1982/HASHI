@@ -1674,6 +1674,447 @@ async def test_parallel_readonly_batch_result_recording_exception_keeps_bindings
     assert len(final_ids) == 4 and len(set(final_ids)) == 4
 
 
+@pytest.mark.asyncio
+async def test_mixed_batch_deferred_followups_survive_later_write_failure_and_recovery(
+    tmp_path, monkeypatch
+):
+    """B1: image + smart advisory from completed parallel reads must not be
+    silently dropped when a later write segment raises, and must flush after
+    the recovered write result (never interleaved mid-pairing)."""
+    from adapters.openrouter_api import _completed_tool_bindings
+
+    adapter = _deepseek_adapter(tmp_path)
+    tool_calls = [
+        {
+            "id": "tc-0",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "a.py"})},
+        },
+        {
+            "id": "tc-1",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "b.py"})},
+        },
+        {
+            "id": "tc-2",
+            "type": "function",
+            "function": {
+                "name": "text_replace",
+                "arguments": json.dumps({"path": "c.py", "find": "x", "replace": "y"}),
+            },
+        },
+    ]
+
+    # Simulate the DeepSeek image user-part follow-up for each read result.
+    orig_translate = adapter._tool_result_messages
+
+    def translate_with_image(*, tool_name, tool_call_id, output, content=None):
+        base = orig_translate(
+            tool_name=tool_name, tool_call_id=tool_call_id, output=output, content=content
+        )
+        if tool_name != "file_read":
+            return base
+        return base + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{tool_call_id}"},
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(adapter, "_tool_result_messages", translate_with_image)
+
+    class FailingWriteRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            if tool_name == "text_replace":
+                raise RuntimeError("write exploded")
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"read:{arguments['path']}",
+                details={"smart_repeat_warning": "same_result_repeated"},
+            )
+
+    adapter.tool_registry = FailingWriteRegistry()
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+
+    with pytest.raises(RuntimeError, match="write exploded"):
+        await adapter._run_tool_calls(tool_calls, messages, None)
+
+    # Completed reads are recorded; the failed write is not.
+    assert set(_completed_tool_bindings(messages).keys()) == {"tc-0", "tc-1"}
+    # Follow-ups are held for resume, not dropped, and not interleaved into the
+    # still-open tool pairing of the failed write.
+    assert [m.get("role") for m in messages] == ["assistant", "tool", "tool"]
+    held_roles = [m.get("role") for m in adapter._deferred_tool_followups]
+    assert held_roles == ["user", "system", "user", "system"]
+
+    # Recovery: re-invoke the full batch. Completed reads are reused, the write
+    # is re-run exactly once, and the held follow-ups flush after all results.
+    re_executed: list[str] = []
+
+    class RecoveryRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            re_executed.append(tool_call_id)
+            return ToolResult(tool_call_id=tool_call_id, output=f"rec:{arguments['path']}")
+
+    adapter.tool_registry = RecoveryRegistry()
+    await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert re_executed == ["tc-2"]
+    assert [m["tool_call_id"] for m in messages if m.get("role") == "tool"] == [
+        "tc-0",
+        "tc-1",
+        "tc-2",
+    ]
+    assert [m.get("role") for m in messages] == [
+        "assistant",
+        "tool",
+        "tool",
+        "tool",
+        "user",
+        "system",
+        "user",
+        "system",
+    ]
+    assert adapter._deferred_tool_followups == []
+    assert adapter._inflight_tool_bindings == {}
+
+
+def _mixed_batch_tool_calls() -> list[dict]:
+    return [
+        {
+            "id": "tc-0",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "a.py"})},
+        },
+        {
+            "id": "tc-1",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "b.py"})},
+        },
+        {
+            "id": "tc-2",
+            "type": "function",
+            "function": {
+                "name": "text_replace",
+                "arguments": json.dumps({"path": "c.py", "find": "x", "replace": "y"}),
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_deferred_followups_survive_cancellation_of_later_write(
+    tmp_path, monkeypatch
+):
+    """B1: cancellation of a later write still holds the completed reads'
+    image + advisory follow-ups for resume instead of dropping them."""
+    from adapters.openrouter_api import _completed_tool_bindings
+
+    adapter = _deepseek_adapter(tmp_path)
+    orig_translate = adapter._tool_result_messages
+
+    def translate_with_image(*, tool_name, tool_call_id, output, content=None):
+        base = orig_translate(
+            tool_name=tool_name, tool_call_id=tool_call_id, output=output, content=content
+        )
+        if tool_name != "file_read":
+            return base
+        return base + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{tool_call_id}"},
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(adapter, "_tool_result_messages", translate_with_image)
+
+    class CancellingWriteRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            if tool_name == "text_replace":
+                raise asyncio.CancelledError("cancelled mid-write")
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"read:{arguments['path']}",
+                details={"smart_repeat_warning": "same_result_repeated"},
+            )
+
+    adapter.tool_registry = CancellingWriteRegistry()
+    tool_calls = _mixed_batch_tool_calls()
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert set(_completed_tool_bindings(messages).keys()) == {"tc-0", "tc-1"}
+    assert [m.get("role") for m in messages] == ["assistant", "tool", "tool"]
+    assert [m.get("role") for m in adapter._deferred_tool_followups] == [
+        "user",
+        "system",
+        "user",
+        "system",
+    ]
+    assert adapter._inflight_tool_bindings == {}
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_deferred_followups_survive_permission_park_of_later_write(
+    tmp_path, monkeypatch
+):
+    """B1: PermissionPark (BaseException) on a later write holds completed
+    reads' follow-ups and never re-executes the completed read tools."""
+    from adapters.openrouter_api import _completed_tool_bindings
+    from orchestrator.permissions.continuation import PermissionPark
+    from orchestrator.permissions.execution_gate import GateResult
+
+    adapter = _deepseek_adapter(tmp_path)
+    orig_translate = adapter._tool_result_messages
+
+    def translate_with_image(*, tool_name, tool_call_id, output, content=None):
+        base = orig_translate(
+            tool_name=tool_name, tool_call_id=tool_call_id, output=output, content=content
+        )
+        if tool_name != "file_read":
+            return base
+        return base + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{tool_call_id}"},
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(adapter, "_tool_result_messages", translate_with_image)
+
+    class ParkingWriteRegistry:
+        permission_durable_wait = False
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            if tool_name == "text_replace":
+                raise PermissionPark(GateResult("waiting", "op-write", "req-write"))
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                output=f"read:{arguments['path']}",
+                details={"smart_repeat_warning": "same_result_repeated"},
+            )
+
+    adapter.tool_registry = ParkingWriteRegistry()
+    tool_calls = _mixed_batch_tool_calls()
+    messages: list[dict] = [{"role": "assistant", "tool_calls": tool_calls}]
+
+    with pytest.raises(PermissionPark):
+        await adapter._run_tool_calls(tool_calls, messages, None)
+
+    assert set(_completed_tool_bindings(messages).keys()) == {"tc-0", "tc-1"}
+    assert [m.get("role") for m in messages] == ["assistant", "tool", "tool"]
+    assert [m.get("role") for m in adapter._deferred_tool_followups] == [
+        "user",
+        "system",
+        "user",
+        "system",
+    ]
+    assert adapter._inflight_tool_bindings == {}
+
+
+@pytest.mark.asyncio
+async def test_managed_mixed_batch_write_not_replayed_after_parallel_read_park(
+    tmp_path, monkeypatch
+):
+    """B1 real permission host: a durable-wait mixed batch [read, write, read,
+    read] must checkpoint the completed write before the trailing parallel read
+    segment, so a park inside the reads never replays the write."""
+    import copy
+
+    from adapters.openrouter_api import _APIResult
+    from orchestrator.her_v2.provider_continuation import pending_tool_calls
+    from orchestrator.permissions.continuation import PermissionPark
+    from orchestrator.permissions.execution_gate import GateResult
+
+    adapter = _deepseek_adapter(tmp_path)
+    adapter.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    writes: list[str] = []
+    reads: list[str] = []
+
+    class ParkingDurableRegistry:
+        permission_durable_wait = True
+        supports_parallel_readonly = True
+
+        def get_tool_definitions(self, tiers=None):
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "description": "Read a file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_write",
+                        "description": "Write a file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["path", "content"],
+                        },
+                    },
+                },
+            ]
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            if tool_name == "file_write":
+                writes.append(tool_call_id)
+                (tmp_path / arguments["path"]).write_text(
+                    arguments["content"], encoding="utf-8"
+                )
+                return ToolResult(tool_call_id=tool_call_id, output=f"wrote {arguments['path']}")
+            if tool_name == "file_read":
+                reads.append(tool_call_id)
+                if arguments.get("path") == "park.txt":
+                    raise PermissionPark(GateResult("waiting", "op-read-park", "req-read-park"))
+                return ToolResult(tool_call_id=tool_call_id, output=f"read {arguments['path']}")
+            return ToolResult(tool_call_id=tool_call_id, output="ok")
+
+    adapter.tool_registry = ParkingDurableRegistry()
+    checkpoints: list[dict] = []
+    adapter.set_provider_context_observer(
+        lambda checkpoint: checkpoints.append(copy.deepcopy(checkpoint))
+    )
+
+    tool_calls = [
+        {
+            "id": "r1",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "a.txt"})},
+        },
+        {
+            "id": "w1",
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "arguments": json.dumps({"path": "out.txt", "content": "once"}),
+            },
+        },
+        {
+            "id": "r2",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "b.txt"})},
+        },
+        {
+            "id": "r3",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": json.dumps({"path": "park.txt"})},
+        },
+    ]
+
+    async def provider(payload, headers, callback):
+        return _APIResult("", tool_calls, "tool_calls")
+
+    monkeypatch.setattr(adapter, "_stream_api_once", provider)
+    with pytest.raises(PermissionPark):
+        await adapter.generate_response(
+            "mixed", "req-mixed", on_stream_event=lambda event: asyncio.sleep(0)
+        )
+
+    # The write completed exactly once before the park.
+    assert writes == ["w1"]
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "once"
+
+    # The last pending_tool_batch checkpoint must include the completed write so
+    # resume only re-dispatches the two pending parallel reads.
+    pending_checkpoint = [
+        checkpoint
+        for checkpoint in checkpoints
+        if checkpoint["boundary"] == "pending_tool_batch"
+    ][-1]
+    assert [
+        m["tool_call_id"] for m in pending_checkpoint["messages"] if m.get("role") == "tool"
+    ] == ["r1", "w1"]
+    assert [call["id"] for call in pending_tool_calls(pending_checkpoint["messages"])] == [
+        "r2",
+        "r3",
+    ]
+
+    # Recovery in a fresh epoch: reads are now authorised; the write must not be
+    # replayed because its result is already settled in the checkpoint.
+    writes.clear()
+    reads.clear()
+
+    class RecoveredRegistry:
+        permission_durable_wait = True
+        supports_parallel_readonly = True
+
+        def get_tool_definitions(self, tiers=None):
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_read",
+                        "description": "Read a file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+
+        async def execute(self, tool_name, arguments, tool_call_id=""):
+            if tool_name == "file_write":
+                writes.append(tool_call_id)
+                return ToolResult(tool_call_id=tool_call_id, output="wrote")
+            reads.append(tool_call_id)
+            return ToolResult(tool_call_id=tool_call_id, output=f"read {arguments['path']}")
+
+    resumed = _deepseek_adapter(tmp_path)
+    resumed.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
+    resumed.tool_registry = RecoveredRegistry()
+
+    async def resume_provider(payload, headers, callback):
+        return _APIResult("done", None, "stop")
+
+    monkeypatch.setattr(resumed, "_stream_api_once", resume_provider)
+    response = await resumed.generate_response(
+        "mixed",
+        "req-mixed",
+        continuation_messages=pending_checkpoint["messages"],
+        resume_pending_tools=True,
+        on_stream_event=lambda event: asyncio.sleep(0),
+    )
+    assert response.is_success, response.error
+    assert writes == []  # completed write reused, never re-executed
+    assert sorted(reads) == ["r2", "r3"]  # only the pending parallel reads re-run
+
+
 # ---------------------------------------------------------------------------
 # WP8: SmartTool shell classification & missing task delta audit noise
 # ---------------------------------------------------------------------------
