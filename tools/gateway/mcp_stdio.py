@@ -166,10 +166,23 @@ def _normalize_legacy_screenshot(payload: str) -> tuple[dict[str, str], int]:
 def _bridge_legacy_screenshot_output(
     tool_name: str,
     output: str,
+    *,
+    arguments: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]] | None, bool]:
-    """Convert legacy screenshot strings into bounded MCP image blocks."""
+    """Convert only explicitly requested legacy screenshots at their Tool edge.
+
+    A browser_session can also read arbitrary page text and source code. The
+    presence of image-looking text is never proof a screenshot was requested.
+    """
     if tool_name not in _LEGACY_SCREENSHOT_TOOLS:
         return None, False
+    if tool_name == "browser_session":
+        steps = (arguments or {}).get("steps") or []
+        if not isinstance(steps, list) or not any(
+            isinstance(step, dict) and step.get("action") == "screenshot"
+            for step in steps
+        ):
+            return None, False
     matches = list(_LEGACY_SCREENSHOT_PATTERN.finditer(output))
     if not matches:
         return None, False
@@ -318,7 +331,9 @@ class ToolGateway:
         content = result.content
         bridge_error = False
         if content is None:
-            content, bridge_error = _bridge_legacy_screenshot_output(internal_name, result.output)
+            content, bridge_error = _bridge_legacy_screenshot_output(
+                internal_name, result.output, arguments=arguments,
+            )
         return self._result(
             result.output,
             result.is_error or bridge_error,
