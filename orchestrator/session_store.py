@@ -516,6 +516,13 @@ class SessionStore:
             "permission.requested",
             "permission.resolved",
             "approval.requested",
+            # The Workbench permission card must appear as soon as the Agent
+            # actually starts waiting for permission (before the formal
+            # permission.requested event), edited messages must refresh the
+            # transcript, and a consumed question must update the card.
+            "run.progress",
+            "frontend.message.updated",
+            "run.question.consumed",
         }
     )
 
