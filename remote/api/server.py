@@ -2756,9 +2756,12 @@ def _workbench_gateway_failure_payload(error: WorkbenchGatewayError, *, method: 
     _workbench_gateway_log("operation_failed", **failure.diagnostic())
     with _HASHI_LIVENESS_LOCK:
         liveness = dict(_HASHI_LIVENESS_STATE)
-    hashi_state = str(liveness.get("hashi_state") or "inactive")
-    if hashi_state == "unknown":
-        hashi_state = "inactive"
+    # Unknown is not evidence: only a confirmed probe may report inactive.
+    # Never convert unknown into inactive, otherwise the Workbench could treat
+    # an unverified failure as proof that the Core may be pulled up.
+    hashi_state = str(liveness.get("hashi_state") or "unknown").strip().lower()
+    if hashi_state not in {"active", "starting", "inactive", "unknown"}:
+        hashi_state = "unknown"
     return {
         **operation_failure_payload(failure, error_code=error.code, effect_state=effect),
         "code": error.code,
@@ -2822,6 +2825,16 @@ def _clear_cached_local_workbench_host(host: str | None = None) -> None:
     with _LOCAL_HTTP_LOCK:
         if host is None or _CACHED_LOCAL_WORKBENCH_HOST == host:
             _CACHED_LOCAL_WORKBENCH_HOST = None
+
+
+def _workbench_host_is_verified(host: str | None) -> bool:
+    """Whether `host` is the loopback address already verified by an
+    identity-matched, healthy /api/health probe — the only evidence that proves
+    this controlled instance (not a foreign HASHI sharing the machine) is online."""
+    if not host:
+        return False
+    with _LOCAL_HTTP_LOCK:
+        return _CACHED_LOCAL_WORKBENCH_HOST == host
 
 
 _INACTIVE_EVIDENCE_REFRESH_LOCK = threading.Lock()
@@ -2953,8 +2966,8 @@ async def _stream_workbench_gateway_sse(
                 break
             continue
 
-        _cache_local_workbench_host(host)
-        record_hashi_liveness(hashi_state="active")
+        if _workbench_host_is_verified(host):
+            record_hashi_liveness(hashi_state="active")
         if upstream_resp.status_code != 200:
             try:
                 content = await upstream_resp.aread()
@@ -3152,8 +3165,8 @@ def _forward_workbench_gateway_request(
                 connect_timeout=connect_timeout,
             ) as response:
                 phase = "read"
-                _cache_local_workbench_host(host)
-                record_hashi_liveness(hashi_state="active")
+                if _workbench_host_is_verified(host):
+                    record_hashi_liveness(hashi_state="active")
                 _workbench_gateway_log(
                     "local_response_headers",
                     **trace_facts,
@@ -3191,8 +3204,8 @@ def _forward_workbench_gateway_request(
                 )
                 return response.status, content, response_headers
         except HTTPError as exc:
-            _cache_local_workbench_host(host)
-            record_hashi_liveness(hashi_state="active")
+            if _workbench_host_is_verified(host):
+                record_hashi_liveness(hashi_state="active")
             _workbench_gateway_log(
                 "local_response_headers",
                 **trace_facts,
@@ -3548,9 +3561,21 @@ def _fetch_workbench_json(
     path: str,
     *,
     timeout: float = 1.0,
+    required_instance_id: str = "",
 ) -> dict[str, Any] | None:
     normalized = path if str(path).startswith("/") else f"/{path}"
-    for attempt, host in enumerate(_ordered_local_workbench_hosts(max_fallbacks=2), start=1):
+    expected = str(required_instance_id or "").strip().upper()
+    hosts = list(_ordered_local_workbench_hosts(max_fallbacks=2))
+    # Bounded extended discovery: the controlled Workbench API may be bound to a
+    # later interface address (e.g. the 6th alias). Once the fast candidates are
+    # exhausted, probe at most six extra aliases so identity verification and
+    # caching still recover, mirroring the gateway's bounded extended pass.
+    # Production-only (gated on the control root) so unit tests that stub the
+    # host list never touch real interface enumeration.
+    extended_hosts: tuple[str, ...] = ()
+    if _control_hashi_root:
+        extended_hosts = tuple(h for h in local_http_hosts() if h not in hosts)[:6]
+    for attempt, host in enumerate([*hosts, *extended_hosts], start=1):
         req = urllib_request.Request(
             local_http_url(_workbench_port, normalized, host=host), method="GET"
         )
@@ -3561,6 +3586,20 @@ def _fetch_workbench_json(
                 connect_timeout=min(timeout, 0.8 if attempt == 1 else 0.4),
             ) as resp:
                 value = json.loads(resp.read().decode("utf-8"))
+                if expected and isinstance(value, dict):
+                    actual = str(value.get("instance_id") or "").strip().upper()
+                    if actual != expected:
+                        # A foreign instance, or an older Core without the
+                        # identity field, is not proof the controlled instance
+                        # is reachable on this host. Keep scanning the bounded
+                        # candidates instead of caching the first HTTP 200.
+                        _workbench_gateway_log(
+                            "local_health_identity_rejected",
+                            expected_instance=expected,
+                            actual_instance=actual or None,
+                        )
+                        _clear_cached_local_workbench_host(host)
+                        continue
                 _cache_local_workbench_host(host)
                 return value if isinstance(value, dict) else None
         except Exception:
@@ -3576,7 +3615,12 @@ def _fetch_workbench_json(
 
 
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
-    health = _fetch_workbench_json("/api/health", timeout=timeout)
+    expected = _controlled_instance_id()
+    health = _fetch_workbench_json(
+        "/api/health",
+        timeout=timeout,
+        required_instance_id=expected,
+    )
     if isinstance(health, dict) and health.get("ok") is True:
         record_hashi_liveness(hashi_state="active", health=health)
     elif health is None:
@@ -3676,7 +3720,8 @@ def _request_workbench_reboot(
 def _hashi_control_status() -> dict[str, Any]:
     health = _fetch_workbench_health(timeout=1.0)
     pid_state = _read_hashi_pid_state()
-    if health:
+    running = isinstance(health, dict) and health.get("ok") is True
+    if running:
         state = "running"
     elif pid_state["pid_alive"]:
         state = "starting_or_stuck"
@@ -3687,7 +3732,7 @@ def _hashi_control_status() -> dict[str, Any]:
     return {
         "ok": True,
         "state": state,
-        "hashi_running": bool(health),
+        "hashi_running": running,
         "workbench_url": _workbench_health_url(),
         "workbench_health": health,
         **pid_state,
@@ -3985,7 +4030,7 @@ def create_app(
             "authenticated_instance": authenticated_instance,
             "remote_status": "ready",
             "hashi_status": hashi_status,
-            "hashi_running": health is not None,
+            "hashi_running": hashi_status == "active",
             "can_start_hashi": bool(_control_hashi_root),
             "instance": {
                 "instance_id": _instance_info.get("instance_id"),
@@ -3995,7 +4040,7 @@ def create_app(
                 "remote_port": _instance_info.get("remote_port"),
                 "workbench_port": _instance_info.get("workbench_port", _workbench_port),
                 "hashi_status": hashi_status,
-                "hashi_running": health is not None,
+                "hashi_running": hashi_status == "active",
                 "can_start_hashi": bool(_control_hashi_root),
             },
             "workbench_online": health is not None,
