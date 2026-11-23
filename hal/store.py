@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS hal_workflow_execs (
     updated_at       TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hal_exec_rule_event
-    ON hal_workflow_execs(rule_id, trigger_event_id);
+    ON hal_workflow_execs(rule_id, workflow_index, trigger_event_id);
 CREATE INDEX IF NOT EXISTS idx_hal_exec_owner ON hal_workflow_execs(owner_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hal_dispatch_receipts (
@@ -102,7 +102,27 @@ class HalStore:
             for pragma in _WAL_PRAGMAS:
                 self._conn.execute(pragma)
             self._conn.executescript(_SCHEMA)
+            self._migrate_exec_dedupe_index()
             self._conn.commit()
+
+    def _migrate_exec_dedupe_index(self) -> None:
+        """Recreate the exec dedupe index with workflow_index.
+
+        v0.1 once shipped the unique index as (rule_id, trigger_event_id); a rule
+        with two workflows triggered by the same event would collide and drop one
+        execution. Drop the stale single-column index when present and recreate
+        the composite one so the two workflows stay distinct.
+
+        Caller must already hold ``_LOCK`` (this runs inside ``__init__``).
+        """
+        try:
+            self._conn.execute("DROP INDEX IF EXISTS idx_hal_exec_rule_event")
+        except sqlite3.Error:
+            pass
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_hal_exec_rule_event "
+            "ON hal_workflow_execs(rule_id, workflow_index, trigger_event_id)"
+        )
 
     def close(self):
         with _LOCK:
@@ -153,9 +173,11 @@ class HalStore:
                 else:
                     if expected_revision is not None and int(row["revision"]) != expected_revision:
                         raise HalStoreError("rule revision conflict; refresh before saving")
+                    # v0.1 draft semantics: any save to an existing rule returns
+                    # it to draft (disabled); the client re-enables explicitly.
                     self._conn.execute(
                         "UPDATE hal_rules SET name=?, script=?, revision=revision+1, "
-                        "updated_at=? WHERE rule_id=? AND owner_id=?",
+                        "enabled=0, updated_at=? WHERE rule_id=? AND owner_id=?",
                         (name, script, now, rule_id, owner_id),
                     )
             self._conn.commit()
@@ -321,13 +343,29 @@ class HalStore:
     def list_execs(self, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
         with _LOCK:
             rows = self._conn.execute(
-                "SELECT exec_id, rule_id, rule_name, rule_revision, stage, state, "
-                "trigger_event_id, trigger_agent, trigger_kind, detail, created_at, "
-                "updated_at FROM hal_workflow_execs WHERE owner_id=? "
+                "SELECT exec_id, rule_id, rule_name, rule_revision, workflow_index, "
+                "stage, state, trigger_event_id, trigger_agent, trigger_kind, detail, "
+                "created_at, updated_at FROM hal_workflow_execs WHERE owner_id=? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (owner_id, max(1, min(int(limit), 200))),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def mark_rule_execs_disabled(
+        self, owner_id: str, rule_id: str, detail: str
+    ) -> int:
+        """Explicitly settle a rule's in-flight executions when it is disabled.
+
+        Returns the number of active executions that were moved to 'disabled'.
+        """
+        with _LOCK:
+            cursor = self._conn.execute(
+                "UPDATE hal_workflow_execs SET state='disabled', detail=?, "
+                "updated_at=? WHERE owner_id=? AND rule_id=? AND state='active'",
+                (detail, _now(), owner_id, rule_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     # --- receipts and consumed events -------------------------------------
 

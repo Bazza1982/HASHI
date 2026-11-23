@@ -188,4 +188,57 @@ def test_unbound_trigger_prompt_becomes_unbound_directive():
 def test_unavailable_wait_detail():
     assert unavailable_wait_detail("#turn_finish") is None
     assert "no reboot-completion" in unavailable_wait_detail("#reboot_ok")
+
+
+def test_multi_workflow_entries_match_independently():
+    rule = _enabled_rule(
+        'if @agent_any #turn_finish then @lily $prompt "a".\n'
+        'if @agent_any #turn_finish then @bob $prompt "b".\n'
+    )
+    creates, advances, _ = plan_for_trigger(_trigger(), [rule], [], [], set())
+    assert not advances
+    assert len(creates) == 2
+    assert {c.workflow_index for c in creates} == {0, 1}
+    assert {c.directive.target for c in creates} == {"@lily", "@bob"}
+
+
+def test_multi_workflow_exec_id_and_dedupe_include_workflow_index():
+    rule = _enabled_rule(
+        'if @agent_any #turn_finish then @lily $prompt "a".\n'
+        'if @agent_any #turn_finish then @bob $prompt "b".\n'
+    )
+    creates, _, _ = plan_for_trigger(_trigger(feed_event_id="evt-1"), [rule], [], [], set())
+    w0, w1 = sorted(creates, key=lambda c: c.workflow_index)
+    # Same rule + same event, two workflows: distinct exec ids, distinct dedupe keys.
+    assert w0.exec_id != w1.exec_id
+    assert w0.dedupe_key == ("r1", 0, "evt-1")
+    assert w1.dedupe_key == ("r1", 1, "evt-1")
+
+
+def test_directive_for_exec_stage_reconstructs():
+    from hal.runtime import directive_for_exec_stage
+
+    program = compile_hal(
+        'if @agent_any #turn_finish then @lily $prompt "start @agent_trigger"; '
+        'if @agent_any #turn_finish then @bob $prompt "next".'
+    )
+    import json as _json
+    from hal.runtime import program_to_json
+
+    exec_row = _exec(stage=0, program=program, trigger_agent="@lily@hashi4")
+    exec_row["program_blob"] = _json.dumps(program_to_json(program))
+    directive = directive_for_exec_stage(exec_row)
+    assert directive is not None
+    assert directive.stage == 0
+    assert directive.target == "@lily"
+    assert directive.payload == "start @lily@hashi4"
+    assert directive.idempotency_key == "hal:hx1:0"
+
+    exec_row2 = _exec(stage=1, program=program, trigger_agent="@lily@hashi4")
+    exec_row2["program_blob"] = _json.dumps(program_to_json(program))
+    directive2 = directive_for_exec_stage(exec_row2)
+    assert directive2 is not None
+    assert directive2.target == "@bob"
+    assert directive2.payload == "next"
+    assert directive2.idempotency_key == "hal:hx1:1"
 # HASHI-Fingerprint: hfp_ea3949897443405a8a2ea7bb048c417f

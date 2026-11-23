@@ -22,7 +22,7 @@ from typing import Any, Mapping
 from aiohttp import web
 
 from hal import compile_hal
-from hal.dispatch import DispatchAdapter, DispatchResult, strip_agent_spec
+from hal.dispatch import DispatchAdapter, DispatchResult, resolve_agent_target
 from hal.event_source import (
     EVENT_SYSTEM_IDLE,
     HalTrigger,
@@ -33,6 +33,7 @@ from hal.runtime import (
     EXEC_FAILED,
     RECEIPT_DISPATCHED,
     RECEIPT_FAILED,
+    directive_for_exec_stage,
     program_from_json,
     plan_for_trigger,
     stage_after_dispatch,
@@ -104,13 +105,20 @@ class HalService:
         result = validate_script(script)
         if not result["ok"]:
             raise HalStoreError(result["error"] or "invalid HAL script")
-        return self.store.upsert_rule(
+        rule, created = self.store.upsert_rule(
             owner_id=owner_id,
             name=name,
             script=script,
             rule_id=rule_id,
             expected_revision=expected_revision,
         )
+        if not created:
+            # Saving a modification returns the rule to draft (disabled); settle
+            # any in-flight executions so they don't resume under the new script.
+            self.store.mark_rule_execs_disabled(
+                owner_id, rule["rule_id"], "rule saved as a new draft; execution settled"
+            )
+        return rule, created
 
     def set_enabled(
         self,
@@ -127,11 +135,14 @@ class HalService:
             result = validate_script(rule["script"])
             if not result["ok"]:
                 raise HalStoreError(f"stored script no longer compiles: {result['error']}")
-            workflow = result["workflows"][0]
-            if not workflow["entry_available"]:
+            unavailable = [
+                d["message"]
+                for d in result["diagnostics"]
+                if d["kind"] == "entry_event_unavailable"
+            ]
+            if unavailable:
                 raise HalStoreError(
-                    "entry event has no real source yet; "
-                    + "; ".join(d["message"] for d in result["diagnostics"] if d["kind"] == "entry_event_unavailable")
+                    "entry event has no real source yet; " + "; ".join(unavailable)
                 )
             if self.store.get_cursor(owner_id) == -1:
                 # Anchor the feed cursor at enable time: only events committed
@@ -144,6 +155,12 @@ class HalService:
         updated = self.store.set_enabled(
             owner_id, rule_id, enabled, expected_revision=expected_revision
         )
+        if not enabled:
+            # Explicit, consistent settle for unfinished executions: disabling a
+            # rule never leaves its in-flight workflows silently active.
+            self.store.mark_rule_execs_disabled(
+                owner_id, rule_id, "rule disabled while execution in progress"
+            )
         self._note_rules_changed()
         return updated
 
@@ -172,6 +189,7 @@ class HalService:
                 "rule_id": row["rule_id"],
                 "rule_name": row["rule_name"],
                 "rule_revision": row["rule_revision"],
+                "workflow_index": row["workflow_index"],
                 "stage": row["stage"],
                 "state": row["state"],
                 "trigger_event_id": row["trigger_event_id"],
@@ -270,10 +288,6 @@ class HalService:
             await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
             return False
 
-        if not events:
-            await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
-            return has_more
-
         rules = await self._load_enabled_rules(owner_id)
         if not rules:
             await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
@@ -289,6 +303,16 @@ class HalService:
         execs_by_id = {str(e["exec_id"]): e for e in execs}
         receipts = await self._load_receipts(execs)
         consumed: dict[str, set[str]] = {}
+
+        if not events:
+            # No new evidence: still recover pending/unfinished executions so a
+            # transient failure (or a crash) is retried without waiting for the
+            # next event. The cursor still advances past this empty page.
+            await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
+            if execs_by_id:
+                await self._recover_executions(owner_id, rules, execs_by_id, receipts)
+                return True
+            return has_more
 
         active_at_cycle_start = await asyncio.to_thread(_active_runs, self.session_store, owner_id)
         if active_at_cycle_start:
@@ -339,7 +363,7 @@ class HalService:
         fresh_execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
         fresh_by_id = {str(e["exec_id"]): e for e in fresh_execs}
         fresh_receipts = await self._load_receipts(fresh_execs)
-        await self._retry_pending(owner_id, rules, fresh_by_id, fresh_receipts)
+        await self._recover_executions(owner_id, rules, fresh_by_id, fresh_receipts)
         return activity
 
     async def _load_enabled_rules(self, owner_id: str) -> list[dict[str, Any]]:
@@ -394,7 +418,7 @@ class HalService:
                 rule_id=intent.rule_id,
                 rule_revision=intent.rule_revision,
                 rule_name=intent.rule_name,
-                workflow_index=0,
+                workflow_index=intent.workflow_index,
                 exec_id=intent.exec_id,
                 trigger_event_id=intent.trigger_event_id,
                 trigger_agent=intent.trigger_agent,
@@ -413,15 +437,64 @@ class HalService:
         for intent in advances:
             if intent.exec_id not in execs_by_id:
                 continue
-            fresh = await asyncio.to_thread(self.store.mark_exec_event_consumed, intent.exec_id, intent.trigger_event_id)
-            if not fresh:
-                continue
             exec_row = execs_by_id[intent.exec_id]
             if int(exec_row["stage"]) != intent.stage:
                 continue
+            # Dispatch FIRST (writes the pre-state receipt) and only then mark the
+            # event consumed. A crash between the two leaves the receipt behind, so
+            # re-delivery of the event re-dispatches idempotently (prompt) or fails
+            # honestly (command) instead of silently dropping the stage.
             if await self._dispatch_stage(owner_id, exec_row, intent.directive, rules, receipts):
                 activity = True
+            await asyncio.to_thread(
+                self.store.mark_exec_event_consumed, intent.exec_id, intent.trigger_event_id
+            )
         return activity
+
+    def _current_instance_id(self) -> str:
+        return str(getattr(self.session_store, "instance_id", "") or "")
+
+    async def _prompt_result(
+        self, exec_row: Mapping[str, Any], directive, exec_id: str, stage: int
+    ) -> DispatchResult:
+        target = directive.target
+        if target == "@agent_trigger":
+            target = exec_row.get("trigger_agent") or None
+            if not target:
+                return DispatchResult(
+                    accepted=False,
+                    transient=False,
+                    detail="prompt target @agent_trigger has no Agent for this system event",
+                )
+        name, error = resolve_agent_target(target, self._current_instance_id())
+        if error:
+            return DispatchResult(accepted=False, transient=False, detail=error)
+        return await self.dispatch.dispatch_prompt(
+            target_agent=name,
+            text=directive.payload,
+            idempotency_key=directive.idempotency_key,
+            exec_id=exec_id,
+            stage=stage,
+        )
+
+    async def _command_result(
+        self, exec_row: Mapping[str, Any], directive
+    ) -> DispatchResult:
+        trigger_agent = exec_row.get("trigger_agent")
+        trigger_name = None
+        if trigger_agent:
+            name, error = resolve_agent_target(trigger_agent, self._current_instance_id())
+            if error:
+                return DispatchResult(
+                    accepted=False,
+                    transient=False,
+                    detail=f"cannot resolve command runtime: {error}",
+                )
+            trigger_name = name
+        return await self.dispatch.dispatch_command(
+            command_text=directive.payload,
+            trigger_agent=trigger_name,
+        )
 
     async def _dispatch_stage(
         self,
@@ -490,28 +563,9 @@ class HalService:
         )
 
         if directive.kind == "prompt":
-            target = strip_agent_spec(directive.target)
-            if directive.target == "@agent_trigger" and not exec_row.get("trigger_agent"):
-                result = DispatchResult(
-                    accepted=False,
-                    transient=False,
-                    detail="prompt target @agent_trigger has no Agent for this system event",
-                )
-            elif target is None:
-                result = DispatchResult(accepted=False, transient=False, detail="prompt target missing")
-            else:
-                result = await self.dispatch.dispatch_prompt(
-                    target_agent=target,
-                    text=directive.payload,
-                    idempotency_key=directive.idempotency_key,
-                    exec_id=exec_id,
-                    stage=stage,
-                )
+            result = await self._prompt_result(exec_row, directive, exec_id, stage)
         else:
-            result = await self.dispatch.dispatch_command(
-                command_text=directive.payload,
-                trigger_agent=exec_row.get("trigger_agent"),
-            )
+            result = await self._command_result(exec_row, directive)
 
         if result.accepted:
             await asyncio.to_thread(
@@ -576,6 +630,14 @@ class HalService:
         receipt = await asyncio.to_thread(self.store.get_receipt, exec_row["exec_id"], stage)
         if receipt is None or receipt["state"] == RECEIPT_PENDING:
             return  # retry pass handles the dispatch
+        if receipt["state"] == RECEIPT_FAILED:
+            await asyncio.to_thread(
+                self.store.update_exec,
+                exec_row["exec_id"],
+                state=EXEC_FAILED,
+                detail=receipt.get("detail") or "dispatch failed",
+            )
+            return
         if receipt["state"] == RECEIPT_DISPATCHED:
             next_stage, state = stage_after_dispatch(stage, len(workflow))
             detail = None
@@ -589,20 +651,56 @@ class HalService:
                 detail=detail,
             )
 
-    async def _retry_pending(
+    async def _recover_executions(
         self,
         owner_id: str,
         rules: list[dict[str, Any]],
         execs_by_id: dict[str, dict[str, Any]],
         receipts: dict[tuple[str, int], dict[str, Any]],
     ) -> None:
-        """Retry prompt dispatches still pending; resolve ambiguous commands."""
+        """Recover active executions after a crash or between event pages.
+
+        Covers every crash position in the dispatch write order:
+        - no receipt yet           -> reconstruct the directive and dispatch once;
+        - receipt pending (prompt) -> retry with the SAME idempotency key;
+        - receipt unknown (cmd)    -> fail honestly (never re-run a command);
+        - receipt dispatched       -> advance the exec stage;
+        - receipt failed           -> mark the exec failed.
+        """
         from hal.runtime import DispatchDirective
 
         for exec_row in execs_by_id.values():
+            if exec_row.get("state") != EXEC_ACTIVE:
+                continue
             stage = int(exec_row["stage"])
             receipt = receipts.get((exec_row["exec_id"], stage))
-            if receipt is None or receipt["state"] not in (RECEIPT_PENDING, RECEIPT_UNKNOWN):
+            if receipt is None:
+                if stage != 0:
+                    # Dependent stages legitimately wait for a correlated event;
+                    # a missing receipt here is normal, not a crash to repair.
+                    continue
+                directive = directive_for_exec_stage(exec_row)
+                if directive is None:
+                    await asyncio.to_thread(
+                        self.store.update_exec, exec_row["exec_id"],
+                        state=EXEC_FAILED,
+                        detail="cannot reconstruct dispatch for current stage",
+                    )
+                    continue
+                if getattr(directive, "unbound_reason", None):
+                    await asyncio.to_thread(
+                        self.store.update_exec, exec_row["exec_id"],
+                        state=EXEC_FAILED,
+                        detail=directive.unbound_reason,
+                    )
+                    continue
+                await self._dispatch_stage(owner_id, exec_row, directive, rules, receipts)
+                continue
+            if receipt["state"] == RECEIPT_DISPATCHED:
+                await self._reconcile(owner_id, exec_row, rules, receipts)
+                continue
+            if receipt["state"] == RECEIPT_FAILED:
+                await self._reconcile(owner_id, exec_row, rules, receipts)
                 continue
             if receipt["state"] == RECEIPT_UNKNOWN and receipt["kind"] == "native_command":
                 await asyncio.to_thread(
@@ -621,6 +719,7 @@ class HalService:
                     detail="native command outcome unknown after interruption",
                 )
                 continue
+            # RECEIPT_PENDING (prompt): re-dispatch with the same idempotency key.
             directive = DispatchDirective(
                 exec_id=exec_row["exec_id"],
                 stage=stage,

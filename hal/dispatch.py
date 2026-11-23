@@ -42,14 +42,43 @@ class DispatchAdapter:
         raise NotImplementedError
 
 
-def strip_agent_spec(target: str | None) -> str | None:
-    """'@lily' or '@lily@hashi4' -> 'lily' (canonical name part only)."""
+def split_agent_spec(target: str | None) -> tuple[str | None, str | None]:
+    """Parse '@name@instance' | '@name' | 'name' into (name, instance|None).
+
+    The instance qualifier is returned so callers must handle it explicitly;
+    it is never silently discarded here.
+    """
     if not target:
-        return None
+        return None, None
     value = target.strip()
     if value.startswith("@"):
         value = value[1:]
-    return value.split("@", 1)[0].strip().casefold() or None
+    name, sep, instance = value.partition("@")
+    name = name.strip().casefold() or None
+    instance = instance.strip().casefold() if sep and instance.strip() else None
+    return name, instance
+
+
+def resolve_agent_target(
+    target: str | None, current_instance: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve a HAL agent spec to a plain runtime name, or return an error.
+
+    Returns ``(name, error)`` — exactly one is ``None``. ``@name@instance`` is
+    only accepted when ``instance`` matches ``current_instance``; the suffix is
+    NEVER dropped to dispatch to a same-named agent on another instance.
+    """
+    name, instance = split_agent_spec(target)
+    if name is None:
+        return None, "empty agent target"
+    if instance:
+        current = (current_instance or "").strip().casefold()
+        if not current or instance != current:
+            return None, (
+                f"target instance @{instance} is not this instance "
+                f"(@{current_instance or 'unknown'}); refusing cross-instance dispatch"
+            )
+    return name, None
 
 
 class GatewayDispatchAdapter(DispatchAdapter):
@@ -63,7 +92,7 @@ class GatewayDispatchAdapter(DispatchAdapter):
         if not runtimes:
             return None
         if agent_name:
-            key = agent_name.strip().casefold()
+            key = agent_name.strip().lstrip("@").casefold()
             runtime = runtimes.get(key)
             if runtime is not None:
                 return runtime
@@ -142,10 +171,20 @@ class GatewayDispatchAdapter(DispatchAdapter):
                 transient=False,
                 detail="command not supported or disabled on this instance",
             )
+        if isinstance(result, dict) and result.get("ok") is False:
+            error = result.get("error") or result.get("message") or "command rejected"
+            return DispatchResult(
+                accepted=False,
+                transient=False,
+                detail=f"command rejected: {error}",
+                evidence={"result": result},
+            )
+        # Accepted means the command handler ran and returned ok — it does NOT
+        # mean a reboot/deploy side effect has completed.
         return DispatchResult(
             accepted=True,
             transient=False,
-            detail="command accepted",
+            detail="command accepted (accepted != completed)",
             evidence={"result": result},
         )
 

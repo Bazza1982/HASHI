@@ -11,6 +11,7 @@ by ``hal.language`` and is never re-interpreted at runtime.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -25,6 +26,7 @@ from hal.event_source import (
 EXEC_ACTIVE = "active"
 EXEC_COMPLETED = "completed"
 EXEC_FAILED = "failed"
+EXEC_DISABLED = "disabled"
 
 # Receipt states.
 RECEIPT_DISPATCHED = "dispatched"
@@ -53,13 +55,15 @@ class CreateIntent:
     rule_id: str
     rule_revision: int
     rule_name: str
+    workflow_index: int
     exec_id: str
     trigger_event_id: str
     trigger_agent: str | None
     trigger_kind: str
     directive: DispatchDirective
-    # (rule_id, trigger_event_id) — service enforces uniqueness for idempotency.
-    dedupe_key: tuple[str, str]
+    # (rule_id, workflow_index, trigger_event_id) — service enforces uniqueness
+    # for idempotency, so two workflows of the same rule and event stay distinct.
+    dedupe_key: tuple[str, int, str]
 
 
 @dataclass(frozen=True)
@@ -198,31 +202,39 @@ def plan_for_trigger(
             if not rule_row.get("enabled"):
                 continue
             program = rule_row["program"]
-            entry = program.workflows[0][0]
-            if not entry_matches(entry, _trigger_as_hal_event(trigger)):
-                continue
-            if trigger.event == EVENT_SYSTEM_IDLE and entry.source_agent is not None:
-                continue  # compiler guarantees this, but stay explicit
-            exec_id = _next_exec_id(rule_row["rule_id"], trigger.feed_event_id)
-            directive = _directive_for(
-                exec_id=exec_id,
-                stage=0,
-                action=entry.action,
-                agent_trigger=trigger.agent_identity,
-            )
-            creates.append(
-                CreateIntent(
-                    rule_id=str(rule_row["rule_id"]),
-                    rule_revision=int(rule_row["revision"]),
-                    rule_name=str(rule_row.get("name") or ""),
-                    exec_id=exec_id,
-                    trigger_event_id=str(trigger.feed_event_id or ""),
-                    trigger_agent=trigger.agent_identity,
-                    trigger_kind=_trigger_kind(trigger),
-                    directive=directive,
-                    dedupe_key=(str(rule_row["rule_id"]), str(trigger.feed_event_id or "")),
+            for workflow_index, workflow in enumerate(program.workflows):
+                entry = workflow[0]
+                if not entry_matches(entry, _trigger_as_hal_event(trigger)):
+                    continue
+                if trigger.event == EVENT_SYSTEM_IDLE and entry.source_agent is not None:
+                    continue  # compiler guarantees this, but stay explicit
+                exec_id = _next_exec_id(
+                    rule_row["rule_id"], workflow_index, trigger.feed_event_id
                 )
-            )
+                directive = _directive_for(
+                    exec_id=exec_id,
+                    stage=0,
+                    action=entry.action,
+                    agent_trigger=trigger.agent_identity,
+                )
+                creates.append(
+                    CreateIntent(
+                        rule_id=str(rule_row["rule_id"]),
+                        rule_revision=int(rule_row["revision"]),
+                        rule_name=str(rule_row.get("name") or ""),
+                        workflow_index=workflow_index,
+                        exec_id=exec_id,
+                        trigger_event_id=str(trigger.feed_event_id or ""),
+                        trigger_agent=trigger.agent_identity,
+                        trigger_kind=_trigger_kind(trigger),
+                        directive=directive,
+                        dedupe_key=(
+                            str(rule_row["rule_id"]),
+                            workflow_index,
+                            str(trigger.feed_event_id or ""),
+                        ),
+                    )
+                )
 
     # --- Dependent matching: only correlated triggers advance a stage.
     for exec_row in execs:
@@ -298,11 +310,11 @@ def _trigger_kind(trigger: HalTrigger) -> str:
     return trigger.feed_kind or "feed"
 
 
-def _next_exec_id(rule_id: str, feed_event_id: str | None) -> str:
-    """Deterministic, collision-free exec identity for one (rule, event) pair."""
+def _next_exec_id(rule_id: str, workflow_index: int, feed_event_id: str | None) -> str:
+    """Deterministic, collision-free exec identity for one (rule, workflow, event)."""
     import hashlib
 
-    material = f"{rule_id}|{feed_event_id or ''}"
+    material = f"{rule_id}|{workflow_index}|{feed_event_id or ''}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
     return f"hx{digest}"
 
@@ -326,6 +338,39 @@ def _directive_for(*, exec_id: str, stage: int, action, agent_trigger: str | Non
         payload=payload,
         idempotency_key=f"hal:{exec_id}:{stage}",
         unbound_reason=unbound_reason,
+    )
+
+
+def directive_for_exec_stage(exec_row: Mapping[str, Any]) -> DispatchDirective | None:
+    """Reconstruct the dispatch directive for an execution's current stage.
+
+    Used for crash recovery when the receipt for the current stage was never
+    written. Deterministic: the same exec_id + stage always yields the same
+    idempotency key and resolved payload, so a reconstructed dispatch never
+    double-executes a side effect that was already recorded.
+    """
+    program = exec_row.get("program")
+    if program is None:
+        program_blob = exec_row.get("program_blob")
+        if program_blob:
+            try:
+                program = program_from_json(json.loads(program_blob))
+            except (ValueError, KeyError, TypeError):
+                program = None
+    if program is None:
+        return None
+    workflow_index = int(exec_row.get("workflow_index") or 0)
+    stage = int(exec_row.get("stage"))
+    if workflow_index >= len(program.workflows):
+        return None
+    workflow = program.workflows[workflow_index]
+    if stage >= len(workflow):
+        return None
+    return _directive_for(
+        exec_id=str(exec_row["exec_id"]),
+        stage=stage,
+        action=workflow[stage].action,
+        agent_trigger=exec_row.get("trigger_agent"),
     )
 
 

@@ -311,7 +311,7 @@ def test_ambiguous_command_never_retries_after_interruption(tmp_path):
         exec_id="hx1", stage=0, idempotency_key="hal:hx1:0", kind="native_command",
         target=None, payload="/reboot max", state="unknown", detail=None,
     )
-    run(service._retry_pending("user:7", [], {"hx1": service.store.get_exec("user:7", "hx1")}, {(("hx1", 0)): service.store.get_receipt("hx1", 0)}))
+    run(service._recover_executions("user:7", [], {"hx1": service.store.get_exec("user:7", "hx1")}, {(("hx1", 0)): service.store.get_receipt("hx1", 0)}))
     assert adapter.command_calls == []  # never re-executed
     execs = service.store.list_execs("user:7")
     assert execs[0]["state"] == "failed"
@@ -325,6 +325,170 @@ def test_enable_rejects_unavailable_entry_event(tmp_path):
     with pytest.raises(HalStoreError):
         service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
     assert service.store.get_rule("user:7", rule["rule_id"])["enabled"] == 0
+
+
+# --- H1: multiple independent workflows -----------------------------------
+
+
+def test_multi_workflow_rule_dispatches_both_entries(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(
+        service,
+        "user:7",
+        'if @agent_any #turn_finish then @alice $prompt "a".\n'
+        'if @agent_any #turn_finish then @bob $prompt "b".\n',
+    )
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert sorted(c["target_agent"] for c in adapter.prompt_calls) == ["alice", "bob"]
+    execs = service.store.list_execs("user:7")
+    assert sorted(e["workflow_index"] for e in execs) == [0, 1]
+    # Same event must not re-dispatch on the next (empty) page.
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 2
+
+
+# --- H2: @agent_trigger target binding + instance identity -----------------
+
+
+def test_agent_trigger_as_prompt_target_binds_runtime(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(
+        service,
+        "user:7",
+        'if @agent_any #turn_finish then @agent_trigger $prompt "hello @agent_trigger".',
+    )
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event(agent_id="lily")
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 1
+    assert adapter.prompt_calls[0]["target_agent"] == "lily"
+    assert adapter.prompt_calls[0]["text"] == "hello @lily@TESTINST"
+
+
+def test_cross_instance_prompt_target_rejected(tmp_path):
+    feed = FakeSessionStore()  # instance_id == TESTINST
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(
+        service,
+        "user:7",
+        'if @agent_any #turn_finish then @alice@OTHER $prompt "hi".',
+    )
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert adapter.prompt_calls == []
+    execs = service.store.list_execs("user:7")
+    assert execs[0]["state"] == "failed"
+    assert "not this instance" in (execs[0]["detail"] or "")
+
+
+# --- H4: retry without new events + settle on disable ----------------------
+
+
+def test_pending_prompt_retries_without_new_event(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    calls = {"n": 0}
+
+    def script(key):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return DispatchResult(accepted=False, transient=True, detail="busy")
+        return DispatchResult(accepted=True, transient=False, detail="ok")
+
+    adapter._prompt_script = script
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 2  # entry + same-cycle retry, both transient
+    assert service.store.list_execs("user:7")[0]["state"] == "active"
+
+    # No new event: recovery alone must retry the pending prompt with the SAME key.
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 3
+    assert adapter.prompt_calls[0]["idempotency_key"] == adapter.prompt_calls[2]["idempotency_key"]
+    assert service.store.list_execs("user:7")[0]["state"] == "completed"
+
+
+def test_disabling_rule_settles_inflight_execs(tmp_path):
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    rule = make_rule(
+        service,
+        "user:7",
+        'if @agent_any #turn_finish then @alice $prompt "start"; '
+        'if @agent_any #turn_finish then @bob $prompt "next".',
+    )
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert service.store.list_execs("user:7")[0]["state"] == "active"
+
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=False)
+    execs = service.store.list_execs("user:7")
+    assert execs[0]["state"] == "disabled"
+    assert "disabled while execution in progress" in (execs[0]["detail"] or "")
+
+
+# --- H5: draft semantics + no history replay -------------------------------
+
+
+def test_save_update_returns_rule_to_draft(tmp_path):
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "a".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    assert service.store.get_rule("user:7", rule["rule_id"])["enabled"] == 1
+
+    updated, created = service.upsert_rule(
+        owner_id="user:7",
+        name="rule",
+        script='if @agent_any #turn_finish then @alice $prompt "b".',
+        rule_id=rule["rule_id"],
+        expected_revision=1,
+    )
+    assert created is False
+    assert updated["enabled"] == 0
+    assert service.store.get_rule("user:7", rule["rule_id"])["enabled"] == 0
+
+
+def test_enable_rejects_any_unavailable_workflow_entry(tmp_path):
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    # workflow[0] entry available, workflow[1] entry unavailable: must not enable.
+    rule = make_rule(
+        service,
+        "user:7",
+        'if @agent_any #turn_finish then @alice $prompt "a".\n'
+        'if #turn_commentary then @bob $prompt "b".\n',
+    )
+    with pytest.raises(HalStoreError):
+        service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    assert service.store.get_rule("user:7", rule["rule_id"])["enabled"] == 0
+
+
+def test_second_rule_does_not_replay_preenable_history(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule1 = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "one".')
+    service.set_enabled(owner_id="user:7", rule_id=rule1["rule_id"], enabled=True)
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 1
+
+    rule2 = make_rule(service, "user:7", 'if @agent_any #turn_finish then @bob $prompt "two".')
+    service.set_enabled(owner_id="user:7", rule_id=rule2["rule_id"], enabled=True)
+    run(service._process_owner("user:7"))  # no new events
+    assert len(adapter.prompt_calls) == 1  # rule2 did NOT consume evt-1
+
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert sorted(c["target_agent"] for c in adapter.prompt_calls[1:]) == ["alice", "bob"]
 
 
 # ------------------------------------------------------------------ API
