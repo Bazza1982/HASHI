@@ -4068,9 +4068,7 @@ class OpenRouterAdapter(BaseBackend):
             )
             safe_text = "\n\n".join(t for t in texts if t.strip())
             tool_message["content"] = "\n\n".join(
-                part for part in (safe_text or str(output or "")
-                                  if not isinstance(output, (bytes, bytearray))
-                                  else "", notice) if part
+                part for part in (safe_text, notice) if part
             )
 
         if not images:
