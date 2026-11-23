@@ -218,6 +218,34 @@ def test_connected_browser_catalogue_describes_bridge_without_standalone_options
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "registration"),
+    [
+        ("browser_screenshot", _browser_registration(actions=("screenshot",))),
+        ("windows_screenshot", _computer_registration(actions=("screenshot",))),
+    ],
+)
+async def test_capability_worker_preserves_typed_image_content(tmp_path, tool, registration):
+    from base64 import b64encode
+
+    encoded = b64encode(b"\x89PNG\r\n\x1a\n" + b"native").decode("ascii")
+    facade = _CapabilityFacade(
+        result={"output": "capture complete", "content": [
+            {"type": "text", "text": "capture complete"},
+            {"type": "image", "mimeType": "image/png", "data": encoded},
+        ]},
+        capabilities=[registration],
+    )
+    registry = _registry(tmp_path, tool, facade)
+    result = await registry.execute(tool, {}, tool_call_id="call-image")
+    assert result.is_error is False
+    assert result.output == "capture complete"
+    assert result.content[0]["type"] == "text"
+    assert result.content[1]["data"] == encoded
+    assert encoded not in result.output
+
+
+@pytest.mark.asyncio
 async def test_unregistered_browser_is_rejected_before_dispatch_with_typed_reason(tmp_path):
     facade = _CapabilityFacade()
     registry = _registry(tmp_path, "browser_get_text", facade)
