@@ -395,6 +395,19 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         assert sent == ["/mode", "/mode flex", "/move", "/restart"]
 
 
+async def test_tui_multiline_slash_text_does_not_open_command_preview(tmp_path):
+    app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    app._schedule_startup_sequence = lambda: None
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        input_box = app.query_one("#chat-input", ChatInput)
+        input_box.value = "/help this code block\nnot a command"
+        await pilot.pause()
+
+        assert app._command_matches == []
+        assert app._current_command_match is None
+
+
 async def test_tui_sound_setting_is_persisted_and_can_be_previewed(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     app._schedule_startup_sequence = lambda: None

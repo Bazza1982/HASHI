@@ -1975,21 +1975,21 @@ class HASHITuiApp(App):
     def _on_composer_changed(self, composer_value: str) -> None:
         """Refresh command completion from either the single- or multiline field."""
 
-        value = composer_value.lstrip().casefold()
+        value = str(composer_value or "").casefold()
         preview = self.query_one("#command-preview", CommandPreview)
         self._current_command_match = None
         self._command_matches = []
         self._command_match_index = 0
         self._parameter_command_name = None
         self._parameter_path = ()
-        if not value.startswith("/") or len(value) < 2:
-            if value == "/":
-                self._command_matches = [
-                    command for command in TUI_DISCOVERY_COMMANDS if command in self._command_names
-                ]
-                self._show_command_matches()
-            else:
-                preview.hide_match()
+        if value == "/":
+            self._command_matches = [
+                command for command in TUI_DISCOVERY_COMMANDS if command in self._command_names
+            ]
+            self._show_command_matches()
+            return
+        if not is_tui_slash_command(value):
+            preview.hide_match()
             return
         command, separator, arguments = value.partition(" ")
         canonical = next(
