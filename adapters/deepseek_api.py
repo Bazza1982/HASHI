@@ -11,11 +11,8 @@ Differences from OpenRouter:
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -54,24 +51,7 @@ _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 _DEEPSEEK_IMAGE_MIME_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/gif", "image/webp"}
 )
-_DEEPSEEK_SCREENSHOT_TOOLS = frozenset(
-    {
-        "browser_screenshot",
-        "browser_session",
-        "desktop_screenshot",
-        "windows_screenshot",
-    }
-)
-_DEEPSEEK_DATA_URL_PATTERN = re.compile(
-    r"data:(?P<mime>image/(?:jpeg|png|gif|webp));base64,"
-    r"(?P<payload>[A-Za-z0-9+/=]+)",
-    flags=re.IGNORECASE,
-)
-_DEEPSEEK_LABELED_SCREENSHOT_PATTERN = re.compile(
-    r"(?P<label>(?:^screenshot:|\[screenshot\]\s+base64:))\s*"
-    r"(?P<payload>[A-Za-z0-9+/=]+)",
-    flags=re.IGNORECASE | re.MULTILINE,
-)
+
 
 HASHI_COMPACTION_CAPABILITIES = {
     "prompt_isolation": True,
@@ -118,49 +98,6 @@ def _tool_output_text(output: Any) -> str:
     return raw
 
 
-def _mime_type_for_legacy_screenshot(payload: str) -> str:
-    try:
-        raw = base64.b64decode(payload, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise MultimodalContractError(
-            "screenshot tool returned malformed base64",
-            code="INVALID_MULTIMODAL_CONTENT",
-        ) from exc
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if raw.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if raw.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
-        return "image/webp"
-    raise MultimodalContractError(
-        "screenshot tool returned an unsupported image format",
-        code="MEDIA_SIGNATURE_UNVERIFIED",
-    )
-
-
-def _extract_legacy_screenshot_urls(text: str) -> tuple[str, list[str]]:
-    urls: list[str] = []
-
-    def replace_data_url(match: re.Match[str]) -> str:
-        urls.append(match.group(0))
-        return ""
-
-    stripped = _DEEPSEEK_DATA_URL_PATTERN.sub(replace_data_url, text)
-
-    def replace_label(match: re.Match[str]) -> str:
-        payload = match.group("payload")
-        mime_type = _mime_type_for_legacy_screenshot(payload)
-        urls.append(f"data:{mime_type};base64,{payload}")
-        return ""
-
-    stripped = _DEEPSEEK_LABELED_SCREENSHOT_PATTERN.sub(replace_label, stripped)
-    stripped = re.sub(r"[ \t]+\n", "\n", stripped)
-    stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
-    return stripped, urls
-
-
 def _structured_tool_media(
     content: list[dict[str, Any]] | None,
 ) -> tuple[list[str], list[str]]:
@@ -204,33 +141,21 @@ def _validate_deepseek_payload(payload: Mapping[str, Any]) -> None:
         if not isinstance(message, Mapping):
             continue
         content = message.get("content")
-        if isinstance(content, str):
-            if _DEEPSEEK_DATA_URL_PATTERN.search(content) or (
-                _DEEPSEEK_LABELED_SCREENSHOT_PATTERN.search(content)
-            ):
-                raise MultimodalContractError(
-                    "DeepSeek image bytes must use structured image_url content, not text",
-                    code="INVALID_MULTIMODAL_CONTENT",
-                )
-            continue
         if not isinstance(content, list):
+            # Ordinary text is never decoded, reclassified, or rejected on
+            # the basis of a string that looks like an image.
             continue
         for part in content:
             if not isinstance(part, Mapping):
                 continue
             kind = str(part.get("type") or "").strip().casefold()
-            if kind == "text":
-                text = str(part.get("text") or "")
-                if _DEEPSEEK_DATA_URL_PATTERN.search(text) or (
-                    _DEEPSEEK_LABELED_SCREENSHOT_PATTERN.search(text)
-                ):
-                    raise MultimodalContractError(
-                        "DeepSeek image bytes must use structured image_url content, not text",
-                        code="INVALID_MULTIMODAL_CONTENT",
-                    )
-                continue
             if kind != "image_url":
                 continue
+            if message.get("role") == "assistant":
+                raise MultimodalContractError(
+                    "DeepSeek does not accept images in assistant messages",
+                    code="INVALID_MULTIMODAL_CONTENT",
+                )
             image_count += 1
             image_url = part.get("image_url")
             url = image_url.get("url") if isinstance(image_url, Mapping) else image_url
@@ -587,13 +512,20 @@ class DeepSeekAdapter(OpenRouterAdapter):
         output: Any,
         content: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Promote Tool-returned images into DeepSeek's native user shape."""
+        """Keep typed Tool images inside the original DeepSeek Tool message.
+
+        Never scan stdout, source code, traceback or other text for images.
+        DeepSeek Chat Completions accepts image_url parts for role=tool.
+        """
 
         output_text = _tool_output_text(output)
         structured_texts, image_urls = _structured_tool_media(content)
-        if tool_name in _DEEPSEEK_SCREENSHOT_TOOLS:
-            output_text, legacy_urls = _extract_legacy_screenshot_urls(output_text)
-            image_urls.extend(legacy_urls)
+        if image_urls:
+            # Typed content is authoritative; an opaque legacy output string
+            # may contain an encoded copy of the same image. Never forward it.
+            output_text = "" if structured_texts else (
+                f"{tool_name} returned {len(image_urls)} image(s)."
+            )
 
         unique_urls: list[str] = []
         seen_urls: set[str] = set()
@@ -655,16 +587,10 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
         if not tool_text:
             tool_text = f"{tool_name} returned {len(unique_urls)} image(s)."
-        user_content: list[dict[str, Any]] = [
-            {
-                "type": "text",
-                "text": (
-                    f"Native image result from Tool {tool_name}; inspect the "
-                    "following image content."
-                ),
-            }
+        tool_content: list[dict[str, Any]] = [
+            {"type": "text", "text": tool_text},
         ]
-        user_content.extend(
+        tool_content.extend(
             {"type": "image_url", "image_url": {"url": url}}
             for url in unique_urls
         )
@@ -672,9 +598,8 @@ class DeepSeekAdapter(OpenRouterAdapter):
             {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
-                "content": tool_text,
-            },
-            {"role": "user", "content": user_content},
+                "content": tool_content,
+            }
         ]
 
     async def _call_api_once(self, payload, headers, on_stream_event) -> _APIResult:
