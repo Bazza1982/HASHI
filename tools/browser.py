@@ -1172,6 +1172,56 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
 
     bridge_result = await _maybe_execute_extension_bridge("session", args)
     if bridge_result is not None:
+        if typed_media and not bridge_result.startswith("Error:"):
+            # The authenticated Chrome extension returns a structured Session
+            # step list. Use its declared action, never search the returned
+            # page/source text for image-looking strings.
+            try:
+                envelope = json.loads(bridge_result)
+            except (TypeError, ValueError):
+                envelope = None
+            if isinstance(envelope, dict) and isinstance(envelope.get("steps"), list):
+                from tools.registry import StructuredToolOutput
+                from tools.typed_media_result import screenshot_tool_result
+
+                parts: list[dict] = []
+                summary: list[str] = []
+                found_image = False
+                for raw in envelope["steps"]:
+                    if not isinstance(raw, dict):
+                        continue
+                    step_type = str(raw.get("action") or "")
+                    step_no = raw.get("index")
+                    label = f"[{step_no}:{step_type}]"
+                    if step_type == "screenshot" and raw.get("ok") is True:
+                        data_url = raw.get("output")
+                        if not isinstance(data_url, str):
+                            return "Error: browser screenshot step returned no image"
+                        header, separator, encoded = data_url.partition(",")
+                        if not separator or header.casefold() != "data:image/png;base64":
+                            return "Error: browser screenshot step has invalid media envelope"
+                        try:
+                            payload = base64.b64decode(encoded, validate=True)
+                            native = screenshot_tool_result(
+                                payload, f"{label} screenshot captured"
+                            )
+                        except (ValueError, binascii.Error) as exc:
+                            return f"Error: browser screenshot step returned malformed image: {type(exc).__name__}"
+                        summary.append(f"{label} image attached")
+                        parts.extend(native.content)
+                        found_image = True
+                    else:
+                        value = raw.get("output") if raw.get("ok") else raw.get("error")
+                        line = label + " " + (
+                            value if isinstance(value, str)
+                            else json.dumps(value, ensure_ascii=False, default=str)
+                        )
+                        summary.append(line)
+                        parts.append({"type": "text", "text": line})
+                if found_image:
+                    return StructuredToolOutput(
+                        output="\n".join(summary), content=parts,
+                    )
         return bridge_result
 
     pw = browser = context = page = None
