@@ -114,7 +114,7 @@ def compile_hal(source: str) -> HALProgram:
             raise _fail(source, position, "System events have no Agent wildcard source")
         action_text = match.group("action").strip()
         # The author has not defined the else failure condition or $stop target.
-        if re.search(r"\s+else\s+", action_text):
+        if re.search(r"\s+else\s+", re.sub(r'"[^"]*"', '""', action_text)):
             raise _fail(source, position, "HAL 'else' semantics are reserved for author approval")
         prompt = PROMPT.fullmatch(action_text)
         if prompt:
