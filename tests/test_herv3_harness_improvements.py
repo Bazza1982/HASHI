@@ -2608,12 +2608,11 @@ async def test_deferred_followups_survive_second_interruption_across_fresh_adapt
     assert max(tool_positions) < len(final_messages) - 4
 
 
-def test_durable_wait_checkpoint_overhead_100k_300k_context(tmp_path):
-    """B1: real synchronous pending_tool_batch checkpoint cost on the managed
-    durable-wait path for 100K–300K contexts.  This is a bounded measurement,
-    not a benchmark framework: it exercises the same deepcopy + JSON
-    serialisation the durable observer performs synchronously before each
-    managed tool dispatch."""
+def test_checkpoint_serialization_overhead_100k_300k_context(tmp_path):
+    """Measure only deepcopy and JSON serialization for 100K–300K contexts.
+
+    This is not a SQLite persistence or durable-checkpoint latency benchmark.
+    """
     import copy
     import time
 
@@ -2661,11 +2660,11 @@ def test_durable_wait_checkpoint_overhead_100k_300k_context(tmp_path):
     cost_100k = measure(100_000)
     cost_300k = measure(300_000)
     # Loose regression guard against pathological quadratic serialisation.
-    assert cost_100k < 5.0, f"100K checkpoint took {cost_100k:.3f}s"
-    assert cost_300k < 5.0, f"300K checkpoint took {cost_300k:.3f}s"
+    assert cost_100k < 5.0, f"100K serialization took {cost_100k:.3f}s"
+    assert cost_300k < 5.0, f"300K serialization took {cost_300k:.3f}s"
     # Real range, reported honestly for the PR body (no brittle ratio assert).
     print(
-        f"durable checkpoint overhead: 100K={cost_100k * 1000:.1f}ms "
+        f"serialization-only overhead: 100K={cost_100k * 1000:.1f}ms "
         f"300K={cost_300k * 1000:.1f}ms"
     )
 
