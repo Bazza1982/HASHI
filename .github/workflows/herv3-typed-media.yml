@@ -14,6 +14,7 @@ name: HERV3 typed media integration
       - 'tests/test_hli_provider.py'
       - 'tests/test_tool_gateway_mcp.py'
       - 'tests/test_tool_registry_device_capabilities.py'
+      - 'tests/test_browser_gateway_proxy.py'
       - '.github/workflows/herv3-typed-media.yml'
   workflow_dispatch:
 
@@ -53,4 +54,5 @@ jobs:
             tests/test_hli_provider.py \
             tests/test_tool_gateway_mcp.py \
             tests/test_tool_registry_device_capabilities.py \
+            tests/test_browser_gateway_proxy.py \
             tests/test_windows_helper_backends.py
