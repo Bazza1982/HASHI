@@ -221,8 +221,9 @@ def bounded_prompt_projection(
             result[key] = _project_settled_exchanges(value, evidence_ref=ref, budget_chars=value_budget)
         elif key == "provider_context_checkpoint" and isinstance(value, Mapping) and value:
             encoded = _serialized(value)
+            available = bool(value.get("available")) if "available" in value else bool(value)
             result[key] = {
-                "present": True, "bytes": len(encoded.encode("utf-8")),
+                "present": available, "bytes": len(encoded.encode("utf-8")),
                 "sha256": _sha256_text(encoded),
                 "digest": _bounded(
                     value.get("digest") or value.get("provider_context_digest") or None,
@@ -230,6 +231,10 @@ def bounded_prompt_projection(
                 ),
                 "evidence_ref": _source_ref(context, "provider_context"),
             }
+            if available and (value.get("message_count") or value.get("reasoning_count")):
+                session = str(context.get("session_id") or "")
+                turn = str(context.get("interrupted_turn_id") or "")
+                result[key]["items_evidence_ref"] = f"her_provider_context_items:{session}:{turn}"
         else:
             result[key] = _bounded(value, budget_chars=value_budget, evidence_ref=ref)
         # Settled checkpoints are replaced on the next completed Turn. Keep a

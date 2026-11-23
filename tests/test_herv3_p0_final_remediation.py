@@ -117,6 +117,41 @@ def test_active_recovery_reference_resolves_actual_sqlite_row(tmp_path):
     assert row and json.loads(row[0])[0]["operation_id"] == "write-1"
 
 
+def test_provider_checkpoint_reference_queries_segmented_messages(tmp_path):
+    from tests.test_her_v2_control_plane import _run_claim
+
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    turn = _accept(coordinator, "provider-source", "Inspect")
+    coordinator.record_provider_context_checkpoint(turn, {
+        "provider": "openrouter-api", "model": "test-model", "stage": "direct",
+        "boundary": "completed_provider_response",
+        "messages": [{"role": "user", "content": "ORIGINAL PROVIDER MESSAGE"}],
+        "producer_run_claim": _run_claim("run-source", "provider-source"),
+    })
+    assert coordinator.store.reconcile_interrupted() == 1
+    successor = _accept(coordinator, "provider-successor", "Recover")
+    recovery = coordinator.store.consume_recovery_context(
+        session_id=successor.session_id, current_turn_id=successor.turn_id)
+    view = bounded_prompt_projection(recovery)["provider_context_checkpoint"]
+    kind, session, source_turn = view["items_evidence_ref"].split(":")
+    assert (kind, session, source_turn) == ("her_provider_context_items", turn.session_id, turn.turn_id)
+    with sqlite3.connect(coordinator.store.path) as conn:
+        rows = conn.execute(
+            "SELECT payload_json FROM her_provider_context_items WHERE session_id=? AND turn_id=?",
+            (session, source_turn),
+        ).fetchall()
+    assert any(json.loads(row[0]).get("content") == "ORIGINAL PROVIDER MESSAGE" for row in rows)
+
+
+def test_unavailable_provider_checkpoint_is_not_claimed_as_present():
+    view = bounded_prompt_projection({
+        "session_id": "s", "interrupted_turn_id": "t",
+        "provider_context_checkpoint": {"available": False, "message_count": 0, "reasoning_count": 0},
+    })["provider_context_checkpoint"]
+    assert view["present"] is False
+    assert "items_evidence_ref" not in view
+
+
 def test_settled_checkpoint_receipt_reference_resolves_actual_record(tmp_path):
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
     turn = _accept(coordinator, "settled", "read")

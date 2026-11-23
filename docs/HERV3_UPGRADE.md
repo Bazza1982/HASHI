@@ -9,7 +9,9 @@ most 96 KiB in UTF-8, including wrappers and truncation metadata. A bounded
 view retains the interruption identity, resume safety, recovery disposition,
 receipt and unresolved-effect counts, and references to the corresponding
 canonical records. Omitted details are evidence-linked, not represented as
-completed work. Re-projecting a view preserves those counts.
+completed work. Private Provider checkpoints identify both their metadata and
+their segmented message records when available; unavailable checkpoints are
+not presented as present. Re-projecting a view preserves those counts.
 
 Active recovery uses the actual Engine Session and interrupted Turn. Settled
 checkpoint references identify the stored checkpoint; the accepted user
