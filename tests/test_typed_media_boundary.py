@@ -96,3 +96,54 @@ def test_openrouter_base_adapter_preserves_typed_image():
     assert messages[0]["tool_call_id"] == "call-image"
     assert messages[1]["content"][1]["type"] == "image_url"
     assert messages[1]["content"][1]["image_url"]["url"] == URL
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_session_uses_declared_action_not_page_text(monkeypatch):
+    from tools import browser
+
+    encoded = ENCODED
+    response = {
+        "ok": True, "completed": 3, "failed": 0,
+        "steps": [
+            {"index": 0, "action": "get_text", "ok": True,
+             "output": "A page contains " + URL},
+            {"index": 1, "action": "screenshot", "ok": True,
+             "output": URL},
+            {"index": 2, "action": "evaluate", "ok": True,
+             "output": {"example": URL}},
+        ],
+    }
+
+    async def fake_bridge(action, args):
+        assert action == "session"
+        return __import__("json").dumps(response)
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", fake_bridge)
+    result = await browser.execute_browser_session(
+        {"steps": [{"action": "get_text"}, {"action": "screenshot"},
+                   {"action": "evaluate"}]},
+        typed_media=True,
+    )
+    assert ENCODED not in result.output
+    texts = [p["text"] for p in result.content if p["type"] == "text"]
+    images = [p for p in result.content if p["type"] == "image"]
+    assert len(images) == 1
+    assert base64.b64decode(images[0]["data"]) == PNG
+    assert any(URL in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_text_only_keeps_entire_response(monkeypatch):
+    from tools import browser
+
+    payload = '{"ok":true,"steps":[{"index":0,"action":"get_text","ok":true,"output":' + repr(URL) + '}] }'
+
+    async def fake_bridge(_action, _args):
+        return payload
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", fake_bridge)
+    result = await browser.execute_browser_session(
+        {"steps": [{"action": "get_text"}]}, typed_media=True,
+    )
+    assert result == payload
