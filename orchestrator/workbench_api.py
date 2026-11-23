@@ -1041,6 +1041,67 @@ class WorkbenchApiServer:
         self.app.router.add_get(
             "/api/v1/automation/events", session_handler(automation_events)
         )
+
+        # HAL v0.1: optional event-automation Function. Rule management and
+        # execution status ride the same authenticated Workbench API; the
+        # runtime loop starts only when enabled rules exist. Import failure
+        # keeps HAL absent without affecting any other endpoint.
+        try:
+            from hal import service as hal_service
+
+            async def hal_status(request):
+                return await hal_service.handle_hal_status(self, request)
+
+            async def hal_validate(request):
+                return await hal_service.handle_hal_validate(self, request)
+
+            async def hal_rules_get(request):
+                return await hal_service.handle_hal_rules_get(self, request)
+
+            async def hal_rules_post(request):
+                return await hal_service.handle_hal_rules_post(self, request)
+
+            async def hal_rule_enable(request):
+                return await hal_service.handle_hal_rule_enable(self, request)
+
+            async def hal_rule_disable(request):
+                return await hal_service.handle_hal_rule_disable(self, request)
+
+            async def hal_runs_get(request):
+                return await hal_service.handle_hal_runs_get(self, request)
+
+            async def hal_run_get(request):
+                return await hal_service.handle_hal_run_get(self, request)
+
+            self.app.router.add_get(
+                "/api/v1/hal/status", session_handler(hal_status)
+            )
+            self.app.router.add_post(
+                "/api/v1/hal/validate", session_handler(hal_validate)
+            )
+            self.app.router.add_get(
+                "/api/v1/hal/rules", session_handler(hal_rules_get)
+            )
+            self.app.router.add_post(
+                "/api/v1/hal/rules", session_handler(hal_rules_post)
+            )
+            self.app.router.add_post(
+                "/api/v1/hal/rules/{rule_id}/enable", session_handler(hal_rule_enable)
+            )
+            self.app.router.add_post(
+                "/api/v1/hal/rules/{rule_id}/disable", session_handler(hal_rule_disable)
+            )
+            self.app.router.add_get(
+                "/api/v1/hal/runs", session_handler(hal_runs_get)
+            )
+            self.app.router.add_get(
+                "/api/v1/hal/runs/{exec_id}", session_handler(hal_run_get)
+            )
+        except Exception as exc:  # noqa: BLE001 — HAL absence must never break the gateway
+            logging.getLogger("HASHI.Workbench.HAL").warning(
+                "HAL endpoints unavailable (%s)", type(exc).__name__
+            )
+
         self.app.router.add_get(
             "/api/agents/{name}/overview", self.handle_agent_overview
         )
@@ -2659,6 +2720,24 @@ class WorkbenchApiServer:
         except Exception as exc:
             logging.getLogger("HASHI.Workbench.Exchange").warning(
                 "Exchange inbox recovery is unavailable (%s)",
+                type(exc).__name__,
+            )
+
+        # HAL v0.1: start the runtime loop only when a HAL store already
+        # exists with enabled rules. No enabled rules => no loop, no polling.
+        try:
+            from hal.service import _default_store_path, ensure_service
+
+            if _default_store_path(self).exists():
+                hal_runtime = ensure_service(self)
+                if (
+                    hal_runtime is not None
+                    and hal_runtime.store.enabled_rule_count() > 0
+                ):
+                    hal_runtime.start_loop()
+        except Exception as exc:
+            logging.getLogger("HASHI.Workbench.HAL").warning(
+                "HAL runtime unavailable at startup (%s)",
                 type(exc).__name__,
             )
 

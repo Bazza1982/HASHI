@@ -73,8 +73,12 @@ def terminal_events_page(store, *, owner_id: str, after: int, limit: int = 50) -
             "run_id": str(row["run_id"] or ""),
             "session_id": str(row["session_id"]),
             "occurred_at": str(row["created_at"]),
-            # An automated Run must not recursively trigger rules in MVP v1.
-            "automation_origin": str(row["run_idempotency_key"]).startswith("hea:"),
+            # Automation-dispatched Runs (HEA "hea:" and HAL "hal:" idempotency
+            # prefixes) must not recursively trigger entry rules. The raw key
+            # is exposed so consumers can correlate dependent workflow stages.
+            # Keep prefixes in sync with hal/event_source.py.
+            "run_idempotency_key": str(row["run_idempotency_key"] or ""),
+            "automation_origin": str(row["run_idempotency_key"]).startswith(("hea:", "hal:")),
         }
         for row in selected
     ]
