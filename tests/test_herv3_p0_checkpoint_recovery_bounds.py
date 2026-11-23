@@ -20,14 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.openrouter_api import (
-    OpenRouterAdapter,
-    ProviderContextCapacityPreflightError,
-)
-from orchestrator.context_compaction import (
-    estimate_tokens,
-    estimate_tokens_conservative,
-)
+from adapters.openrouter_api import OpenRouterAdapter
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from orchestrator.her_v2.recovery_projection import (
     FIELD_BUDGET_CHARS,
@@ -348,7 +341,8 @@ def test_request_received_goal_is_bounded_and_audit_preserved(tmp_path):
     import sqlite3 as _sqlite3
 
     coordinator = HerBackendSessionCoordinator(tmp_path / "state")
-    turn = _accept(coordinator, "turn-1", "Build it")
+    original_goal = "用户目标 " + "任" * 20_000
+    turn = _accept(coordinator, "turn-1", original_goal)
     coordinator.store.freeze_turn_routing(
         session_id=turn.session_id,
         turn_id=turn.turn_id,
@@ -382,8 +376,14 @@ def test_request_received_goal_is_bounded_and_audit_preserved(tmp_path):
         assert remaining["goal_truncated"] is True
         assert len(remaining["goal"]) <= GOAL_BUDGET_CHARS + 32
         assert remaining["goal_sha256"].startswith("sha256:")
-        # The full authoritative request is still queryable in the canonical
-        # audit stream (never lost, never re-fed on recovery).
+        # The original accepted user request and full provider audit remain
+        # independently queryable; the provider prompt is not the goal.
+        user = conn.execute(
+            "SELECT user_message FROM her_turns WHERE session_id=? AND turn_id=?",
+            (turn.session_id, turn.turn_id),
+        ).fetchone()
+        assert user["user_message"] == original_goal
+        assert remaining["goal"].startswith("用户目标 ")
         audit = conn.execute(
             "SELECT payload_json FROM her_session_events "
             "WHERE event_id = ?",
@@ -403,8 +403,8 @@ def test_wip_journal_summary_never_copies_full_prompt(tmp_path):
         request_id="r1", prompt=huge_prompt, request_summary="", session_id="s1"
     )
     rendered = journal.render_context(journal.records())
-    assert "assembled provider prompt " in rendered  # bounded excerpt retained
-    assert "A" * 100_000 not in rendered  # full prompt never re-fed
+    assert "assembled provider prompt " not in rendered
+    assert "A" * 100_000 not in rendered  # provider prompt never re-fed
     assert len(rendered) < 10_000
 
 
@@ -448,8 +448,9 @@ def test_preflight_text_containing_data_substring_is_still_checked(monkeypatch):
             }
         ],
     }
-    with pytest.raises(ProviderContextCapacityPreflightError):
-        adapter._preflight_payload_capacity(payload)
+    # The estimate is not a tokenizer proof. Actual provider admission must
+    # decide whether this ordinary text fits, regardless of these substrings.
+    adapter._preflight_payload_capacity(payload)
 
 
 def test_preflight_real_multimodal_media_is_not_miscounted(monkeypatch):
@@ -474,65 +475,9 @@ def test_preflight_real_multimodal_media_is_not_miscounted(monkeypatch):
     adapter._preflight_payload_capacity(payload)
 
 
-def test_preflight_text_only_extraction_drops_media_parts():
-    payload = {
-        "model": "m",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "KEEP_THIS"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "data:image/png;base64,DEADBEEF"},
-                    },
-                    {"type": "input_audio", "input_audio": {"data": "DEADBEEF"}},
-                ],
-            },
-            {"role": "user", "content": "ALSO_KEEP_THIS"},
-        ],
-        "tools": [{"type": "function", "function": {"name": "read", "description": "d"}}],
-    }
-    extracted = OpenRouterAdapter._preflight_text_content(payload)
-    serialized = json.dumps(extracted, ensure_ascii=False, default=str)
-    assert "KEEP_THIS" in serialized
-    assert "ALSO_KEEP_THIS" in serialized
-    assert "DEADBEEF" not in serialized
-    assert extracted["tools"] == payload["tools"]
-
-
-def test_conservative_estimator_catches_json_code_unicode():
-    json_text = json.dumps({"items": [{"k": i} for i in range(5000)]})
-    code_text = "def f(x):\n  " + "  return x + 1\n" * 5000
-    unicode_text = "历史详情累积" * 5000
-    for text in (json_text, code_text, unicode_text):
-        conservative = estimate_tokens_conservative(text)
-        named = estimate_tokens(text)
-        assert conservative >= named, (conservative, named)
-    assert estimate_tokens_conservative(json_text) > estimate_tokens(json_text)
-    assert estimate_tokens_conservative(code_text) > estimate_tokens(code_text)
-
-
 # --------------------------------------------------------------------------
 # P0-5: bounded recovery across repeated failures / no tool replay
 # --------------------------------------------------------------------------
-
-
-def test_repeated_failed_recovery_context_stays_bounded(tmp_path):
-    """Simulate three successive recovery attempts against polluted state."""
-    del tmp_path
-    polluted = _huge_recovery_context()
-    polluted["recovery_disposition"] = "UNKNOWN_SIDE_EFFECT"
-    polluted["safe_to_resume"] = False
-    sizes = []
-    for _ in range(3):
-        projection = bounded_prompt_projection(polluted)
-        sizes.append(
-            len(json.dumps(projection, ensure_ascii=False, default=str).encode("utf-8"))
-        )
-    assert all(s <= TOTAL_BUDGET_CHARS for s in sizes)
-    # Stable across attempts: no per-attempt growth.
-    assert max(sizes) - min(sizes) <= 8
 
 
 def test_unresolved_side_effect_survives_projection_as_evidence_ref(tmp_path):

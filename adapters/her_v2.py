@@ -2087,15 +2087,14 @@ class HERv2Adapter(BaseBackend):
                         operation="private provider recovery readback",
                         error=exc,
                     )
-                pcm_runtime_context["active_turn_recovery"] = dict(
-                    canonical_recovery_context
-                )
+                recovery_view = bounded_prompt_projection(canonical_recovery_context)
+                pcm_runtime_context["active_turn_recovery"] = recovery_view
                 prompt += (
                     "\n\n--- HER CANONICAL ACTIVE-TURN RECOVERY — CONTEXT ONLY ---\n\n"
                     "This state survived a process interruption. Investigate unresolved "
                     "side effects before continuing; do not replay them automatically.\n\n"
                     + json.dumps(
-                        bounded_prompt_projection(canonical_recovery_context),
+                        recovery_view,
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -2112,7 +2111,11 @@ class HERv2Adapter(BaseBackend):
             wip_journal.begin_turn(
                 request_id=request_id,
                 prompt=prompt,
-                request_summary=str(request_meta.get("summary") or ""),
+                request_summary=(
+                    str(fixed_turn.pcm_input.get("current_request") or "")
+                    if fixed_turn is not None
+                    else str(request_meta.get("summary") or "")
+                ),
                 session_id=str(request_meta.get("hashi_session_id") or ""),
                 context_generation=int(
                     request_meta.get("context_generation") or 0
@@ -2178,6 +2181,17 @@ class HERv2Adapter(BaseBackend):
                 voice_enabled = bool(native_enabled(terminal))
             except TypeError:
                 voice_enabled = bool(native_enabled())
+        # Preserve the effective text main route before a voice-only override.
+        # Voice transport changes do not themselves replace the main model.
+        main_route_profile = None
+        if fixed_turn is not None and self._session_coordinator is not None:
+            try:
+                main_route_profile = turn_config.profile_for_route(Route.DIRECT)
+            except Exception as exc:
+                return self._fixed_control_failure_response(
+                    accepted=fixed_turn, started=started,
+                    operation="main route resolution", error=exc,
+                )
         if (
             request_content_is_voice_origin(request_content)
             and voice_enabled
@@ -2206,6 +2220,10 @@ class HERv2Adapter(BaseBackend):
                 route_snapshot = {
                     "routing_mode": turn_config.routing_mode,
                     "effort": effort_resolution.effective.value,
+                    "main_route": {
+                        "provider": main_route_profile.engine,
+                        "model": main_route_profile.model,
+                    },
                     "profiles": [
                         {
                             "name": profile.name,
@@ -2244,7 +2262,8 @@ class HERv2Adapter(BaseBackend):
             if frozen_route.get("rebuild_from_checkpoint"):
                 checkpoint = dict(frozen_route.get("checkpoint") or {})
                 checkpoint.pop("recent_settled_exchanges", None)
-                pcm_runtime_context["settled_checkpoint"] = dict(checkpoint)
+                checkpoint_view = bounded_prompt_projection(checkpoint)
+                pcm_runtime_context["settled_checkpoint"] = checkpoint_view
                 prompt += (
                     "\n\n--- HER PROVIDER CONTEXT REBUILD — SETTLED CHECKPOINT ---\n\n"
                     "The provider/model route changed for this Turn. Continue the same "
@@ -2252,7 +2271,7 @@ class HERv2Adapter(BaseBackend):
                     "exchanges are already materialised above. This checkpoint is "
                     "context, not a new user request.\n\n"
                     + json.dumps(
-                        bounded_prompt_projection(checkpoint),
+                        checkpoint_view,
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),

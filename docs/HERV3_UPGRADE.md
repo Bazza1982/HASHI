@@ -1,5 +1,42 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+## 2026-11-23 bounded recovery views
+
+HERV3 keeps canonical Session, Tool receipt, side-effect, WIP and audit
+evidence; these limits apply only to the model-facing recovery view. Each
+complete JSON field is at most 24 KiB and the complete JSON projection is at
+most 96 KiB in UTF-8, including wrappers and truncation metadata. A bounded
+view retains the interruption identity, resume safety, recovery disposition,
+receipt and unresolved-effect counts, and references to the corresponding
+canonical records. Omitted details are evidence-linked, not represented as
+completed work. Re-projecting a view preserves those counts.
+
+Active recovery uses the actual Engine Session and interrupted Turn. Settled
+checkpoint references identify the stored checkpoint; the accepted user
+message remains the source for the recovery goal, even for older rows polluted
+by an assembled provider prompt. A new recovery handoff references its source
+Turn rather than recursively embedding its remaining-work object. Completed
+receipts and uncertain effects remain durable and uncertain effects are not
+automatically replayed.
+
+The WIP journal and compacted recovery memory keep their source records. Their
+model views are bounded and carry a source reference; multiple compacted WIP
+entries share one 64 KiB model-view budget and omitted entries remain queryable
+by memory-row range. An assembled provider prompt is never used as a fallback
+request summary. A main Provider/model
+change rebuilds the provider context from the settled checkpoint. Profile
+ordering, reasoning effort, auxiliary profiles and a voice flag alone do not
+change that main identity.
+
+A generic token estimate is not proof of overflow and cannot reject a request
+that might fit. Provider-specific capacity preparation runs before final
+provider admission. Qualified native limits and provider-confirmed typed
+capacity failures retain their existing behavior and fallback semantics.
+
+Source changes, offline tests, actual provider acceptance and running-generation
+adoption are separate evidence.
+
+
 ## 2026-11-21 Compact follows the current HERV3 target
 
 Manual and automatic conversation Compact resolve the Provider and model from
@@ -122,22 +159,20 @@ The model owns reasoning, planning, adaptation and verification inside one conti
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
 permissions, recovery, audit, user commentary and learning.
 
-Prior WIP Journal evidence remains complete, quoted context for a new turn when
-canonical recovery is absent. It no longer sends a proactive recovery card
-before that turn: the current user request is processed first, and all recovery
-facts are available to the model without claiming authority to replay effects.
+Prior WIP Journal evidence remains complete. When canonical recovery is absent,
+a bounded, referenced view is quoted as context for a new turn. It does not
+send a proactive recovery card before that turn: the current user request
+remains authoritative and recovery facts never grant authority to replay effects.
 
 Individual Tool response frames may be paged before they re-enter the model
 loop (including structured text content); native image blocks remain media.
 File reads, searches and directory listings expose offsets or cursors so the
 model can retrieve all authorised source data across as many calls as needed;
-these frame sizes are not HERV3 execution ceilings. For OpenAI-compatible
-Provider calls with a declared target capacity, a clearly oversized serialized
-text request is rejected
-before HTTP with the existing typed capacity code. Unknown capacities and
-native-media accounting still depend on Provider rejection; the preflight
-does not promise that every request will fit. A capacity rejection after tool
-activity remains non-replayable without user reconciliation.
+these frame sizes are not HERV3 execution ceilings. For OpenAI-compatible Provider calls, uncertain token estimates do not hard
+reject input. Provider-specific preparation and qualified native limits remain
+in force, and provider-confirmed overflow retains the existing typed capacity
+code. Native-media accounting follows the selected Provider. A capacity
+rejection after tool activity remains non-replayable without user reconciliation.
 
 ### Completed-tool checkpoint provider-call continuation
 

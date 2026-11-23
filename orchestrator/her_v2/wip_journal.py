@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.her_v2.recovery_projection import _bounded, bounded_goal
 from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.storage_profile import flush_projection
 
@@ -90,17 +91,6 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
 
 def _text(value: Any) -> str:
     return str(value or "")
-
-
-_SUMMARY_BUDGET_CHARS = 2048
-
-
-def _bounded_summary(value: Any) -> str:
-    """Bound a journal request summary so an assembled prompt is never re-fed."""
-    text = str(value or "")
-    if len(text) <= _SUMMARY_BUDGET_CHARS:
-        return text
-    return text[:_SUMMARY_BUDGET_CHARS] + "…[truncated]"
 
 
 def _content_marker(
@@ -356,18 +346,20 @@ class WIPJournal:
 
         with self._lock:
             prior = self._read_records_unlocked()
+            # request_summary is an explicit request description, whereas
+            # prompt can already contain assembled recovery and PCM context.
+            # Preserve the source summary in the journal and bound only the
+            # model-facing projection.
             summary = str(request_summary or "").strip()
             if not summary:
-                # Never copy the full assembled provider prompt into the
-                # journal; that re-fed the expanded prompt on recovery and
-                # caused recursive growth. Retain only a bounded excerpt.
-                summary = _bounded_summary(prompt)
+                summary = "Unfinished request; consult the accepted user message."
+            summary_projection = bounded_goal(summary, budget_chars=2048)
             record = {
                 "format": FORMAT,
                 "recorded_at": _now(),
                 "kind": "turn_received",
                 "request_id": _text(request_id),
-                "request_summary": summary,
+                "request_summary": summary_projection.get("goal", ""),
                 "prompt_chars": len(str(prompt or "")),
                 "prompt_sha256": _sha256_text(str(prompt or "")),
                 "session_id": _text(session_id),
@@ -375,6 +367,13 @@ class WIPJournal:
                     int(context_generation) if context_generation else None
                 ),
             }
+            if summary_projection.get("goal_truncated"):
+                # Keep the complete source in the private journal for cases
+                # without a fixed Session; compaction retains it in memory.
+                record["request_summary_full"] = summary
+                record["request_summary_sha256"] = summary_projection["goal_sha256"]
+                record["request_summary_truncated"] = True
+                record["request_summary_evidence_ref"] = f"wip_journal:{self.path}"
             self._append_unlocked(record)
         return self.render_context(prior)
 
@@ -413,6 +412,9 @@ class WIPJournal:
                 "recorded_at": _text(record.get("recorded_at")),
                 "request_id": _text(record.get("request_id")),
                 "request_summary": _text(record.get("request_summary")),
+                "request_summary_full": _text(record.get("request_summary_full")),
+                "request_summary_sha256": _text(record.get("request_summary_sha256")),
+                "request_summary_truncated": True if record.get("request_summary_truncated") else None,
                 "session_id": _text(record.get("session_id")),
                 "context_generation": record.get("context_generation"),
             }
@@ -507,12 +509,54 @@ class WIPJournal:
         return capsule
 
     @staticmethod
-    def render_context(records: Sequence[Mapping[str, Any]]) -> str:
+    def project_capsule(capsule: Mapping[str, Any], *, evidence_ref: str) -> dict[str, Any]:
+        """Bound the model view while retaining a queryable canonical source."""
+        projected: dict[str, Any] = {}
+        for key in (
+            "format", "authority", "source_sha256", "source_recorded_through",
+            "source_record_count", "request_id_count", "first_request_id", "last_request_id",
+        ):
+            if key in capsule:
+                projected[key] = _bounded(capsule[key], budget_chars=2048, evidence_ref=evidence_ref)
+        projected["evidence_ref"] = evidence_ref
+        for key in ("request_ids", "unfinished_requests", "event_counts", "unfinished_work_activity", "failures", "limitations", "summary"):
+            if key not in capsule:
+                continue
+            value = capsule[key]
+            if key == "unfinished_requests" and isinstance(value, list):
+                selected = value if len(value) <= 4 else [value[0], *value[-3:]]
+                recent = [
+                    {
+                        str(name): _bounded(item, budget_chars=2048, evidence_ref=evidence_ref)
+                        for name, item in row.items()
+                        if name != "request_summary_full"
+                    }
+                    for row in selected if isinstance(row, Mapping)
+                ]
+                value = {"total": len(value), "recent": recent, "omitted": len(value) - len(recent), "evidence_ref": evidence_ref}
+            elif key in {"unfinished_work_activity", "failures"} and isinstance(value, list):
+                recent = [
+                    _bounded(row, budget_chars=1024, evidence_ref=evidence_ref)
+                    for row in value[-8:]
+                ]
+                value = {"total": len(value), "recent": recent, "omitted": len(value) - len(recent), "evidence_ref": evidence_ref}
+            projected[key] = _bounded(value, budget_chars=8 * 1024, evidence_ref=evidence_ref)
+        omitted = {key: value for key, value in capsule.items() if key not in projected}
+        if omitted:
+            projected["omitted_fields"] = {
+                "count": len(omitted),
+                "sha256": _sha256_text(json.dumps(omitted, ensure_ascii=False, sort_keys=True, default=str)),
+                "evidence_ref": evidence_ref,
+            }
+        return projected
+
+    def render_context(self, records: Sequence[Mapping[str, Any]]) -> str:
         if not records:
             return ""
-        capsule = WIPJournal.recovery_capsule(records)
+        capsule = self.recovery_capsule(records)
+        projected = self.project_capsule(capsule, evidence_ref=f"wip_journal:{self.path}")
         serialized = json.dumps(
-            capsule,
+            projected,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

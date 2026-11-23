@@ -2086,86 +2086,18 @@ class OpenRouterAdapter(BaseBackend):
         """Optional provider-native check of the final, privacy-filtered payload.
 
         A subclass may return a replacement payload after proactive context
-        maintenance (for example, Compact). The caller re-protects and
-        re-estimates the rebuilt payload before submission. Returning None
-        sends the original payload unchanged.
+        maintenance (for example, Compact). The caller re-protects any
+        rebuilt payload and applies provider-specific final checks. Returning
+        None sends the original payload unchanged.
         """
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
-        """Reject a clearly oversized text payload before an HTTP call.
+        """Defer uncertain token counts to the provider's typed admission.
 
-        Native media have provider-specific token accounting, so leave those
-        requests to the provider's typed rejection rather than guessing from
-        base64 wire bytes.
+        A heuristic upper estimate cannot prove that a request will not fit.
+        Model-specific capacity preparation and compaction run separately.
         """
-
-        from orchestrator.context_compaction import (
-            estimate_tokens_conservative,
-            resolve_capacity_profile,
-        )
-
-        runtime = getattr(self.config, "_hashi_runtime", None)
-        if runtime is None:
-            return
-        model = str(payload.get("model") or self.config.model)
-        capacity = resolve_capacity_profile(runtime, self.config.engine, model)
-        if capacity is None:
-            return
-        serialized = json.dumps(
-            self._preflight_text_content(payload),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        if not serialized or serialized in ("{}", "[]"):
-            return
-        estimated = estimate_tokens_conservative(serialized)
-        if estimated > capacity.usable_input_tokens:
-            raise ProviderContextCapacityPreflightError(
-                f"Prepared request conservative estimate {estimated} tokens "
-                f"exceeds declared usable input capacity "
-                f"{capacity.usable_input_tokens} for "
-                f"{capacity.provider}/{capacity.model}."
-            )
-
-    @classmethod
-    def _preflight_text_content(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Return only text-bearing content for capacity estimation.
-
-        Structured multimodal parts (``image_url`` / ``input_audio`` /
-        ``input_image``) use provider-specific token accounting and must not be
-        estimated from their base64 wire bytes; they are excluded. Plain string
-        content and explicit ``text`` parts are kept. ``tools`` schema JSON is
-        always text and kept in full.
-        """
-        media_types = frozenset({"image_url", "input_audio", "input_image"})
-        result: dict[str, Any] = {}
-        messages = payload.get("messages")
-        if isinstance(messages, list):
-            text_messages: list[Any] = []
-            for message in messages:
-                if not isinstance(message, Mapping):
-                    text_messages.append(message)
-                    continue
-                content = message.get("content")
-                if isinstance(content, str):
-                    text_messages.append(message)
-                elif isinstance(content, list):
-                    kept = [
-                        part
-                        for part in content
-                        if not (
-                            isinstance(part, Mapping)
-                            and part.get("type") in media_types
-                        )
-                    ]
-                    text_messages.append({**dict(message), "content": kept})
-                else:
-                    text_messages.append(message)
-            result["messages"] = text_messages
-        if "tools" in payload:
-            result["tools"] = payload["tools"]
-        return result
+        del payload
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -4755,16 +4687,11 @@ class OpenRouterAdapter(BaseBackend):
                             audio_output is None or audio_output.get("tools")
                         ),
                     )
-                    self._preflight_payload_capacity(payload)
                     payload = await self._protect_outbound_payload(
                         payload, request_id=str(request_id or ""), gate=privacy_gate
                     )
-                    # Level-2 placeholders may be longer than the sensitive
-                    # spans they replace.  The first check protects the local
-                    # privacy sidecar from an already-oversized request; this
-                    # second check governs the exact text payload that will be
-                    # audited and sent over HTTP.
-                    self._preflight_payload_capacity(payload)
+                    # Let the target's capacity preparation inspect the
+                    # privacy-filtered payload before any native admission.
                     capacity_start = len(provider_calls)
                     rebuilt_payload = await self._prepare_payload_capacity(
                         payload,
@@ -4776,7 +4703,10 @@ class OpenRouterAdapter(BaseBackend):
                         payload = await self._protect_outbound_payload(
                             payload, request_id=str(request_id or ""), gate=privacy_gate
                         )
-                        self._preflight_payload_capacity(payload)
+                    # A provider-specific exact constraint may still apply to
+                    # the final protected payload. Generic token estimates do
+                    # not reject; target preparation has already had a chance.
+                    self._preflight_payload_capacity(payload)
                     provider_call_count += len(provider_calls) - capacity_start
                     for capacity_call in provider_calls[capacity_start:]:
                         total_prompt += int(capacity_call.get("input") or 0)

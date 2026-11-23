@@ -1,24 +1,8 @@
-"""Bounded prompt projections for HER v2/v3 recovery and settled-checkpoint contexts.
+"""Bounded, evidence-linked model views of canonical HER recovery state.
 
-Canonical records (``her_active_turn_recovery``, ``her_settled_checkpoints``,
-``her_session_events``, ``her_provider_context_items``) keep the complete
-authoritative state and stay queryable. The projections in this module exist
-only for the *model-facing prompt* and never mutate those records.
-
-Design invariants:
-
-- Every dynamic field is hard-capped (default ``FIELD_BUDGET_CHARS``).
-- The whole projection is hard-capped (default ``TOTAL_BUDGET_CHARS``).
-- Truncation/omission is always recorded with a size, a SHA-256, and a
-  queryable evidence reference. We never silently drop audit facts.
-- Full ``tool_receipts`` arrays are never copied into the prompt; only a
-  count, a bounded recent-window identity list, and an evidence reference.
-
-These projections are deliberately not a recovery mechanism by themselves:
-they make a *previously unbounded* prompt contribution bounded regardless of
-how large, nested, or historically polluted the canonical state is.
+The SQLite recovery, checkpoint, turn and audit records remain authoritative.
+These limits apply only to serialized prompt projections, not to stored work.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -26,71 +10,64 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-FIELD_BUDGET_CHARS: int = 24 * 1024
-TOTAL_BUDGET_CHARS: int = 96 * 1024
-GOAL_BUDGET_CHARS: int = 4 * 1024
-RECENT_RECEIPTS_MAX: int = 8
-RECENT_EXCHANGES_MAX: int = 4
-
+# Historical names are retained for existing callers; units are UTF-8 JSON bytes.
+FIELD_BUDGET_CHARS = 24 * 1024
+TOTAL_BUDGET_CHARS = 96 * 1024
+GOAL_BUDGET_CHARS = 4 * 1024
+RECENT_RECEIPTS_MAX = 8
+RECENT_EXCHANGES_MAX = 4
 _TRUNCATION_MARKER = "…[truncated]"
-
 _PROJECTION_NOTICE = (
-    "Complete canonical records remain queryable in HER audit storage. "
-    "Truncated or omitted fields carry sha256 + evidence_ref."
+    "Quoted recovery context only. Consult the referenced canonical HER records "
+    "for omitted details; never replay an uncertain side effect automatically."
 )
+
+
+def _serialized(value: Any) -> str:
+    # The non-compact form also bounds callers that serialize with JSON spaces.
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _json_size(value: Any) -> int:
+    return len(_serialized(value).encode("utf-8"))
 
 
 def _sha256_text(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _json_size(value: Any) -> int:
-    try:
-        return len(
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        )
-    except Exception:
-        return len(str(value or "").encode("utf-8"))
+def _source_ref(context: Mapping[str, Any], field: str) -> str:
+    session = str(context.get("session_id") or "")
+    settled = bool(context.get("settled_through_turn_id")) or str(
+        context.get("format") or ""
+    ).startswith("her-settled-")
+    turn = str(context.get("interrupted_turn_id") or context.get("settled_through_turn_id") or "")
+    source = "her_settled_checkpoints" if settled else "her_active_turn_recovery"
+    return f"{source}:{field}:{session}:{turn}"
 
 
-def _bounded(value: Any, *, budget_chars: int) -> Any:
-    """Return ``value`` unchanged when it fits, else a truncation witness."""
-    if value is None or isinstance(value, (bool, int, float)):
+def _bounded(value: Any, *, budget_chars: int, evidence_ref: str = "") -> Any:
+    """Bound one complete JSON value; only scalar text gets an excerpt."""
+    if _json_size(value) <= budget_chars:
         return value
+    raw = value if isinstance(value, str) else _serialized(value)
+    witness: dict[str, Any] = {
+        "truncated": True,
+        "bytes": len(raw.encode("utf-8")),
+        "sha256": _sha256_text(raw),
+        "evidence_ref": evidence_ref,
+    }
     if isinstance(value, str):
-        if len(value) <= budget_chars:
-            return value
-        return {
-            "truncated": True,
-            "chars": len(value),
-            "sha256": _sha256_text(value),
-            "excerpt": value[:budget_chars] + _TRUNCATION_MARKER,
-        }
-    if isinstance(value, (Mapping, Sequence)) and not isinstance(
-        value, (bytes, bytearray)
-    ):
-        serialized = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        if len(serialized) <= budget_chars:
-            return value
-        return {
-            "truncated": True,
-            "chars": len(serialized),
-            "sha256": _sha256_text(serialized),
-            "excerpt": serialized[:budget_chars] + _TRUNCATION_MARKER,
-        }
-    return _bounded(str(value or ""), budget_chars=budget_chars)
+        lo, hi = 0, len(value)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _json_size({**witness, "excerpt": value[:mid] + _TRUNCATION_MARKER}) <= budget_chars:
+                lo = mid
+            else:
+                hi = mid - 1
+        if lo:
+            witness["excerpt"] = value[:lo] + _TRUNCATION_MARKER
+    return witness
 
 
 def _as_mappings(value: Any) -> list[dict[str, Any]]:
@@ -99,267 +76,219 @@ def _as_mappings(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
-def _receipt_identity(receipt: Mapping[str, Any]) -> dict[str, Any]:
-    """Minimal, bounded identity for one tool receipt / side effect."""
+def _receipt_identity(receipt: Mapping[str, Any], evidence_ref: str) -> dict[str, Any]:
     identity: dict[str, Any] = {}
-    for key in (
-        "operation_id",
-        "invocation_id",
-        "tool_name",
-        "tool",
-        "name",
-        "status",
-        "state",
-        "read_only",
-    ):
+    for key in ("operation_id", "invocation_id", "tool_name", "tool", "name", "status", "state", "read_only"):
         value = receipt.get(key)
         if value not in (None, "", [], {}):
-            identity[key] = _bounded(value, budget_chars=256)
-    if not identity:
-        return {"summary": _bounded(dict(receipt), budget_chars=512)}
-    return identity
+            identity[key] = _bounded(value, budget_chars=256, evidence_ref=evidence_ref)
+    return identity or {"evidence_ref": evidence_ref}
 
 
-def _project_tool_receipts(
-    value: Any, *, session_id: str, turn_id: str, budget_chars: int
-) -> dict[str, Any]:
-    items = _as_mappings(value)
-    total = len(items)
-    if total == 0:
-        return {"total": 0}
-    recent = [_receipt_identity(item) for item in items[-RECENT_RECEIPTS_MAX:]]
-    return _bounded(
-        {
-            "total": total,
-            "recent": recent,
-            "omitted": total - len(recent),
-            "evidence_ref": (
-                f"her_active_turn_recovery:tool_receipts:{session_id}:{turn_id}"
-            ),
-        },
-        budget_chars=budget_chars,
-    )
+def _fit_summary(summary: dict[str, Any], *, budget_chars: int, list_key: str) -> dict[str, Any]:
+    # Keep counts, reference and safety facts even when individual identities
+    # must be omitted. Never turn the complete JSON document into an excerpt.
+    while _json_size(summary) > budget_chars and summary.get(list_key):
+        summary[list_key].pop(0)
+        summary["omitted"] = int(summary.get("omitted") or 0) + 1
+    return summary
 
 
-def _project_side_effects(
-    value: Any, *, session_id: str, turn_id: str, budget_chars: int
-) -> dict[str, Any]:
-    items = _as_mappings(value)
-    total = len(items)
-    if total == 0:
-        return {"total": 0}
-    unresolved = [
-        item for item in items if item.get("state") in {"pending", "unknown", None}
-    ]
-    recent = [
-        _receipt_identity(item) for item in unresolved[-RECENT_RECEIPTS_MAX:]
-    ]
-    return _bounded(
-        {
-            "total": total,
-            "unresolved_total": len(unresolved),
-            "unresolved": recent,
-            "omitted": len(unresolved) - len(recent),
-            "evidence_ref": (
-                f"her_active_turn_recovery:side_effects:{session_id}:{turn_id}"
-            ),
-        },
-        budget_chars=budget_chars,
-    )
+def _project_tool_receipts(value: Any, *, evidence_ref: str, budget_chars: int) -> dict[str, Any]:
+    if isinstance(value, Mapping) and "total" in value:
+        total = int(value.get("total") or 0)
+        recent = _as_mappings(value.get("recent"))
+        omitted = int(value.get("omitted") or max(0, total - len(recent)))
+        ref = str(value.get("evidence_ref") or evidence_ref)
+    else:
+        items = _as_mappings(value)
+        total = len(items)
+        ref = evidence_ref
+        recent = [_receipt_identity(item, ref) for item in items[-RECENT_RECEIPTS_MAX:]]
+        omitted = total - len(recent)
+    result = {"total": total, "recent": recent, "omitted": omitted, "evidence_ref": ref}
+    return _fit_summary(result, budget_chars=budget_chars, list_key="recent")
 
 
-def _project_remaining_work(
-    value: Any, *, session_id: str, turn_id: str, budget_chars: int
-) -> dict[str, Any]:
-    del session_id, turn_id
+def _project_side_effects(value: Any, *, evidence_ref: str, budget_chars: int) -> dict[str, Any]:
+    if isinstance(value, Mapping) and "total" in value:
+        total = int(value.get("total") or 0)
+        unresolved_total = int(value.get("unresolved_total") or 0)
+        recent = _as_mappings(value.get("unresolved"))
+        omitted = int(value.get("omitted") or max(0, unresolved_total - len(recent)))
+        ref = str(value.get("evidence_ref") or evidence_ref)
+    else:
+        items = _as_mappings(value)
+        unresolved = [item for item in items if item.get("state") in {"pending", "unknown", None}]
+        total, unresolved_total = len(items), len(unresolved)
+        ref = evidence_ref
+        recent = [_receipt_identity(item, ref) for item in unresolved[-RECENT_RECEIPTS_MAX:]]
+        omitted = unresolved_total - len(recent)
+    result = {
+        "total": total, "unresolved_total": unresolved_total, "unresolved": recent,
+        "omitted": omitted, "evidence_ref": ref,
+    }
+    return _fit_summary(result, budget_chars=budget_chars, list_key="unresolved")
+
+
+def _project_remaining_work(value: Any, *, evidence_ref: str, budget_chars: int) -> Any:
     if not isinstance(value, Mapping):
-        return _bounded(value, budget_chars=budget_chars)
-    projected: dict[str, Any] = {}
-    for key in ("status", "current_stage", "recovery_source_turn_id"):
+        return _bounded(value, budget_chars=budget_chars, evidence_ref=evidence_ref)
+    result: dict[str, Any] = {}
+    for key in (
+        "status", "current_stage", "recovery_source_turn_id", "recovery_origin_turn_id", "goal",
+        "goal_truncated", "goal_chars", "goal_sha256", "goal_evidence_ref",
+    ):
         if value.get(key) not in (None, ""):
-            projected[key] = value[key]
-    goal = value.get("goal")
-    if isinstance(goal, str) and goal:
-        projected["goal"] = _bounded(goal, budget_chars=GOAL_BUDGET_CHARS)
-    elif goal not in (None, ""):
-        projected["goal"] = _bounded(goal, budget_chars=GOAL_BUDGET_CHARS)
-    # ``inherited_recovery`` re-embeds a prior turn's remaining_work and is a
-    # recursion amplifier; it stays in the canonical record but never in the
-    # prompt projection.
-    return _bounded(projected, budget_chars=budget_chars)
+            field_ref = str(value.get("goal_evidence_ref") or evidence_ref) if key == "goal" else evidence_ref
+            result[key] = _bounded(
+                value[key], budget_chars=min(GOAL_BUDGET_CHARS, budget_chars // 2),
+                evidence_ref=field_ref,
+            )
+    omitted = [key for key in value if key not in result]
+    if omitted:
+        result["omitted_fields"] = omitted
+        result["evidence_ref"] = evidence_ref
+    return _bounded(result, budget_chars=budget_chars, evidence_ref=evidence_ref)
 
 
-def _project_settled_exchanges(
-    value: Any, *, session_id: str, turn_id: str, budget_chars: int
-) -> dict[str, Any]:
-    del turn_id
+def _project_settled_exchanges(value: Any, *, evidence_ref: str, budget_chars: int) -> dict[str, Any]:
+    if isinstance(value, Mapping) and "total" in value:
+        result = dict(value)
+        result.setdefault("evidence_ref", evidence_ref)
+        return _fit_summary(result, budget_chars=budget_chars, list_key="recent")
     items = _as_mappings(value)
-    total = len(items)
-    if total == 0:
-        return {"total": 0}
-    recent: list[dict[str, Any]] = []
+    recent = []
     for item in items[-RECENT_EXCHANGES_MAX:]:
-        row: dict[str, Any] = {}
-        for key in ("sequence", "turn_id", "routing_revision"):
-            if item.get(key) is not None:
-                row[key] = item[key]
+        row = {key: item[key] for key in ("sequence", "turn_id", "routing_revision") if item.get(key) is not None}
         for key in ("user", "assistant"):
             if item.get(key):
-                row[key] = _bounded(item[key], budget_chars=1024)
+                row[key] = _bounded(item[key], budget_chars=1024, evidence_ref=evidence_ref)
         recent.append(row)
-    return _bounded(
-        {
-            "total": total,
-            "recent": recent,
-            "omitted": total - len(recent),
-            "evidence_ref": f"her_turns:settled:{session_id}",
-        },
-        budget_chars=budget_chars,
+    return _fit_summary(
+        {"total": len(items), "recent": recent, "omitted": len(items) - len(recent), "evidence_ref": evidence_ref},
+        budget_chars=budget_chars, list_key="recent",
     )
 
 
-def _project_provider_context(
-    value: Any, *, session_id: str, turn_id: str, budget_chars: int
-) -> Any:
-    del budget_chars
-    if not isinstance(value, Mapping) or not value:
-        return value
-    serialized = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
-    )
-    return {
-        "present": True,
-        "chars": len(serialized),
-        "sha256": _sha256_text(serialized),
-        "digest": value.get("digest") or value.get("provider_context_digest") or None,
-        "evidence_ref": (
-            f"her_provider_context_items:{session_id}:{turn_id}"
-        ),
-    }
-
-
-def bounded_goal(
-    goal: Any, *, budget_chars: int = GOAL_BUDGET_CHARS
-) -> dict[str, Any]:
-    """Bound a recovery goal string; keep a SHA-256 for full audit traceability.
-
-    The complete authoritative request stays in the canonical audit stream
-    (``her_session_events`` request_received, ``her_turns.user_message``); this
-    summary is the only form allowed in ``remaining_work.goal`` so a previously
-    expanded provider prompt can never be re-fed on recovery.
-    """
+def bounded_goal(goal: Any, *, budget_chars: int = GOAL_BUDGET_CHARS) -> dict[str, Any]:
+    """Bound a goal projection; its full user request remains in her_turns."""
     text = str(goal or "")
     if not text:
         return {}
-    if len(text) <= budget_chars:
+    if _json_size({"goal": text}) <= budget_chars:
         return {"goal": text}
-    return {
-        "goal": text[:budget_chars] + _TRUNCATION_MARKER,
-        "goal_truncated": True,
-        "goal_chars": len(text),
-        "goal_sha256": _sha256_text(text),
+    result: dict[str, Any] = {
+        "goal_truncated": True, "goal_chars": len(text), "goal_sha256": _sha256_text(text),
     }
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _json_size({**result, "goal": text[:mid] + _TRUNCATION_MARKER}) <= budget_chars:
+            lo = mid
+        else:
+            hi = mid - 1
+    result["goal"] = text[:lo] + _TRUNCATION_MARKER
+    return result
 
 
 def bounded_prompt_projection(
-    context: Mapping[str, Any],
-    *,
+    context: Mapping[str, Any], *,
     field_budget_chars: int = FIELD_BUDGET_CHARS,
     total_budget_chars: int = TOTAL_BUDGET_CHARS,
 ) -> dict[str, Any]:
-    """Project a canonical recovery/checkpoint context into bounded prompt form.
-
-    Only for model-facing prompt injection. The source canonical records are
-    never modified.
-    """
+    """Return an evidence-linked UTF-8 JSON view, preserving safety state."""
     if not isinstance(context, Mapping):
         return {}
-    session_id = str(context.get("session_id") or "")
-    turn_id = str(
-        context.get("interrupted_turn_id")
-        or context.get("settled_through_turn_id")
-        or ""
-    )
-
-    projected: dict[str, Any] = {}
+    field_budget_chars = min(FIELD_BUDGET_CHARS, int(field_budget_chars))
+    total_budget_chars = min(TOTAL_BUDGET_CHARS, int(total_budget_chars))
+    result: dict[str, Any] = {}
     for key, value in context.items():
+        if key == "projection_limits":
+            continue
+        ref = _source_ref(context, str(key))
+        # Include the enclosing JSON field name, quotes, colon and whitespace.
+        value_budget = field_budget_chars - (_json_size({key: None}) - _json_size(None))
+        if value_budget < 512:
+            raise ValueError("recovery field name exceeds projection budget")
         if key == "tool_receipts":
-            projected[key] = _project_tool_receipts(
-                value,
-                session_id=session_id,
-                turn_id=turn_id,
-                budget_chars=field_budget_chars,
-            )
+            result[key] = _project_tool_receipts(value, evidence_ref=ref, budget_chars=value_budget)
         elif key == "side_effects":
-            projected[key] = _project_side_effects(
-                value,
-                session_id=session_id,
-                turn_id=turn_id,
-                budget_chars=field_budget_chars,
-            )
+            result[key] = _project_side_effects(value, evidence_ref=ref, budget_chars=value_budget)
         elif key == "remaining_work":
-            projected[key] = _project_remaining_work(
-                value,
-                session_id=session_id,
-                turn_id=turn_id,
-                budget_chars=field_budget_chars,
-            )
+            result[key] = _project_remaining_work(value, evidence_ref=ref, budget_chars=value_budget)
         elif key == "recent_settled_exchanges":
-            projected[key] = _project_settled_exchanges(
-                value,
-                session_id=session_id,
-                turn_id=turn_id,
-                budget_chars=field_budget_chars,
-            )
-        elif key == "provider_context_checkpoint":
-            projected[key] = _project_provider_context(
-                value,
-                session_id=session_id,
-                turn_id=turn_id,
-                budget_chars=field_budget_chars,
-            )
-        elif key == "limitations":
-            projected[key] = _bounded(value, budget_chars=field_budget_chars)
-        elif isinstance(value, (str, int, float, bool)) or value is None:
-            projected[key] = value
-        elif isinstance(value, (Mapping, Sequence)) and not isinstance(
-            value, (bytes, bytearray)
-        ):
-            projected[key] = _bounded(value, budget_chars=field_budget_chars)
+            result[key] = _project_settled_exchanges(value, evidence_ref=ref, budget_chars=value_budget)
+        elif key == "provider_context_checkpoint" and isinstance(value, Mapping) and value:
+            encoded = _serialized(value)
+            result[key] = {
+                "present": True, "bytes": len(encoded.encode("utf-8")),
+                "sha256": _sha256_text(encoded),
+                "digest": _bounded(
+                    value.get("digest") or value.get("provider_context_digest") or None,
+                    budget_chars=512, evidence_ref=_source_ref(context, "provider_context"),
+                ),
+                "evidence_ref": _source_ref(context, "provider_context"),
+            }
         else:
-            projected[key] = _bounded(str(value or ""), budget_chars=field_budget_chars)
-
-    projected["projection_limits"] = {
-        "field_budget_chars": int(field_budget_chars),
-        "total_budget_chars": int(total_budget_chars),
-        "authority": "quoted_recovery_context",
-        "notice": _PROJECTION_NOTICE,
+            result[key] = _bounded(value, budget_chars=value_budget, evidence_ref=ref)
+        # Settled checkpoints are replaced on the next completed Turn. Keep a
+        # stable reference to the underlying per-Turn evidence as well.
+        if (
+            context.get("settled_through_turn_id")
+            and isinstance(result[key], dict)
+            and (key in {"tool_receipts", "side_effects", "recent_settled_exchanges"}
+                 or result[key].get("truncated"))
+        ):
+            session = str(context.get("session_id") or "")
+            turn = str(context.get("settled_through_turn_id") or "")
+            if key in {"tool_receipts", "side_effects", "strategy", "plan"}:
+                fallback_ref = f"her_active_turn_recovery:{key}:{session}:{turn}"
+            elif key == "recent_settled_exchanges":
+                fallback_ref = f"her_turns:settled:{session}"
+            elif key == "route_snapshot":
+                fallback_ref = f"her_turns:route_snapshot:{session}:{turn}"
+            else:
+                fallback_ref = ""
+            if fallback_ref:
+                result[key] = {**result[key], "canonical_evidence_ref": fallback_ref}
+                if _json_size(result[key]) > value_budget:
+                    result[key].pop("excerpt", None)
+                if key in {"tool_receipts", "side_effects", "recent_settled_exchanges"}:
+                    list_key = "unresolved" if key == "side_effects" else "recent"
+                    result[key] = _fit_summary(result[key], budget_chars=value_budget, list_key=list_key)
+    result["projection_limits"] = {
+        "field_budget_bytes": field_budget_chars, "total_budget_bytes": total_budget_chars,
+        "authority": "quoted_recovery_context", "notice": _PROJECTION_NOTICE,
     }
-
-    # Final hard ceiling: even with per-field budgets a pathological input must
-    # not be able to exceed the whole-projection budget.
-    if _json_size(projected) > total_budget_chars:
-        serialized = json.dumps(
-            projected,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        return {
-            "truncated": True,
-            "chars": len(serialized),
-            "sha256": _sha256_text(serialized),
-            "excerpt": serialized[:total_budget_chars],
+    essential = {
+        "session_id", "interrupted_turn_id", "settled_through_turn_id",
+        "safe_to_resume", "recovery_disposition", "tool_receipts", "side_effects",
+        "projection_limits",
+    }
+    removed: dict[str, Any] = {}
+    while _json_size(result) > total_budget_chars:
+        candidates = [key for key in result if key not in essential and key != "omitted_fields"]
+        if not candidates:
+            for key, list_key in (("tool_receipts", "recent"), ("side_effects", "unresolved")):
+                item = result.get(key)
+                if isinstance(item, dict) and item.get(list_key):
+                    item[list_key].pop(0)
+                    item["omitted"] = int(item.get("omitted") or 0) + 1
+                    break
+            else:
+                raise ValueError("recovery safety metadata exceeds projection budget")
+            continue
+        key = max(candidates, key=lambda name: _json_size(result[name]))
+        result.pop(key)
+        # The witness covers the source fields, not an already truncated view.
+        removed[key] = context.get(key)
+        result["omitted_fields"] = {
+            "count": len(removed), "sha256": _sha256_text(_serialized(removed)),
+            "evidence_ref": _source_ref(context, "*"),
         }
-    return projected
+    return result
 
 
-__all__ = [
-    "FIELD_BUDGET_CHARS",
-    "GOAL_BUDGET_CHARS",
-    "TOTAL_BUDGET_CHARS",
-    "bounded_goal",
-    "bounded_prompt_projection",
-]
+__all__ = ["FIELD_BUDGET_CHARS", "GOAL_BUDGET_CHARS", "TOTAL_BUDGET_CHARS", "bounded_goal", "bounded_prompt_projection"]
 # HASHI-Fingerprint: hfp_71071e3f156a4ae4a25249b6ec0e080e
