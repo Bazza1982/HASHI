@@ -4090,6 +4090,11 @@ class OpenRouterAdapter(BaseBackend):
         tool_text = "\n\n".join(t for t in texts if t.strip()) or (
             f"{tool_name} returned {len(images)} image(s)."
         )
+        if other_media:
+            tool_text += (
+                "\n[Other typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media)) + ".]"
+            )
         if not self.resolve_input_capability().supports("image", "data_url"):
             tool_message["content"] = (
                 tool_text
