@@ -696,6 +696,7 @@ def test_gateway_bridges_legacy_desktop_and_session_screenshots_in_order():
     session_content, session_error = _bridge_legacy_screenshot_output(
         "browser_session",
         f"[goto] https://example.com\n[screenshot] base64:{payload}\n[click] button",
+        arguments={"steps": [{"action": "screenshot"}]},
     )
     assert session_error is False
     assert session_content and [block["type"] for block in session_content] == [
@@ -720,13 +721,26 @@ def test_gateway_rejects_malformed_legacy_screenshot_payload():
     assert "not-valid" not in json.dumps(content)
 
 
+def test_gateway_does_not_extract_image_examples_from_browser_text():
+    source = "CSS src image: " + "data:image/png;base64,AAAA"
+    parts, errored = _bridge_legacy_screenshot_output(
+        "browser_session", "[get_text] " + source,
+        arguments={"steps": [{"action": "get_text"}]},
+    )
+    assert parts is None
+    assert errored is False
+
+
 def test_gateway_bounds_legacy_browser_session_screenshot_count():
     payload = _png_base64()
     output = "\n".join(
         f"[screenshot] base64:{payload}" for _index in range(7)
     )
 
-    content, is_error = _bridge_legacy_screenshot_output("browser_session", output)
+    content, is_error = _bridge_legacy_screenshot_output(
+        "browser_session", output,
+        arguments={"steps": [{"action": "screenshot"}]},
+    )
 
     assert is_error is False
     assert content and sum(block.get("type") == "image" for block in content) == 6
