@@ -1782,11 +1782,25 @@ class ToolRegistry:
         )
         if isinstance(result, str):
             return result
+        # The authenticated capability Worker can return native Tool content.
+        # Trust the structured result type, never infer media from the text.
+        if (
+            capability_kind in {"browser_control", "computer_control"}
+            and action in {"screenshot", "session"}
+            and isinstance(result, Mapping)
+            and isinstance(result.get("output"), str)
+            and isinstance(result.get("content"), list)
+        ):
+            return StructuredToolOutput(
+                output=result["output"],
+                content=[dict(part) for part in result["content"]
+                         if isinstance(part, Mapping)],
+            )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
     async def _dispatch_gateway_browser(
         self, tool_name: str, arguments: dict, *, tool_call_id: str
-    ) -> str:
+    ) -> str | StructuredToolOutput:
         """Relay a CLI tool call to its owning Function Worker, then Core RPC."""
         from urllib.parse import urlsplit
         from urllib.error import HTTPError
@@ -1827,7 +1841,7 @@ class ToolRegistry:
             return "Error: " + operation_failure_payload(failure,
                 error_code="browser_gateway_unavailable", effect_state="unconfirmed")["message"]
 
-        def request_proxy() -> str:
+        def request_proxy() -> str | StructuredToolOutput:
             request = urllib_request.Request(
                 url,
                 data=payload,
@@ -1846,6 +1860,13 @@ class ToolRegistry:
                 output = str(result.get("output") or "")
                 if result.get("is_error") and not output.startswith("Error:"):
                     return "Error: " + output
+                native_parts = result.get("content")
+                if isinstance(native_parts, list) and native_parts:
+                    return StructuredToolOutput(
+                        output=output,
+                        content=[dict(part) for part in native_parts
+                                 if isinstance(part, dict)],
+                    )
                 return output
             except HTTPError as exc:
                 try:
