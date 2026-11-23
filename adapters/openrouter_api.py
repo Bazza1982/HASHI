@@ -47,6 +47,7 @@ from orchestrator.audio_assets import (
 )
 from orchestrator.pcm import load_pcm_document
 from orchestrator.multimodal_contract import (
+    HASHI_API_MAX_IMAGE_BYTES,
     InputCapability,
     MultimodalContractError,
     attachment_manifest,
