@@ -65,3 +65,8 @@ def test_prompt_literal_symbols_and_trigger_boundary():
     assert resolve_prompt(p.workflows[0][0].action, agent_trigger="@rika@hashi4") == (
         "Send $100 to @someone; tag #turn_error; @agent_trigger_extra"
     )
+
+
+def test_else_word_inside_prompt_is_literal_text():
+    p = compile_hal('if #system_idle then @lily $prompt "anything else is okay".')
+    assert p.workflows[0][0].action.value == "anything else is okay"
