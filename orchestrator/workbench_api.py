@@ -478,8 +478,12 @@ class WorkbenchApiServer:
             self._event_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._event_loop = None
-        self._frontend_event_subscribers: set[tuple[asyncio.Queue, str | None, str | None]] = set()
+        self._frontend_event_subscribers: set[tuple[asyncio.Queue, str | None, str | None, str | None]] = set()
         self._frontend_event_seq: int = 0
+        # Owner -> session ownership for governed-profile stream scoping.
+        # Bounded cache; events are low-rate and session ownership is stable.
+        self._session_owner_cache: dict[str, str | None] = {}
+        self._session_owner_cache_limit = 512
         self._bind_session_store_telegram_wakeup()
         self._bind_session_store_frontend_events()
         self.ingress_confirmation = IngressConfirmationService(self.session_store)
@@ -2470,6 +2474,22 @@ class WorkbenchApiServer:
         register(_on_committed_session_change)
         self._frontend_session_store_listener = _on_committed_session_change
 
+    def _session_owner_id(self, session_id: str) -> str | None:
+        """Owner of a session, cached; None when unknown (not found)."""
+        cached = self._session_owner_cache.get(session_id)
+        if cached is not None:
+            return cached
+        value: str | None = None
+        try:
+            row = self.session_store.get_session(session_id)
+            value = str(row.get("owner_id") or "") or None
+        except Exception:
+            value = None
+        if len(self._session_owner_cache) >= self._session_owner_cache_limit:
+            self._session_owner_cache.clear()
+        self._session_owner_cache[session_id] = value
+        return value
+
     def publish_frontend_session_event(
         self,
         agent_id: str,
@@ -2477,7 +2497,12 @@ class WorkbenchApiServer:
         kind: str,
         run_id: str | None = None,
     ) -> None:
-        """Broadcast a lightweight post-commit change signal to active SSE clients."""
+        """Broadcast a lightweight post-commit change signal to active SSE clients.
+
+        In governed (Enterprise) profiles each subscriber is bound to the
+        authenticated owner and only receives events for sessions that owner
+        can see, so owners never receive each other's session metadata.
+        """
         if not self._frontend_event_subscribers:
             return
         self._frontend_event_seq += 1
@@ -2491,13 +2516,19 @@ class WorkbenchApiServer:
             "run_id": str(run_id) if run_id else None,
             "ts": round(time.time(), 3),
         }
-        for queue, filter_session, filter_agent in tuple(
+        resolved_owner: str | None | bool = False
+        for queue, filter_session, filter_agent, owner_scope in tuple(
             self._frontend_event_subscribers
         ):
             if filter_session and norm_session and filter_session != norm_session:
                 continue
             if filter_agent and norm_agent and filter_agent != norm_agent:
                 continue
+            if owner_scope and norm_session:
+                if resolved_owner is False:
+                    resolved_owner = self._session_owner_id(norm_session)
+                if not resolved_owner or resolved_owner != owner_scope:
+                    continue
             if queue.full():
                 try:
                     queue.get_nowait()
@@ -2509,7 +2540,7 @@ class WorkbenchApiServer:
                 pass
 
     def close_frontend_event_streams(self) -> None:
-        for queue, _fs, _fa in tuple(self._frontend_event_subscribers):
+        for queue, _fs, _fa, _owner in tuple(self._frontend_event_subscribers):
             while queue.full():
                 try:
                     queue.get_nowait()
@@ -2547,7 +2578,11 @@ class WorkbenchApiServer:
         )
         await response.prepare(request)
         queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-        sub = (queue, filter_session, filter_agent)
+        # In governed profiles the authenticated owner scopes this subscription:
+        # the stream only receives session events owned by that user. The
+        # personal profile has a single owner, so scoping is skipped (None).
+        owner_scope = owner if self._is_governed_profile() else None
+        sub = (queue, filter_session, filter_agent, owner_scope)
         self._frontend_event_subscribers.add(sub)
         try:
             ready_frame = (

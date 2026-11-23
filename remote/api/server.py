@@ -63,7 +63,12 @@ _HASHI_LIVENESS_STATE: dict[str, Any] = {
 }
 _HASHI_LIVENESS_LISTENER: Any = None
 HASHI_LIVENESS_CACHE_TTL_SECONDS = 5.0
-HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS = 1.5
+# Aligned with the background probe cadence in remote/main.py
+# (HASHI_LIVENESS_PROBE_SECONDS). Confirmed-inactive evidence stays
+# authoritative for one full probe window so repeated requests never re-walk
+# TCP hosts; once the window expires, one bounded fresh probe re-judges on
+# real evidence (startup/recovery). Unknown is never forced into inactive.
+HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS = 5.0
 
 from orchestrator.agent_move.package import (
     AGENT_MOVE_CAPABILITY,
@@ -2515,6 +2520,11 @@ def _get_local_workbench_http_client():
                 ),
                 follow_redirects=False,
                 trust_env=False,
+                # A stale keep-alive socket (e.g. HASHI restarted and the
+                # pooled connection died) is retried once on a fresh
+                # connection for idempotent methods instead of leaking the
+                # dead socket into the request outcome.
+                transport=httpx.HTTPTransport(retries=1),
             )
         return _LOCAL_HTTP_CLIENT
 
@@ -2536,6 +2546,7 @@ def _get_local_workbench_async_client():
                 ),
                 follow_redirects=False,
                 trust_env=False,
+                transport=httpx.AsyncHTTPTransport(retries=1),
             )
         return _LOCAL_ASYNC_HTTP_CLIENT
 
@@ -2764,15 +2775,26 @@ def _workbench_gateway_failure_payload(error: WorkbenchGatewayError, *, method: 
 
 
 def _desktop_workbench_host(instance_id: str, port: int) -> str:
-    """Authenticate a bounded identity projection before non-replayable input."""
+    """Authenticate a bounded identity projection before non-replayable input.
+
+    The verified host is tried first, then a bounded set of fallbacks under a
+    shared deadline — never a per-request walk across every interface alias.
+    """
     token = _workbench_admin_token()
     if not token:
         raise WorkbenchGatewayError("local_workbench_identity_unverified", accepted=False, retryable=True, status=503)
-    for host in local_http_hosts():
+    candidates = list(_ordered_local_workbench_hosts(max_fallbacks=2))
+    visited = set(candidates)
+    candidates.extend(host for host in local_http_hosts() if host not in visited)
+    deadline = time.monotonic() + 3.0
+    for host in candidates[: len(candidates) if len(candidates) <= 9 else 9]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.05:
+            break
         identity_url = local_http_url(port, "/api/v1/instance/identity", host=host)
         try:
             request = urllib_request.Request(identity_url, method="GET", headers={"X-Workbench-Token": token})
-            with urllib_request.urlopen(request, timeout=1.0) as response:
+            with urllib_request.urlopen(request, timeout=min(1.0, remaining)) as response:
                 if response.status != 200:
                     continue
                 raw = response.read(1025)
@@ -2802,6 +2824,10 @@ def _clear_cached_local_workbench_host(host: str | None = None) -> None:
             _CACHED_LOCAL_WORKBENCH_HOST = None
 
 
+_INACTIVE_EVIDENCE_REFRESH_LOCK = threading.Lock()
+_INACTIVE_EVIDENCE_REFRESHED_AT_MONO = 0.0
+
+
 def _should_fast_fail_inactive_hashi(*, method: str, route_path: str) -> bool:
     if urllib_request.urlopen is not _ORIGINAL_URLOPEN:
         return False
@@ -2811,6 +2837,35 @@ def _should_fast_fail_inactive_hashi(*, method: str, route_path: str) -> bool:
     with _HASHI_LIVENESS_LOCK:
         state = str(_HASHI_LIVENESS_STATE.get("hashi_state") or "unknown")
         checked_at = float(_HASHI_LIVENESS_STATE.get("checked_at") or 0.0)
+    if state != "inactive":
+        # Unknown, starting and active are never forced into inactive.
+        return False
+    if now - checked_at <= HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS:
+        return True
+    # Cached inactive evidence is older than one probe window: refresh once
+    # with real bounded evidence (rate-limited to one probe per 0.5s) so a
+    # HASHI that just started or recovered is re-judged on facts, without a
+    # request stampede re-probing the local backend or re-walking TCP hosts.
+    global _INACTIVE_EVIDENCE_REFRESHED_AT_MONO
+    if not _INACTIVE_EVIDENCE_REFRESH_LOCK.acquire(blocking=False):
+        # A refresh is already in flight; stay on the confirmed inactive path
+        # this once — the refreshed snapshot governs the next request.
+        with _HASHI_LIVENESS_LOCK:
+            state = str(_HASHI_LIVENESS_STATE.get("hashi_state") or "unknown")
+        return state == "inactive"
+    try:
+        if time.monotonic() - _INACTIVE_EVIDENCE_REFRESHED_AT_MONO >= 0.5:
+            refresh_hashi_liveness(timeout=0.8)
+            _INACTIVE_EVIDENCE_REFRESHED_AT_MONO = time.monotonic()
+    finally:
+        _INACTIVE_EVIDENCE_REFRESH_LOCK.release()
+    with _HASHI_LIVENESS_LOCK:
+        state = str(_HASHI_LIVENESS_STATE.get("hashi_state") or "unknown")
+        checked_at = float(_HASHI_LIVENESS_STATE.get("checked_at") or 0.0)
+    if state == "inactive" and (now - checked_at) > HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS:
+        # Refresh was rate-limited away (stampede) yet the confirmed state is
+        # still inactive: stay on the fast-fail path; the next probe governs.
+        return True
     return state == "inactive" and (now - checked_at) <= HASHI_INACTIVE_FAST_FAIL_TTL_SECONDS
 
 
@@ -2856,13 +2911,38 @@ async def _stream_workbench_gateway_sse(
     client = _get_local_workbench_async_client()
     hosts = _ordered_local_workbench_hosts(max_fallbacks=2)
     last_exc: Exception | None = None
-    for attempt, host in enumerate(hosts, start=1):
+    hosts_attempted: set[str] = set()
+    extended_count = 0
+
+    def _stream_host_candidates():
+        for host in hosts:
+            yield host, False
+        # Bounded extended discovery: when the fast candidates all fail, the
+        # API may be bound to a later interface address. Probe at most six
+        # extra aliases once; connect-only budget, streaming stays unbounded.
+        for host in local_http_hosts():
+            if host not in hosts_attempted:
+                yield host, True
+
+    attempt = 0
+    for host, is_extended in _stream_host_candidates():
+        if is_extended and extended_count >= 6:
+            break
+        attempt += 1
+        if is_extended:
+            extended_count += 1
+        hosts_attempted.add(host)
         url = local_http_url(_workbench_port, upstream_path, host=host)
         stream_ctx = client.stream(
             "GET",
             url,
             headers=headers,
-            timeout=httpx.Timeout(connect=1.5 if attempt == 1 else 0.5, read=None, write=10.0, pool=5.0),
+            timeout=httpx.Timeout(
+                connect=(1.5 if attempt == 1 else 0.5),
+                read=None,
+                write=10.0,
+                pool=5.0,
+            ),
         )
         try:
             upstream_resp = await stream_ctx.__aenter__()
@@ -2998,6 +3078,10 @@ def _forward_workbench_gateway_request(
         else _ordered_local_workbench_hosts(max_fallbacks=2)
     )
     eff_timeout = _workbench_gateway_timeout() if timeout is None else timeout
+    # One shared deadline bounds the whole operation: per-address timeouts must
+    # not stack into a multiplied wait, while a single healthy address may
+    # still consume the full business timeout (long polls / large reads).
+    deadline = time.monotonic() + eff_timeout
     total_started = time.monotonic()
     _workbench_gateway_log(
         "forward_started",
@@ -3009,7 +3093,41 @@ def _forward_workbench_gateway_request(
         timeout_ms=int(1000 * eff_timeout),
     )
     last_error: WorkbenchGatewayError | None = None
-    for attempt, host in enumerate(hosts, start=1):
+    hosts_attempted: set[str] = set()
+    extended_count = 0
+    # Bounded extended discovery: only for idempotent reads after every fast
+    # candidate failed, and capped so ordinary requests never re-walk all
+    # interface aliases. This finds an API bound to the 4th..Nth address
+    # without making each request traverse all of them.
+    extended_cap = 0 if desktop_request or normalized_method not in {"GET", "HEAD"} else 6
+
+    def _host_candidates():
+        for host in hosts:
+            yield host, False
+        if extended_cap:
+            for host in local_http_hosts():
+                if host not in hosts_attempted:
+                    yield host, True
+
+    attempt = 0
+    for host, is_extended in _host_candidates():
+        if is_extended and extended_count >= extended_cap:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.05:
+            last_error = _workbench_upstream_failure(
+                TimeoutError("workbench gateway deadline exceeded"),
+                method=normalized_method,
+                phase="request",
+                desktop=desktop_request,
+            )
+            break
+        attempt += 1
+        if is_extended:
+            extended_count += 1
+        hosts_attempted.add(host)
+        attempt_timeout = min(remaining, 0.5) if is_extended else remaining
+        connect_timeout = min(1.0 if attempt == 1 else 0.5, max(0.1, remaining))
         attempt_started = time.monotonic()
         try:
             url = local_http_url(_workbench_port, upstream_path, host=host)
@@ -3030,8 +3148,8 @@ def _forward_workbench_gateway_request(
         try:
             with _open_local_workbench_request(
                 upstream,
-                timeout=eff_timeout,
-                connect_timeout=1.0 if attempt == 1 else 0.5,
+                timeout=attempt_timeout,
+                connect_timeout=connect_timeout,
             ) as response:
                 phase = "read"
                 _cache_local_workbench_host(host)

@@ -764,3 +764,165 @@ def test_desktop_error_envelope_distinguishes_preflight_from_unknown_outcome(
         assert response.json()["code"] == code
         assert response.json()["accepted"] is accepted
         assert response.json()["retryable"] is retryable
+
+def test_gateway_extended_discovery_finds_workbench_on_late_interface_alias(
+    tmp_path, monkeypatch
+):
+    """The fast path only visits the cached host plus two fallbacks; when the
+    API is actually bound to a later interface (e.g. the 6th alias), a bounded
+    extended pass finds it without making every request walk all aliases."""
+    _client(tmp_path)
+    remote_server.reset_local_workbench_transport_state()
+    import httpx
+
+    # The gateway stops walking aliases when the local HASHI process is dead;
+    # the test simulates a live process so failover logic is exercised.
+    monkeypatch.setattr(remote_server, "_read_hashi_pid_state", lambda: {"pid_alive": True})
+    hosts = [f"127.0.0.{i}" for i in range(1, 8)]
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: hosts)
+    visited: list[str] = []
+
+    def handler(request):
+        host = request.url.host
+        visited.append(host)
+        if host == "127.0.0.6":
+            return httpx.Response(200, json={"ok": True}, headers={"content-type": "application/json"})
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(
+        remote_server,
+        "_LOCAL_HTTP_CLIENT",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    status, body, _headers = remote_server._forward_workbench_gateway_request(
+        method="GET",
+        api_path="/api/v1/agents",
+        query="",
+        body_bytes=b"",
+        request_headers={},
+        timeout=6.0,
+    )
+    assert status == 200
+    assert json.loads(body.decode("utf-8")).get("ok") is True
+    # Cached host first, then two fallbacks, then the bounded extended pass.
+    assert visited == ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST == "127.0.0.6"
+
+
+def test_gateway_shared_deadline_bounds_silent_hosts(tmp_path, monkeypatch):
+    """A port that accepts the connection but never answers must not multiply
+    the wait across candidates: the whole operation shares one deadline."""
+    _client(tmp_path)
+    remote_server.reset_local_workbench_transport_state()
+    import httpx
+
+    monkeypatch.setattr(remote_server, "_read_hashi_pid_state", lambda: {"pid_alive": True})
+    monkeypatch.setattr(
+        remote_server, "local_http_hosts", lambda: ["127.0.0.1", "127.0.0.2", "127.0.0.3"]
+    )
+    attempts = 0
+
+    def handler(request):
+        nonlocal attempts
+        attempts += 1
+        # Simulate "port connected, no response": the per-attempt budget is
+        # the remaining slice of the shared deadline, then the read times out.
+        timeout_ext = (request.extensions or {}).get("timeout") or {}
+        read_budget = float(timeout_ext.get("read") or 60.0)
+        time.sleep(min(read_budget + 0.02, 5.0))
+        raise httpx.ReadTimeout("no response", request=request)
+
+    monkeypatch.setattr(
+        remote_server,
+        "_LOCAL_HTTP_CLIENT",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(remote_server.WorkbenchGatewayError) as err:
+        remote_server._forward_workbench_gateway_request(
+            method="GET",
+            api_path="/api/v1/agents",
+            query="",
+            body_bytes=b"",
+            request_headers={},
+            timeout=1.5,
+        )
+    elapsed = time.monotonic() - started
+    assert err.value.code == "local_workbench_unavailable"
+    assert attempts >= 1
+    # The shared deadline holds: nowhere near 3 x 1.5s stacking.
+    assert elapsed < 2.4
+
+
+def test_gateway_fast_fail_uses_fresh_evidence_after_probe_window(tmp_path, monkeypatch):
+    """Confirmed-inactive HASHI fast-fails without TCP attempts; once the
+    evidence ages past the probe window, one real probe re-judges startup."""
+    _client(tmp_path)
+    remote_server.reset_local_workbench_transport_state()
+    import httpx
+
+    monkeypatch.setattr(remote_server, "_read_hashi_pid_state", lambda: {"pid_alive": True})
+    pool_calls = 0
+
+    def handler(request):
+        nonlocal pool_calls
+        pool_calls += 1
+        return httpx.Response(200, json={"ok": True}, headers={"content-type": "application/json"})
+
+    monkeypatch.setattr(
+        remote_server,
+        "_LOCAL_HTTP_CLIENT",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    # Fresh inactive evidence: no TCP attempt at all.
+    with remote_server._HASHI_LIVENESS_LOCK:
+        remote_server._HASHI_LIVENESS_STATE.update(
+            {"hashi_state": "inactive", "checked_at": time.monotonic()}
+        )
+    with pytest.raises(remote_server.WorkbenchGatewayError) as err:
+        remote_server._forward_workbench_gateway_request(
+            method="GET", api_path="/api/v1/agents", query="", body_bytes=b"", request_headers={}
+        )
+    assert err.value.code == "local_workbench_unavailable"
+    assert pool_calls == 0
+
+    # Stale inactive evidence triggers one bounded fresh probe; the probe
+    # observes HASHI started, so the request proceeds on real evidence.
+    def fake_refresh(timeout=0.8):
+        with remote_server._HASHI_LIVENESS_LOCK:
+            remote_server._HASHI_LIVENESS_STATE.update(
+                {"hashi_state": "active", "checked_at": time.monotonic()}
+            )
+
+    monkeypatch.setattr(remote_server, "refresh_hashi_liveness", fake_refresh)
+    with remote_server._HASHI_LIVENESS_LOCK:
+        remote_server._HASHI_LIVENESS_STATE.update(
+            {"hashi_state": "inactive", "checked_at": time.monotonic() - 60.0}
+        )
+    status, _body, _headers = remote_server._forward_workbench_gateway_request(
+        method="GET", api_path="/api/v1/agents", query="", body_bytes=b"", request_headers={}
+    )
+    assert status == 200
+    assert pool_calls == 1
+
+    # If the fresh probe still says inactive, fast-fail resumes (no TCP).
+    with remote_server._HASHI_LIVENESS_LOCK:
+        remote_server._HASHI_LIVENESS_STATE.update(
+            {"hashi_state": "inactive", "checked_at": time.monotonic() - 60.0}
+        )
+
+    def fake_refresh_still_inactive(timeout=0.8):
+        with remote_server._HASHI_LIVENESS_LOCK:
+            remote_server._HASHI_LIVENESS_STATE.update(
+                {"hashi_state": "inactive", "checked_at": time.monotonic()}
+            )
+
+    monkeypatch.setattr(remote_server, "refresh_hashi_liveness", fake_refresh_still_inactive)
+    with pytest.raises(remote_server.WorkbenchGatewayError):
+        remote_server._forward_workbench_gateway_request(
+            method="GET", api_path="/api/v1/agents", query="", body_bytes=b"", request_headers={}
+        )
+    assert pool_calls == 1

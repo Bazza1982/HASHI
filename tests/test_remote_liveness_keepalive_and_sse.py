@@ -758,3 +758,105 @@ async def test_remote_proxy_streams_sse_events_live(tmp_path: Path) -> None:
             await asyncio.wait_for(uv_task, timeout=5.0)
     finally:
         await wb_server.shutdown()
+
+def test_frontend_stream_kinds_cover_permission_progress_message_update_question_consumed(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "sessions.sqlite3", instance_id="HASHI_TEST")
+    seen: list[tuple[str, str, str, str | None]] = []
+    store._session_change_listeners.append(
+        lambda agent_id, session_id, kind, run_id: seen.append(
+            (agent_id, session_id, kind, run_id)
+        )
+    )
+    session = store.ensure_default_session(owner_id="user:1", agent_id="lily")
+    run = store.accept_run(
+        session_id=session["session_id"],
+        owner_id="user:1",
+        agent_id="lily",
+        request_id="req-kinds-1",
+        source="workbench",
+        idempotency_key="idem-kinds-1",
+        text="hello kinds",
+    )
+    run_id = str(run.run_id)
+    seen.clear()
+    with store._connection() as connection:
+        for kind in (
+            "run.progress",
+            "frontend.message.updated",
+            "run.question.consumed",
+        ):
+            store._append_event(
+                connection,
+                session_id=str(session["session_id"]),
+                run_id=run_id,
+                kind=kind,
+                status="running",
+                phase="waiting_permission",
+                summary="permission wait",
+            )
+    notified = {kind for _, _, kind, _ in seen}
+    assert {
+        "run.progress",
+        "frontend.message.updated",
+        "run.question.consumed",
+    } <= notified
+
+    # Internal telemetry outside the UI contract stays off the stream.
+    seen.clear()
+    with store._connection() as connection:
+        store._append_event(
+            connection,
+            session_id=str(session["session_id"]),
+            run_id=run_id,
+            kind="internal.telemetry.noise",
+            status="running",
+            phase="sampling",
+            summary="not for the frontend",
+        )
+    assert seen == []
+
+
+async def test_frontend_stream_scopes_events_to_authenticated_owner_in_governed_profile(
+    tmp_path: Path,
+) -> None:
+    port = _reserve_unused_port()
+    server = _build_test_workbench_server(
+        tmp_path, port=port, instance_id="HASHI_GOV", admin_token="test-token"
+    )
+    store = server.session_store
+    session_a = store.ensure_default_session(owner_id="enterprise:user-a", agent_id="lily")
+    session_b = store.ensure_default_session(owner_id="enterprise:user-b", agent_id="lily")
+    sid_a = str(session_a["session_id"])
+    sid_b = str(session_b["session_id"])
+
+    queue_a: asyncio.Queue = asyncio.Queue(maxsize=8)
+    queue_b: asyncio.Queue = asyncio.Queue(maxsize=8)
+    queue_all: asyncio.Queue = asyncio.Queue(maxsize=8)
+    # Governed-profile subscribers carry the authenticated owner scope.
+    server._frontend_event_subscribers.add((queue_a, None, None, "enterprise:user-a"))
+    server._frontend_event_subscribers.add((queue_b, None, None, "enterprise:user-b"))
+    # Personal-profile subscribers (unscoped) keep receiving everything.
+    server._frontend_event_subscribers.add((queue_all, None, None, None))
+
+    server.publish_frontend_session_event("lily", sid_a, "run.accepted", None)
+    server.publish_frontend_session_event("lily", sid_b, "run.accepted", None)
+    server.publish_frontend_session_event("lily", sid_a, "run.started", None)
+
+    await asyncio.sleep(0)
+    a_items = [queue_a.get_nowait() for _ in range(queue_a.qsize())]
+    b_items = [queue_b.get_nowait() for _ in range(queue_b.qsize())]
+    all_items = [queue_all.get_nowait() for _ in range(queue_all.qsize())]
+
+    assert {item["session_id"] for item in a_items} == {sid_a}
+    assert {item["session_id"] for item in b_items} == {sid_b}
+    assert {item["session_id"] for item in all_items} == {sid_a, sid_b}
+
+    # Unknown/deleted sessions are never delivered to owner-scoped subscribers.
+    server.publish_frontend_session_event("lily", "ses_missing_owner", "run.started", None)
+    await asyncio.sleep(0)
+    assert queue_a.qsize() == 0
+    assert queue_b.qsize() == 0
+    assert queue_all.qsize() == 1
+# HASHI-Fingerprint: hfp_6d6e6e1f893e4a5f8d5fad8ff3083f73
