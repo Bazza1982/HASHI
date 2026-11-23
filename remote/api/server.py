@@ -2756,9 +2756,12 @@ def _workbench_gateway_failure_payload(error: WorkbenchGatewayError, *, method: 
     _workbench_gateway_log("operation_failed", **failure.diagnostic())
     with _HASHI_LIVENESS_LOCK:
         liveness = dict(_HASHI_LIVENESS_STATE)
-    hashi_state = str(liveness.get("hashi_state") or "inactive")
-    if hashi_state == "unknown":
-        hashi_state = "inactive"
+    # Unknown is not evidence: only a confirmed probe may report inactive.
+    # Never convert unknown into inactive, otherwise the Workbench could treat
+    # an unverified failure as proof that the Core may be pulled up.
+    hashi_state = str(liveness.get("hashi_state") or "unknown").strip().lower()
+    if hashi_state not in {"active", "starting", "inactive", "unknown"}:
+        hashi_state = "unknown"
     return {
         **operation_failure_payload(failure, error_code=error.code, effect_state=effect),
         "code": error.code,
@@ -3578,6 +3581,20 @@ def _fetch_workbench_json(
 def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
     health = _fetch_workbench_json("/api/health", timeout=timeout)
     if isinstance(health, dict) and health.get("ok") is True:
+        actual = str(health.get("instance_id") or "").strip().upper()
+        expected = _controlled_instance_id()
+        if expected and actual and actual != expected:
+            # A different HASHI instance is occupying the expected loopback
+            # port. That is not evidence that the controlled instance is
+            # active — and not confirmation that it is inactive either, so
+            # keep the PID-derived state instead of reporting active.
+            _workbench_gateway_log(
+                "local_health_identity_mismatch",
+                expected_instance=expected,
+                actual_instance=actual,
+            )
+            record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
+            return None
         record_hashi_liveness(hashi_state="active", health=health)
     elif health is None:
         record_hashi_liveness(hashi_state=_derive_hashi_state(None), health=None)
