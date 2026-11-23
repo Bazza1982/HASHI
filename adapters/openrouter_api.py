@@ -4036,6 +4036,7 @@ class OpenRouterAdapter(BaseBackend):
 
         texts: list[str] = []
         images: list[str] = []
+        other_media: set[str] = set()
         for raw_part in content:
             if not isinstance(raw_part, Mapping):
                 continue
@@ -4052,6 +4053,25 @@ class OpenRouterAdapter(BaseBackend):
                 url = data.get("url") if isinstance(data, Mapping) else data
                 if isinstance(url, str) and url:
                     images.append(url)
+            elif kind in {"audio", "input_audio", "video", "input_video",
+                          "file", "input_file", "document"}:
+                other_media.add(kind)
+
+        if other_media:
+            # Do not send unsupported media bytes as ordinary Tool text.
+            # Native user audio, video and document input keep their existing
+            # separate capability-gated routing in the multimodal contract.
+            notice = (
+                "[Typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media))
+                + "; use an authorized media inspection route if available.]"
+            )
+            safe_text = "\n\n".join(t for t in texts if t.strip())
+            tool_message["content"] = "\n\n".join(
+                part for part in (safe_text or str(output or "")
+                                  if not isinstance(output, (bytes, bytearray))
+                                  else "", notice) if part
+            )
 
         if not images:
             return [tool_message]
