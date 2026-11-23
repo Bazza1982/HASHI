@@ -181,6 +181,21 @@ checkpoint is actually written. A missing, corrupt, relabelled or mismatched
 producer claim makes the recovery evidence unavailable rather than inviting a
 replay.
 
+A pending Tool checkpoint also retains completed reads' deferred image parts
+and advisories in their original order. Ordinary recovery appends those older
+follow-ups before follow-ups from newly completed Tools, after all results for
+the batch. A same-model /steer successor closes unfinished Tool calls without
+executing them, then presents the retained follow-ups before the new user
+instruction even when the Provider makes no further Tool calls. Malformed
+deferred follow-ups make the private recovery unavailable; checkpoints from
+before the field existed remain compatible.
+
+When parallel reads are interrupted after a sibling has completed, the
+existing pending boundary is checkpointed again with the completed Tool result
+and its follow-ups before the interruption is handed back. A fresh Adapter can
+then resume only the still-pending calls. A checkpoint failure is reported
+instead of treating the unpersisted progress as recoverable.
+
 The meaningful-output stream inactivity limit is 300 seconds regardless of
 whether fallback models are configured. It counts provider read wait, excluding
 local tools. Transport diagnostics retain bounded exception causes, actual

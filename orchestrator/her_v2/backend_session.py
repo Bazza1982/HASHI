@@ -122,6 +122,9 @@ class HerBackendSessionCoordinator:
             boundary=str(checkpoint.get("boundary") or ""),
             messages=tuple(checkpoint.get("messages") or ()),
             reasoning=tuple(checkpoint.get("reasoning") or ()),
+            deferred_followups=tuple(
+                checkpoint.get("deferred_followups") or ()
+            ),
             provider_request_id=str(
                 checkpoint.get("provider_request_id") or ""
             ),
@@ -860,3 +863,4 @@ class HerBackendSessionCoordinator:
             )
         except HerSessionStoreError as exc:
             raise HerFixedProtocolError(exc.code, str(exc)) from exc
+# HASHI-Fingerprint: hfp_cb59dacd220f40498b2257bde4194d1c

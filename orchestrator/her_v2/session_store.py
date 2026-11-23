@@ -56,6 +56,7 @@ def _provider_context_digest(
     *,
     message_digests: Sequence[str],
     reasoning_digests: Sequence[str],
+    deferred_followup_digests: Sequence[str] = (),
 ) -> str:
     """Digest an arbitrarily long continuation without one aggregate JSON blob."""
 
@@ -65,7 +66,12 @@ def _provider_context_digest(
     for kind, values in (
         (b"message\0", message_digests),
         (b"reasoning\0", reasoning_digests),
+        (b"deferred_followup\0", deferred_followup_digests),
     ):
+        # The deferred-follow-up kind only contributes when present, so older
+        # checkpoints (which never recorded it) keep their original digest.
+        if not values and kind == b"deferred_followup\0":
+            continue
         digest.update(kind)
         for value in values:
             digest.update(str(value).encode("ascii"))
@@ -318,7 +324,7 @@ class HerSessionStore:
                     payload_json TEXT NOT NULL,
                     payload_digest TEXT NOT NULL,
                     PRIMARY KEY(session_id, turn_id, item_kind, ordinal),
-                    CHECK(item_kind IN ('message', 'reasoning')),
+                    CHECK(item_kind IN ('message', 'reasoning', 'deferred_followup')),
                     FOREIGN KEY(session_id, turn_id)
                         REFERENCES her_turns(session_id, turn_id) ON DELETE CASCADE
                 );
@@ -444,6 +450,57 @@ class HerSessionStore:
                         connection.execute(
                             f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
                         )
+
+            # Lift databases created before deferred tool follow-ups were
+            # durably segmented.  her_provider_context_items has no inbound
+            # foreign keys, so a rename/copy/drop rebuild is safe and atomic.
+            item_table_row = connection.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'her_provider_context_items'"
+            ).fetchone()
+            item_table_sql = str(item_table_row["sql"] or "") if item_table_row else ""
+            if "deferred_followup" not in item_table_sql:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        "ALTER TABLE her_provider_context_items "
+                        "RENAME TO _her_provider_context_items_legacy"
+                    )
+                    connection.execute(
+                        """
+                        CREATE TABLE her_provider_context_items (
+                            session_id TEXT NOT NULL,
+                            turn_id TEXT NOT NULL,
+                            item_kind TEXT NOT NULL,
+                            ordinal INTEGER NOT NULL,
+                            payload_json TEXT NOT NULL,
+                            payload_digest TEXT NOT NULL,
+                            PRIMARY KEY(session_id, turn_id, item_kind, ordinal),
+                            CHECK(item_kind IN ('message', 'reasoning', 'deferred_followup')),
+                            FOREIGN KEY(session_id, turn_id)
+                                REFERENCES her_turns(session_id, turn_id)
+                                ON DELETE CASCADE
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO her_provider_context_items(
+                            session_id, turn_id, item_kind, ordinal,
+                            payload_json, payload_digest
+                        )
+                        SELECT session_id, turn_id, item_kind, ordinal,
+                               payload_json, payload_digest
+                        FROM _her_provider_context_items_legacy
+                        """
+                    )
+                    connection.execute(
+                        "DROP TABLE _her_provider_context_items_legacy"
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
 
             # One-time compatibility lift for databases created while costs
             # still lived beside immutable request facts.  All subsequent
@@ -1103,6 +1160,9 @@ class HerSessionStore:
             "boundary": str(value.get("boundary") or ""),
             "message_count": int(value.get("message_count") or 0),
             "reasoning_count": int(value.get("reasoning_count") or 0),
+            "deferred_followup_count": int(
+                value.get("deferred_followup_count") or 0
+            ),
             "digest": str(digest or ""),
         }
 
@@ -1215,6 +1275,7 @@ class HerSessionStore:
         for item_kind, count_key in (
             ("message", "message_count"),
             ("reasoning", "reasoning_count"),
+            ("deferred_followup", "deferred_followup_count"),
         ):
             rows = connection.execute(
                 """
@@ -1261,6 +1322,7 @@ class HerSessionStore:
             metadata,
             message_digests=item_digests["message"],
             reasoning_digests=item_digests["reasoning"],
+            deferred_followup_digests=item_digests["deferred_followup"],
         )
         if not expected_digest or observed_digest != expected_digest:
             raise HerSessionStoreError(
@@ -1271,6 +1333,7 @@ class HerSessionStore:
             **dict(metadata),
             "messages": values["message"],
             "reasoning": values["reasoning"],
+            "deferred_followups": values["deferred_followup"],
         }
 
     def record_provider_context_checkpoint(
@@ -1285,6 +1348,7 @@ class HerSessionStore:
         boundary: str,
         messages: Sequence[Mapping[str, Any]],
         reasoning: Sequence[Mapping[str, Any]] = (),
+        deferred_followups: Sequence[Mapping[str, Any]] = (),
         provider_request_id: str = "",
         invocation_id: str = "",
         producer_run_claim: Mapping[str, Any] | None = None,
@@ -1322,11 +1386,19 @@ class HerSessionStore:
                 "invalid_provider_context",
                 "Every provider reasoning segment must be an object.",
             )
+        if any(not isinstance(item, Mapping) for item in deferred_followups):
+            raise HerSessionStoreError(
+                "invalid_provider_context",
+                "Every deferred tool follow-up must be an object.",
+            )
         clean_messages, encoded_messages, message_digests = (
             self._serialise_provider_context_items(messages)
         )
         clean_reasoning, encoded_reasoning, reasoning_digests = (
             self._serialise_provider_context_items(reasoning)
+        )
+        clean_deferred, encoded_deferred, deferred_digests = (
+            self._serialise_provider_context_items(deferred_followups)
         )
         context_metadata = {
             "format": "herv3-provider-context-v1",
@@ -1340,12 +1412,14 @@ class HerSessionStore:
             "invocation_id": str(invocation_id or ""),
             "message_count": len(clean_messages),
             "reasoning_count": len(clean_reasoning),
+            "deferred_followup_count": len(clean_deferred),
         }
         encoded_metadata = _json(context_metadata)
         digest = _provider_context_digest(
             context_metadata,
             message_digests=message_digests,
             reasoning_digests=reasoning_digests,
+            deferred_followup_digests=deferred_digests,
         )
         now = _utc_now()
         with self._transaction() as connection:
@@ -1446,6 +1520,14 @@ class HerSessionStore:
                 item_kind="reasoning",
                 encoded_rows=encoded_reasoning,
                 digests=reasoning_digests,
+            )
+            self._sync_provider_context_items(
+                connection,
+                session_id=session_id,
+                turn_id=turn_id,
+                item_kind="deferred_followup",
+                encoded_rows=encoded_deferred,
+                digests=deferred_digests,
             )
             sequence = self._next_event(
                 connection,
@@ -4074,3 +4156,4 @@ class HerSessionStore:
                 payload={},
             )
             return True
+# HASHI-Fingerprint: hfp_712d6826fba547e98b5f10810eee0a25
