@@ -2048,8 +2048,8 @@ async def test_managed_mixed_batch_write_not_replayed_after_parallel_read_park(
     assert writes == ["w1"]
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "once"
 
-    # The last pending_tool_batch checkpoint must include the completed write so
-    # resume only re-dispatches the two pending parallel reads.
+    # The last pending checkpoint contains both the completed write and the
+    # read that finished before its parallel sibling parked.
     pending_checkpoint = [
         checkpoint
         for checkpoint in checkpoints
@@ -2057,9 +2057,8 @@ async def test_managed_mixed_batch_write_not_replayed_after_parallel_read_park(
     ][-1]
     assert [
         m["tool_call_id"] for m in pending_checkpoint["messages"] if m.get("role") == "tool"
-    ] == ["r1", "w1"]
+    ] == ["r1", "w1", "r2"]
     assert [call["id"] for call in pending_tool_calls(pending_checkpoint["messages"])] == [
-        "r2",
         "r3",
     ]
 
@@ -2098,6 +2097,7 @@ async def test_managed_mixed_batch_write_not_replayed_after_parallel_read_park(
     resumed = _deepseek_adapter(tmp_path)
     resumed.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 0
     resumed.tool_registry = RecoveredRegistry()
+    resumed.set_provider_context_observer(lambda checkpoint: None)
 
     async def resume_provider(payload, headers, callback):
         return _APIResult("done", None, "stop")
@@ -2112,7 +2112,7 @@ async def test_managed_mixed_batch_write_not_replayed_after_parallel_read_park(
     )
     assert response.is_success, response.error
     assert writes == []  # completed write reused, never re-executed
-    assert sorted(reads) == ["r2", "r3"]  # only the pending parallel reads re-run
+    assert reads == ["r3"]  # the completed sibling read is not re-executed
 
 
 @pytest.mark.asyncio

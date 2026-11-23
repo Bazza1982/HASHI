@@ -3817,6 +3817,17 @@ class OpenRouterAdapter(BaseBackend):
                 if existing_id:
                     current_batch_tool_ids.add(existing_id)
 
+        last_checkpoint_message_count = len(messages)
+
+        def _checkpoint_pending() -> None:
+            nonlocal last_checkpoint_message_count
+            if before_tool_dispatch is not None:
+                before_tool_dispatch(
+                    list(self._deferred_tool_followups)
+                    + list(deferred_tool_result_messages)
+                )
+                last_checkpoint_message_count = len(messages)
+
         async def _run_one(tc: dict) -> None:
             """Execute exactly one tool call serially into the shared sinks."""
             fn = tc.get("function", {})
@@ -4011,10 +4022,7 @@ class OpenRouterAdapter(BaseBackend):
             if getattr(self.tool_registry, "permission_durable_wait", False):
                 if before_tool_dispatch is None or self._provider_context_observer is None:
                     raise ProviderContextObserverError("managed Tool dispatch requires a durable pending boundary")
-                before_tool_dispatch(
-                    list(self._deferred_tool_followups)
-                    + list(deferred_tool_result_messages)
-                )
+                _checkpoint_pending()
 
             # Execute only after atomically claiming this Tool ID.
             claim_id = str(tc_id or "")
@@ -4104,10 +4112,7 @@ class OpenRouterAdapter(BaseBackend):
                     # reads. Otherwise a park inside the read segment would
                     # lose the write's completion and replay it on resume.
                     if before_tool_dispatch is not None:
-                        before_tool_dispatch(
-                            list(self._deferred_tool_followups)
-                            + list(deferred_tool_result_messages)
-                        )
+                        _checkpoint_pending()
                     parallel_facts = await self._try_run_parallel_readonly_tool_calls(
                         segment,
                         messages,
@@ -4122,11 +4127,26 @@ class OpenRouterAdapter(BaseBackend):
                 for tc in segment:
                     await _run_one(tc)
         except BaseException:
-            # A later segment failed after earlier tools already completed.
-            # Their provider follow-ups (image user-parts, smart advisories)
-            # were only staged locally; hold them so a subsequent resume can
-            # flush them after the remaining tools complete, instead of
-            # silently dropping completed reads' media and advice.
+            # A parallel read may have completed after the last pending
+            # checkpoint while a sibling parked or failed. Persist the real
+            # completed results and follow-ups before allowing recovery to
+            # consume the remaining pending calls in a fresh Adapter.
+            if (
+                before_tool_dispatch is not None
+                and len(messages) > last_checkpoint_message_count
+            ):
+                from orchestrator.her_v2.provider_continuation import pending_tool_calls
+
+                try:
+                    pending_tool_calls(messages)
+                except ValueError as exc:
+                    if str(exc) != "the checkpoint contains no pending Tool call":
+                        raise ProviderContextObserverError(
+                            "interrupted Tool checkpoint is invalid"
+                        ) from exc
+                else:
+                    _checkpoint_pending()
+            # Also retain follow-ups if this same Adapter is resumed.
             if deferred_tool_result_messages:
                 self._deferred_tool_followups.extend(deferred_tool_result_messages)
             raise
@@ -4134,10 +4154,10 @@ class OpenRouterAdapter(BaseBackend):
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
         # contains more than one call.
-        messages.extend(deferred_tool_result_messages)
         if self._deferred_tool_followups:
             messages.extend(self._deferred_tool_followups)
             self._deferred_tool_followups.clear()
+        messages.extend(deferred_tool_result_messages)
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):

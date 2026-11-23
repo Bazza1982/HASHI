@@ -3344,6 +3344,23 @@ class HashiStageProvider(StageProvider):
                 "private provider recovery contains an invalid message"
             )
         continuation = [copy.deepcopy(dict(item)) for item in raw_messages]
+        raw_deferred = context.get("deferred_followups", [])
+        if raw_deferred is None:
+            raw_deferred = []
+        if not isinstance(raw_deferred, list) or any(
+            not isinstance(item, Mapping)
+            or item.get("role") not in {"user", "system"}
+            or not isinstance(item.get("content"), (str, list))
+            or (
+                isinstance(item.get("content"), list)
+                and any(not isinstance(part, Mapping) for part in item["content"])
+            )
+            for item in raw_deferred
+        ):
+            raise ProviderContextObserverError(
+                "private provider recovery contains invalid deferred tool follow-ups"
+            )
+        deferred = [copy.deepcopy(dict(item)) for item in raw_deferred]
         if context.get("boundary") == "pending_tool_batch":
             from orchestrator.her_v2.provider_continuation import pending_tool_calls
 
@@ -3362,28 +3379,28 @@ class HashiStageProvider(StageProvider):
                             ),
                         }
                     )
+                # All pending calls now have cancellation results.  Deliver
+                # completed reads before the new steering instruction even if
+                # the Provider does not request any further Tools.
+                continuation.extend(deferred)
+                deferred.clear()
                 continuation.append(
                     {"role": "user", "content": stage_prompt}
                 )
         elif context.get("boundary") == "ready_provider_request":
+            continuation.extend(deferred)
+            deferred.clear()
             if not self._provider_context_resume_pending:
-                # /steer successor: the checkpoint ends at the original
-                # provider request, so the new steering instruction must be
-                # appended or the backend payload only carries the old one.
-                # Ordinary crash recovery re-drives the identical request and
-                # must not duplicate the original prompt.
+                # /steer successor keeps the original request as history and
+                # appends the new instruction after recovered follow-ups.
                 continuation.append(
                     {"role": "user", "content": stage_prompt}
                 )
         else:
+            continuation.extend(deferred)
+            deferred.clear()
             continuation.append({"role": "user", "content": stage_prompt})
-        raw_deferred = context.get("deferred_followups")
-        self._provider_recovery_deferred_followups = (
-            [copy.deepcopy(dict(item)) for item in raw_deferred]
-            if isinstance(raw_deferred, list)
-            and all(isinstance(item, Mapping) for item in raw_deferred)
-            else []
-        )
+        self._provider_recovery_deferred_followups = deferred
         self._provider_context_recovery_consumed = True
         return continuation
 
