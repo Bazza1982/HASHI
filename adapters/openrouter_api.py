@@ -4095,7 +4095,13 @@ class OpenRouterAdapter(BaseBackend):
                 "\n[Other typed Tool media not forwarded natively: "
                 + ", ".join(sorted(other_media)) + ".]"
             )
-        if not self.resolve_input_capability().supports("image", "data_url"):
+        capability = self.resolve_input_capability()
+        image_transports = (
+            "data_url" if url.casefold().startswith("data:")
+            else "remote_url" for url in images
+        )
+        if not all(capability.supports("image", transport)
+                   for transport in image_transports):
             tool_message["content"] = (
                 tool_text
                 + "\n[Image unavailable natively for this selected model; "
