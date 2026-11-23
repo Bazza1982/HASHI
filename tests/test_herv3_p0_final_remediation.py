@@ -206,6 +206,62 @@ def test_profile_reordering_does_not_rebuild_but_main_route_change_does(tmp_path
     assert frozen["rebuild_from_checkpoint"] is True
 
 
+@pytest.mark.asyncio
+async def test_real_configuration_model_switch_rebuilds_but_reordering_and_effort_do_not(tmp_path):
+    from dataclasses import replace
+    from adapters.her_v2 import HERv2Adapter
+    from orchestrator.her_v2.models import Route, Stage
+    from tests.test_her_v2_adapter import _agent_config, _global_config, _DirectProvider
+    from tests.test_her_v2_runtime_configuration import _manager
+
+    config = _agent_config(tmp_path / "adapter")
+    provider = _DirectProvider()
+    config._her_v2_stage_provider = provider
+    runtime = SimpleNamespace(backend_manager=SimpleNamespace(agent_mode="fixed"),
+                              _request_meta_by_id={}, current_request_meta={})
+    config._hashi_runtime = runtime
+    adapter = HERv2Adapter(config, _global_config(tmp_path))
+    manager = _manager(tmp_path / "manager")
+    manager.current_backend = adapter
+    assert await adapter.initialize()
+    manager.apply_her_v3_target(manager.get_her_v3_target())
+    sections = [{"key": "permanent_system", "title": "SYSTEM", "text": "Stable",
+                 "authority": "permanent_system", "order": 0}]
+    payload = {"transport_snapshot": {"version": 1, "sections": sections}}
+
+    async def run_turn(index):
+        request_id = f"route-real-{index}"
+        meta = {"request_id": request_id, "hashi_session_id": "routing-session",
+                "hashi_message_id": f"routing-message-{index}", "context_generation": 1,
+                "session_workspace": str(tmp_path / "routing-session")}
+        runtime._request_meta_by_id[request_id] = meta
+        runtime.current_request_meta = meta
+        transport, _ = adapter.prepare_fixed_turn_input(
+            prompt_payload=payload, user_message=f"Task {index}",
+            request_id=request_id, request_meta=meta)
+        response = await adapter.generate_response(transport, request_id)
+        assert response.is_success
+        return adapter._session_coordinator.store.session(adapter._session_id)
+
+    try:
+        first = await run_turn(1)
+        original = adapter._v2_config.profile_for_route(Route.DIRECT)
+        adapter._v2_config = replace(adapter._v2_config, profiles=dict(reversed(list(adapter._v2_config.profiles.items()))))
+        adapter.effort = "low"
+        second = await run_turn(2)
+        assert second["provider_context_generation"] == first["provider_context_generation"]
+
+        manager.apply_her_v3_target(manager.prepare_her_v3_provider("openrouter-api"))
+        changed = adapter._v2_config.profile_for_route(Route.DIRECT)
+        assert (changed.engine, changed.model) != (original.engine, original.model)
+        third = await run_turn(3)
+        assert third["provider_context_generation"] == second["provider_context_generation"] + 1
+        direct_profiles = [profile for profile, request in provider.requests if request.stage is Stage.DIRECT]
+        assert (direct_profiles[-1].engine, direct_profiles[-1].model) == (changed.engine, changed.model)
+    finally:
+        await adapter.shutdown()
+
+
 def test_wip_summary_and_many_records_have_bounded_model_context(tmp_path):
     journal = WIPJournal(tmp_path / "wip.jsonl")
     journal.begin_turn(request_id="r0", prompt="prompt", request_summary="中文🌙" * 30000)
