@@ -208,21 +208,33 @@ class ToolActivity:
 
 
 async def bounded_communicate(proc, *, activity: ToolActivity | None = None,
-                              limit: int = 65536) -> tuple[bytes, bytes]:
-    """Drain both pipes concurrently; retain bounded head/tail without spooling."""
+                              limit: int = 65536,
+                              partial: dict | None = None) -> tuple[bytes, bytes]:
+    """Drain both pipes concurrently; retain bounded head/tail without spooling.
+
+    If *partial* is a mutable mapping, it is kept updated with the running
+    bounded head/tail for each stream so a caller can recover the last
+    available output even after this task is cancelled (e.g. shell timeout).
+    """
     async def drain(stream, key):
         head, tail = bytearray(), bytearray()
         total = 0
-        while chunk := await stream.read(32768):
-            total += len(chunk)
-            need = max(0, limit // 2 - len(head))
-            head.extend(chunk[:need])
-            tail.extend(chunk[need:])
-            if len(tail) > limit // 2:
-                del tail[:-limit // 2]
-            if activity:
-                counters = {**activity.snapshot['counters'], key: total}
-                activity.update(counters=counters, output=True, worker_response=True)
+        try:
+            while chunk := await stream.read(32768):
+                total += len(chunk)
+                need = max(0, limit // 2 - len(head))
+                head.extend(chunk[:need])
+                tail.extend(chunk[need:])
+                if len(tail) > limit // 2:
+                    del tail[:-limit // 2]
+                if partial is not None:
+                    partial[key] = bytes(head) + bytes(tail)
+                if activity:
+                    counters = {**activity.snapshot['counters'], key: total}
+                    activity.update(counters=counters, output=True, worker_response=True)
+        finally:
+            if partial is not None:
+                partial[key] = bytes(head) + bytes(tail)
         if total > limit:
             return bytes(head) + b'\n...[output omitted; bounded head/tail]\n' + bytes(tail)
         return bytes(head) + bytes(tail)

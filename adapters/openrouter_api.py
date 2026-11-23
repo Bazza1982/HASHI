@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import socket
 import threading
 import time
 import wave
@@ -1763,6 +1764,54 @@ def _transient_provider_call_error(error: Exception) -> bool:
     )
 
 
+def _is_dns_resolution_before_send(error: Exception) -> bool:
+    """Return True only when *error* proves DNS resolution failed before any
+    HTTP request bytes could have been written to the wire.
+
+    A failed ``getaddrinfo`` (``socket.gaierror`` / ``socket.herror``) is
+    raised while establishing the connection, before the request is sent, so
+    re-submitting cannot double-deliver to the provider.  Connection-refused,
+    reset, timeout and TLS failures do not carry that guarantee and keep the
+    ordinary transient retry policy.
+    """
+    if not isinstance(error, httpx.ConnectError):
+        return False
+    cause = error.__cause__
+    depth = 0
+    while cause is not None and depth < 8:
+        if isinstance(cause, (socket.gaierror, socket.herror)):
+            return True
+        cause = cause.__cause__
+        depth += 1
+    lowered = str(error).casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "getaddrinfo",
+            "name resolution",
+            "name or service not known",
+        )
+    )
+
+
+def _provider_call_transport_retry_limit(adapter, error: Exception) -> int:
+    """Effective bounded in-place retry count for one failed provider call.
+
+    A provable pre-send DNS failure may use a wider retry window (longer
+    outage tolerance) because re-submission cannot double-deliver; all other
+    transient errors keep the default, repair-limited budget.
+    """
+    if _is_dns_resolution_before_send(error):
+        retries = getattr(
+            adapter,
+            "TRANSIENT_PROVIDER_CALL_DNS_RETRIES",
+            getattr(adapter, "TRANSIENT_PROVIDER_CALL_RETRIES", 0),
+        )
+        return max(0, int(retries))
+    retries = getattr(adapter, "TRANSIENT_PROVIDER_CALL_RETRIES", 0)
+    return min(INVALID_TOOL_CALL_REPAIR_LIMIT, max(0, int(retries)))
+
+
 def _checkpoint_backed_stream_inactivity_continuation(
     error: Exception,
     *,
@@ -2046,6 +2095,8 @@ class OpenRouterAdapter(BaseBackend):
     TRANSIENT_PROVIDER_CALL_RETRIES = INVALID_TOOL_CALL_REPAIR_LIMIT
     TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S = 1.5
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 16.0
+    TRANSIENT_PROVIDER_CALL_DNS_RETRIES = 6
+    TRANSIENT_PROVIDER_CALL_DNS_RETRY_MAX_DELAY_S = 60.0
     INTRA_TURN_COMPACTION_TRIGGER_TOKENS = 110_000
     INTRA_TURN_COMPACTION_TRIGGER_CHARS = 360_000
     INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS = 12
@@ -4465,16 +4516,6 @@ class OpenRouterAdapter(BaseBackend):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
-                    wire_evidence["assembly_snapshots"].append(
-                        {
-                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
-                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
-                            "index": idx,
-                            "assembled": json.loads(
-                                json.dumps(acc, ensure_ascii=False)
-                            ),
-                        }
-                    )
                 if tool_calls_acc:
                     protocol_state["tool_calls"] = _tool_call_protocol_summary(
                         list(tool_calls_acc.values())
@@ -4924,9 +4965,9 @@ class OpenRouterAdapter(BaseBackend):
                             and provider_attempt_serial >= int(provider_call_limit)
                         ):
                             can_media_fallback = False
-                        retry_limit = min(
-                            INVALID_TOOL_CALL_REPAIR_LIMIT,
-                            max(0, int(self.TRANSIENT_PROVIDER_CALL_RETRIES)),
+                        dns_before_send = _is_dns_resolution_before_send(exc)
+                        retry_limit = _provider_call_transport_retry_limit(
+                            self, exc
                         )
                         effect_recovery = _effect_recovery_summary(
                             tool_effect_facts
@@ -5090,7 +5131,13 @@ class OpenRouterAdapter(BaseBackend):
                                         self.TRANSIENT_PROVIDER_CALL_RETRY_DELAY_S
                                     ),
                                     maximum_s=(
-                                        self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S
+                                        getattr(
+                                            self,
+                                            "TRANSIENT_PROVIDER_CALL_DNS_RETRY_MAX_DELAY_S",
+                                            self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S,
+                                        )
+                                        if dns_before_send
+                                        else self.TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S
                                     ),
                                     attempt=recovery_attempts_used,
                                 )

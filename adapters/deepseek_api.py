@@ -988,16 +988,6 @@ class DeepSeekAdapter(OpenRouterAdapter):
                         acc["function"]["name"] += fn_delta["name"]
                     if fn_delta.get("arguments"):
                         acc["function"]["arguments"] += fn_delta["arguments"]
-                    wire_evidence["assembly_snapshots"].append(
-                        {
-                            "arrival": len(wire_evidence["assembly_snapshots"]) + 1,
-                            "after_fragment": len(wire_evidence["tool_call_fragments"]),
-                            "index": idx,
-                            "assembled": json.loads(
-                                json.dumps(acc, ensure_ascii=False)
-                            ),
-                        }
-                    )
                 if tool_calls_acc:
                     protocol_state["tool_calls"] = _tool_call_protocol_summary(
                         list(tool_calls_acc.values())
@@ -1093,3 +1083,4 @@ class DeepSeekAdapter(OpenRouterAdapter):
             before_provider_call=before_provider_call,
             transient_images=transient_images,
         )
+# HASHI-Fingerprint: hfp_7a133652f45647d1818e652ac7bfeb1d
