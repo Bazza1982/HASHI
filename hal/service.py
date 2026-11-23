@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -30,7 +31,9 @@ from hal.event_source import (
 )
 from hal.runtime import (
     EXEC_ACTIVE,
+    EXEC_COMPLETED,
     EXEC_FAILED,
+    EXEC_UNVERIFIED,
     RECEIPT_DISPATCHED,
     RECEIPT_FAILED,
     directive_for_exec_stage,
@@ -49,6 +52,18 @@ POLL_INTERVAL_SECONDS = 5.0
 MAX_SCRIPT_BYTES = 64 * 1024
 MAX_PAGE_EVENTS = 100
 
+# Bounded transient-prompt retry: a failed dispatch is deferred with an
+# exponential backoff and never retried more than a small number of times, so a
+# network error cannot become a continuous request storm while the loop waits.
+RETRY_BASE_SECONDS = 2.0
+RETRY_MAX_SECONDS = 60.0
+MAX_RETRY_ATTEMPTS = 5
+
+
+def _retry_backoff(attempts: int) -> float:
+    """Exponential backoff in seconds for the Nth failed attempt (N >= 1)."""
+    return min(RETRY_BASE_SECONDS * (2.0 ** max(0, attempts - 1)), RETRY_MAX_SECONDS)
+
 SCHEMA_ID = "hashi.hal/v1"
 
 
@@ -60,11 +75,13 @@ class HalService:
         session_store,
         dispatch: DispatchAdapter,
         logger: logging.Logger | None = None,
+        clock: Any = None,
     ):
         self.store = store
         self.session_store = session_store
         self.dispatch = dispatch
         self.logger = logger or logging.getLogger("hal.runtime")
+        self._clock = clock if clock is not None else time.time
         self._loop_task: asyncio.Task | None = None
         self._stopping = False
         self._wake = asyncio.Event()
@@ -144,14 +161,26 @@ class HalService:
                 raise HalStoreError(
                     "entry event has no real source yet; " + "; ".join(unavailable)
                 )
+            # Per-rule enable baseline: this rule only matches feed events
+            # committed after the moment it is enabled. The owner cursor alone
+            # cannot express this when a second rule is enabled after events
+            # were already written but before they were consumed.
+            baseline = self.store.get_cursor(owner_id)
+            try:
+                page = _feed_page(self.session_store, owner_id, -1, 1)
+                baseline = int(page["next_cursor"])
+            except Exception:  # noqa: BLE001 — degraded fallback below
+                self.logger.warning(
+                    "HAL enable baseline read failed for owner %s; using owner cursor",
+                    owner_id,
+                )
+            if baseline < 0:
+                baseline = 0
+            self.store.set_rule_enable_cursor(owner_id, rule_id, baseline)
             if self.store.get_cursor(owner_id) == -1:
-                # Anchor the feed cursor at enable time: only events committed
-                # after enabling may trigger this owner's rules.
-                try:
-                    page = _feed_page(self.session_store, owner_id, -1, 1)
-                    self.store.set_cursor(owner_id, page["next_cursor"])
-                except Exception:  # noqa: BLE001 — loop bootstraps on first cycle
-                    pass
+                # Anchor the owner feed cursor at enable time: only events
+                # committed after enabling may trigger this owner's rules.
+                self.store.set_cursor(owner_id, baseline)
         updated = self.store.set_enabled(
             owner_id, rule_id, enabled, expected_revision=expected_revision
         )
@@ -308,11 +337,11 @@ class HalService:
             # No new evidence: still recover pending/unfinished executions so a
             # transient failure (or a crash) is retried without waiting for the
             # next event. The cursor still advances past this empty page.
+            # Returning the recovery result (True only when a dispatch was
+            # actually attempted) keeps a normal "waiting for a correlated
+            # event" state out of the 0.1s fast loop.
             await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
-            if execs_by_id:
-                await self._recover_executions(owner_id, rules, execs_by_id, receipts)
-                return True
-            return has_more
+            return await self._recover_executions(owner_id, rules, execs_by_id, receipts)
 
         active_at_cycle_start = await asyncio.to_thread(_active_runs, self.session_store, owner_id)
         if active_at_cycle_start:
@@ -348,6 +377,7 @@ class HalService:
                         feed_kind="system_idle",
                         run_idempotency_key=None,
                         automation_origin=False,
+                        feed_cursor=trigger.feed_cursor,
                     )
                     if await self._apply_trigger(
                         owner_id, idle, rules, execs_by_id, receipts, consumed
@@ -363,8 +393,8 @@ class HalService:
         fresh_execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
         fresh_by_id = {str(e["exec_id"]): e for e in fresh_execs}
         fresh_receipts = await self._load_receipts(fresh_execs)
-        await self._recover_executions(owner_id, rules, fresh_by_id, fresh_receipts)
-        return activity
+        recovered = await self._recover_executions(owner_id, rules, fresh_by_id, fresh_receipts)
+        return activity or recovered
 
     async def _load_enabled_rules(self, owner_id: str) -> list[dict[str, Any]]:
         rows = await asyncio.to_thread(self.store.list_rules, owner_id)
@@ -406,6 +436,24 @@ class HalService:
             list(receipts.values()),
             _flatten_consumed(consumed),
         )
+        # A rule disabled concurrently (between the rule load and this dispatch)
+        # must not fire again. Re-check the store's enabled state for exactly the
+        # rules the planner touched; this closes the plan->dispatch race window.
+        advance_rule_ids = {
+            str(execs_by_id[a.exec_id]["rule_id"])
+            for a in advances
+            if a.exec_id in execs_by_id
+        }
+        intent_rule_ids = {c.rule_id for c in creates} | advance_rule_ids
+        if intent_rule_ids:
+            fresh_rows = await asyncio.to_thread(self.store.list_rules, owner_id)
+            enabled_ids = {str(r["rule_id"]) for r in fresh_rows if r["enabled"]}
+            creates = [c for c in creates if c.rule_id in enabled_ids]
+            advances = [
+                a for a in advances
+                if a.exec_id in execs_by_id
+                and str(execs_by_id[a.exec_id]["rule_id"]) in enabled_ids
+            ]
         for hint in hints:
             await asyncio.to_thread(
                 self.store.update_exec, hint.exec_id, detail=hint.detail
@@ -429,11 +477,15 @@ class HalService:
             exec_row = await asyncio.to_thread(self.store.get_exec, owner_id, intent.exec_id)
             if exec_row is None:
                 continue
+            if created is False:
+                # Replayed create (idempotency hit): never blindly re-dispatch.
+                # Reconcile from the PERSISTED execution state and receipt so a
+                # completed/failed/disabled/unverified run is never re-run and
+                # its state/receipt is never overwritten.
+                await self._reconcile(owner_id, exec_row, rules, receipts)
+                continue
             if await self._dispatch_stage(owner_id, exec_row, intent.directive, rules, receipts):
                 activity = True
-            if created is False:
-                # Replayed create: reconcile stage/receipt divergence from a crash.
-                await self._reconcile(owner_id, exec_row, rules, receipts)
         for intent in advances:
             if intent.exec_id not in execs_by_id:
                 continue
@@ -583,7 +635,14 @@ class HalService:
             workflow = program.workflows[int(exec_row["workflow_index"])]
             next_stage, state = stage_after_dispatch(stage, len(workflow))
             detail = None
-            if state == EXEC_ACTIVE and next_stage < len(workflow):
+            if directive.kind == "native_command" and state == EXEC_COMPLETED:
+                # A native command being accepted is NOT proof that its effect
+                # (a reboot or deploy) finished. v0.1 has no reliable completion
+                # event source for these, so report the honest terminal state
+                # instead of claiming "completed".
+                state = EXEC_UNVERIFIED
+                detail = "command accepted; completion not verified"
+            elif state == EXEC_ACTIVE and next_stage < len(workflow):
                 detail = unavailable_wait_detail(workflow[next_stage].event)
             await asyncio.to_thread(
                 self.store.update_exec,
@@ -597,6 +656,14 @@ class HalService:
         # Failure: transient (prompt only) keeps the same idempotency key for
         # retry; permanent failures stop the workflow honestly.
         final_state = RECEIPT_PENDING if result.transient else RECEIPT_FAILED
+        attempts = None
+        next_retry_at = None
+        if result.transient:
+            existing_attempts = 0
+            if existing is not None:
+                existing_attempts = int(existing.get("attempts") or 0)
+            attempts = existing_attempts + 1
+            next_retry_at = self._clock() + _retry_backoff(attempts)
         await asyncio.to_thread(
             self.store.upsert_receipt,
             exec_id=exec_id,
@@ -607,6 +674,8 @@ class HalService:
             payload=directive.payload,
             state=final_state,
             detail=result.detail,
+            attempts=attempts,
+            next_retry_at=next_retry_at,
         )
         if not result.transient:
             await asyncio.to_thread(
@@ -622,6 +691,11 @@ class HalService:
         receipts: dict[tuple[str, int], dict[str, Any]],
     ) -> None:
         """Repair stage/state divergence after a crash between writes."""
+        if str(exec_row.get("state")) != EXEC_ACTIVE:
+            # Terminal/settled executions (completed, failed, disabled,
+            # unverified) must never be re-run or have their state overwritten
+            # by a replayed trigger.
+            return
         stage = int(exec_row["stage"])
         program = program_from_json(json.loads(exec_row["program_blob"]))
         workflow = program.workflows[int(exec_row["workflow_index"])]
@@ -641,7 +715,10 @@ class HalService:
         if receipt["state"] == RECEIPT_DISPATCHED:
             next_stage, state = stage_after_dispatch(stage, len(workflow))
             detail = None
-            if state == EXEC_ACTIVE and next_stage < len(workflow):
+            if receipt.get("kind") == "native_command" and state == EXEC_COMPLETED:
+                state = EXEC_UNVERIFIED
+                detail = "command accepted; completion not verified"
+            elif state == EXEC_ACTIVE and next_stage < len(workflow):
                 detail = unavailable_wait_detail(workflow[next_stage].event)
             await asyncio.to_thread(
                 self.store.update_exec,
@@ -657,18 +734,25 @@ class HalService:
         rules: list[dict[str, Any]],
         execs_by_id: dict[str, dict[str, Any]],
         receipts: dict[tuple[str, int], dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """Recover active executions after a crash or between event pages.
 
         Covers every crash position in the dispatch write order:
         - no receipt yet           -> reconstruct the directive and dispatch once;
-        - receipt pending (prompt) -> retry with the SAME idempotency key;
+        - receipt pending (prompt) -> retry with the SAME idempotency key (bounded);
         - receipt unknown (cmd)    -> fail honestly (never re-run a command);
         - receipt dispatched       -> advance the exec stage;
         - receipt failed           -> mark the exec failed.
+
+        Returns True only when a dispatch was actually attempted. A normal
+        "waiting for a correlated event" (or a pending retry still inside its
+        backoff window) returns False so the run loop uses the slow poll
+        instead of the 0.1s fast loop.
         """
         from hal.runtime import DispatchDirective
 
+        did_work = False
+        now = self._clock()
         for exec_row in execs_by_id.values():
             if exec_row.get("state") != EXEC_ACTIVE:
                 continue
@@ -695,6 +779,7 @@ class HalService:
                     )
                     continue
                 await self._dispatch_stage(owner_id, exec_row, directive, rules, receipts)
+                did_work = True
                 continue
             if receipt["state"] == RECEIPT_DISPATCHED:
                 await self._reconcile(owner_id, exec_row, rules, receipts)
@@ -719,7 +804,30 @@ class HalService:
                     detail="native command outcome unknown after interruption",
                 )
                 continue
-            # RECEIPT_PENDING (prompt): re-dispatch with the same idempotency key.
+            # RECEIPT_PENDING (prompt): re-dispatch with the same idempotency
+            # key, but with a bounded retry count and exponential backoff so a
+            # network failure cannot become a continuous request storm.
+            attempts = int(receipt.get("attempts") or 0)
+            if attempts >= MAX_RETRY_ATTEMPTS:
+                await asyncio.to_thread(
+                    self.store.upsert_receipt,
+                    exec_id=exec_row["exec_id"],
+                    stage=stage,
+                    idempotency_key=receipt["idempotency_key"],
+                    kind=receipt["kind"],
+                    target=receipt["target"],
+                    payload=receipt["payload"],
+                    state=RECEIPT_FAILED,
+                    detail="prompt retry limit exceeded",
+                )
+                await asyncio.to_thread(
+                    self.store.update_exec, exec_row["exec_id"], state=EXEC_FAILED,
+                    detail="prompt retry limit exceeded",
+                )
+                continue
+            next_retry_at = receipt.get("next_retry_at")
+            if next_retry_at is not None and float(next_retry_at) > now:
+                continue  # still inside the backoff window: not work yet
             directive = DispatchDirective(
                 exec_id=exec_row["exec_id"],
                 stage=stage,
@@ -729,6 +837,8 @@ class HalService:
                 idempotency_key=receipt["idempotency_key"],
             )
             await self._dispatch_stage(owner_id, exec_row, directive, rules, receipts)
+            did_work = True
+        return did_work
 
 
 # ----------------------------------------------------------------- module APIs

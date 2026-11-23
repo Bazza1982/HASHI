@@ -12,6 +12,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS hal_rules (
     script       TEXT NOT NULL,
     revision     INTEGER NOT NULL DEFAULT 1,
     enabled      INTEGER NOT NULL DEFAULT 0,
+    enable_cursor INTEGER,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -66,6 +68,8 @@ CREATE TABLE IF NOT EXISTS hal_dispatch_receipts (
     payload         TEXT NOT NULL,
     state           TEXT NOT NULL,
     detail          TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_retry_at   REAL,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     PRIMARY KEY (exec_id, stage)
@@ -103,6 +107,8 @@ class HalStore:
                 self._conn.execute(pragma)
             self._conn.executescript(_SCHEMA)
             self._migrate_exec_dedupe_index()
+            self._migrate_rule_enable_cursor()
+            self._migrate_receipt_retry()
             self._conn.commit()
 
     def _migrate_exec_dedupe_index(self) -> None:
@@ -123,6 +129,29 @@ class HalStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_hal_exec_rule_event "
             "ON hal_workflow_execs(rule_id, workflow_index, trigger_event_id)"
         )
+
+    def _migrate_rule_enable_cursor(self) -> None:
+        """Add the per-rule enable baseline column to pre-existing stores.
+
+        v0.1 anchored only an owner cursor; a second rule enabled after events
+        were already written (but not yet consumed) would replay that history.
+        Each rule now records the feed position captured at enable time.
+        """
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(hal_rules)")}
+        if "enable_cursor" not in cols:
+            self._conn.execute("ALTER TABLE hal_rules ADD COLUMN enable_cursor INTEGER")
+
+    def _migrate_receipt_retry(self) -> None:
+        """Add bounded-retry bookkeeping to pre-existing receipt stores."""
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(hal_dispatch_receipts)")}
+        if "attempts" not in cols:
+            self._conn.execute(
+                "ALTER TABLE hal_dispatch_receipts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
+            )
+        if "next_retry_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE hal_dispatch_receipts ADD COLUMN next_retry_at REAL"
+            )
 
     def close(self):
         with _LOCK:
@@ -151,7 +180,7 @@ class HalStore:
         with _LOCK:
             created = False
             if rule_id is None:
-                rule_id = f"hl{int(time.time() * 1000):x}{id(self) % 4096:03x}"
+                rule_id = f"hl{uuid.uuid4().hex}"
                 created = True
                 self._conn.execute(
                     "INSERT INTO hal_rules (rule_id, owner_id, name, script, revision, "
@@ -229,6 +258,15 @@ class HalStore:
                 (rule_id, owner_id),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def set_rule_enable_cursor(self, owner_id: str, rule_id: str, cursor: int) -> None:
+        """Record the feed position a rule was enabled at (per-rule baseline)."""
+        with _LOCK:
+            self._conn.execute(
+                "UPDATE hal_rules SET enable_cursor=?, updated_at=? WHERE rule_id=? AND owner_id=?",
+                (int(cursor), _now(), rule_id, owner_id),
+            )
+            self._conn.commit()
 
     def enabled_owner_ids(self) -> list[str]:
         with _LOCK:
@@ -380,15 +418,34 @@ class HalStore:
         payload: str,
         state: str,
         detail: str | None,
+        attempts: int | None = None,
+        next_retry_at: float | None = None,
     ) -> None:
+        """Persist a dispatch receipt.
+
+        ``attempts`` and ``next_retry_at`` are only written when explicitly
+        supplied; omitted values leave the existing bookkeeping untouched so a
+        pre-dispatch state write can never reset a retry counter.
+        """
         now = _now()
+        attempts_val = 0 if attempts is None else int(attempts)
+        next_retry_val = None if next_retry_at is None else float(next_retry_at)
+        update_extra = []
+        if attempts is not None:
+            update_extra.append("attempts=excluded.attempts")
+        if next_retry_at is not None:
+            update_extra.append("next_retry_at=excluded.next_retry_at")
+        conflict = (
+            "state=excluded.state, detail=excluded.detail, updated_at=excluded.updated_at"
+            + (", " + ", ".join(update_extra) if update_extra else "")
+        )
         with _LOCK:
             self._conn.execute(
                 "INSERT INTO hal_dispatch_receipts (exec_id, stage, idempotency_key, "
-                "kind, target, payload, state, detail, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(exec_id, stage) DO UPDATE SET state=excluded.state, "
-                "detail=excluded.detail, updated_at=excluded.updated_at",
+                "kind, target, payload, state, detail, attempts, next_retry_at, "
+                "created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                f"ON CONFLICT(exec_id, stage) DO UPDATE SET {conflict}",
                 (
                     exec_id,
                     stage,
@@ -398,6 +455,8 @@ class HalStore:
                     payload,
                     state,
                     detail,
+                    attempts_val,
+                    next_retry_val,
                     now,
                     now,
                 ),

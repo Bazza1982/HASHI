@@ -60,6 +60,9 @@ class HalTrigger:
     run_idempotency_key: str | None
     # True when the originating run was automation-dispatched.
     automation_origin: bool
+    # Monotonic feed position (the event's ``cursor``); None for synthetic
+    # triggers built in tests. Used for the per-rule enable baseline.
+    feed_cursor: int | None = None
 
 
 def feed_event_hal_event(event: Mapping[str, Any]) -> HalTrigger | None:
@@ -69,6 +72,7 @@ def feed_event_hal_event(event: Mapping[str, Any]) -> HalTrigger | None:
     if hal_event is None:
         return None
     key = event.get("run_idempotency_key")
+    cursor = event.get("cursor")
     return HalTrigger(
         event=hal_event,
         agent_identity=event.get("agent_id") or None,
@@ -76,6 +80,7 @@ def feed_event_hal_event(event: Mapping[str, Any]) -> HalTrigger | None:
         feed_kind=kind,
         run_idempotency_key=(str(key) if key else None),
         automation_origin=bool(event.get("automation_origin")),
+        feed_cursor=(int(cursor) if isinstance(cursor, int) else None),
     )
 
 

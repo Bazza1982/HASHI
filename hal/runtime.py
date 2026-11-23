@@ -27,6 +27,9 @@ EXEC_ACTIVE = "active"
 EXEC_COMPLETED = "completed"
 EXEC_FAILED = "failed"
 EXEC_DISABLED = "disabled"
+# A native command was accepted but its real completion cannot be observed:
+# accepting a reboot/deploy request does not mean the reboot/deploy finished.
+EXEC_UNVERIFIED = "unverified"
 
 # Receipt states.
 RECEIPT_DISPATCHED = "dispatched"
@@ -200,6 +203,16 @@ def plan_for_trigger(
     if not trigger.automation_origin:
         for rule_row in rules:
             if not rule_row.get("enabled"):
+                continue
+            # Per-rule enable baseline: a rule only matches events committed
+            # AFTER the moment it was enabled, so a newly enabled rule never
+            # replays feed history that predates its enablement.
+            enable_cursor = rule_row.get("enable_cursor")
+            if (
+                enable_cursor is not None
+                and trigger.feed_cursor is not None
+                and int(trigger.feed_cursor) <= int(enable_cursor)
+            ):
                 continue
             program = rule_row["program"]
             for workflow_index, workflow in enumerate(program.workflows):

@@ -21,6 +21,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from hal.dispatch import DispatchResult, RecordingDispatchAdapter
+from hal.event_source import HalTrigger
 from hal.service import HalService, handle_hal_rules_get, handle_hal_rules_post, handle_hal_status, handle_hal_validate, handle_hal_rule_enable, handle_hal_rule_disable, handle_hal_runs_get
 from hal.store import HalStore, HalStoreError
 
@@ -91,11 +92,27 @@ class FakeSessionStore:
         return self.active_rows
 
 
-def make_service(tmp_path, feed):
+def make_service(tmp_path, feed, clock=None):
     store = HalStore(tmp_path / "hal" / "hal_v1.sqlite")
     adapter = RecordingDispatchAdapter()
-    service = HalService(store=store, session_store=feed, dispatch=adapter, logger=logging.getLogger("hal.test"))
+    service = HalService(
+        store=store, session_store=feed, dispatch=adapter,
+        logger=logging.getLogger("hal.test"), clock=clock,
+    )
     return service, adapter
+
+
+class FakeClock:
+    """Deterministic clock for the bounded-retry backoff."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
 
 
 def make_rule(service, owner_id, script, name="rule", rule_id=None):
@@ -259,8 +276,9 @@ def test_idle_trigger_prompt_with_unbound_trigger_fails_honestly(tmp_path):
 
 
 def test_transient_prompt_failure_retries_same_key(tmp_path):
+    clock = FakeClock()
     feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
+    service, adapter = make_service(tmp_path, feed, clock=clock)
     calls = {"n": 0}
 
     def script(key):
@@ -273,8 +291,15 @@ def test_transient_prompt_failure_retries_same_key(tmp_path):
     rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
     service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
     feed.add_event()
-    run(service._process_owner("user:7"))
-    # first attempt transient -> retried within the same cycle via retry pass
+    # First attempt is transient and enters the bounded backoff: no same-cycle
+    # storm retry; the loop reports no activity (waiting), not a 0.1s spin.
+    assert run(service._process_owner("user:7")) is False
+    assert len(adapter.prompt_calls) == 1
+    assert service.store.list_execs("user:7")[0]["state"] == "active"
+
+    # Once the backoff elapses, recovery retries with the SAME idempotency key.
+    clock.advance(3.0)
+    assert run(service._process_owner("user:7")) is True
     assert len(adapter.prompt_calls) == 2
     assert adapter.prompt_calls[0]["idempotency_key"] == adapter.prompt_calls[1]["idempotency_key"]
     assert service.store.list_execs("user:7")[0]["state"] == "completed"
@@ -392,6 +417,9 @@ def test_cross_instance_prompt_target_rejected(tmp_path):
 def test_pending_prompt_retries_without_new_event(tmp_path):
     feed = FakeSessionStore()
     service, adapter = make_service(tmp_path, feed)
+    clock = FakeClock()
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed, clock=clock)
     calls = {"n": 0}
 
     def script(key):
@@ -404,12 +432,19 @@ def test_pending_prompt_retries_without_new_event(tmp_path):
     rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
     service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
     feed.add_event()
-    run(service._process_owner("user:7"))
-    assert len(adapter.prompt_calls) == 2  # entry + same-cycle retry, both transient
+    # Entry dispatch fails transient -> deferred (no same-cycle storm retry).
+    assert run(service._process_owner("user:7")) is False
+    assert len(adapter.prompt_calls) == 1
     assert service.store.list_execs("user:7")[0]["state"] == "active"
 
-    # No new event: recovery alone must retry the pending prompt with the SAME key.
-    run(service._process_owner("user:7"))
+    # No new event: after the backoff elapses, recovery retries the SAME key.
+    clock.advance(2.0)
+    assert run(service._process_owner("user:7")) is True
+    assert len(adapter.prompt_calls) == 2
+    assert service.store.list_execs("user:7")[0]["state"] == "active"
+
+    clock.advance(4.0)
+    assert run(service._process_owner("user:7")) is True
     assert len(adapter.prompt_calls) == 3
     assert adapter.prompt_calls[0]["idempotency_key"] == adapter.prompt_calls[2]["idempotency_key"]
     assert service.store.list_execs("user:7")[0]["state"] == "completed"
@@ -489,6 +524,132 @@ def test_second_rule_does_not_replay_preenable_history(tmp_path):
     feed.add_event()
     run(service._process_owner("user:7"))
     assert sorted(c["target_agent"] for c in adapter.prompt_calls[1:]) == ["alice", "bob"]
+
+
+# --- Round 2: idle loop, replay, per-rule baseline, command truth, UUID ------
+
+
+def test_waiting_exec_reports_no_activity_not_fast_loop(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(
+        service,
+        "user:7",
+        'if @agent_any #turn_finish then @alice $prompt "start"; '
+        'if @agent_any #turn_finish then @bob $prompt "next".',
+    )
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event()
+    assert run(service._process_owner("user:7")) is True  # stage 0 dispatched
+    assert len(adapter.prompt_calls) == 1
+    # Stage 1 now waits for a correlated #turn_finish. With no new event the
+    # owner must report NO activity so the run loop sleeps POLL_INTERVAL rather
+    # than the 0.1s fast loop.
+    for _ in range(4):
+        assert run(service._process_owner("user:7")) is False
+    assert len(adapter.prompt_calls) == 1
+
+
+def test_prompt_retry_limit_fails_permanently(tmp_path):
+    from hal.service import MAX_RETRY_ATTEMPTS, _retry_backoff
+
+    clock = FakeClock()
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed, clock=clock)
+    adapter._prompt_script = lambda key: DispatchResult(accepted=False, transient=True, detail="busy")
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event()
+    assert run(service._process_owner("user:7")) is False  # first transient, deferred
+
+    calls = 1
+    while calls < MAX_RETRY_ATTEMPTS:
+        clock.advance(_retry_backoff(calls) + 0.001)
+        run(service._process_owner("user:7"))
+        calls += 1
+    clock.advance(999)
+    run(service._process_owner("user:7"))  # attempts now at cap -> settle failed
+    assert len(adapter.prompt_calls) == MAX_RETRY_ATTEMPTS
+    execs = service.store.list_execs("user:7")
+    assert execs[0]["state"] == "failed"
+    assert "retry limit" in (execs[0]["detail"] or "")
+
+
+def test_replayed_unverified_command_never_redispatches(tmp_path):
+    feed = FakeSessionStore()
+    adapter = RecordingDispatchAdapter()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+
+    # First "process": dispatch the command once, then crash before the cursor
+    # advances. The store keeps the accepted-but-unverified execution.
+    store1 = HalStore(path)
+    service1 = HalService(store=store1, session_store=feed, dispatch=adapter, logger=logging.getLogger("hal.test"))
+    rule = make_rule(service1, "user:7", 'if @lily@TESTINST #turn_finish then /reboot max.')
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    trigger = HalTrigger(
+        event="#turn_finish", agent_identity="@lily@TESTINST",
+        feed_event_id="evt-1", feed_kind="run.completed",
+        run_idempotency_key=None, automation_origin=False, feed_cursor=1,
+    )
+    rules1 = run(service1._load_enabled_rules("user:7"))
+    run(service1._apply_trigger("user:7", trigger, rules1, {}, {}, {}))
+    assert len(adapter.command_calls) == 1
+    assert service1.store.list_execs("user:7")[0]["state"] == "unverified"
+    store1.close()
+
+    # "Process restart": reopen the same SQLite and replay the same event.
+    store2 = HalStore(path)
+    service2 = HalService(store=store2, session_store=feed, dispatch=adapter, logger=logging.getLogger("hal.test"))
+    rules2 = run(service2._load_enabled_rules("user:7"))
+    run(service2._apply_trigger("user:7", trigger, rules2, {}, {}, {}))
+    assert len(adapter.command_calls) == 1  # still exactly one dispatch
+    execs = service2.store.list_execs("user:7")
+    assert execs[0]["state"] == "unverified"
+    assert execs[0]["stage"] == 1
+    assert "completion not verified" in (execs[0]["detail"] or "")
+    store2.close()
+
+
+def test_per_rule_enable_baseline_covers_unconsumed_events(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule_a = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "A".')
+    service.set_enabled(owner_id="user:7", rule_id=rule_a["rule_id"], enabled=True)
+
+    # Events committed before rule B is enabled, but not yet consumed.
+    feed.add_event()
+    feed.add_event()
+    rule_b = make_rule(service, "user:7", 'if @agent_any #turn_finish then @bob $prompt "B".')
+    service.set_enabled(owner_id="user:7", rule_id=rule_b["rule_id"], enabled=True)
+
+    run(service._process_owner("user:7"))
+    # Only A matches the two pre-enable events; B must not replay that history.
+    assert sorted(c["target_agent"] for c in adapter.prompt_calls) == ["alice", "alice"]
+
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    assert sorted(c["target_agent"] for c in adapter.prompt_calls) == ["alice", "alice", "alice", "bob"]
+
+
+def test_native_command_acceptance_is_unverified_not_completed(tmp_path):
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @lily@TESTINST #turn_finish then /reboot max.')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.add_event(agent_id="lily")
+    run(service._process_owner("user:7"))
+    assert len(adapter.command_calls) == 1
+    execs = service.store.list_execs("user:7")
+    assert execs[0]["state"] == "unverified"
+    assert "completion not verified" in (execs[0]["detail"] or "")
+
+
+def test_new_rule_id_is_uuid(tmp_path):
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    assert rule["rule_id"].startswith("hl")
+    assert len(rule["rule_id"]) == 34  # "hl" + 32 hex chars
 
 
 # ------------------------------------------------------------------ API
