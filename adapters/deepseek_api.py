@@ -518,6 +518,23 @@ class DeepSeekAdapter(OpenRouterAdapter):
         DeepSeek Chat Completions accepts image_url parts for role=tool.
         """
 
+        # Completed Tool IDs are projected from existing provider messages by
+        # _completed_tool_bindings(). Their output is already a *wire* content
+        # array, not a new ToolResult. Preserve it verbatim on idempotent
+        # replay; never re-execute a screenshot or stringify its image parts.
+        if content is None and isinstance(output, list) and all(
+            isinstance(part, Mapping)
+            and str(part.get("type") or "").casefold() in {"text", "image_url"}
+            for part in output
+        ):
+            from copy import deepcopy
+
+            return [{
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": deepcopy(output),
+            }]
+
         output_text = _tool_output_text(output)
         structured_texts, image_urls = _structured_tool_media(content)
         other_media = {
