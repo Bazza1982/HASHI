@@ -520,6 +520,24 @@ class DeepSeekAdapter(OpenRouterAdapter):
 
         output_text = _tool_output_text(output)
         structured_texts, image_urls = _structured_tool_media(content)
+        other_media = {
+            str(part.get("type") or "").casefold()
+            for part in (content or [])
+            if isinstance(part, Mapping)
+            and str(part.get("type") or "").casefold()
+            in {"audio", "input_audio", "video", "input_video",
+                "document", "file", "input_file"}
+        }
+        if other_media:
+            # DeepSeek images have a native Tool shape. Other Tool media must
+            # use their own capability-gated route; never send encoded bytes
+            # as model-visible stdout.
+            output_text = ""
+            structured_texts.append(
+                "[Typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media))
+                + "; use an authorized media inspection route.]"
+            )
         if image_urls:
             # Typed content is authoritative; an opaque legacy output string
             # may contain an encoded copy of the same image. Never forward it.
