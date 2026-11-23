@@ -2108,14 +2108,11 @@ class OpenRouterAdapter(BaseBackend):
         capacity = resolve_capacity_profile(runtime, self.config.engine, model)
         if capacity is None:
             return
-        serialized = json.dumps(
-            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        if "data:" in serialized or "base64," in serialized:
-            return
+        from orchestrator.provider_text_projection import provider_text_capacity_json
+
+        # Only typed media parts are removed from text-token estimation.
+        # User, assistant and Tool text remains in scope verbatim.
+        serialized = provider_text_capacity_json(payload)
         estimated = estimate_tokens(serialized)
         if estimated > capacity.usable_input_tokens:
             raise ProviderContextCapacityPreflightError(
