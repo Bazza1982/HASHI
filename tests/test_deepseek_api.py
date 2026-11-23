@@ -1369,6 +1369,26 @@ async def test_deepseek_tool_screenshot_is_native_image_not_base64_text(tmp_path
     deepseek_api._validate_deepseek_payload({"messages": messages})
 
 
+def test_deepseek_completed_tool_image_replay_keeps_native_shape(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    native = [
+        {"type": "text", "text": "Previous screenshot"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl0sAAAAASUVORK5CYII=",
+        }},
+    ]
+    replayed = adapter._tool_result_messages(
+        tool_name="windows_screenshot",
+        tool_call_id="call-previous-image",
+        output=native,
+        content=None,
+    )
+    assert replayed == [{"role": "tool", "tool_call_id": "call-previous-image",
+                         "content": native}]
+    assert replayed[0]["content"] is not native
+    deepseek_api._validate_deepseek_payload({"messages": replayed})
+
+
 def test_deepseek_payload_requires_structured_image_content():
     data_url = (
         "data:image/png;base64,"
