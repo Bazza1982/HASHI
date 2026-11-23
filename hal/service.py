@@ -148,6 +148,11 @@ class HalService:
         rule = self.store.get_rule(owner_id, rule_id)
         if rule is None:
             raise HalStoreError("rule not found")
+        # Converge the revision conflict check here, BEFORE any baseline or
+        # enabled-state mutation: a stale write must never move an existing
+        # rule's event baseline.
+        if expected_revision is not None and int(rule["revision"]) != expected_revision:
+            raise HalStoreError("rule revision conflict; refresh before saving")
         if enabled:
             result = validate_script(rule["script"])
             if not result["ok"]:
@@ -165,15 +170,19 @@ class HalService:
             # committed after the moment it is enabled. The owner cursor alone
             # cannot express this when a second rule is enabled after events
             # were already written but before they were consumed.
-            baseline = self.store.get_cursor(owner_id)
+            #
+            # Reading the latest feed cursor is REQUIRED, never best-effort: a
+            # stale owner cursor must not be used as an unsafe fallback, because
+            # it could misanchor the new rule and replay history or skip events.
+            # If the feed is unavailable, fail the enable and keep the rule
+            # disabled (its baseline and the existing rules' cursors untouched).
             try:
                 page = _feed_page(self.session_store, owner_id, -1, 1)
-                baseline = int(page["next_cursor"])
-            except Exception:  # noqa: BLE001 — degraded fallback below
-                self.logger.warning(
-                    "HAL enable baseline read failed for owner %s; using owner cursor",
-                    owner_id,
-                )
+            except Exception as exc:  # noqa: BLE001
+                raise HalStoreError(
+                    f"cannot establish enable baseline (feed unavailable): {exc}"
+                ) from exc
+            baseline = int(page["next_cursor"])
             if baseline < 0:
                 baseline = 0
             self.store.set_rule_enable_cursor(owner_id, rule_id, baseline)
@@ -333,7 +342,7 @@ class HalService:
         receipts = await self._load_receipts(execs)
         consumed: dict[str, set[str]] = {}
 
-        if not events:
+        if not events and not has_more:
             # No new evidence: still recover pending/unfinished executions so a
             # transient failure (or a crash) is retried without waiting for the
             # next event. The cursor still advances past this empty page.
@@ -394,7 +403,9 @@ class HalService:
         fresh_by_id = {str(e["exec_id"]): e for e in fresh_execs}
         fresh_receipts = await self._load_receipts(fresh_execs)
         recovered = await self._recover_executions(owner_id, rules, fresh_by_id, fresh_receipts)
-        return activity or recovered
+        # A reported feed backlog (has_more) keeps the loop consuming pages
+        # immediately instead of idling POLL_INTERVAL between non-matching pages.
+        return activity or recovered or has_more
 
     async def _load_enabled_rules(self, owner_id: str) -> list[dict[str, Any]]:
         rows = await asyncio.to_thread(self.store.list_rules, owner_id)
@@ -548,6 +559,15 @@ class HalService:
             trigger_agent=trigger_name,
         )
 
+    async def _exec_still_active(self, owner_id: str, exec_id: str) -> bool:
+        """Re-read persisted execution state (single source of truth)."""
+        fresh = await asyncio.to_thread(self.store.get_exec, owner_id, exec_id)
+        return fresh is not None and str(fresh.get("state")) == EXEC_ACTIVE
+
+    async def _rule_enabled(self, owner_id: str, rule_id: str) -> bool:
+        rule = await asyncio.to_thread(self.store.get_rule, owner_id, rule_id)
+        return rule is not None and bool(rule.get("enabled"))
+
     async def _dispatch_stage(
         self,
         owner_id: str,
@@ -559,6 +579,13 @@ class HalService:
         """Dispatch one stage once; crash-safe and never double-executing."""
         exec_id = directive.exec_id
         stage = directive.stage
+        # A concurrent disable may have settled this execution between planning
+        # and now. Re-check persisted execution and rule state before admitting
+        # any new side effect; never overwrite a concurrent settlement.
+        if not await self._exec_still_active(owner_id, exec_id):
+            return False
+        if not await self._rule_enabled(owner_id, exec_row["rule_id"]):
+            return False
         existing = receipts.get((exec_id, stage))
         if existing is not None and existing["state"] in (RECEIPT_DISPATCHED, RECEIPT_FAILED):
             return False
@@ -620,6 +647,8 @@ class HalService:
             result = await self._command_result(exec_row, directive)
 
         if result.accepted:
+            # Preserve the true dispatch receipt even if a concurrent disable
+            # settled the execution while the adapter was in flight.
             await asyncio.to_thread(
                 self.store.upsert_receipt,
                 exec_id=exec_id,
@@ -631,6 +660,10 @@ class HalService:
                 state=RECEIPT_DISPATCHED,
                 detail=result.detail,
             )
+            if not await self._exec_still_active(owner_id, exec_id):
+                # The side effect was admitted, but the execution has been
+                # settled concurrently; never overwrite that settlement.
+                return True
             program = program_from_json(json.loads(exec_row["program_blob"]))
             workflow = program.workflows[int(exec_row["workflow_index"])]
             next_stage, state = stage_after_dispatch(stage, len(workflow))
@@ -696,6 +729,10 @@ class HalService:
             # unverified) must never be re-run or have their state overwritten
             # by a replayed trigger.
             return
+        # Re-read persisted state: a concurrent disable/settle must never be
+        # overwritten by a stale 'active' snapshot.
+        if not await self._exec_still_active(owner_id, exec_row["exec_id"]):
+            return
         stage = int(exec_row["stage"])
         program = program_from_json(json.loads(exec_row["program_blob"]))
         workflow = program.workflows[int(exec_row["workflow_index"])]
@@ -755,6 +792,10 @@ class HalService:
         now = self._clock()
         for exec_row in execs_by_id.values():
             if exec_row.get("state") != EXEC_ACTIVE:
+                continue
+            # Re-read persisted state so a concurrent disable (which settles the
+            # exec to 'disabled') is honored and never overwritten by recovery.
+            if not await self._exec_still_active(owner_id, exec_row["exec_id"]):
                 continue
             stage = int(exec_row["stage"])
             receipt = receipts.get((exec_row["exec_id"], stage))

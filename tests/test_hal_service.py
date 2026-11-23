@@ -20,8 +20,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from hal import service as hal_service_mod
 from hal.dispatch import DispatchResult, RecordingDispatchAdapter
 from hal.event_source import HalTrigger
+from hal.runtime import DispatchDirective
 from hal.service import HalService, handle_hal_rules_get, handle_hal_rules_post, handle_hal_status, handle_hal_validate, handle_hal_rule_enable, handle_hal_rule_disable, handle_hal_runs_get
 from hal.store import HalStore, HalStoreError
 
@@ -650,6 +652,170 @@ def test_new_rule_id_is_uuid(tmp_path):
     rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
     assert rule["rule_id"].startswith("hl")
     assert len(rule["rule_id"]) == 34  # "hl" + 32 hex chars
+
+
+# ------------------------------------------------ A1/A2/A3 (Round 3 review)
+
+
+def _prompt_exec(service, rule, exec_id="hx1"):
+    service.store.create_exec(
+        owner_id="user:7", rule_id=rule["rule_id"], rule_revision=rule["revision"],
+        rule_name="rule", workflow_index=0, exec_id=exec_id, trigger_event_id="evt-1",
+        trigger_agent="@lily@TESTINST", trigger_kind="run.completed",
+        program_blob=__import__("hal").compile_hal('if @agent_any #turn_finish then @alice $prompt "hi".'),
+    )
+
+
+def test_dispatch_stage_refuses_rule_disabled_after_plan(tmp_path):
+    """A plan produced before a disable must not admit a new side effect."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    _prompt_exec(service, rule)
+    stale = {e["exec_id"]: e for e in service.store.list_active_execs("user:7")}
+    # Disable after the plan/exec exists but before dispatch is applied.
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=False)
+    directive = DispatchDirective(
+        exec_id="hx1", stage=0, kind="prompt", target="@alice",
+        payload='$prompt "hi"', idempotency_key="hal:hx1:0",
+    )
+    run(service._dispatch_stage("user:7", stale["hx1"], directive, [], {}))
+    assert adapter.prompt_calls == []
+    assert service.store.get_exec("user:7", "hx1")["state"] == "disabled"
+
+
+def test_disable_during_prompt_dispatch_preserves_settlement(tmp_path):
+    """A disable landing mid-dispatch must never overwrite the settlement."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    state = {"disabled": False}
+
+    def script(idempotency_key):
+        if not state["disabled"]:
+            state["disabled"] = True
+            service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=False)
+        return DispatchResult(accepted=True, transient=False, detail="accepted")
+
+    adapter._prompt_script = script
+    feed.add_event(agent_id="lily")
+    run(service._process_owner("user:7"))
+
+    assert len(adapter.prompt_calls) == 1
+    execs = service.store.list_execs("user:7")
+    assert len(execs) == 1
+    assert execs[0]["state"] == "disabled"  # not overwritten to completed
+    receipt = service.store.get_receipt(execs[0]["exec_id"], 0)
+    assert receipt["state"] == "dispatched"  # real receipt preserved
+
+
+def test_disable_after_pending_receipt_blocks_recovery_redispatch(tmp_path):
+    """Pre-dispatch (pending) receipt + disable: recovery must not re-dispatch."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    _prompt_exec(service, rule)
+    service.store.upsert_receipt(
+        exec_id="hx1", stage=0, idempotency_key="hal:hx1:0", kind="prompt",
+        target="@alice", payload='$prompt "hi"', state="pending_retry", detail=None,
+    )
+    stale = {e["exec_id"]: e for e in service.store.list_active_execs("user:7")}
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=False)
+    run(service._recover_executions(
+        "user:7", [], stale, {("hx1", 0): service.store.get_receipt("hx1", 0)},
+    ))
+    assert adapter.prompt_calls == []
+    assert service.store.get_exec("user:7", "hx1")["state"] == "disabled"
+
+
+def test_disable_after_dispatch_receipt_does_not_complete_exec(tmp_path):
+    """Dispatch completed but exec not yet advanced; a disable must not complete it."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    _prompt_exec(service, rule)
+    service.store.upsert_receipt(
+        exec_id="hx1", stage=0, idempotency_key="hal:hx1:0", kind="prompt",
+        target="@alice", payload='$prompt "hi"', state="dispatched", detail=None,
+    )
+    stale = {e["exec_id"]: e for e in service.store.list_active_execs("user:7")}
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=False)
+    run(service._recover_executions(
+        "user:7", [], stale, {("hx1", 0): service.store.get_receipt("hx1", 0)},
+    ))
+    assert adapter.prompt_calls == []
+    assert service.store.get_exec("user:7", "hx1")["state"] == "disabled"
+
+
+def test_enable_fails_when_baseline_read_fails(tmp_path, monkeypatch):
+    """A stale owner cursor is never an unsafe fallback for a rule baseline."""
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    rule1 = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "one".')
+    service.set_enabled(owner_id="user:7", rule_id=rule1["rule_id"], enabled=True)
+    service.store.set_cursor("user:7", 100)  # owner cursor deliberately behind
+    rule2 = make_rule(service, "user:7", 'if @agent_any #turn_finish then @bob $prompt "two".')
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("feed down")
+
+    monkeypatch.setattr(hal_service_mod, "_feed_page", boom)
+    with pytest.raises(HalStoreError) as excinfo:
+        service.set_enabled(owner_id="user:7", rule_id=rule2["rule_id"], enabled=True)
+    assert "baseline" in str(excinfo.value)
+
+    # Rule stays disabled; no baseline was written; existing cursors untouched.
+    assert service.store.get_rule("user:7", rule2["rule_id"])["enabled"] == 0
+    assert service.store.get_rule("user:7", rule2["rule_id"])["enable_cursor"] is None
+    assert service.store.get_cursor("user:7") == 100
+    assert service.store.get_rule("user:7", rule1["rule_id"])["enabled"] == 1
+
+
+def test_enable_revision_conflict_does_not_touch_baseline(tmp_path):
+    """A revision conflict must fail before any baseline/enabled mutation."""
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    before = service.store.get_rule("user:7", rule["rule_id"])["enable_cursor"]
+    # Save bumps revision to 2 (and disables). Stale enable must conflict first.
+    service.upsert_rule(
+        owner_id="user:7", rule_id=rule["rule_id"], name="rule",
+        script='if @agent_any #turn_finish then @alice $prompt "hi".', expected_revision=1,
+    )
+    with pytest.raises(HalStoreError) as excinfo:
+        service.set_enabled(
+            owner_id="user:7", rule_id=rule["rule_id"], enabled=True, expected_revision=1,
+        )
+    assert "revision conflict" in str(excinfo.value)
+    assert service.store.get_rule("user:7", rule["rule_id"])["enable_cursor"] == before
+
+
+def test_backlog_pages_consumed_without_idling(tmp_path):
+    """has_more keeps draining a backlog instead of idling POLL_INTERVAL/page."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if @target@TESTINST #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    for _ in range(250):
+        feed.add_event(agent_id="other")
+
+    # Page 1 (100 events, has_more) -> fast (no idle).
+    assert run(service._process_owner("user:7")) is True
+    assert service.store.get_cursor("user:7") == 100
+    # Page 2 (100 events, has_more) -> fast.
+    assert run(service._process_owner("user:7")) is True
+    assert service.store.get_cursor("user:7") == 200
+    # Page 3 (50 events, drained) -> returns to low-frequency wait.
+    assert run(service._process_owner("user:7")) is False
+    assert service.store.get_cursor("user:7") == 250
+    # No rule matched; nothing dispatched; idle now stays low-frequency.
+    assert adapter.prompt_calls == []
+    assert run(service._process_owner("user:7")) is False
 
 
 # ------------------------------------------------------------------ API
