@@ -102,16 +102,16 @@ def test_openrouter_base_adapter_preserves_typed_image():
 async def test_browser_extension_session_uses_declared_action_not_page_text(monkeypatch):
     from tools import browser
 
-    encoded = ENCODED
+    text_example_url = "data:image/png;base64,AAAA"
     response = {
         "ok": True, "completed": 3, "failed": 0,
         "steps": [
             {"index": 0, "action": "get_text", "ok": True,
-             "output": "A page contains " + URL},
+             "output": "A page contains " + text_example_url},
             {"index": 1, "action": "screenshot", "ok": True,
              "output": URL},
             {"index": 2, "action": "evaluate", "ok": True,
-             "output": {"example": URL}},
+             "output": {"example": text_example_url}},
         ],
     }
 
@@ -130,7 +130,7 @@ async def test_browser_extension_session_uses_declared_action_not_page_text(monk
     images = [p for p in result.content if p["type"] == "image"]
     assert len(images) == 1
     assert base64.b64decode(images[0]["data"]) == PNG
-    assert any(URL in text for text in texts)
+    assert any(text_example_url in text for text in texts)
 
 
 @pytest.mark.asyncio
