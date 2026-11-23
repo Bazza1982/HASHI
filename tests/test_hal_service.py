@@ -48,6 +48,7 @@ class FakeSessionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
         self.active_rows: list = []
+        self.list_active_runs_calls = 0
         self._seq = 0
 
     @contextmanager
@@ -91,6 +92,7 @@ class FakeSessionStore:
         return f"evt-{self._seq}"
 
     def list_active_runs(self, *, owner_id, session_id=None):
+        self.list_active_runs_calls += 1
         return self.active_rows
 
 
@@ -957,4 +959,87 @@ def test_api_runs_listing(tmp_path):
             assert payload["runs"][0]["trigger_agent"] == "@lily@TESTINST"
 
     asyncio.run(scenario())
+
+
+# --- Round 4: A1 atomic enable / A3 #system_idle correctness ---------------
+
+
+def test_enable_after_edit_with_stale_revision_conflicts(tmp_path):
+    """Enable racing an edit must never leave the old script enabled."""
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    rule = make_rule(
+        service, "user:7", 'if @agent_any #turn_finish then @alice $prompt "v1".'
+    )
+    # An edit bumps revision 1 -> 2 and returns the rule to draft.
+    service.upsert_rule(
+        owner_id="user:7", rule_id=rule["rule_id"], name="rule",
+        script='if @agent_any #turn_finish then @alice $prompt "v2".',
+        expected_revision=1,
+    )
+    # A stale enable (expects revision 1) must conflict, never enable v1.
+    with pytest.raises(HalStoreError):
+        service.set_enabled(
+            owner_id="user:7", rule_id=rule["rule_id"], enabled=True,
+            expected_revision=1,
+        )
+    r = service.store.get_rule("user:7", rule["rule_id"])
+    assert r["enabled"] == 0
+    assert '"v2"' in r["script"]
+    assert r["enable_cursor"] is None
+
+
+def test_system_idle_pagination_does_not_multiply(tmp_path):
+    """250 already-finished runs paged 100/100/50 produce exactly ONE idle edge."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if #system_idle then /reboot max.')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.active_rows = []  # the single active->idle transition already happened
+    for _ in range(250):
+        feed.add_event()
+    run(service._process_owner("user:7"))  # page 1 (100 events)
+    run(service._process_owner("user:7"))  # page 2 (100 events)
+    run(service._process_owner("user:7"))  # page 3 (50 events)
+    reboot_calls = [c for c in adapter.command_calls if c["command_text"] == "/reboot max"]
+    assert len(reboot_calls) == 1
+
+
+def test_system_idle_queries_active_state_once_per_cycle(tmp_path):
+    """Active-state evidence is sampled once per cycle, never once per event."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.active_rows = []
+    for _ in range(250):
+        feed.add_event()
+    feed.list_active_runs_calls = 0
+    run(service._process_owner("user:7"))
+    run(service._process_owner("user:7"))
+    run(service._process_owner("user:7"))
+    assert feed.list_active_runs_calls == 3  # 1/cycle, not 1/event (250)
+
+
+def test_system_idle_does_not_fire_at_startup_without_terminal_event(tmp_path):
+    """Already-idle startup with no terminal evidence fabricates no idle edge."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.active_rows = []  # idle, and no terminal event at all
+    run(service._process_owner("user:7"))
+    assert adapter.prompt_calls == []
+
+
+def test_system_idle_ignores_automation_origin_events(tmp_path):
+    """Automation-origin terminal runs are not idle-transition evidence."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.active_rows = []
+    feed.add_event(key="hal:some-automation-origin")
+    run(service._process_owner("user:7"))
+    assert adapter.prompt_calls == []
 # HASHI-Fingerprint: hfp_9717a97af9924e26925d98bfde62bb3d

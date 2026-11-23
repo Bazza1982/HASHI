@@ -108,4 +108,135 @@ def test_cursor_defaults_and_advances(store):
     assert store.get_cursor("user:7") == 12
     store.set_cursor("user:7", 15)
     assert store.get_cursor("user:7") == 15
+
+
+def _new_exec(store, rule, exec_id="hx1"):
+    program = compile_hal(SCRIPT)
+    store.create_exec(
+        owner_id="user:7", rule_id=rule["rule_id"], rule_revision=rule["revision"],
+        rule_name="n", workflow_index=0, exec_id=exec_id, trigger_event_id="evt-1",
+        trigger_agent="@lily@hashi4", trigger_kind="run.completed", program_blob=program,
+    )
+
+
+def test_enable_rule_atomic_conflict_writes_nothing(store):
+    rule, _ = store.upsert_rule(owner_id="user:7", name="n", script=SCRIPT)
+    store.set_cursor("user:7", 100)
+    with pytest.raises(HalStoreError):
+        store.enable_rule(
+            owner_id="user:7", rule_id=rule["rule_id"],
+            expected_revision=99, baseline_cursor=150,
+        )
+    r = store.get_rule("user:7", rule["rule_id"])
+    assert r["enabled"] == 0
+    assert r["enable_cursor"] is None
+    assert store.get_cursor("user:7") == 100  # owner cursor untouched on conflict
+
+
+def test_enable_rule_anchors_owner_cursor_only_when_absent(store):
+    rule_a, _ = store.upsert_rule(owner_id="user:7", name="a", script=SCRIPT)
+    rule_b, _ = store.upsert_rule(owner_id="user:7", name="b", script=SCRIPT)
+    store.enable_rule(
+        owner_id="user:7", rule_id=rule_a["rule_id"],
+        expected_revision=None, baseline_cursor=42,
+    )
+    assert store.get_cursor("user:7") == 42
+    # A second enable must not move the shared owner cursor (that would drop
+    # already-consumed history for rule A).
+    store.enable_rule(
+        owner_id="user:7", rule_id=rule_b["rule_id"],
+        expected_revision=None, baseline_cursor=99,
+    )
+    assert store.get_cursor("user:7") == 42
+    assert store.get_rule("user:7", rule_a["rule_id"])["enable_cursor"] == 42
+    assert store.get_rule("user:7", rule_b["rule_id"])["enable_cursor"] == 99
+
+
+def test_admit_stage_dispatch_atomic(store):
+    rule, _ = store.upsert_rule(owner_id="user:7", name="n", script=SCRIPT)
+    store.set_enabled("user:7", rule["rule_id"], True)
+    _new_exec(store, rule)
+    res = store.admit_stage_dispatch(
+        owner_id="user:7", rule_id=rule["rule_id"], exec_id="hx1", stage=0,
+        idempotency_key="hal:hx1:0", kind="prompt", target="@lily", payload="hi",
+        pre_state="pending",
+    )
+    assert res == "admitted"
+    assert store.get_receipt("hx1", 0)["state"] == "pending"
+
+
+def test_admit_stage_dispatch_refuses_disabled_rule(store):
+    rule, _ = store.upsert_rule(owner_id="user:7", name="n", script=SCRIPT)
+    _new_exec(store, rule)  # rule never enabled
+    res = store.admit_stage_dispatch(
+        owner_id="user:7", rule_id=rule["rule_id"], exec_id="hx1", stage=0,
+        idempotency_key="hal:hx1:0", kind="prompt", target="@lily", payload="hi",
+        pre_state="pending",
+    )
+    assert res == "rule_disabled"
+    assert store.get_receipt("hx1", 0) is None
+
+
+def test_admit_stage_dispatch_refuses_settled_exec(store):
+    rule, _ = store.upsert_rule(owner_id="user:7", name="n", script=SCRIPT)
+    store.set_enabled("user:7", rule["rule_id"], True)
+    _new_exec(store, rule)
+    store.update_exec("hx1", state="disabled", detail="rule disabled")
+    res = store.admit_stage_dispatch(
+        owner_id="user:7", rule_id=rule["rule_id"], exec_id="hx1", stage=0,
+        idempotency_key="hal:hx1:0", kind="prompt", target="@lily", payload="hi",
+        pre_state="pending",
+    )
+    assert res == "exec_not_active"
+    assert store.get_receipt("hx1", 0) is None
+
+
+def test_admit_stage_dispatch_never_overwrites_terminal_receipt(store):
+    rule, _ = store.upsert_rule(owner_id="user:7", name="n", script=SCRIPT)
+    store.set_enabled("user:7", rule["rule_id"], True)
+    _new_exec(store, rule)
+    store.upsert_receipt(
+        exec_id="hx1", stage=0, idempotency_key="hal:hx1:0", kind="prompt",
+        target="@lily", payload="hi", state="dispatched", detail="accepted",
+    )
+    res = store.admit_stage_dispatch(
+        owner_id="user:7", rule_id=rule["rule_id"], exec_id="hx1", stage=0,
+        idempotency_key="hal:hx1:0", kind="prompt", target="@lily", payload="hi",
+        pre_state="pending",
+    )
+    assert res == "already_terminal"
+    assert store.get_receipt("hx1", 0)["state"] == "dispatched"
+
+
+def test_advance_and_fail_never_overwrite_disabled(store):
+    rule, _ = store.upsert_rule(owner_id="user:7", name="n", script=SCRIPT)
+    _new_exec(store, rule)
+    store.update_exec("hx1", state="disabled", detail="rule disabled")
+    assert store.advance_exec_if_active(
+        owner_id="user:7", exec_id="hx1", stage=1, state="completed"
+    ) is False
+    assert store.fail_exec_if_active(
+        owner_id="user:7", exec_id="hx1", detail="boom"
+    ) is False
+    assert store.get_exec("user:7", "hx1")["state"] == "disabled"
+
+
+def test_concurrent_enable_rule_does_not_corrupt_baselines(store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    rule_a, _ = store.upsert_rule(owner_id="user:7", name="a", script=SCRIPT)
+    rule_b, _ = store.upsert_rule(owner_id="user:7", name="b", script=SCRIPT)
+
+    def enable(rid):
+        store.enable_rule(
+            owner_id="user:7", rule_id=rid, expected_revision=None, baseline_cursor=42
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        list(ex.map(enable, [rule_a["rule_id"], rule_b["rule_id"]]))
+
+    assert store.get_rule("user:7", rule_a["rule_id"])["enable_cursor"] == 42
+    assert store.get_rule("user:7", rule_b["rule_id"])["enable_cursor"] == 42
+    # The shared owner cursor is anchored exactly once, never clobbered.
+    assert store.get_cursor("user:7") == 42
 # HASHI-Fingerprint: hfp_1a8547dce6b446f69a5d6009ef471ff1

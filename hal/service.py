@@ -85,7 +85,7 @@ class HalService:
         self._loop_task: asyncio.Task | None = None
         self._stopping = False
         self._wake = asyncio.Event()
-        self._idle_latch: dict[str, str] = {}  # owner -> last idle evidence run_id
+        self._idle_emitted: dict[str, bool] = {}  # owner -> idle edge emitted for current idle period
 
     # ------------------------------------------------------------------ API
 
@@ -153,52 +153,56 @@ class HalService:
         # rule's event baseline.
         if expected_revision is not None and int(rule["revision"]) != expected_revision:
             raise HalStoreError("rule revision conflict; refresh before saving")
-        if enabled:
-            result = validate_script(rule["script"])
-            if not result["ok"]:
-                raise HalStoreError(f"stored script no longer compiles: {result['error']}")
-            unavailable = [
-                d["message"]
-                for d in result["diagnostics"]
-                if d["kind"] == "entry_event_unavailable"
-            ]
-            if unavailable:
-                raise HalStoreError(
-                    "entry event has no real source yet; " + "; ".join(unavailable)
-                )
-            # Per-rule enable baseline: this rule only matches feed events
-            # committed after the moment it is enabled. The owner cursor alone
-            # cannot express this when a second rule is enabled after events
-            # were already written but before they were consumed.
-            #
-            # Reading the latest feed cursor is REQUIRED, never best-effort: a
-            # stale owner cursor must not be used as an unsafe fallback, because
-            # it could misanchor the new rule and replay history or skip events.
-            # If the feed is unavailable, fail the enable and keep the rule
-            # disabled (its baseline and the existing rules' cursors untouched).
-            try:
-                page = _feed_page(self.session_store, owner_id, -1, 1)
-            except Exception as exc:  # noqa: BLE001
-                raise HalStoreError(
-                    f"cannot establish enable baseline (feed unavailable): {exc}"
-                ) from exc
-            baseline = int(page["next_cursor"])
-            if baseline < 0:
-                baseline = 0
-            self.store.set_rule_enable_cursor(owner_id, rule_id, baseline)
-            if self.store.get_cursor(owner_id) == -1:
-                # Anchor the owner feed cursor at enable time: only events
-                # committed after enabling may trigger this owner's rules.
-                self.store.set_cursor(owner_id, baseline)
-        updated = self.store.set_enabled(
-            owner_id, rule_id, enabled, expected_revision=expected_revision
-        )
         if not enabled:
+            updated = self.store.set_enabled(
+                owner_id, rule_id, enabled, expected_revision=expected_revision
+            )
             # Explicit, consistent settle for unfinished executions: disabling a
             # rule never leaves its in-flight workflows silently active.
             self.store.mark_rule_execs_disabled(
                 owner_id, rule_id, "rule disabled while execution in progress"
             )
+            self._note_rules_changed()
+            return updated
+
+        # --- enable path ---
+        result = validate_script(rule["script"])
+        if not result["ok"]:
+            raise HalStoreError(f"stored script no longer compiles: {result['error']}")
+        unavailable = [
+            d["message"]
+            for d in result["diagnostics"]
+            if d["kind"] == "entry_event_unavailable"
+        ]
+        if unavailable:
+            raise HalStoreError(
+                "entry event has no real source yet; " + "; ".join(unavailable)
+            )
+
+        # Reading the latest feed cursor is REQUIRED, never best-effort: a stale
+        # owner cursor must not be used as an unsafe fallback. If the feed is
+        # unavailable, fail the enable and keep the rule disabled (its baseline
+        # and the existing rules' cursors untouched).
+        try:
+            page = _feed_page(self.session_store, owner_id, -1, 1)
+        except Exception as exc:  # noqa: BLE001
+            raise HalStoreError(
+                f"cannot establish enable baseline (feed unavailable): {exc}"
+            ) from exc
+        baseline = int(page["next_cursor"])
+        if baseline < 0:
+            baseline = 0
+
+        # Atomic enable: revision check, per-rule enable baseline, enabled-state
+        # update and the initial owner-cursor anchor happen in ONE transaction.
+        updated = self.store.enable_rule(
+            owner_id=owner_id,
+            rule_id=rule_id,
+            expected_revision=expected_revision,
+            baseline_cursor=baseline,
+        )
+        if updated is None:
+            raise HalStoreError("rule not found")
         self._note_rules_changed()
         return updated
 
@@ -352,11 +356,22 @@ class HalService:
             await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
             return await self._recover_executions(owner_id, rules, execs_by_id, receipts)
 
-        active_at_cycle_start = await asyncio.to_thread(_active_runs, self.session_store, owner_id)
-        if active_at_cycle_start:
-            self._idle_latch.pop(owner_id, None)
+        # #system_idle is only consulted when some enabled rule actually needs
+        # it; otherwise no active-run query is made at all. The active state is
+        # sampled ONCE per cycle (never per event) and the edge fires once per
+        # idle period, so paginating a backlog of already-finished runs cannot
+        # multiply the edge or re-dispatch an idle rule.
+        needs_idle = any(_rule_needs_idle(r) for r in rules)
+        now_active: bool | None = None
+        if needs_idle:
+            now_active = await asyncio.to_thread(_active_runs, self.session_store, owner_id)
+            if now_active:
+                # Active again: clear the idle-period latch so the next true
+                # active->idle transition can fire exactly once.
+                self._idle_emitted.pop(owner_id, None)
 
-        idle_emitted_this_page = False
+        saw_terminal_event = False
+        first_terminal: HalTrigger | None = None
         for event in events:
             trigger = feed_event_hal_event(event)
             if trigger is not None and trigger.agent_identity:
@@ -369,31 +384,35 @@ class HalService:
                     owner_id, trigger, rules, execs_by_id, receipts, consumed
                 ):
                     activity = True
-            # Idle edge: real evidence only — a non-automation run became
-            # terminal and no runs remain active.
-            if (
-                not idle_emitted_this_page
-                and trigger is not None
-                and not trigger.automation_origin
-                and not await asyncio.to_thread(_active_runs, self.session_store, owner_id)
+                if (
+                    not trigger.automation_origin
+                    and trigger.event in _TERMINAL_HAL_EVENTS
+                ):
+                    saw_terminal_event = True
+                    if first_terminal is None:
+                        first_terminal = trigger
+
+        if (
+            needs_idle
+            and saw_terminal_event
+            and first_terminal is not None
+            and now_active is False
+            and not self._idle_emitted.get(owner_id, False)
+        ):
+            idle = HalTrigger(
+                event=EVENT_SYSTEM_IDLE,
+                agent_identity=None,
+                feed_event_id=first_terminal.feed_event_id,
+                feed_kind="system_idle",
+                run_idempotency_key=None,
+                automation_origin=False,
+                feed_cursor=first_terminal.feed_cursor,
+            )
+            if await self._apply_trigger(
+                owner_id, idle, rules, execs_by_id, receipts, consumed
             ):
-                run_id = _event_run_id(event)
-                if run_id != self._idle_latch.get(owner_id):
-                    idle = HalTrigger(
-                        event=EVENT_SYSTEM_IDLE,
-                        agent_identity=None,
-                        feed_event_id=trigger.feed_event_id,
-                        feed_kind="system_idle",
-                        run_idempotency_key=None,
-                        automation_origin=False,
-                        feed_cursor=trigger.feed_cursor,
-                    )
-                    if await self._apply_trigger(
-                        owner_id, idle, rules, execs_by_id, receipts, consumed
-                    ):
-                        activity = True
-                    self._idle_latch[owner_id] = run_id
-                    idle_emitted_this_page = True
+                activity = True
+            self._idle_emitted[owner_id] = True
 
         await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
 
@@ -579,13 +598,7 @@ class HalService:
         """Dispatch one stage once; crash-safe and never double-executing."""
         exec_id = directive.exec_id
         stage = directive.stage
-        # A concurrent disable may have settled this execution between planning
-        # and now. Re-check persisted execution and rule state before admitting
-        # any new side effect; never overwrite a concurrent settlement.
-        if not await self._exec_still_active(owner_id, exec_id):
-            return False
-        if not await self._rule_enabled(owner_id, exec_row["rule_id"]):
-            return False
+        rule_id = str(exec_row["rule_id"])
         existing = receipts.get((exec_id, stage))
         if existing is not None and existing["state"] in (RECEIPT_DISPATCHED, RECEIPT_FAILED):
             return False
@@ -603,15 +616,12 @@ class HalService:
                 detail="command outcome unknown after interruption; manual verification advised",
             )
             await asyncio.to_thread(
-                self.store.update_exec, exec_id, state=EXEC_FAILED,
+                self.store.fail_exec_if_active, owner_id=owner_id, exec_id=exec_id,
                 detail="native command outcome unknown after interruption",
             )
             return False
 
         if directive.unbound_reason:
-            result = DispatchResult(
-                accepted=False, transient=False, detail=directive.unbound_reason
-            )
             await asyncio.to_thread(
                 self.store.upsert_receipt,
                 exec_id=exec_id,
@@ -621,25 +631,33 @@ class HalService:
                 target=directive.target,
                 payload=directive.payload,
                 state=RECEIPT_FAILED,
-                detail=result.detail,
+                detail=directive.unbound_reason,
             )
             await asyncio.to_thread(
-                self.store.update_exec, exec_id, state=EXEC_FAILED, detail=result.detail
+                self.store.fail_exec_if_active, owner_id=owner_id, exec_id=exec_id,
+                detail=directive.unbound_reason,
             )
             return False
 
+        # Atomic admission: rule-enabled + exec-active + pre-state receipt in
+        # ONE transaction. A concurrent disable can no longer land between the
+        # state check and the receipt write, so "disable returned" implies "no
+        # new side effect will be admitted".
         pre_state = RECEIPT_PENDING if directive.kind == "prompt" else RECEIPT_UNKNOWN
-        await asyncio.to_thread(
-            self.store.upsert_receipt,
+        admission = await asyncio.to_thread(
+            self.store.admit_stage_dispatch,
+            owner_id=owner_id,
+            rule_id=rule_id,
             exec_id=exec_id,
             stage=stage,
             idempotency_key=directive.idempotency_key,
             kind=directive.kind,
             target=directive.target,
             payload=directive.payload,
-            state=pre_state,
-            detail=None,
+            pre_state=pre_state,
         )
+        if admission != "admitted":
+            return False
 
         if directive.kind == "prompt":
             result = await self._prompt_result(exec_row, directive, exec_id, stage)
@@ -660,10 +678,6 @@ class HalService:
                 state=RECEIPT_DISPATCHED,
                 detail=result.detail,
             )
-            if not await self._exec_still_active(owner_id, exec_id):
-                # The side effect was admitted, but the execution has been
-                # settled concurrently; never overwrite that settlement.
-                return True
             program = program_from_json(json.loads(exec_row["program_blob"]))
             workflow = program.workflows[int(exec_row["workflow_index"])]
             next_stage, state = stage_after_dispatch(stage, len(workflow))
@@ -677,9 +691,11 @@ class HalService:
                 detail = "command accepted; completion not verified"
             elif state == EXEC_ACTIVE and next_stage < len(workflow):
                 detail = unavailable_wait_detail(workflow[next_stage].event)
+            # Advance only if STILL active; never overwrite a concurrent settle.
             await asyncio.to_thread(
-                self.store.update_exec,
-                exec_id,
+                self.store.advance_exec_if_active,
+                owner_id=owner_id,
+                exec_id=exec_id,
                 stage=next_stage,
                 state=state,
                 detail=detail,
@@ -712,7 +728,8 @@ class HalService:
         )
         if not result.transient:
             await asyncio.to_thread(
-                self.store.update_exec, exec_id, state=EXEC_FAILED, detail=result.detail
+                self.store.fail_exec_if_active, owner_id=owner_id, exec_id=exec_id,
+                detail=result.detail,
             )
         return False
 
@@ -743,9 +760,9 @@ class HalService:
             return  # retry pass handles the dispatch
         if receipt["state"] == RECEIPT_FAILED:
             await asyncio.to_thread(
-                self.store.update_exec,
-                exec_row["exec_id"],
-                state=EXEC_FAILED,
+                self.store.fail_exec_if_active,
+                owner_id=owner_id,
+                exec_id=exec_row["exec_id"],
                 detail=receipt.get("detail") or "dispatch failed",
             )
             return
@@ -758,8 +775,9 @@ class HalService:
             elif state == EXEC_ACTIVE and next_stage < len(workflow):
                 detail = unavailable_wait_detail(workflow[next_stage].event)
             await asyncio.to_thread(
-                self.store.update_exec,
-                exec_row["exec_id"],
+                self.store.advance_exec_if_active,
+                owner_id=owner_id,
+                exec_id=exec_row["exec_id"],
                 stage=next_stage,
                 state=state,
                 detail=detail,
@@ -807,15 +825,17 @@ class HalService:
                 directive = directive_for_exec_stage(exec_row)
                 if directive is None:
                     await asyncio.to_thread(
-                        self.store.update_exec, exec_row["exec_id"],
-                        state=EXEC_FAILED,
+                        self.store.fail_exec_if_active,
+                        owner_id=owner_id,
+                        exec_id=exec_row["exec_id"],
                         detail="cannot reconstruct dispatch for current stage",
                     )
                     continue
                 if getattr(directive, "unbound_reason", None):
                     await asyncio.to_thread(
-                        self.store.update_exec, exec_row["exec_id"],
-                        state=EXEC_FAILED,
+                        self.store.fail_exec_if_active,
+                        owner_id=owner_id,
+                        exec_id=exec_row["exec_id"],
                         detail=directive.unbound_reason,
                     )
                     continue
@@ -841,7 +861,8 @@ class HalService:
                     detail="command outcome unknown after interruption; manual verification advised",
                 )
                 await asyncio.to_thread(
-                    self.store.update_exec, exec_row["exec_id"], state=EXEC_FAILED,
+                    self.store.fail_exec_if_active, owner_id=owner_id,
+                    exec_id=exec_row["exec_id"],
                     detail="native command outcome unknown after interruption",
                 )
                 continue
@@ -862,7 +883,8 @@ class HalService:
                     detail="prompt retry limit exceeded",
                 )
                 await asyncio.to_thread(
-                    self.store.update_exec, exec_row["exec_id"], state=EXEC_FAILED,
+                    self.store.fail_exec_if_active, owner_id=owner_id,
+                    exec_id=exec_row["exec_id"],
                     detail="prompt retry limit exceeded",
                 )
                 continue
@@ -907,6 +929,27 @@ def _active_runs(session_store, owner_id: str) -> bool:
 
 def _event_run_id(event: Mapping[str, Any]) -> str:
     return str(event.get("run_id") or event.get("event_id") or "")
+
+
+# Non-automation run-terminal HAL events that count as real evidence for the
+# active->idle transition. The idle edge is only ever derived from these.
+_TERMINAL_HAL_EVENTS = {"#turn_finish", "#turn_error"}
+
+
+def _rule_needs_idle(rule: dict[str, Any]) -> bool:
+    """True when an enabled rule has a workflow whose entry is ``#system_idle``.
+
+    Idle is an entry-only event (system events carry no per-workflow correlation
+    evidence), so only entry events need to be consulted. When no enabled rule
+    needs idle, no active-run query is performed at all.
+    """
+    program = rule.get("program")
+    if program is None:
+        return False
+    for workflow in program.workflows:
+        if workflow and workflow[0].event == EVENT_SYSTEM_IDLE:
+            return True
+    return False
 
 
 def _flatten_consumed(consumed: dict[str, set[str]]) -> set[tuple[str, str]]:

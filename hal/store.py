@@ -18,6 +18,9 @@ from typing import Any, Mapping
 
 from hal.runtime import (
     EXEC_ACTIVE,
+    EXEC_FAILED,
+    RECEIPT_DISPATCHED,
+    RECEIPT_FAILED,
     program_to_json,
 )
 
@@ -268,6 +271,53 @@ class HalStore:
             )
             self._conn.commit()
 
+    def enable_rule(
+        self,
+        *,
+        owner_id: str,
+        rule_id: str,
+        expected_revision: int | None,
+        baseline_cursor: int,
+    ) -> dict[str, Any] | None:
+        """Atomically enable one rule.
+
+        The revision check, per-rule enable baseline, enabled-state update and
+        the initial owner-cursor anchor all happen under ONE lock acquisition and
+        ONE commit, so a concurrent enable/edit cannot interleave and corrupt a
+        baseline. Raises :class:`HalStoreError` on revision conflict; returns
+        ``None`` when the rule does not exist. On conflict nothing is written,
+        including the owner cursor.
+        """
+        now = _now()
+        with _LOCK:
+            row = self._conn.execute(
+                "SELECT revision FROM hal_rules WHERE rule_id=? AND owner_id=?",
+                (rule_id, owner_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if expected_revision is not None and int(row["revision"]) != expected_revision:
+                raise HalStoreError("rule revision conflict; refresh before saving")
+            self._conn.execute(
+                "UPDATE hal_rules SET enabled=1, enable_cursor=?, updated_at=? "
+                "WHERE rule_id=? AND owner_id=?",
+                (int(baseline_cursor), now, rule_id, owner_id),
+            )
+            # Anchor the owner cursor only when absent; never overwrite an
+            # existing owner cursor, which would drop already-consumed history
+            # for other enabled rules on the same owner.
+            self._conn.execute(
+                "INSERT INTO hal_feed_cursor (owner_id, cursor) VALUES (?,?) "
+                "ON CONFLICT(owner_id) DO NOTHING",
+                (owner_id, int(baseline_cursor)),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM hal_rules WHERE rule_id=? AND owner_id=?",
+                (rule_id, owner_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def enabled_owner_ids(self) -> list[str]:
         with _LOCK:
             rows = self._conn.execute(
@@ -360,6 +410,53 @@ class HalStore:
                 values,
             )
             self._conn.commit()
+
+    def advance_exec_if_active(
+        self,
+        *,
+        owner_id: str,
+        exec_id: str,
+        stage: int,
+        state: str,
+        detail: str | None = None,
+    ) -> bool:
+        """Conditionally advance an execution only if it is still active.
+
+        A concurrent disable settles the execution to ``disabled``; this update
+        must never overwrite that settlement. Returns ``True`` when the update
+        applied and ``False`` when the execution was settled concurrently.
+        """
+        now = _now()
+        with _LOCK:
+            cursor = self._conn.execute(
+                "UPDATE hal_workflow_execs SET stage=?, state=?, detail=?, updated_at=? "
+                "WHERE exec_id=? AND owner_id=? AND state=?",
+                (int(stage), state, detail, now, exec_id, owner_id, EXEC_ACTIVE),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
+
+    def fail_exec_if_active(
+        self,
+        *,
+        owner_id: str,
+        exec_id: str,
+        detail: str | None = None,
+    ) -> bool:
+        """Conditionally fail an execution only if it is still active.
+
+        Never overwrites a concurrent disable/settlement. Returns ``True`` when
+        the execution was transitioned to ``failed``.
+        """
+        now = _now()
+        with _LOCK:
+            cursor = self._conn.execute(
+                "UPDATE hal_workflow_execs SET state=?, detail=?, updated_at=? "
+                "WHERE exec_id=? AND owner_id=? AND state=?",
+                (EXEC_FAILED, detail, now, exec_id, owner_id, EXEC_ACTIVE),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
 
     def get_exec(self, owner_id: str, exec_id: str) -> dict[str, Any] | None:
         with _LOCK:
@@ -462,6 +559,76 @@ class HalStore:
                 ),
             )
             self._conn.commit()
+
+    def admit_stage_dispatch(
+        self,
+        *,
+        owner_id: str,
+        rule_id: str,
+        exec_id: str,
+        stage: int,
+        idempotency_key: str,
+        kind: str,
+        target: str | None,
+        payload: str,
+        pre_state: str,
+        detail: str | None = None,
+    ) -> str:
+        """Atomically admit one stage dispatch.
+
+        In a single lock acquisition + commit: verify the rule is still enabled
+        and the execution is still active, then write the pre-dispatch receipt.
+        This closes the window where a concurrent disable lands between the
+        state check and the receipt write.
+
+        Returns one of ``admitted``, ``rule_disabled``, ``exec_not_active`` or
+        ``already_terminal``. A terminal (dispatched/failed) receipt is never
+        overwritten; the pre-state write never resets retry bookkeeping.
+        """
+        now = _now()
+        with _LOCK:
+            rule_row = self._conn.execute(
+                "SELECT enabled FROM hal_rules WHERE rule_id=? AND owner_id=?",
+                (rule_id, owner_id),
+            ).fetchone()
+            if rule_row is None or not int(rule_row["enabled"]):
+                return "rule_disabled"
+            exec_row = self._conn.execute(
+                "SELECT state FROM hal_workflow_execs WHERE exec_id=? AND owner_id=?",
+                (exec_id, owner_id),
+            ).fetchone()
+            if exec_row is None or str(exec_row["state"]) != EXEC_ACTIVE:
+                return "exec_not_active"
+            existing = self._conn.execute(
+                "SELECT state FROM hal_dispatch_receipts WHERE exec_id=? AND stage=?",
+                (exec_id, stage),
+            ).fetchone()
+            if existing is not None and str(existing["state"]) in (
+                RECEIPT_DISPATCHED,
+                RECEIPT_FAILED,
+            ):
+                return "already_terminal"
+            self._conn.execute(
+                "INSERT INTO hal_dispatch_receipts (exec_id, stage, idempotency_key, "
+                "kind, target, payload, state, detail, attempts, next_retry_at, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,NULL,?,?) "
+                "ON CONFLICT(exec_id, stage) DO UPDATE SET "
+                "state=excluded.state, detail=excluded.detail, updated_at=excluded.updated_at",
+                (
+                    exec_id,
+                    stage,
+                    idempotency_key,
+                    kind,
+                    target,
+                    payload,
+                    pre_state,
+                    detail,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            return "admitted"
 
     def get_receipt(self, exec_id: str, stage: int) -> dict[str, Any] | None:
         with _LOCK:
