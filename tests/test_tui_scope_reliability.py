@@ -173,7 +173,7 @@ async def test_multiline_composer_sends_complete_pasted_block_with_timestamp(tmp
 
 
 @pytest.mark.asyncio
-async def test_composer_paste_stages_clipboard_image_for_next_caption(tmp_path, monkeypatch):
+async def test_attach_clipboard_stages_image_for_next_caption(tmp_path, monkeypatch):
     app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
     client = _Client([_agent("akane")])
     app.api = client
@@ -184,9 +184,7 @@ async def test_composer_paste_stages_clipboard_image_for_next_caption(tmp_path, 
         app._load_initial_transcript = lambda *_args, **_kwargs: None
         app._select_agent(client.agents[0], client=client)
         field = app.query_one(ChatInput)
-        field.focus()
-        await pilot.press("ctrl+v")
-        await pilot.pause(0.3)
+        await app._handle_attach_cmd("/attach clipboard")
 
         assert app._pending_attachment is not None
         field.value = "What is in this image?"
@@ -196,6 +194,77 @@ async def test_composer_paste_stages_clipboard_image_for_next_caption(tmp_path, 
         assert client.sent[0][0:2] == ("akane", "What is in this image?")
         assert client.sent[0][2]["attachment"]["content_b64"] == base64.b64encode(clipboard_image).decode("ascii")
         assert client.sent[0][2]["originated_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_shift_enter_keeps_multiline_unicode_code_as_one_submission(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = "```python\nprint('你好')"
+        field.focus()
+        await pilot.press("shift+enter")
+        field.insert("\n```")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][0:2] == ("akane", "```python\nprint('你好')\n\n```")
+        assert len(client.sent) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    (
+        "// keep this comment\nconst retry = true;",
+        "/* preserve this block\n   without becoming a command */",
+        "/usr/local/bin/tool --preview\n# this is code, not an attachment",
+        "/help document this block\nwithout invoking local help",
+    ),
+)
+async def test_multiline_comment_or_path_is_sent_as_plain_text(tmp_path, message):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = message
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][0:2] == ("akane", message)
+        assert field.value == ""
+
+
+def test_chat_input_leaves_terminal_paste_shortcuts_unbound():
+    keys = {binding.key for binding in ChatInput.BINDINGS}
+    assert "ctrl+v" not in keys
+    assert "ctrl+shift+v" not in keys
+
+
+@pytest.mark.asyncio
+async def test_local_submit_failure_keeps_unsent_draft(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    async with app.run_test() as pilot:
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.value = "keep this draft"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert client.sent == []
+        assert field.value == "keep this draft"
 
 
 @pytest.mark.asyncio

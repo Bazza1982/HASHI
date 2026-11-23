@@ -10,7 +10,6 @@ import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import uuid4
 
 from rich.console import Group
@@ -40,7 +39,12 @@ from orchestrator.say_command import (
     parse_say_selection,
     select_recent_replies,
 )
-from tui.api_client import TUI_TERMINAL_RUN_STATES, TuiApiClient, run_failure_text
+from tui.api_client import (
+    TUI_TERMINAL_RUN_STATES,
+    TuiApiClient,
+    is_tui_slash_command,
+    run_failure_text,
+)
 from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_bytes, snapshot_path
 from tui.audio import TuiAudioError, decode_tui_audio, play_ogg_bytes
 from tui.clipboard import copy_to_windows_clipboard, read_windows_clipboard_png
@@ -288,19 +292,10 @@ class ChatInput(TextArea):
             self.input = input
             self.value = input.value
 
-    class ClipboardImageRequested(Message):
-        """Ask the App to inspect the host clipboard for an image asynchronously."""
-
-        def __init__(self, input: "ChatInput") -> None:
-            super().__init__()
-            self.input = input
-
     BINDINGS = [
         Binding("enter", "submit", "Send", show=False, priority=True),
         Binding("ctrl+enter", "submit", "Send", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "New line", show=False, priority=True),
-        Binding("ctrl+v", "paste_clipboard", "Paste", show=False, priority=True),
-        Binding("ctrl+shift+v", "paste_clipboard", "Paste", show=False, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -325,6 +320,8 @@ class ChatInput(TextArea):
     @value.setter
     def value(self, value: str) -> None:
         self.load_text(str(value))
+        lines = self.text.split("\n")
+        self.move_cursor((len(lines) - 1, len(lines[-1])))
 
     @property
     def cursor_position(self) -> int:
@@ -349,9 +346,6 @@ class ChatInput(TextArea):
     def action_insert_newline(self) -> None:
         result = self.insert("\n")
         self.move_cursor(result.end_location)
-
-    def action_paste_clipboard(self) -> None:
-        self.post_message(self.ClipboardImageRequested(self))
 
 
 class CommandPreview(Static):
@@ -1782,8 +1776,6 @@ class HASHITuiApp(App):
             input_box.value = ""
             return
         normalized = text
-        if normalized.startswith("/ "):
-            normalized = "/" + normalized[2:].lstrip()
 
         # Onboarding mode
         if self._onboarding:
@@ -1791,10 +1783,10 @@ class HASHITuiApp(App):
             await self._handle_onboarding_input(normalized.strip())
             return
 
-        if normalized.startswith("/"):
+        is_command = is_tui_slash_command(normalized)
+        if is_command:
             resolved = self._resolve_submitted_command(normalized)
             if resolved is None:
-                input_box.value = ""
                 self._hide_command_preview()
                 chat = self.query_one("#chat-history", ChatHistory)
                 command = normalized.split(maxsplit=1)[0]
@@ -1807,56 +1799,61 @@ class HASHITuiApp(App):
                 return
             normalized = resolved
 
-        input_box.value = ""
         self._hide_command_preview()
 
+        # Commands have an explicit local result. Plain text remains in the
+        # composer until it has passed local target and attachment checks.
+        command_name = normalized.partition(" ")[0][1:].casefold()
+        if is_command and command_name in TUI_COMMAND_HELP:
+            input_box.value = ""
+
         # TUI local commands
-        if normalized == "/to" or normalized.startswith("/to "):
+        if is_command and (normalized == "/to" or normalized.startswith("/to ")):
             await self._handle_to(normalized)
             return
-        if normalized == "/attach" or normalized.startswith("/attach "):
+        if is_command and (normalized == "/attach" or normalized.startswith("/attach ")):
             await self._handle_attach_cmd(normalized)
             return
-        if normalized == "/say" or normalized.startswith("/say "):
+        if is_command and (normalized == "/say" or normalized.startswith("/say ")):
             self._handle_say_cmd(normalized)
             return
-        if normalized == "/voice" or normalized.startswith("/voice "):
+        if is_command and (normalized == "/voice" or normalized.startswith("/voice ")):
             await self._handle_voice_cmd(normalized)
             return
-        if normalized == "/agents":
+        if is_command and normalized == "/agents":
             await self._handle_agents_cmd()
             return
-        if normalized == "/sidepanel" or normalized.startswith("/sidepanel "):
+        if is_command and (normalized == "/sidepanel" or normalized.startswith("/sidepanel ")):
             await self._handle_sidepanel_cmd(normalized)
             return
-        if normalized == "/tui" or normalized.startswith("/tui "):
+        if is_command and (normalized == "/tui" or normalized.startswith("/tui ")):
             self._handle_tui_cmd(normalized)
             return
-        if normalized == "/help" or normalized.startswith("/help "):
+        if is_command and (normalized == "/help" or normalized.startswith("/help ")):
             self._handle_help_cmd(normalized)
             return
-        if normalized == "/connect":
+        if is_command and normalized == "/connect":
             self._start_connection()
             return
-        if normalized == "/theme" or normalized.startswith("/theme "):
+        if is_command and (normalized == "/theme" or normalized.startswith("/theme ")):
             self._handle_theme_cmd(normalized)
             return
-        if normalized == "/layout" or normalized.startswith("/layout "):
+        if is_command and (normalized == "/layout" or normalized.startswith("/layout ")):
             self._handle_layout_cmd(normalized)
             return
-        if normalized == "/instance" or normalized.startswith("/instance "):
+        if is_command and (normalized == "/instance" or normalized.startswith("/instance ")):
             await self._handle_instance_cmd(normalized)
             return
-        if normalized == "/clear":
+        if is_command and normalized == "/clear":
             self.clear_selection()
             chat_history = self.query_one("#chat-history", ChatHistory)
             chat_history.clear()
             chat_history.resume_auto_scroll()
             return
-        if normalized == "/quit":
+        if is_command and normalized == "/quit":
             await self._shutdown()
             return
-        if normalized == "/log" or normalized.startswith("/log "):
+        if is_command and (normalized == "/log" or normalized.startswith("/log ")):
             self._handle_log_cmd(normalized)
             return
 
@@ -1871,12 +1868,13 @@ class HASHITuiApp(App):
         # Resolved slash commands (e.g. /sys, /workzone, /reboot) are dispatched
         # to the active agent verbatim and are never attachment paths. Only plain
         # text (including ~/ ./ ../ UNC and Windows drive paths) may be staged.
-        if not normalized.startswith("/"):
+        if not is_command:
             workzone_ref, workzone_caption = self._parse_workzone_reference(normalized)
             if workzone_ref is not None:
                 if not self.current_agent or self.current_agent_display == "ALL":
                     chat.write(markup("[hashi.error]Select one Agent before attaching a Workzone file.[/]"))
                     return
+                input_box.value = ""
                 chat.write(chat_message_renderable("user", "You", workzone_caption or f"Attached: {Path(workzone_ref).name}"))
                 self._send_attachment_message(
                     workzone_caption,
@@ -1891,10 +1889,9 @@ class HASHITuiApp(App):
                 )
                 return
             if self._looks_like_dropped_path(normalized):
-                await self._stage_path_attachment(normalized)
+                if await self._stage_path_attachment(normalized):
+                    input_box.value = ""
                 return
-
-        chat.write(chat_message_renderable("user", "You", normalized))
 
         if self.current_agent_display == "ALL":
             # Broadcast to all active agents
@@ -1902,6 +1899,8 @@ class HASHITuiApp(App):
             if not targets:
                 chat.write(markup("[hashi.error]No active Agents are available on the current instance; nothing was sent.[/]"))
                 return
+            input_box.value = ""
+            chat.write(chat_message_renderable("user", "You", normalized))
             self._play_message_sound("sent")
             self._send_broadcast(
                 normalized,
@@ -1916,54 +1915,57 @@ class HASHITuiApp(App):
         if not self.current_agent:
             chat.write(markup("[yellow]No agent selected. Use /to <name> first.[/]"))
             return
-        else:
-            self._play_message_sound("sent")
-            pending = self._pending_attachment
-            if pending is not None:
-                if (
-                    pending.generation != self._connection_generation
-                    or pending.instance_id != self.current_instance_id
-                    or pending.agent != self.current_agent.casefold()
-                ):
-                    self._pending_attachment = None
-                    chat.write(markup("[hashi.error]The pending attachment belonged to an earlier target and was cleared; nothing was sent.[/]"))
-                    return
+        pending = self._pending_attachment
+        if pending is not None:
+            if (
+                pending.generation != self._connection_generation
+                or pending.instance_id != self.current_instance_id
+                or pending.agent != self.current_agent.casefold()
+            ):
                 self._pending_attachment = None
-                self._send_attachment_message(
-                    normalized,
-                    self.current_agent,
-                    self.api,
-                    self._connection_generation,
-                    self.current_instance_id,
-                    self._ui_language,
-                    attachment=pending,
-                    workzone_ref=None,
-                    originated_at=originated_at,
-                )
+                chat.write(markup("[hashi.error]The pending attachment belonged to an earlier target and was cleared; nothing was sent.[/]"))
                 return
-            self._submission_sequence += 1
-            submission_ref = (
-                self._connection_generation,
-                self.current_agent,
-                self._submission_sequence,
-            )
-            self._latest_submission_ref = submission_ref
-            self._send_message(
+            input_box.value = ""
+            chat.write(chat_message_renderable("user", "You", normalized))
+            self._play_message_sound("sent")
+            self._pending_attachment = None
+            self._send_attachment_message(
                 normalized,
                 self.current_agent,
                 self.api,
                 self._connection_generation,
+                self.current_instance_id,
                 self._ui_language,
-                submission_ref,
-                originated_at,
+                attachment=pending,
+                workzone_ref=None,
+                originated_at=originated_at,
             )
+            return
+        input_box.value = ""
+        chat.write(chat_message_renderable("user", "You", normalized))
+        self._play_message_sound("sent")
+        self._submission_sequence += 1
+        submission_ref = (
+            self._connection_generation,
+            self.current_agent,
+            self._submission_sequence,
+        )
+        self._latest_submission_ref = submission_ref
+        self._send_message(
+            normalized,
+            self.current_agent,
+            self.api,
+            self._connection_generation,
+            self._ui_language,
+            submission_ref,
+            originated_at,
+        )
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Keep palette matching while the composer accepts complete text blocks."""
 
         if isinstance(event.text_area, ChatInput):
-            # Keep the established App hook observable for TUI customizations.
-            self.on_input_changed(SimpleNamespace(value=event.text_area.value))
+            self._on_composer_changed(event.text_area.value)
 
     def on_input_changed(self, event: Input.Changed):
         """Show command syntax first, then valid parameter completions."""
@@ -3071,6 +3073,8 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     @staticmethod
     def _looks_like_dropped_path(text: str) -> bool:
         value = str(text or "").strip()
+        if "\n" in value or "\r" in value:
+            return False
         return bool(
             value.startswith(("/", "./", "../", "~", "\\\\", '"'))
             or (len(value) >= 3 and value[0].isalpha() and value[1:3] in {":\\", ":/"})
@@ -3448,17 +3452,6 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             return False
         chat.write(markup("[hashi.accent]✓ Clipboard image attached. Type the accompanying message to submit it.[/]"))
         return True
-
-    async def on_chat_input_clipboard_image_requested(
-        self, event: ChatInput.ClipboardImageRequested
-    ) -> None:
-        """Prefer an image attachment on paste, retaining normal text paste otherwise."""
-
-        payload = await asyncio.to_thread(read_windows_clipboard_png)
-        if payload is not None:
-            await self._stage_clipboard_image(payload)
-            return
-        event.input.action_paste()
 
     async def _handle_attach_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)

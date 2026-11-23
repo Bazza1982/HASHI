@@ -6,7 +6,66 @@ import json
 
 import pytest
 
-from tui.api_client import TuiApiClient
+from tui.api_client import TuiApiClient, is_tui_slash_command
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("/mode flex", True),
+        ("/effortt", True),
+        ("// a code comment", False),
+        ("/* a code comment */", False),
+        ("/usr/local/bin/tool", False),
+        ("/mode flex\n# multiline input", False),
+        ("/help composer's text\nnot a command", False),
+    ),
+)
+def test_tui_command_classifier_distinguishes_commands_from_code_and_paths(text, expected):
+    assert is_tui_slash_command(text) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    (
+        "// preserve this comment\nconst complete = true;",
+        "/* preserve this block\nwithout a command invocation */",
+        "/usr/local/bin/tool\n# preserve as text",
+    ),
+)
+async def test_tui_api_client_sends_multiline_slash_prefixed_content_as_text_run(
+    monkeypatch, text,
+):
+    client = TuiApiClient("http://127.0.0.1:18800")
+    calls = []
+
+    async def request(method, path, *, json_body=None, timeout=10, pinned_base=None):
+        calls.append((method, path, json_body))
+        if path == "/api/v1/capabilities":
+            return {
+                "ok": True,
+                "session_api_version": "1.0",
+                "frontend_contract_versions": {"ingress": 2},
+                "tui_session_ingress": {
+                    "version": 1,
+                    "primary_session": True,
+                    "text_runs": True,
+                    "command_invocations": True,
+                },
+            }
+        if path == "/api/v1/agents/akane/primary-session":
+            return {"ok": True, "session": {"session_id": "ses-1", "context_generation": 7}}
+        if path == "/api/v1/sessions/ses-1/runs":
+            return {"ok": True, "session_id": "ses-1", "run_id": "run-1"}
+        raise AssertionError(f"unexpected route: {path}")
+
+    monkeypatch.setattr(client, "_direct_request", request)
+    result = await client.send_chat("akane", text, client_id="tui-1")
+
+    assert result["run_id"] == "run-1"
+    assert calls[-1][1] == "/api/v1/sessions/ses-1/runs"
+    assert calls[-1][2]["message"]["content"] == [{"type": "text", "text": text}]
 
 
 @pytest.mark.asyncio

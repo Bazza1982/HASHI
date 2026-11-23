@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 from uuid import uuid4
@@ -24,12 +25,29 @@ logger = logging.getLogger(__name__)
 TUI_TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
 )
+_TUI_COMMAND_TEXT = re.compile(r"/[A-Za-z][A-Za-z0-9_-]*(?:[ \t]+.*)?\Z")
 
 
 def _originated_at_now() -> str:
     """Return the RFC 3339 timestamp required by Session Run admission."""
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def is_tui_slash_command(text: str) -> bool:
+    """Return whether one single-line value is an unambiguous TUI command.
+
+    Code comments and POSIX paths can begin with ``/`` too.  Treat only a
+    command-shaped first line as a command so the TUI and its API client make
+    the same ingress choice.
+    """
+
+    value = str(text or "")
+    return (
+        "\n" not in value
+        and "\r" not in value
+        and bool(_TUI_COMMAND_TEXT.fullmatch(value))
+    )
 
 
 def run_failure_text(payload: dict) -> str:
@@ -442,7 +460,7 @@ class TuiApiClient:
             capabilities = await self.capabilities_info()
             versions = capabilities.get("frontend_contract_versions")
             tui_ingress = capabilities.get("tui_session_ingress")
-            is_slash_command = text.strip().startswith("/")
+            is_slash_command = is_tui_slash_command(text)
             command_name, command_arguments = parse_slash_command_text(text)
             supports_canonical_ingress = (
                 capabilities.get("ok")

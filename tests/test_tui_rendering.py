@@ -224,15 +224,7 @@ async def test_tui_language_balanced_logo_and_command_preview(tmp_path):
     }
 
 
-async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path, monkeypatch):
-    input_changes = asyncio.Queue()
-    original_input_changed = HASHITuiApp.on_input_changed
-
-    def input_changed(app, event):
-        original_input_changed(app, event)
-        input_changes.put_nowait((app, event.value))
-
-    monkeypatch.setattr(HASHITuiApp, "on_input_changed", input_changed)
+async def test_tui_command_preview_discovers_dynamic_parameters_in_both_languages(tmp_path):
     app = HASHITuiApp(bridge_home=tmp_path, launch_instance_id="HASHI1")
     app._schedule_startup_sequence = lambda: None
 
@@ -260,12 +252,7 @@ async def test_tui_command_preview_discovers_dynamic_parameters_in_both_language
 
         async def change_input_value(value):
             input_box.value = value
-            # Pilot.pause drains messages queued at its start. A Changed
-            # message may still be bubbling from the input to the App.
-            async with asyncio.timeout(5):
-                while await input_changes.get() != (app, value):
-                    pass
-            await pilot.pause()
+            await pilot.pause(0.05)
 
         app._handle_tui_cmd("/tui language zh")
         await change_input_value("/eff")
@@ -395,6 +382,7 @@ async def test_tui_enter_completes_prefix_and_rejects_unknown_slash_command(tmp_
         chat = app.query_one("#chat-history", ChatHistory)
         rendered = "\n".join(line.text for line in chat.lines)
         assert "Unknown command: /effortt" in rendered
+        assert input_box.value == "/effortt"
 
         # Exact non-menu commands remain valid even though they are not previewed.
         input_box.value = "/move"
