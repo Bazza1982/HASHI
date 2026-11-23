@@ -500,6 +500,13 @@ Current implementation boundary:
 - submitting a command or parameter prefix selects the first displayed prefix
   match, while an unknown slash command is rejected locally and never becomes a
   model prompt;
+- the chat composer is multiline: terminal bracketed-paste text is preserved
+  verbatim, Enter submits, and Shift+Enter inserts a newline. On Windows,
+  Ctrl+V snapshots a clipboard image as the selected Agent's pending,
+  digest-bound attachment; ordinary text paste remains text. Each admitted
+  text, managed attachment, and Workzone attachment Run includes the single
+  submission-time `originated_at` value, including across the authenticated
+  Remote proxy;
 - unified slash-command response `messages` are rendered immediately by the
   TUI with target-safe Telegram HTML/Markdown conversion. They are not inserted
   into the transcript, so later polling cannot duplicate them. A successful

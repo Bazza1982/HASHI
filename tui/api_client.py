@@ -6,6 +6,7 @@ import binascii
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -23,6 +24,12 @@ logger = logging.getLogger(__name__)
 TUI_TERMINAL_RUN_STATES = frozenset(
     {"completed", "failed", "stopped", "superseded", "interrupted"}
 )
+
+
+def _originated_at_now() -> str:
+    """Return the RFC 3339 timestamp required by Session Run admission."""
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def run_failure_text(payload: dict) -> str:
@@ -228,6 +235,7 @@ class TuiApiClient:
         voice_profile: str | None = None,
         attachment: dict | None = None,
         workzone_ref: str | None = None,
+        originated_at: str | None = None,
         offset: int = 0,
         history_generation: int | None = None,
         limit: int = 20,
@@ -271,6 +279,8 @@ class TuiApiClient:
             payload["attachment"] = dict(attachment)
         if workzone_ref is not None:
             payload["workzone_ref"] = str(workzone_ref)
+        if originated_at is not None:
+            payload["originated_at"] = str(originated_at)
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
                 async with session.post(f"{self.remote_url}/tui/proxy", json=payload) as response:
@@ -416,9 +426,11 @@ class TuiApiClient:
         client_id: str | None = None,
         telegram_mirror: bool = True,
         ui_locale: str = "en",
+        originated_at: str | None = None,
     ) -> dict:
         """Send a text message without bypassing the selected transport."""
         del telegram_mirror  # Legacy caller argument; FC owns mirror preferences.
+        originated_at = str(originated_at or _originated_at_now())
         policy = (
             frontend_run_delivery_policy(
                 connector_id="tui", client_id=client_id, targets=[]
@@ -532,6 +544,7 @@ class TuiApiClient:
                                     client_id=client_id,
                                     ui_locale=ui_locale,
                                     delivery_policy=policy,
+                                    originated_at=originated_at,
                                 )
                         else:
                             command_result = await self._direct_request(
@@ -563,6 +576,7 @@ class TuiApiClient:
                             delivery_policy=policy,
                             session_id=session_id,
                             idempotency_key=idempotency_key,
+                            originated_at=originated_at,
                             timeout=25,
                         )
                     return await self._direct_request(
@@ -570,6 +584,7 @@ class TuiApiClient:
                         f"/api/v1/sessions/{quote(session_id, safe='')}/runs",
                         json_body={
                             "idempotency_key": idempotency_key,
+                            "originated_at": originated_at,
                             "surface": "tui",
                             "client_id": client_id,
                             "ui_locale": ui_locale,
@@ -591,8 +606,10 @@ class TuiApiClient:
                 client_id=client_id,
                 ui_locale=ui_locale,
                 delivery_policy=policy,
+                originated_at=originated_at,
             )
         payload = {"agent": agent, "text": text}
+        payload["originated_at"] = originated_at
         if policy is not None:
             payload.update(
                 {
@@ -619,9 +636,11 @@ class TuiApiClient:
         client_id: str | None = None,
         telegram_mirror: bool = True,
         ui_locale: str = "en",
+        originated_at: str | None = None,
     ) -> dict:
         """Submit one caption and one immutable attachment as one request."""
         del telegram_mirror  # Legacy caller argument; FC owns mirror preferences.
+        originated_at = str(originated_at or _originated_at_now())
         if bool(attachment) == bool(workzone_ref):
             return {"ok": False, "code": "invalid_attachment", "error": "exactly one attachment source is required"}
         policy = frontend_run_delivery_policy(
@@ -721,6 +740,7 @@ class TuiApiClient:
                             session_id=session_id,
                             idempotency_key=f"tui-{uuid4().hex}",
                             attachment=frozen_attachment,
+                            originated_at=originated_at,
                             timeout=120,
                         )
                         if (
@@ -774,6 +794,7 @@ class TuiApiClient:
                             "POST", f"{session_path}/runs",
                             json_body={
                                 "idempotency_key": f"tui-{uuid4().hex}",
+                                "originated_at": originated_at,
                                 "surface": "tui",
                                 "client_id": str(client_id or "tui-client"),
                                 "ui_locale": ui_locale,
@@ -857,6 +878,7 @@ class TuiApiClient:
                             session_id=session_id,
                             idempotency_key=f"tui-{uuid4().hex}",
                             workzone_ref=reference,
+                            originated_at=originated_at,
                             timeout=90,
                         )
                         if (
@@ -891,6 +913,7 @@ class TuiApiClient:
                             "POST", f"{session_path}/runs",
                             json_body={
                                 "idempotency_key": f"tui-{uuid4().hex}",
+                                "originated_at": originated_at,
                                 "surface": "tui",
                                 "client_id": str(client_id or "tui-client"),
                                 "ui_locale": ui_locale,
@@ -912,11 +935,13 @@ class TuiApiClient:
                 delivery_policy=policy,
                 attachment=attachment,
                 workzone_ref=workzone_ref,
+                originated_at=originated_at,
                 timeout=35,
             )
         payload = {
             "agent": agent,
             "text": text,
+            "originated_at": originated_at,
             "source": "tui",
             "client_id": client_id,
             "ui_locale": ui_locale,

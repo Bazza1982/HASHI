@@ -9,6 +9,7 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.events import Paste
 from tui.app import ChatHistory, ChatInput, HASHITuiApp, LogPanel
 from tui.audio import TuiAudioError, decode_tui_audio
 from tui import preferences as preferences_module
@@ -146,6 +147,55 @@ async def test_broadcast_freezes_current_instance_targets_before_submission(tmp_
         await pilot.pause(0.3)
 
         assert [call[0] for call in client.sent] == ["akane", "kasumi"]
+
+
+@pytest.mark.asyncio
+async def test_multiline_composer_sends_complete_pasted_block_with_timestamp(tmp_path):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    pasted = "First line\n\nSecond line with a / slash\nFinal line"
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        # The terminal routes bracketed paste through App to the focused widget.
+        field._forward_event(Paste(pasted))
+        await pilot.pause(0.1)
+        assert field.value == pasted
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][0:2] == ("akane", pasted)
+        assert client.sent[0][2]["originated_at"].endswith("Z")
+        assert field.value == ""
+
+
+@pytest.mark.asyncio
+async def test_composer_paste_stages_clipboard_image_for_next_caption(tmp_path, monkeypatch):
+    app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
+    client = _Client([_agent("akane")])
+    app.api = client
+    clipboard_image = b"\x89PNG\r\n\x1a\nclipboard-image"
+    monkeypatch.setattr("tui.app.read_windows_clipboard_png", lambda: clipboard_image)
+    async with app.run_test() as pilot:
+        app.gateway_ok = True
+        app._load_initial_transcript = lambda *_args, **_kwargs: None
+        app._select_agent(client.agents[0], client=client)
+        field = app.query_one(ChatInput)
+        field.focus()
+        await pilot.press("ctrl+v")
+        await pilot.pause(0.3)
+
+        assert app._pending_attachment is not None
+        field.value = "What is in this image?"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert client.sent[0][0:2] == ("akane", "What is in this image?")
+        assert client.sent[0][2]["attachment"]["content_b64"] == base64.b64encode(clipboard_image).decode("ascii")
+        assert client.sent[0][2]["originated_at"].endswith("Z")
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,9 @@ import logging
 import os
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from rich.console import Group
@@ -18,9 +20,9 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.strip import Strip
-from textual.suggester import SuggestFromList
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, RichLog, Static, TextArea
 
 from orchestrator import ui_language
 from orchestrator.command_registry import load_runtime_commands
@@ -275,11 +277,36 @@ class ChatHistory(ThemedLog):
             self.scroll_end(animate=False, immediate=False, x_axis=False)
 
 
-class ChatInput(Input):
-    """Single-line input for sending messages."""
+class ChatInput(TextArea):
+    """Multiline chat composer that preserves full terminal paste blocks."""
+
+    class Submitted(Message):
+        """Posted when the user explicitly sends the current composer text."""
+
+        def __init__(self, input: "ChatInput") -> None:
+            super().__init__()
+            self.input = input
+            self.value = input.value
+
+    class ClipboardImageRequested(Message):
+        """Ask the App to inspect the host clipboard for an image asynchronously."""
+
+        def __init__(self, input: "ChatInput") -> None:
+            super().__init__()
+            self.input = input
+
+    BINDINGS = [
+        Binding("enter", "submit", "Send", show=False, priority=True),
+        Binding("ctrl+enter", "submit", "Send", show=False, priority=True),
+        Binding("shift+enter", "insert_newline", "New line", show=False, priority=True),
+        Binding("ctrl+v", "paste_clipboard", "Paste", show=False, priority=True),
+        Binding("ctrl+shift+v", "paste_clipboard", "Paste", show=False, priority=True),
+    ]
+
     DEFAULT_CSS = """
     ChatInput {
-        height: 3;
+        height: 7;
+        min-height: 3;
         background: $hashi-surface;
         color: $hashi-text;
         border: solid $hashi-border;
@@ -288,6 +315,43 @@ class ChatInput(Input):
         border: solid $hashi-accent;
     }
     """
+
+    @property
+    def value(self) -> str:
+        """Compatibility view used by existing TUI command and test helpers."""
+
+        return self.text
+
+    @value.setter
+    def value(self, value: str) -> None:
+        self.load_text(str(value))
+
+    @property
+    def cursor_position(self) -> int:
+        row, column = self.cursor_location
+        lines = self.text.splitlines(keepends=True)
+        return sum(len(line) for line in lines[:row]) + column
+
+    @cursor_position.setter
+    def cursor_position(self, position: int) -> None:
+        remaining = max(0, int(position))
+        lines = self.text.split("\n")
+        for row, line in enumerate(lines):
+            if remaining <= len(line):
+                self.move_cursor((row, remaining))
+                return
+            remaining -= len(line) + 1
+        self.move_cursor((len(lines) - 1, len(lines[-1])))
+
+    def action_submit(self) -> None:
+        self.post_message(self.Submitted(self))
+
+    def action_insert_newline(self) -> None:
+        result = self.insert("\n")
+        self.move_cursor(result.end_location)
+
+    def action_paste_clipboard(self) -> None:
+        self.post_message(self.ClipboardImageRequested(self))
 
 
 class CommandPreview(Static):
@@ -802,10 +866,6 @@ class HASHITuiApp(App):
         self._command_order = {
             command: index for index, command in enumerate(self._command_names)
         }
-        self._suggestion_names = sorted(
-            self._command_names,
-            key=lambda command: (len(command), self._command_order[command]),
-        )
         self._current_command_match: str | None = None
         self._command_matches: list[str] = []
         self._command_match_index = 0
@@ -929,7 +989,6 @@ class HASHITuiApp(App):
                         yield TypingIndicator(id="typing-indicator")
                         yield ChatInput(
                             placeholder="Message · /help · /to <agent> · /instance",
-                            suggester=SuggestFromList(self._suggestion_names, case_sensitive=False),
                             id="chat-input",
                         )
                         yield CommandPreview(id="command-preview")
@@ -1701,16 +1760,26 @@ class HASHITuiApp(App):
     # ── Input handling ──────────────────────────────────────────────────
 
     async def on_input_submitted(self, event: Input.Submitted):
-        text = event.value.strip()
+        """Keep compatibility for ordinary Textual ``Input`` submissions."""
+
+        await self._submit_composer(event.input, event.value)
+
+    async def on_chat_input_submitted(self, event: ChatInput.Submitted):
+        await self._submit_composer(event.input, event.value)
+
+    async def _submit_composer(self, input_box, value: str) -> None:
+        """Route one submitted composer payload without flattening pasted lines."""
+
+        text = str(value or "")
 
         # Light onboarding accepts empty Enter to advance
         if self._light_onboarding:
-            event.input.value = ""
-            await self._handle_light_onboarding_input(text)
+            input_box.value = ""
+            await self._handle_light_onboarding_input(text.strip())
             return
 
-        if not text:
-            event.input.value = ""
+        if not text.strip():
+            input_box.value = ""
             return
         normalized = text
         if normalized.startswith("/ "):
@@ -1718,14 +1787,14 @@ class HASHITuiApp(App):
 
         # Onboarding mode
         if self._onboarding:
-            event.input.value = ""
-            await self._handle_onboarding_input(normalized)
+            input_box.value = ""
+            await self._handle_onboarding_input(normalized.strip())
             return
 
         if normalized.startswith("/"):
             resolved = self._resolve_submitted_command(normalized)
             if resolved is None:
-                event.input.value = ""
+                input_box.value = ""
                 self._hide_command_preview()
                 chat = self.query_one("#chat-history", ChatHistory)
                 command = normalized.split(maxsplit=1)[0]
@@ -1738,7 +1807,7 @@ class HASHITuiApp(App):
                 return
             normalized = resolved
 
-        event.input.value = ""
+        input_box.value = ""
         self._hide_command_preview()
 
         # TUI local commands
@@ -1798,6 +1867,7 @@ class HASHITuiApp(App):
             return
 
         chat = self.query_one("#chat-history", ChatHistory)
+        originated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         # Resolved slash commands (e.g. /sys, /workzone, /reboot) are dispatched
         # to the active agent verbatim and are never attachment paths. Only plain
         # text (including ~/ ./ ../ UNC and Windows drive paths) may be staged.
@@ -1817,6 +1887,7 @@ class HASHITuiApp(App):
                     self._ui_language,
                     attachment=None,
                     workzone_ref=workzone_ref,
+                    originated_at=originated_at,
                 )
                 return
             if self._looks_like_dropped_path(normalized):
@@ -1838,6 +1909,7 @@ class HASHITuiApp(App):
                 self.api,
                 self._connection_generation,
                 self._ui_language,
+                originated_at,
             )
             return
 
@@ -1866,6 +1938,7 @@ class HASHITuiApp(App):
                     self._ui_language,
                     attachment=pending,
                     workzone_ref=None,
+                    originated_at=originated_at,
                 )
                 return
             self._submission_sequence += 1
@@ -1882,12 +1955,25 @@ class HASHITuiApp(App):
                 self._connection_generation,
                 self._ui_language,
                 submission_ref,
+                originated_at,
             )
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """Keep palette matching while the composer accepts complete text blocks."""
+
+        if isinstance(event.text_area, ChatInput):
+            # Keep the established App hook observable for TUI customizations.
+            self.on_input_changed(SimpleNamespace(value=event.text_area.value))
 
     def on_input_changed(self, event: Input.Changed):
         """Show command syntax first, then valid parameter completions."""
 
-        value = event.value.lstrip().casefold()
+        self._on_composer_changed(event.value)
+
+    def _on_composer_changed(self, composer_value: str) -> None:
+        """Refresh command completion from either the single- or multiline field."""
+
+        value = composer_value.lstrip().casefold()
         preview = self.query_one("#command-preview", CommandPreview)
         self._current_command_match = None
         self._command_matches = []
@@ -3341,6 +3427,39 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         )
         return True
 
+    async def _stage_clipboard_image(self, payload: bytes) -> bool:
+        """Freeze a native clipboard image for the currently selected Agent."""
+
+        chat = self.query_one("#chat-history", ChatHistory)
+        if not self.current_agent or self.current_agent_display == "ALL":
+            chat.write(markup("[hashi.error]Select one Agent before attaching a clipboard image.[/]"))
+            return False
+        try:
+            self._pending_attachment = snapshot_bytes(
+                payload,
+                filename="clipboard.png",
+                media_type="image/png",
+                generation=self._connection_generation,
+                instance_id=self.current_instance_id,
+                agent=self.current_agent,
+            )
+        except TuiAttachmentError as exc:
+            chat.write(Text(f"Clipboard image not staged: {exc}", style="hashi.error"))
+            return False
+        chat.write(markup("[hashi.accent]✓ Clipboard image attached. Type the accompanying message to submit it.[/]"))
+        return True
+
+    async def on_chat_input_clipboard_image_requested(
+        self, event: ChatInput.ClipboardImageRequested
+    ) -> None:
+        """Prefer an image attachment on paste, retaining normal text paste otherwise."""
+
+        payload = await asyncio.to_thread(read_windows_clipboard_png)
+        if payload is not None:
+            await self._stage_clipboard_image(payload)
+            return
+        event.input.action_paste()
+
     async def _handle_attach_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)
         try:
@@ -3358,26 +3477,11 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             chat.write(markup("[hashi.accent]✓ Pending attachment cleared.[/]"))
             return
         if argument.casefold() == "clipboard":
-            if not self.current_agent or self.current_agent_display == "ALL":
-                chat.write(markup("[hashi.error]Select one Agent before attaching a clipboard image.[/]"))
-                return
             payload = await asyncio.to_thread(read_windows_clipboard_png)
             if payload is None:
                 chat.write(markup("[hashi.error]No supported image is available on the Windows clipboard.[/]"))
                 return
-            try:
-                self._pending_attachment = snapshot_bytes(
-                    payload,
-                    filename="clipboard.png",
-                    media_type="image/png",
-                    generation=self._connection_generation,
-                    instance_id=self.current_instance_id,
-                    agent=self.current_agent,
-                )
-            except TuiAttachmentError as exc:
-                chat.write(Text(f"Clipboard image not staged: {exc}", style="hashi.error"))
-                return
-            chat.write(markup("[hashi.accent]✓ Clipboard image attached. Type the accompanying message to submit it.[/]"))
+            await self._stage_clipboard_image(payload)
             return
         await self._stage_path_attachment(argument)
 
@@ -3393,6 +3497,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         *,
         attachment: PendingAttachment | None,
         workzone_ref: str | None,
+        originated_at: str | None = None,
     ) -> None:
         result = await client.send_chat_attachment(
             agent,
@@ -3401,6 +3506,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             workzone_ref=workzone_ref,
             client_id=self._tui_client_id,
             ui_locale=ui_locale,
+            originated_at=originated_at,
         )
         if (
             generation != self._connection_generation
@@ -3430,12 +3536,14 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         generation: int,
         ui_locale: str,
         submission_ref: tuple[int, str, int],
+        originated_at: str | None = None,
     ):
         result = await client.send_chat(
             agent,
             text,
             client_id=self._tui_client_id,
             ui_locale=ui_locale,
+            originated_at=originated_at,
         )
         if generation != self._connection_generation or client is not self.api:
             logger.info("TUI message completed on previous instance generation=%s agent=%s", generation, agent)
@@ -3662,6 +3770,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         client: TuiApiClient,
         generation: int,
         ui_locale: str,
+        originated_at: str | None = None,
     ):
         for agent in targets:
             if generation != self._connection_generation or client is not self.api:
@@ -3672,6 +3781,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                     text,
                     client_id=self._tui_client_id,
                     ui_locale=ui_locale,
+                    originated_at=originated_at,
             )
         if generation != self._connection_generation:
             logger.info("TUI broadcast completed on previous instance generation=%s", generation)

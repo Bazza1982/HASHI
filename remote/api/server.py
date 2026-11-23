@@ -637,6 +637,7 @@ class TuiProxyRequest(BaseModel):
     voice_profile: Optional[str] = None
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
+    originated_at: Optional[str] = None
     offset: int = 0
     history_generation: Optional[int] = None
     limit: int = 20
@@ -662,6 +663,7 @@ class ProtocolTuiRequest(BaseModel):
     voice_profile: Optional[str] = None
     attachment: Optional[dict[str, Any]] = None
     workzone_ref: Optional[str] = None
+    originated_at: Optional[str] = None
     offset: int = 0
     history_generation: Optional[int] = None
     limit: int = 20
@@ -1237,6 +1239,7 @@ def _local_tui_session_attachment_run(
     message_content.append({"type": "attachment", "attachment_id": attachment_id})
     body: dict[str, Any] = {
         "idempotency_key": str(payload.idempotency_key or ""),
+        "originated_at": str(payload.originated_at or ""),
         "surface": "tui",
         "client_id": str(payload.client_id or ""),
         "ui_locale": str(payload.ui_locale or ""),
@@ -1295,6 +1298,7 @@ def _local_workbench_tui_request(
         method = "POST"
         body = {
             "idempotency_key": str(payload.idempotency_key or ""),
+            "originated_at": str(payload.originated_at or ""),
             "surface": "tui",
             "client_id": str(payload.client_id or ""),
             "ui_locale": str(payload.ui_locale or ""),
@@ -1367,6 +1371,7 @@ def _local_workbench_tui_request(
         body = {
             "agent": agent,
             "text": str(payload.text or ""),
+            "originated_at": str(payload.originated_at or ""),
         }
         if operation == "chat_attachment":
             if payload.attachment is not None:
@@ -4288,6 +4293,7 @@ def create_app(
             voice_profile=payload.voice_profile,
             attachment=payload.attachment,
             workzone_ref=payload.workzone_ref,
+            originated_at=payload.originated_at,
             offset=payload.offset,
             history_generation=payload.history_generation,
             limit=payload.limit,
