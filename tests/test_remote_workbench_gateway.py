@@ -807,7 +807,85 @@ def test_gateway_extended_discovery_finds_workbench_on_late_interface_alias(
     assert json.loads(body.decode("utf-8")).get("ok") is True
     # Cached host first, then two fallbacks, then the bounded extended pass.
     assert visited == ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"]
-    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST == "127.0.0.6"
+    # The gateway relays the recovered host, but must not promote an unverified
+    # address into the identity-verified cache; that stays the health probe's job.
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST is None
+
+
+def test_gateway_does_not_mark_foreign_401_as_active(tmp_path, monkeypatch):
+    """Scenario B: a foreign HASHI answering 401 on the loopback port is not
+    evidence that the controlled instance is online — the gateway relays the
+    status but never records active nor caches the address."""
+    _client(tmp_path)
+    remote_server.reset_local_workbench_transport_state()
+    import httpx
+
+    monkeypatch.setattr(remote_server, "_read_hashi_pid_state", lambda: {"pid_alive": True})
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ["127.0.0.1"])
+
+    def handler(request):
+        return httpx.Response(
+            401,
+            json={"ok": False, "error": "unauthorized"},
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr(
+        remote_server,
+        "_LOCAL_HTTP_CLIENT",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    status, _body, _headers = remote_server._forward_workbench_gateway_request(
+        method="GET",
+        api_path="/api/v1/agents",
+        query="",
+        body_bytes=b"",
+        request_headers={},
+        timeout=6.0,
+    )
+    assert status == 401
+    with remote_server._HASHI_LIVENESS_LOCK:
+        assert remote_server._HASHI_LIVENESS_STATE["hashi_state"] != "active"
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST is None
+
+
+def test_gateway_does_not_cache_foreign_200_as_target(tmp_path, monkeypatch):
+    """Scenario C: a foreign HASHI answering 200 on the loopback port must not
+    become the cached target for the controlled instance."""
+    _client(tmp_path)
+    remote_server.reset_local_workbench_transport_state()
+    import httpx
+
+    monkeypatch.setattr(remote_server, "_read_hashi_pid_state", lambda: {"pid_alive": True})
+    monkeypatch.setattr(remote_server, "local_http_hosts", lambda: ["127.0.0.1"])
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"ok": True, "instance_id": "HASHI4"},
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr(
+        remote_server,
+        "_LOCAL_HTTP_CLIENT",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    status, _body, _headers = remote_server._forward_workbench_gateway_request(
+        method="GET",
+        api_path="/api/v1/agents",
+        query="",
+        body_bytes=b"",
+        request_headers={},
+        timeout=6.0,
+    )
+    assert status == 200
+    # A foreign 200 is relayed, but never cached as this instance's target.
+    assert remote_server._CACHED_LOCAL_WORKBENCH_HOST is None
+    with remote_server._HASHI_LIVENESS_LOCK:
+        assert remote_server._HASHI_LIVENESS_STATE["hashi_state"] != "active"
 
 
 def test_gateway_shared_deadline_bounds_silent_hosts(tmp_path, monkeypatch):
