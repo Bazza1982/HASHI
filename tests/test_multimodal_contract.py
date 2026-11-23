@@ -10,6 +10,7 @@ from orchestrator.multimodal_contract import (
     MultimodalContractError,
     attachment_manifest,
     canonical_request_content,
+    contains_persistent_inline_media,
     materialize_openai_user_content,
     native_media_failure_reason,
     resolve_input_capability,
@@ -327,7 +328,6 @@ def test_canonical_envelope_rejects_duplicate_local_attachment_reference(tmp_pat
     [
         b"raw",
         "data:image/png;base64,AAAA",
-        "embedded payload: data:image/png;base64,AAAA",
     ],
 )
 def test_persistent_metadata_never_contains_inline_media_bytes(forbidden):
@@ -348,6 +348,21 @@ def test_persistent_metadata_never_contains_inline_media_bytes(forbidden):
 
     with pytest.raises(MultimodalContractError):
         canonical_request_content([part])
+
+
+def test_text_and_caption_can_describe_real_image_data_url(tmp_path):
+    source = tmp_path / "one.png"
+    _write_png(source)
+    example = "source: " + "data:image/png;base64,AAAA"
+    media = _image_part(source)
+    media["caption"] = example
+    content = canonical_request_content([
+        {"type": "text", "item_index": 1, "text": example},
+        media,
+    ])
+    assert content["parts"][0]["text"] == example
+    assert content["parts"][1]["caption"] == example
+    assert contains_persistent_inline_media(content) is False
 
 
 def test_persistent_transport_rejects_unbounded_inline_blob_fields(tmp_path):
