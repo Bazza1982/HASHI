@@ -134,6 +134,11 @@ class HerBackendSessionCoordinator:
                 if isinstance(checkpoint.get("context_ownership"), Mapping)
                 else None
             ),
+            recovery_reconstruction=(
+                checkpoint.get("recovery_reconstruction")
+                if isinstance(checkpoint.get("recovery_reconstruction"), Mapping)
+                else None
+            ),
             producer_run_claim=(
                 checkpoint.get("producer_run_claim")
                 if isinstance(checkpoint.get("producer_run_claim"), Mapping)

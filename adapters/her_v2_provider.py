@@ -3288,6 +3288,12 @@ class HashiStageProvider(StageProvider):
         self._provider_recovery_resume_pending = bool(resume_pending_tools)
         self._provider_context_successor = bool(successor_turn)
         self._provider_context_reconstruction: dict[str, Any] | None = None
+        inherited_reconstruction = self._provider_context_recovery.get("recovery_reconstruction")
+        self._provider_context_reconstruction_durable: dict[str, Any] | None = (
+            dict(inherited_reconstruction)
+            if isinstance(inherited_reconstruction, Mapping) and inherited_reconstruction.get("total")
+            else None
+        )
         self._provider_context_prompt_candidate: tuple[str, str, int, bool, str] | None = None
         self._provider_context_inherited_owner = (
             dict(self._provider_context_recovery.get("context_ownership") or {})
@@ -3324,9 +3330,15 @@ class HashiStageProvider(StageProvider):
             # Only this stage's structural ownership may describe an
             # assembled prompt, never an arbitrary backend-provided value.
             payload.pop("context_ownership", None)
+            payload.pop("recovery_reconstruction", None)
             ownership = self._checkpoint_prompt_ownership(checkpoint.get("messages"))
             if ownership:
                 payload["context_ownership"] = ownership
+            durable_reconstruction = getattr(
+                self, "_provider_context_reconstruction_durable", None
+            )
+            if isinstance(durable_reconstruction, Mapping) and durable_reconstruction.get("total"):
+                payload["recovery_reconstruction"] = dict(durable_reconstruction)
             result = observer(payload)
             if inspect.isawaitable(result):
                 raise ProviderContextObserverError(
@@ -3474,6 +3486,12 @@ class HashiStageProvider(StageProvider):
         recovery = runtime.get("active_turn_recovery", {}) if isinstance(runtime, Mapping) else {}
         metadata = recovery.get("provider_context_checkpoint", {}) if isinstance(recovery, Mapping) else {}
         reference = str(metadata.get("items_evidence_ref") or "") if isinstance(metadata, Mapping) else ""
+        inherited = context.get("recovery_reconstruction") if isinstance(context, Mapping) else None
+        if isinstance(inherited, Mapping) and inherited.get("total"):
+            # A prior incompatible recovery already projected the completed
+            # Tool evidence. Preserve its identity and provenance instead of
+            # re-deriving from messages that no longer carry the full output.
+            return _project_tool_receipts(inherited, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
         rows = []
         for message in context.get("messages", []):
             if not isinstance(message, Mapping) or message.get("role") != "tool":
@@ -6553,6 +6571,8 @@ class HashiStageProvider(StageProvider):
                 )
                 reconstructed = self._provider_context_reconstruction
                 self._provider_context_reconstruction = None
+                if reconstructed and reconstructed.get("total"):
+                    self._provider_context_reconstruction_durable = reconstructed
                 if continuation_messages is None and reconstructed and reconstructed.get("total"):
                     stage_prompt += (
                         "\n\nCompleted Tool results from the verified recovery checkpoint "

@@ -182,7 +182,7 @@ def read_scoped_recovery_evidence(
     raw_ref = str(evidence_ref or "")
     if raw_ref.startswith("her_provider_context_items:"):
         parts = raw_ref.split(":", 2)
-        if len(parts) != 3 or not item_id:
+        if len(parts) != 3:
             return unavailable
         field, session_id, turn_id = "provider_tool_result", parts[1], parts[2]
     else:
@@ -272,14 +272,26 @@ def read_scoped_recovery_evidence(
                     context = metadata
                 else:
                     return unavailable
-                matches = [
-                    message for message in context.get("messages", [])
-                    if isinstance(message, Mapping) and message.get("role") == "tool"
-                    and str(message.get("tool_call_id") or "") == item_id
-                ]
-                if len(matches) != 1:
-                    return unavailable
-                value = {"tool_call_id": item_id, "content": matches[0].get("content")}
+                if not item_id:
+                    # Scoped discovery: the caller holds the canonical
+                    # reference but not an item identity. Return only the
+                    # authorized provider-item identities in this checkpoint.
+                    item_ids = sorted({
+                        str(message.get("tool_call_id") or "")
+                        for message in context.get("messages", [])
+                        if isinstance(message, Mapping) and message.get("role") == "tool"
+                        and str(message.get("tool_call_id") or "")
+                    })
+                    value = {"field": field, "item_ids": item_ids, "count": len(item_ids)}
+                else:
+                    matches = [
+                        message for message in context.get("messages", [])
+                        if isinstance(message, Mapping) and message.get("role") == "tool"
+                        and str(message.get("tool_call_id") or "") == item_id
+                    ]
+                    if len(matches) != 1:
+                        return unavailable
+                    value = {"tool_call_id": item_id, "content": matches[0].get("content")}
             else:
                 value = json.loads(row["tool_receipts_json"] if field == "tool_receipts" else row["side_effects_json"])
                 if not isinstance(value, list):

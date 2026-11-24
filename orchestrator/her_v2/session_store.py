@@ -1353,6 +1353,7 @@ class HerSessionStore:
         provider_request_id: str = "",
         invocation_id: str = "",
         context_ownership: Mapping[str, Any] | None = None,
+        recovery_reconstruction: Mapping[str, Any] | None = None,
         producer_run_claim: Mapping[str, Any] | None = None,
         execution_owner_id: str = "",
     ) -> dict[str, Any]:
@@ -1420,6 +1421,11 @@ class HerSessionStore:
             # This describes only a provider message owned by prompt assembly.
             # It is private and covered by the same checkpoint digest.
             context_metadata["context_ownership"] = dict(context_ownership)
+        if recovery_reconstruction:
+            # Durable projected Tool evidence from an incompatible-provider
+            # recovery. Kept separate from replaceable prompt assembly so a
+            # later recovery cannot drop the original completed results.
+            context_metadata["recovery_reconstruction"] = dict(recovery_reconstruction)
         encoded_metadata = _json(context_metadata)
         digest = _provider_context_digest(
             context_metadata,
