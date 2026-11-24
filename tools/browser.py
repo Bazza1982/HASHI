@@ -1193,12 +1193,16 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                 summary: list[str] = []
                 found_image = False
                 partial_error = False
+                requested_screenshots = {index for index, step in enumerate(steps) if isinstance(step, dict) and step.get("action") == "screenshot"}
+                observed_screenshots = set()
                 for raw in envelope["steps"]:
                     if not isinstance(raw, dict):
                         continue
                     step_type = str(raw.get("action") or "")
                     step_no = raw.get("index")
                     label = f"[{step_no}:{step_type}]"
+                    if step_type == "screenshot" and step_no in requested_screenshots:
+                        observed_screenshots.add(step_no)
                     if step_type == "screenshot" and raw.get("ok") is True:
                         data_url = raw.get("output")
                         try:
@@ -1230,10 +1234,12 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                         )
                         summary.append(line)
                         parts.append({"type": "text", "text": line})
-                if found_image or any(
-                    isinstance(step, dict) and step.get("action") == "screenshot"
-                    for step in steps
-                ):
+                for missing in sorted(requested_screenshots - observed_screenshots):
+                    partial_error = True
+                    line = f"[{missing}:screenshot] ERROR: requested screenshot step missing"
+                    summary.append(line)
+                    parts.append({"type": "text", "text": line})
+                if found_image or requested_screenshots:
                     return StructuredToolOutput(
                         output="\n".join(summary), content=parts, is_error=partial_error,
                     )

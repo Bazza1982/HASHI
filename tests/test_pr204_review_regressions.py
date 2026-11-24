@@ -163,3 +163,28 @@ def test_partial_session_provider_message_retains_failure_and_text():
     assert "before" in messages[0]["content"]
     assert "screenshot failed" in messages[0]["content"]
     assert "after" in messages[0]["content"]
+
+@pytest.mark.asyncio
+async def test_extension_missing_screenshot_preserves_text(monkeypatch):
+    from tools import browser
+    async def bridge(action, args):
+        return json.dumps({"steps": [{"index": 0, "action": "get_text", "ok": True, "output": "before"}]})
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", bridge)
+    result = await browser.execute_browser_session({"steps": [{"action": "get_text"}, {"action": "screenshot"}]}, typed_media=True)
+    assert result.is_error
+    assert "before" in result.content[0]["text"]
+    assert "screenshot" in result.content[-1]["text"].lower()
+
+@pytest.mark.asyncio
+async def test_extension_second_screenshot_missing_is_error(monkeypatch):
+    from tools import browser
+    import base64
+    encoded = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"test-image").decode("ascii")
+    async def bridge(action, args):
+        return json.dumps({"steps": [{"index":0,"action":"screenshot","ok":True,"output":"data:image/png;base64," + encoded}, {"index":1,"action":"get_text","ok":True,"output":"kept"}]})
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", bridge)
+    result = await browser.execute_browser_session({"steps":[{"action":"screenshot"}, {"action":"get_text"}, {"action":"screenshot"}]}, typed_media=True)
+    assert result.is_error
+    assert any(part.get("type") == "image" for part in result.content)
+    assert any("kept" in part.get("text", "") for part in result.content)
+    assert "[2:screenshot]" in result.output

@@ -145,3 +145,5 @@ A legitimate worker failure remains a failure. Browser session step failures
 retain surrounding text and ordering and propagate a typed error flag through
 the worker and gateway to ToolResult and audit; page text is never classified
 by keyword. Valid structured screenshots need no worker upgrade.
+
+A session requesting screenshots fails if the structured result contains fewer valid images than requested without an explicit failure. A missing extension step is reported while completed text remains available in order.

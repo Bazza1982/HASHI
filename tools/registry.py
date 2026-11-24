@@ -1316,7 +1316,13 @@ class ToolRegistry:
             output = dispatched.output
             content = dispatched.content
             structured_error = dispatched.is_error
-            if tool_name in _IMAGE_OUTPUT_TOOLS and not structured_error and not output.startswith("Error:"):
+            screenshot_count = 1 if tool_name in _IMAGE_OUTPUT_TOOLS else (
+                sum(
+                    1 for step in (arguments.get("steps") or [])
+                    if isinstance(step, Mapping) and step.get("action") == "screenshot"
+                ) if tool_name == "browser_session" else 0
+            )
+            if screenshot_count and not output.startswith("Error:"):
                 from orchestrator.multimodal_contract import (
                     HASHI_API_MAX_IMAGE_BYTES,
                     validate_inline_image_data_url,
@@ -1325,7 +1331,7 @@ class ToolRegistry:
                     if not isinstance(content, list) or not all(isinstance(part, Mapping) for part in content):
                         raise ValueError("invalid content")
                     images = [part for part in content if part.get("type") == "image"]
-                    if not images:
+                    if not structured_error and len(images) < screenshot_count:
                         raise ValueError("missing image")
                     for part in images:
                         mime, data = part.get("mimeType"), part.get("data")
@@ -1335,8 +1341,17 @@ class ToolRegistry:
                             f"data:{mime};base64,{data}", max_bytes=HASHI_API_MAX_IMAGE_BYTES,
                         )
                 except ValueError:
-                    output = "Error: screenshot returned missing or invalid image content"
-                    content = None
+                    error = "Error: screenshot returned missing or invalid image content"
+                    if tool_name == "browser_session":
+                        content = [
+                            dict(part) for part in (content or [])
+                            if isinstance(part, Mapping) and part.get("type") == "text"
+                        ]
+                        content.append({"type": "text", "text": error})
+                        output = "\n".join(part for part in (output, error) if part)
+                    else:
+                        output = error
+                        content = None
                     structured_error = True
         elif isinstance(dispatched, BuiltinExecutionResult):
             output = dispatched.output
@@ -1346,7 +1361,16 @@ class ToolRegistry:
             output = dispatched
             content = None
         if (
-            tool_name in _IMAGE_OUTPUT_TOOLS
+            (
+                tool_name in _IMAGE_OUTPUT_TOOLS
+                or (
+                    tool_name == "browser_session"
+                    and any(
+                        isinstance(step, Mapping) and step.get("action") == "screenshot"
+                        for step in (arguments.get("steps") or [])
+                    )
+                )
+            )
             and not isinstance(dispatched, StructuredToolOutput)
             and not output.startswith("Error:")
         ):

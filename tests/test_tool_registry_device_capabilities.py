@@ -637,3 +637,36 @@ async def test_screenshot_worker_failure_is_preserved(tmp_path):
     assert result.output == "Error: camera unavailable"
     assert "upgrade" not in result.output.lower()
 # HASHI-Fingerprint: hfp_8ee37f8b596a433bae68eccaf6c86f97
+
+@pytest.mark.asyncio
+async def test_session_missing_worker_screenshot_is_not_success(tmp_path):
+    facade = _CapabilityFacade(result={"output": "complete", "content": [], "is_error": False}, capabilities=[_browser_registration(actions=("session",))])
+    registry = _registry(tmp_path, "browser_session", facade)
+    result = await registry.execute("browser_session", {"steps": [{"action": "screenshot"}]}, "session-missing")
+    assert result.is_error
+    assert "screenshot" in result.output.lower()
+
+@pytest.mark.asyncio
+async def test_session_text_only_worker_screenshot_failure_preserves_text_and_audit(tmp_path):
+    facade = _CapabilityFacade(result={"output":"before\nafter", "content":[{"type":"text", "text":"before"}, {"type":"text", "text":"after"}], "is_error":False}, capabilities=[_browser_registration(actions=("session",))])
+    registry = _registry(tmp_path, "browser_session", facade)
+    records = []
+    class Audit:
+        def record(self, kind, data, **kwargs):
+            records.append(data)
+    registry.canonical_audit = Audit()
+    result = await registry.execute("browser_session", {"steps":[{"action":"get_text"}, {"action":"screenshot"}, {"action":"get_text"}]}, "session-text-only")
+    assert result.is_error and records[-1]["is_error"]
+    assert [part["text"] for part in result.content[:2]] == ["before", "after"]
+    assert "screenshot" in result.content[-1]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_session_valid_worker_screenshot_is_success(tmp_path):
+    import base64
+    image = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"test-image").decode("ascii")
+    facade = _CapabilityFacade(result={"output":"captured", "content":[{"type":"image", "mimeType":"image/png", "data":image}], "is_error":False}, capabilities=[_browser_registration(actions=("session",))])
+    registry = _registry(tmp_path, "browser_session", facade)
+    result = await registry.execute("browser_session", {"steps":[{"action":"screenshot"}]}, "session-image")
+    assert not result.is_error
+    assert result.content[0]["data"] == image
