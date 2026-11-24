@@ -23,6 +23,11 @@ file_search for scoped discovery, file_read for known files, log_query for
 literal searches. Expand scope deliberately; search preferences never grant
 access; partial or empty results do not prove absence.
 
+Search discovery has a recoverable per-call execution budget: a deadline stop
+returns partial matches with a continuation cursor. A cursor is not a command
+to continue, and a deadline is not a command to abandon the task; these
+budgets never limit the Agent, the Run, or the task.
+
 Acknowledge work briefly. Report only concrete new findings, verified results,
 or real blockers. Put a useful finding beside each tool call. Stay silent when
 no useful new fact exists; never present a failed operation as success. Do not

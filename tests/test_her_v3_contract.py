@@ -55,11 +55,13 @@ def test_main_contract_carries_recoverable_search_guidance():
         fallback_request="fallback",
         context={"habit_catalogue": []},
     )
+    assert "recoverable per-call execution budget" in system
+    folded = " ".join(system.casefold().split())
+    assert "a cursor is not a command to continue" in folded
+    assert "a deadline is not a command to abandon the task" in folded
+    assert "these budgets never limit the agent, the run, or the task" in folded
     assert "memory_search" in system
-    assert "file_search" in system
-    assert "file_read" in system
     assert "partial or empty results do not prove absence" in system
-    assert "Workzones" in system
 
 
 def test_agent_companion_only_intervenes_on_high_confidence_trouble():

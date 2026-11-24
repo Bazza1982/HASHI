@@ -77,18 +77,53 @@ def test_profile_explicit_override_wins_and_validates():
     assert resolve_pcm_profile("codex-cli") == "cloud"
 
 
+def test_invalid_profile_raises_consistently(tmp_path):
+    """Misconfigured profiles fail loudly at construction and assembly alike."""
+    _store, assembler = _assembler(tmp_path)
+    with pytest.raises(ValueError):
+        assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="hybrid")
+
+    from types import SimpleNamespace
+
+    from adapters.base import BaseBackend
+
+    class _MinimalBackend(BaseBackend):
+        def _define_capabilities(self):
+            return SimpleNamespace()
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, prompt, request_id, **kwargs):
+            return None
+
+        async def shutdown(self):
+            return None
+
+        async def handle_new_session(self):
+            return False
+
+    with pytest.raises(ValueError):
+        _MinimalBackend(
+            SimpleNamespace(extra={"pcm_profile": "hybrid"}), SimpleNamespace()
+        )
+
+
 # --- C/D. local tiering ------------------------------------------------------
 
 
 def test_local_omits_full_permanent_memory_but_keeps_reference(tmp_path):
-    _store, assembler = _assembler(tmp_path, memory="secret long-term facts" * 40)
+    tail = "z" * 2000
+    _store, assembler = _assembler(tmp_path, memory="alpha-fact-7 " + tail)
     payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")
     memory_section = _section(payload, "permanent_memory")
     assert memory_section is not None
-    assert "secret long-term facts" not in memory_section["text"]
+    assert "alpha-fact-7" in memory_section["text"]
+    assert tail not in memory_section["text"]
     assert "file_read" in memory_section["text"]
+    assert len(memory_section["text"]) < 700
     cloud = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="cloud")
-    assert "secret long-term facts" in _section(cloud, "permanent_memory")["text"]
+    assert tail in _section(cloud, "permanent_memory")["text"]
 
 
 def test_local_skips_skill_and_tool_catalogues(tmp_path):

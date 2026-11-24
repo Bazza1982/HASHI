@@ -1307,15 +1307,23 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         try:
             target = runtime.backend_manager.get_her_v3_target()
             her_v3_target_engine = str(getattr(target, "provider", None) or "")
-        except Exception:
+        except Exception as exc:
+            # Never fail a request over profile resolution; surface the silent
+            # fallback so a "should be local" HERV3 route is observable.
+            import logging as _logging
+
+            _logging.getLogger("BridgeU.PCMProfile").warning(
+                "pcm_profile: HERV3 inference target unavailable, falling back "
+                "to cloud projection: %s",
+                type(exc).__name__,
+            )
             her_v3_target_engine = None
     pcm_profile = resolve_pcm_profile(
         runtime.config.active_backend,
         backend_extra=profile_backend_extra,
         her_v3_target_engine=her_v3_target_engine,
     )
-    if "pcm_profile" in inspect.signature(prompt_builder).parameters:
-        prompt_kwargs["pcm_profile"] = pcm_profile
+    prompt_kwargs["pcm_profile"] = pcm_profile
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -1543,11 +1551,20 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             if isinstance(section, Mapping)
         }
         previous_digests = getattr(runtime, "_last_pcm_section_digests", None)
-        if incremental and isinstance(previous_digests, dict):
-            prompt_payload = BridgeContextAssembler.render_incremental_payload(
-                prompt_payload, previous_digests
-            )
-        if not incremental:
+        if incremental:
+            if isinstance(previous_digests, dict):
+                prompt_payload = BridgeContextAssembler.render_incremental_payload(
+                    prompt_payload, previous_digests
+                )
+            else:
+                # Restart-recovered session: this turn sent the full projection,
+                # so record the baseline immediately to restore incremental
+                # behaviour from the next turn instead of falling back forever.
+                runtime._last_pcm_section_digests = current_digests
+        elif session_scope == SESSION_SCOPE_PERSISTENT:
+            # Only persistent-session bootstrap turns own the baseline. Isolated
+            # activity turns use a different provider session and must never
+            # overwrite the persistent baseline.
             runtime._last_pcm_section_digests = current_digests
 
     if phone_audit:

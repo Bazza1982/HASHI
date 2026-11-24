@@ -2158,16 +2158,24 @@ class BridgeContextAssembler:
             None,
         )
         if not changed and not removed_keys:
-            payload["final_prompt"] = (
+            projected = (
                 str(current.get("text") or "")
                 if isinstance(current, Mapping)
                 else ""
             )
-            payload.setdefault("audit", {})["pcm_incremental"] = {
+            payload["final_prompt"] = projected
+            audit = payload.setdefault("audit", {})
+            audit["pcm_incremental"] = {
                 "mode": "request_only",
                 "changed_sections": 0,
                 "removed_sections": 0,
+                "sent_chars": len(projected),
+                "sent_tokens_est": _estimate_tokens(projected),
             }
+            # The incremental projection replaces the full assembled prompt;
+            # keep the size audit consistent with what is actually sent.
+            audit["final_prompt_chars_after_budget"] = len(projected)
+            audit["final_prompt_tokens_after_budget"] = _estimate_tokens(projected)
             return payload
         parts: list[str] = []
         for section in changed:
@@ -2185,12 +2193,18 @@ class BridgeContextAssembler:
             parts.append(
                 CURRENT_REQUEST_SEPARATOR.strip() + "\n\n" + str(current["text"])
             )
-        payload["final_prompt"] = "\n\n".join(parts).strip()
-        payload.setdefault("audit", {})["pcm_incremental"] = {
+        projected = "\n\n".join(parts).strip()
+        payload["final_prompt"] = projected
+        audit = payload.setdefault("audit", {})
+        audit["pcm_incremental"] = {
             "mode": "delta",
             "changed_sections": len(changed),
             "removed_sections": len(removed_keys),
+            "sent_chars": len(projected),
+            "sent_tokens_est": _estimate_tokens(projected),
         }
+        audit["final_prompt_chars_after_budget"] = len(projected)
+        audit["final_prompt_tokens_after_budget"] = _estimate_tokens(projected)
         return payload
 
     def build_prompt_payload(
@@ -2208,6 +2222,7 @@ class BridgeContextAssembler:
     ) -> dict[str, Any]:
         """Build PCM with token-aware, traceable non-HER history fallback."""
 
+        pcm_profile = pcm_profile_module.normalize_pcm_profile(pcm_profile)
         local_profile = (
             str(pcm_profile).strip().casefold() == pcm_profile_module.PCM_PROFILE_LOCAL
         )
@@ -2433,14 +2448,20 @@ class BridgeContextAssembler:
 
         if document and document.memory:
             if local_profile:
-                # Local receives a retrieval reference instead of the full
-                # block. The canonical memory remains in agent.md and is
+                # Local keeps a one-line bounded excerpt so long-term facts
+                # stay directly visible to small models, plus a retrieval
+                # reference. The canonical block remains in agent.md and is
                 # readable through the authorized file tools; retrieval does
                 # not assume memory_search already indexes it.
+                memory_text = str(document.memory or "")
+                excerpt = " ".join(memory_text.replace("\r\n", "\n").split())
+                if len(excerpt) > pcm_profile_module.LOCAL_MEMORY_EXCERPT_CHARS:
+                    excerpt = excerpt[: pcm_profile_module.LOCAL_MEMORY_EXCERPT_CHARS].rstrip() + "…"
                 add_section(
                     "permanent_memory",
-                    "LONG-TERM MEMORY REFERENCE",
-                    "Long-term memory is stored in agent.md ([memory]); read it "
+                    "LONG-TERM MEMORY (EXCERPT + REFERENCE)",
+                    excerpt
+                    + "\nFull long-term memory is in agent.md ([memory]); read it "
                     "with file_read when relevant to this request.",
                     "memory",
                     protected=True,
