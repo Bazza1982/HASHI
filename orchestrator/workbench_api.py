@@ -15914,6 +15914,10 @@ class WorkbenchApiServer:
             payload["status"] = "ready"
             payload["issues"] = []
         remote_status = getattr(orchestrator, "remote_lifecycle_status", None)
+        remote_version = getattr(orchestrator, "remote_version_state", None)
+        if isinstance(remote_status, dict) and isinstance(remote_version, dict):
+            # Populated by /version full; health never probes Remote itself.
+            remote_status = {**remote_status, **remote_version}
         if isinstance(remote_status, dict):
             payload["remote"] = dict(remote_status)
         runtime = getattr(orchestrator, "runtime_fingerprint", None)
@@ -16102,6 +16106,17 @@ class WorkbenchApiServer:
                 {"ok": False, "error": "version_facts_unavailable"},
                 status=503,
             )
+        remote = payload.get("remote") if isinstance(payload, dict) else None
+        if isinstance(remote, dict):
+            setattr(self.orchestrator, "remote_version_state", {
+                "version_status": remote.get("status"),
+                "source_commit": (
+                    (remote.get("provenance") or {}).get("commit")
+                    if isinstance(remote.get("provenance"), dict) else None
+                ),
+                "restart_pending": remote.get("restart_pending"),
+                "expected_commit": remote.get("expected_commit"),
+            })
         return web.json_response(payload)
 
     def _schedule_device_capability_topology_refresh(self) -> None:

@@ -815,6 +815,121 @@ async def ensure_remote_started(
     return await _start_child_remote(settings, **source_options)
 
 
+REMOTE_RESTART_VERIFY_TIMEOUT_SECONDS = 90.0
+_REMOTE_RESTART_POLL_INTERVAL_SECONDS = 0.5
+
+
+def _lifecycle_receipt_brief(result: Any) -> Any:
+    """Keep JSON-safe supervisor evidence for durable reboot receipts."""
+
+    if not isinstance(result, dict):
+        return result
+    return {
+        key: result[key]
+        for key in ("ok", "action", "reason", "service_name", "exit_code", "backend")
+        if key in result
+    }
+
+
+async def restart_remote_after_cutover(
+    root: Path | str | None = None,
+    *,
+    expected_commit: str | None = None,
+    code_root: Path | str | None = None,
+    timeout: float = REMOTE_RESTART_VERIFY_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Restart Remote after Core committed and require a new verified process.
+
+    A supervisor restart is preferred; when no supervised controller is
+    available the ordinary stop/start lifecycle is used. Success requires a new
+    PID and, when supplied, the exact expected source commit. Nothing here
+    changes the persisted Remote on/off state.
+    """
+
+    settings = load_settings(root)
+    if not settings.enabled:
+        return {"ok": True, "status": "skipped", "reason": "remote_enabled=false"}
+    disabled = read_disabled_state(settings.root)
+    if disabled:
+        return {
+            "ok": True,
+            "status": "skipped",
+            "reason": "remote explicitly disabled",
+            "disabled": disabled,
+        }
+    source_options = {"code_root": code_root} if code_root is not None else {}
+    before = read_runtime_claim(settings.root) or {}
+    previous_pid = _owned_remote_pid(await _find_owned_remote(settings))
+    try:
+        previous_pid = int(previous_pid or before.get("pid") or 0) or None
+    except (TypeError, ValueError):
+        previous_pid = None
+    controller = await control_remote_supervisor(
+        settings.root, action="restart", **source_options
+    )
+    fallback = None
+    if not controller.get("ok"):
+        stop_result = await stop_remote(settings.root, **source_options)
+        start_result = await ensure_remote_started(settings.root, **source_options)
+        fallback = {"stop": stop_result, "start": start_result}
+        if not start_result.get("ok"):
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": "remote_restart_failed",
+                "controller": _lifecycle_receipt_brief(controller),
+                "fallback": {
+                    key: _lifecycle_receipt_brief(value)
+                    for key, value in (fallback or {}).items()
+                },
+                "previous_pid": previous_pid,
+            }
+    expected = str(expected_commit or "").strip().lower()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(5.0, float(timeout))
+    last: dict[str, Any] | None = None
+    while loop.time() < deadline:
+        owned = await _find_owned_remote(settings)
+        if owned:
+            claim = (owned.get("health") or {}).get("instance", {}).get("runtime_claim") or {}
+            provenance = claim.get("provenance") if isinstance(claim, dict) else {}
+            commit = str((provenance or {}).get("commit") or "").strip().lower() or None
+            pid = _owned_remote_pid(owned)
+            last = {"pid": pid, "source_commit": commit, "owned": True}
+            new_process = pid is not None and (previous_pid is None or int(pid) != previous_pid)
+            commit_ok = not expected or commit == expected
+            if new_process and commit_ok:
+                return {
+                    "ok": True,
+                    "status": "restarted",
+                    "pid": pid,
+                    "previous_pid": previous_pid,
+                    "source_commit": commit,
+                    "verified_commit": bool(expected),
+                    "controller": _lifecycle_receipt_brief(controller),
+                    "fallback": {
+                        key: _lifecycle_receipt_brief(value)
+                        for key, value in (fallback or {}).items()
+                    },
+                }
+        else:
+            last = {"owned": False}
+        await asyncio.sleep(_REMOTE_RESTART_POLL_INTERVAL_SECONDS)
+    return {
+        "ok": False,
+        "status": "failed",
+        "reason": "remote_restart_timeout" if last and last.get("owned") else "remote_not_healthy",
+        "expected_commit": expected or None,
+        "previous_pid": previous_pid,
+        "last_observation": last,
+        "controller": _lifecycle_receipt_brief(controller),
+        "fallback": {
+            key: _lifecycle_receipt_brief(value)
+            for key, value in (fallback or {}).items()
+        },
+    }
+
+
 async def stop_remote(
     root: Path | str | None = None, *, code_root: Path | str | None = None,
 ) -> dict[str, Any]:

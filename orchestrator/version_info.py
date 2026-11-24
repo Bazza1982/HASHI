@@ -474,6 +474,12 @@ def collect_version_payload(
     elif (remote.get("status") in {"active", "degraded"}
           and remote_provenance.get("dirty_at_build") is not False):
         reasons.append("remote_build_status_unknown")
+    if shared_commit and remote_commit:
+        remote["restart_pending"] = shared_commit != remote_commit
+        remote["expected_commit"] = shared_commit
+        remote["running_commit"] = remote_commit
+    else:
+        remote["restart_pending"] = None
     if shared_commit and remote_commit and shared_commit != remote_commit:
         mixed = True
         reasons.append("remote_commit_differs")

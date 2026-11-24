@@ -966,12 +966,21 @@ class RebootManager:
             )
             online_count = sum(online.values())
             if shared_ready and online_count == len(record["targets"]):
+                remote_restart = await self._restart_remote_after_cutover(record)
+                warnings = list(connector_warnings)
+                outcome = "succeeded_with_warning" if warnings else "succeeded"
+                if remote_restart and remote_restart.get("status") not in {
+                    "restarted",
+                    "skipped",
+                }:
+                    warnings.append("remote_restart_failed")
+                    outcome = "succeeded_with_warning"
                 self._finish(
                     record,
                     "succeeded",
                     lifecycle_state="online",
-                    outcome="succeeded_with_warning" if connector_warnings else "succeeded",
-                    warnings=connector_warnings,
+                    outcome=outcome,
+                    warnings=warnings,
                     observation_confidence="confirmed",
                     committed=True,
                     reason="",
@@ -979,6 +988,7 @@ class RebootManager:
                     workers=evidence,
                     generations={name: generation_id for name in record["targets"]},
                     shared_replacement=shared_result,
+                    remote_restart=remote_restart,
                 )
             else:
                 outcome = "partial" if online_count else "failed"
@@ -994,6 +1004,53 @@ class RebootManager:
                     workers=evidence,
                     shared_replacement=shared_result,
                 )
+
+    async def _restart_remote_after_cutover(
+        self,
+        record: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Restart the independently supervised Remote after a broad cutover.
+
+        Shared Functions are already committed and verified before this runs.
+        A Remote failure never rewrites Core's commit result, but it is durable
+        evidence and a warning rather than a silent success.
+        """
+
+        if str(record.get("mode") or "") not in BROAD_REBOOT_MODES:
+            return None
+        expected = ""
+        for worker in (record.get("workers") or {}).values():
+            value = str((worker or {}).get("source_commit") or "").strip()
+            if value:
+                expected = value
+                break
+        try:
+            self.receipts.update(
+                record["id"],
+                phase="remote_restarting",
+                lifecycle_state="committed",
+            )
+        except (OSError, ValueError):
+            bridge_logger.warning(
+                "Could not persist remote_restarting phase: operation=%s",
+                record.get("id"),
+            )
+        try:
+            from orchestrator.remote_lifecycle import restart_remote_after_cutover
+
+            return await restart_remote_after_cutover(
+                expected_commit=expected or None,
+            )
+        except Exception as exc:
+            bridge_logger.exception(
+                "Remote restart after cutover failed: operation=%s", record.get("id")
+            )
+            return {
+                "ok": False,
+                "status": "failed",
+                "reason": "remote_restart_error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def _promote_legacy_shared_replacements(self, state_dir: Path) -> None:
         """Adopt a legacy broad receipt only after Core committed its handoff."""

@@ -804,9 +804,153 @@ def _qualify_staged_functions(root: Path, home: Path, staging: Path) -> dict[str
     }
 
 
+_REMOTE_REQUIRED_FILES = (
+    "remote/__main__.py",
+    "remote/api/server.py",
+    "remote/runtime_identity.py",
+)
+_REMOTE_REQUIRED_CONTROLLERS = (
+    "bin/hashi_remote_ctl.ps1",
+    "bin/hashi-remote-ctl.sh",
+)
+
+
+def _remote_import_precheck(code_root: Path) -> dict[str, Any]:
+    """Import the Remote entry points without starting a process or port.
+
+    This catches syntax/import damage in the staged commit before any Core
+    restart, while remaining a read-only check (no FastAPI app is served).
+    """
+
+    argv = [
+        sys.executable,
+        "-c",
+        "import remote.api.server, remote.main; print('remote_import_ok')",
+    ]
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment["PYTHONPATH"] = str(code_root)
+    environment.setdefault("HASHI_INSTANCE_ID", "")
+    environment["PYTHONUTF8"] = "1"
+    completed = subprocess.run(
+        argv,
+        cwd=code_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120.0,
+        env=environment,
+        check=False,
+    )
+    if completed.returncode != 0 or "remote_import_ok" not in (completed.stdout or ""):
+        raise ReleaseUpdateError(
+            "remote_prepare",
+            "Remote source at the target commit failed its import precheck; "
+            "nothing was restarted.",
+            details=_bounded_output(
+                (completed.stdout or "") + "\n" + (completed.stderr or "")
+            ),
+        )
+    return {"ok": True, "imports": ["remote.api.server", "remote.main"]}
+
+
+def _remote_release_precheck(
+    root: Path,
+    target: str,
+    *,
+    remote: str,
+    branch: str,
+) -> dict[str, Any]:
+    """Describe Remote source/process state and verify it can adopt the target."""
+
+    from orchestrator.remote_lifecycle import load_settings, read_disabled_state
+    from remote.runtime_identity import read_runtime_claim
+
+    settings = load_settings(root)
+    base: dict[str, Any] = {
+        "enabled": bool(settings.enabled),
+        "port": settings.port,
+        "target_commit": target,
+        "running_commit": None,
+        "running_pid": None,
+        "needs_restart": False,
+        "code_root": str(root),
+        "sync": {"action": "same_tree", "code_root": str(root)},
+    }
+    if not settings.enabled:
+        return {**base, "status": "disabled", "reason": "remote_enabled=false"}
+    disabled = read_disabled_state(root)
+    if disabled:
+        return {
+            **base,
+            "status": "disabled",
+            "reason": "remote explicitly disabled",
+            "disabled": disabled,
+        }
+    claim = read_runtime_claim(root) or {}
+    remote_root = root
+    if str(claim.get("code_root") or "").strip():
+        remote_root = Path(str(claim["code_root"])).expanduser().resolve()
+    base["code_root"] = str(remote_root)
+    base["running_pid"] = claim.get("pid")
+    provenance = claim.get("provenance") if isinstance(claim, dict) else {}
+    running_commit = (
+        str((provenance or {}).get("commit") or "").strip().lower() or None
+    )
+    base["running_commit"] = running_commit
+    base["needs_restart"] = running_commit != target
+
+    missing_files = [
+        rel for rel in _REMOTE_REQUIRED_FILES if not (remote_root / rel).is_file()
+    ]
+    if missing_files:
+        raise ReleaseUpdateError(
+            "remote_prepare",
+            "Remote source is incomplete at the target commit; nothing was restarted.",
+            details={"code_root": str(remote_root), "missing": missing_files},
+        )
+    controllers = [
+        rel for rel in _REMOTE_REQUIRED_CONTROLLERS if (remote_root / rel).is_file()
+    ]
+    if not controllers:
+        raise ReleaseUpdateError(
+            "remote_prepare",
+            "Remote controller entry point is missing from the source tree.",
+            details={"code_root": str(remote_root), "expected": list(_REMOTE_REQUIRED_CONTROLLERS)},
+        )
+    if remote_root != root:
+        head = _require_clean_checkout(remote_root, phase="remote_prepare")
+        sync: dict[str, Any] = {"action": "same_tree", "code_root": str(remote_root)}
+        if head != target:
+            fast_forward_checkout(remote_root, remote=remote, branch=branch)
+            head = _require_clean_checkout(remote_root, phase="remote_prepare")
+            sync = {
+                "action": "fast_forward",
+                "code_root": str(remote_root),
+                "remote": remote,
+                "branch": branch,
+            }
+        if head != target:
+            raise ReleaseUpdateError(
+                "remote_prepare",
+                "Remote CodeRoot could not be brought to the target commit.",
+                details={"code_root": str(remote_root), "head": head, "target": target},
+            )
+        base["sync"] = sync
+    precheck = _remote_import_precheck(remote_root)
+    return {
+        **base,
+        "status": "ready",
+        "controller": controllers[0],
+        "precheck": precheck,
+    }
+
+
 def prepare_staged_release(
     *, code_root: Path | str, bridge_home: Path | str,
     instance_id: str, expected_commit: str,
+    remote: str = "origin", branch: str = "main",
 ) -> dict[str, Any]:
     """Qualify committed source and persist a receipt; never activate it."""
     from datetime import datetime
@@ -820,6 +964,7 @@ def prepare_staged_release(
         raise ReleaseUpdateError("stage_verify", "expected source commit is invalid")
     if _require_clean_checkout(root, phase="stage_verify") != target:
         raise ReleaseUpdateError("stage_verify", "source commit changed before qualification")
+    remote_state = _remote_release_precheck(root, target, remote=remote, branch=branch)
     staging = home / "state" / "source_deployments" / uuid4().hex
     qualification = _qualify_staged_functions(root, home, staging)
     if qualification.get("source_commit") != target:
@@ -834,8 +979,18 @@ def prepare_staged_release(
         "restarts_performed": False, "running_verified": False,
         "qualification": qualification, "receipt_path": str(receipt_path),
         "validated_at": datetime.now().astimezone().isoformat(),
-        "next_action": "Adopt the prepared Functions with /reboot when ready, then "
-                       "check /version full. Core and Remote adoption remain separate.",
+        "remote_target_commit": target,
+        "remote_code_root": remote_state.get("code_root"),
+        "remote_needs_restart": bool(remote_state.get("needs_restart")),
+        "remote": remote_state,
+        "next_action": (
+            "Adopt the prepared Functions with /reboot when ready. Core and Remote "
+            "adoption remain separate: restart Remote and require /health "
+            "source_commit_sha == target before reporting the release complete."
+            if remote_state.get("needs_restart")
+            else "Core changes are ready to adopt; Remote already runs the target "
+                 "commit, so verify /version full after the reboot."
+        ),
     }
     try:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -873,6 +1028,7 @@ def run_staged_source_release(
                 "--code-root", str(root), "--release-home", str(home),
                 "--instance-id", instance_id,
                 "--expected-commit", source["target_commit"],
+                "--remote", remote, "--branch", branch,
             ]
             completed = _run(
                 argv, cwd=root, phase="stage_qualification",
@@ -1044,6 +1200,8 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--release-home", dest="bridge_home", type=Path, required=True)
     stage.add_argument("--instance-id", required=True)
     stage.add_argument("--expected-commit", required=True)
+    stage.add_argument("--remote", default="origin")
+    stage.add_argument("--branch", default="main")
     return parser
 
 
@@ -1056,6 +1214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = prepare_staged_release(
                 code_root=args.code_root, bridge_home=args.bridge_home,
                 instance_id=args.instance_id, expected_commit=args.expected_commit,
+                remote=args.remote, branch=args.branch,
             )
         except ReleaseUpdateError as exc:
             print(json.dumps(exc.to_payload(), ensure_ascii=False, sort_keys=True))
@@ -1067,3 +1226,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_71dd6fdbb2004e0b95465bbda1db899f

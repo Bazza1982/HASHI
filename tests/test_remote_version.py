@@ -68,6 +68,53 @@ def test_real_remote_health_projects_exact_claim_for_loopback(tmp_path: Path) ->
     assert _remote_health_matches_claim(health, claim, tmp_path, "HASHI2")
 
 
+def test_remote_health_and_status_expose_runtime_identity(tmp_path: Path) -> None:
+    claim = {
+        "instance_id": "HASHI2",
+        "root": str(tmp_path.resolve()),
+        "port": 8767,
+        "pid": 4242,
+        "started_at": 123456.0,
+        "code_root": str(tmp_path.resolve()),
+        "provenance": {"commit": "c" * 40, "branch": "main"},
+    }
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "remote_runtime_claim.json").write_text(
+        json.dumps(claim), encoding="utf-8"
+    )
+    (tmp_path / "secrets.json").write_text(
+        json.dumps({"hashi_remote_shared_token": TOKEN}), encoding="utf-8"
+    )
+    app = create_app(
+        {"instance_id": "HASHI2", "display_name": "Target", "remote_port": 8767},
+        PairingManager(storage_dir=tmp_path / "pairing", lan_mode=True),
+        TerminalExecutor(),
+        hashi_root=str(tmp_path),
+    )
+    with TestClient(app, client=("127.0.0.1", 54321)) as client:
+        health = client.get("/health").json()
+        status_headers = build_auth_headers(
+            shared_token=TOKEN,
+            method="GET",
+            path="/workbench/v1/status",
+            from_instance="HASHI1",
+            body_bytes=b"",
+        )
+        status = client.get("/workbench/v1/status", headers=status_headers)
+
+    instance = health["instance"]
+    assert instance["source_commit_sha"] == "c" * 40
+    assert instance["pid"] == 4242
+    assert instance["started_at"] == 123456.0
+    assert "sse_proxy_v1" in instance["capabilities"]
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["source_commit_sha"] == "c" * 40
+    assert payload["pid"] == 4242
+    assert "sse_proxy_v1" in payload["capabilities"]
+
+
 def test_remote_version_requires_hmac_and_signs_structured_facts(
     tmp_path: Path, monkeypatch
 ) -> None:

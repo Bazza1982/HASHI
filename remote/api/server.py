@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -103,6 +104,7 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from ..attachments import AttachmentStore, STREAM_ATTACHMENT_CHUNK_BYTES
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
+from ..runtime_identity import read_runtime_claim
 from .lan_readiness import LanReadinessCache, MAX_REPORT_BYTES
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
 from ..protocol_outbound import (
@@ -326,6 +328,11 @@ _workbench_port: int = DEFAULT_WORKBENCH_PORT
 _attachment_store: Optional[AttachmentStore] = None
 _HCHAT_HEADER_RE = re.compile(r"^\[hchat from (?P<agent>\w+)(?:@(?P<instance>[\w-]+))?\]\s*(?P<body>.*)$", re.DOTALL)
 API_PROTOCOL_CAPABILITIES = [
+    # Consumed by Workbench before it opens the upstream SSE stream. Keep the
+    # marker stable: older Remotes legitimately lack it, and clients must
+    # degrade instead of inferring support from a bare 200 response.
+    "sse_proxy_v1",
+    "remote_runtime_identity_v1",
     "protocol_announce_v1",
     "protocol_directory_v1",
     "protocol_outbound_correlation_v1",
@@ -3628,6 +3635,66 @@ def _fetch_workbench_health(timeout: float = 1.0) -> dict[str, Any] | None:
     return health
 
 
+_WORKBENCH_STATUS_POOL: ThreadPoolExecutor | None = None
+_WORKBENCH_STATUS_POOL_LOCK = threading.Lock()
+_PROCESS_STARTED_AT = time.time()
+
+
+def _workbench_status_pool() -> ThreadPoolExecutor:
+    """Isolate status-path loopback probes from the shared default executor."""
+
+    global _WORKBENCH_STATUS_POOL
+    with _WORKBENCH_STATUS_POOL_LOCK:
+        if _WORKBENCH_STATUS_POOL is None:
+            _WORKBENCH_STATUS_POOL = ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix="remote-workbench-status",
+            )
+        return _WORKBENCH_STATUS_POOL
+
+
+async def _fetch_workbench_health_bounded(timeout: float = 1.0) -> dict[str, Any] | None:
+    """Probe loopback Workbench without letting urllib pin a request task.
+
+    The sync probe keeps its own redirect/TLS/identity policy; it simply runs in
+    a small dedicated pool whose only job is this bounded health projection.
+    """
+
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_workbench_status_pool(), _fetch_workbench_health, timeout)
+    try:
+        return await asyncio.wait_for(future, timeout=float(timeout) + 0.5)
+    except asyncio.TimeoutError:
+        return None
+
+
+def _remote_runtime_identity() -> dict[str, Any]:
+    """Non-secret build/process identity shared with Workbench and /version."""
+
+    claim: dict[str, Any] = {}
+    if _hashi_root:
+        try:
+            claim = read_runtime_claim(_hashi_root) or {}
+        except Exception:
+            claim = {}
+    provenance = claim.get("provenance") if isinstance(claim, dict) else {}
+    provenance = provenance if isinstance(provenance, dict) else {}
+    capabilities = list(API_PROTOCOL_CAPABILITIES)
+    if _protocol_manager is not None:
+        capabilities = _protocol_capabilities_with_api_endpoints(
+            list(_protocol_manager.get_protocol_status().get("capabilities") or [])
+        )
+    pid = claim.get("pid") if isinstance(claim, dict) else None
+    started_at = claim.get("started_at") if isinstance(claim, dict) else None
+    return {
+        "source_commit_sha": str(provenance.get("commit") or "") or None,
+        "source_branch": str(provenance.get("branch") or "") or None,
+        "pid": int(pid) if isinstance(pid, int) or str(pid or "").isdigit() else os.getpid(),
+        "started_at": float(started_at) if started_at else _PROCESS_STARTED_AT,
+        "capabilities": capabilities,
+    }
+
+
 def _request_workbench_agent_lifecycle(
     agent: str,
     *,
@@ -3831,11 +3898,8 @@ def create_app(
                 "hashi_status": hashi_status,
                 "hashi_running": hashi_running,
                 "can_start_hashi": can_start_hashi,
+                **_remote_runtime_identity(),
             }
-            if _protocol_manager:
-                instance_view["capabilities"] = _protocol_capabilities_with_api_endpoints(
-                    list(_protocol_manager.get_protocol_status().get("capabilities") or [])
-                )
             return {
                 "ok": True,
                 "instance": instance_view,
@@ -3868,6 +3932,7 @@ def create_app(
             "hashi_status": hashi_status,
             "hashi_running": hashi_running,
             "can_start_hashi": can_start_hashi,
+            **_remote_runtime_identity(),
         }
         return {
             "ok": True,
@@ -4021,9 +4086,10 @@ def create_app(
                 "detail": "Shared request credentials are required." if reason == "auth_required"
                     else "Remote authentication failed. Check the connection credential, clock and signed request.",
             })
-        health = await asyncio.to_thread(_fetch_workbench_health, 1.0)
+        health = await _fetch_workbench_health_bounded(1.0)
         hashi_status = _derive_hashi_state(health)
         record_hashi_liveness(hashi_state=hashi_status, health=health)
+        identity = _remote_runtime_identity()
         return _shared_token_response(request, {
             "ok": True,
             "gateway": "workbench_v1",
@@ -4032,6 +4098,11 @@ def create_app(
             "hashi_status": hashi_status,
             "hashi_running": hashi_status == "active",
             "can_start_hashi": bool(_control_hashi_root),
+            "source_commit_sha": identity["source_commit_sha"],
+            "source_branch": identity["source_branch"],
+            "pid": identity["pid"],
+            "started_at": identity["started_at"],
+            "capabilities": identity["capabilities"],
             "instance": {
                 "instance_id": _instance_info.get("instance_id"),
                 "display_name": _instance_info.get("display_name"),
@@ -4042,6 +4113,7 @@ def create_app(
                 "hashi_status": hashi_status,
                 "hashi_running": hashi_status == "active",
                 "can_start_hashi": bool(_control_hashi_root),
+                **identity,
             },
             "workbench_online": health is not None,
             "workbench_health": health,
