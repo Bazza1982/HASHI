@@ -81,7 +81,7 @@ class WorkerHerCallbacks:
         allowed = {"request_id", "recovery_evidence_ref", "recovery_item_id", "offset", "expected_digest"}
         if (not isinstance(arguments, dict) or set(arguments) - allowed
                 or not all(isinstance(arguments.get(k), str) and arguments[k]
-                           for k in ("request_id", "recovery_evidence_ref"))):
+                           for k in ("request_id", "recovery_evidence_ref", "recovery_item_id"))):
             return unavailable
 
         def read_page():
@@ -142,27 +142,6 @@ class WorkerHerCallbacks:
             if not isinstance(checkpoint, Mapping):
                 return unavailable
             item_id = arguments["recovery_item_id"]
-            if not item_id:
-                # Scoped discovery: the caller holds the canonical reference but
-                # not an item identity. Re-run the same binding, claim and
-                # workzone checks, then return only authorized item identities.
-                agent_home = Path(adapter.config.workspace_dir)
-                expected = agent_home / "backend_state" / "her_v2" / "fixed_sessions.sqlite3"
-                if Path(store.path).resolve() != expected.resolve():
-                    return unavailable
-                scope = {"agent_name": context.agent_id, "owner_id": context.owner_id,
-                         "instance_id": context.instance_id, "hashi_session_id": context.session_id,
-                         "context_generation": int(context.context_generation),
-                         "session_workspace": identity.get("workzone_identity"),
-                         "_herv3_recovery_scopes": [{"session_id": accepted.session_id,
-                             "turn_id": source_turn, "request_id": arguments["request_id"]}]}
-                page = read_scoped_recovery_evidence(
-                    agent_home=agent_home, request_id=arguments["request_id"], evidence_ref=reference,
-                    item_id="", offset=arguments.get("offset", 0),
-                    expected_digest=arguments.get("expected_digest", ""), scope=scope)
-                if page.get("status") != "available":
-                    return unavailable
-                return {"page": page}
             call_id = item_id
             if not reference.startswith("her_provider_context_items:"):
                 field = "tool_receipts" if ":tool_receipts:" in reference else "side_effects"
