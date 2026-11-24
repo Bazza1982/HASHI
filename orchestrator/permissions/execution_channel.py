@@ -26,6 +26,8 @@ class PermissionExecutionChannel:
         self.registry, self._models = registry, model_broker
         self._checkpoint, self._audit = checkpoint_writer, audit_writer
         self._runtime_port = None
+        self._evidence_callback = None
+        self._evidence_policy_validator = None
         self._closed, self._parked = False, False
         self._completed_tool_calls = set()
         self._require_checkpoints = bool(require_checkpoints)
@@ -53,7 +55,10 @@ class PermissionExecutionChannel:
 
         token = TOOL_CALL.set(tool_call_id)
         try:
-            result = await self.registry.execute(tool_name, arguments, tool_call_id)
+            if tool_name == "request_diagnostics" and isinstance(arguments, dict) and arguments.get("recovery_evidence_ref"):
+                result = await self._read_recovery_evidence(arguments, tool_call_id)
+            else:
+                result = await self.registry.execute(tool_name, arguments, tool_call_id)
         except PermissionPark as park:
             result = park.result
         finally:
@@ -65,6 +70,74 @@ class PermissionExecutionChannel:
             self._completed_tool_calls.add((tool_name, tool_call_id))
             self._pending_calls.pop(tool_call_id, None)
         return result
+
+    async def _read_recovery_evidence(self, arguments, tool_call_id):
+        """A single Run-bound recovery item, under the existing PAO policy."""
+        import asyncio
+        import time
+        from pathlib import Path
+        from orchestrator.permissions.descriptors import describe_tool
+        from tools.registry import ToolResult
+
+        started = time.monotonic()
+        admission = self.registry.evaluate_admission("request_diagnostics", arguments, tool_call_id)
+        if admission is not None:
+            return self.registry._finish_result("request_diagnostics", arguments, admission, started)
+        unavailable = {"status": "not available"}
+        page = unavailable
+        try:
+            if not callable(self._evidence_callback) or not callable(self._evidence_policy_validator):
+                raise PermissionDenied("scoped recovery evidence owner is unavailable")
+            evidence = await self._evidence_callback(binding=self.binding, arguments=arguments)
+            self._current()
+            if not isinstance(evidence, dict) or not isinstance(evidence.get("page"), dict):
+                raise PermissionDenied("invalid scoped recovery evidence")
+            proposed = evidence["page"]
+            if proposed.get("status") == "available":
+                name, source_args = evidence.get("tool_name"), evidence.get("tool_arguments")
+                if not isinstance(name, str) or not isinstance(source_args, dict):
+                    raise PermissionDenied("the source Tool identity is unavailable")
+                if self.registry.evaluate_admission(name, source_args, tool_call_id) is not None:
+                    raise PermissionDenied("the source Tool is not currently admitted")
+                cwd, roots = self.registry._permission_cwd, self.registry._permission_roots
+                # A default search root cannot be reconstructed from an old
+                # checkpoint without evidence of the original roots.
+                if name == "file_search" and not source_args.get("roots"):
+                    raise PermissionDenied("the source search roots are unavailable")
+                if any(isinstance(value, str) and not Path(value).is_absolute() for value in (
+                    [source_args.get("path")] + list(source_args.get("roots") or [])
+                )):
+                    if Path(str(evidence.get("source_workzone") or "")).resolve(strict=False) != cwd:
+                        raise PermissionDenied("the source working directory cannot be rebound")
+                descriptor = describe_tool(name, source_args, cwd=cwd, read_roots=roots)
+                if not descriptor.scopes:
+                    raise PermissionDenied("the source action has no reviewed scope")
+                for scope in descriptor.scopes:
+                    if self._evidence_policy_validator(self.binding.context, scope) is not True:
+                        raise PermissionDenied("the source scope is outside the current policy")
+                if await asyncio.to_thread(self._authority.evaluate, self.binding.context, descriptor.scopes) is not True:
+                    raise PermissionDenied("the source scope is not currently authorized")
+                # Check again after the owner read and permission lookup, before
+                # releasing any content to the restricted execution host.
+                self._current()
+                if any(self._evidence_policy_validator(self.binding.context, scope) is not True
+                       for scope in descriptor.scopes):
+                    raise PermissionDenied("the source policy changed")
+                if await asyncio.to_thread(self._authority.evaluate, self.binding.context, descriptor.scopes) is not True:
+                    raise PermissionDenied("the source authorization changed")
+                if any(self._evidence_policy_validator(self.binding.context, scope) is not True
+                       for scope in descriptor.scopes):
+                    raise PermissionDenied("the source policy changed")
+                self._current()
+                page = proposed
+        except (PermissionDenied, OSError, TypeError, ValueError, AttributeError):
+            page = unavailable
+        result = ToolResult(
+            tool_call_id=tool_call_id,
+            output=json.dumps({"recovery_evidence": page}, ensure_ascii=False),
+            details={"control_disposition": "allowed" if page is not unavailable else "denied"},
+        )
+        return self.registry._finish_result("request_diagnostics", arguments, result, started)
 
     async def provider_call(self, *, engine, model, payload, use_stream):
         self._current()
@@ -193,3 +266,4 @@ class PermissionExecutionChannel:
     def descriptor(self):
         self._current()
         return {"binding": asdict(self.binding), "tool_definitions": self.tool_definitions()}
+# HASHI-Fingerprint: hfp_4773f9ce379f4cb78fb68dd45c3fa44d

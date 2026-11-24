@@ -213,6 +213,11 @@ def read_scoped_recovery_evidence(
     workzone = str(scope.get("session_workspace") or agent_home)
     if not agent or not owner or not conversation or not instance or type(generation) is not int:
         return unavailable
+    from orchestrator.her_v2.session_store import _binding_workzone_identity
+
+    workzone = _binding_workzone_identity(
+        workzone, hashi_conversation_id=conversation, context_generation=generation,
+    )
     db_path = Path(agent_home) / "backend_state" / "her_v2" / "fixed_sessions.sqlite3"
     if not db_path.is_file():
         return unavailable
@@ -223,7 +228,8 @@ def read_scoped_recovery_evidence(
                 """
                 SELECT r.tool_receipts_json, r.side_effects_json, r.provider_context_json,
                        r.provider_context_digest, r.provider_context_producer_claim_json,
-                       r.provider_context_producer_claim_digest
+                       r.provider_context_producer_claim_digest,
+                       s.workzone_identity AS stored_workzone
                 FROM her_active_turn_recovery r
                 JOIN her_turns t ON t.session_id = r.session_id AND t.turn_id = r.turn_id
                 JOIN her_sessions s ON s.session_id = r.session_id
@@ -231,12 +237,13 @@ def read_scoped_recovery_evidence(
                   AND s.agent_id = ? COLLATE NOCASE AND s.owner_id = ?
                   AND s.instance_id = ? COLLATE NOCASE
                   AND s.hashi_conversation_id = ? AND s.context_generation = ?
-                  AND s.workzone_identity = ?
                 """,
                 (session_id, turn_id, str(request_id), agent, owner, instance,
-                 conversation, generation, workzone),
+                 conversation, generation),
             ).fetchone()
-            if row is None:
+            if row is None or _binding_workzone_identity(
+                row["stored_workzone"], hashi_conversation_id=conversation, context_generation=generation,
+            ) != workzone:
                 return unavailable
             if field == "provider_tool_result":
                 from orchestrator.her_v2.session_store import (

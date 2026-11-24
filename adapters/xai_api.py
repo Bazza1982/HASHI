@@ -150,6 +150,10 @@ class XaiApiAdapter(OpenRouterAdapter):
     def _api_url(self) -> str:
         return self._responses_url() if self._use_responses_api() else self._chat_url()
 
+    def supports_herv3_context(self) -> bool:
+        # Responses/image routes do not use the shared chat-message protocol.
+        return not self._use_responses_api() and not is_imagine_image_model(self.config.model)
+
     def supports_external_tool_passthrough(self, model: str | None = None) -> bool:
         """Return whether this model has a native Chat Completions tool path."""
         selected_model = str(model or self.config.model or "")
@@ -872,6 +876,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         continuation_messages=None,
         resume_pending_tools=False,
         deferred_followups=None,
+        continuation_request_content=False,
         provider_call_limit=None,
         before_provider_call=None,
         transient_images=None,
@@ -897,6 +902,7 @@ class XaiApiAdapter(OpenRouterAdapter):
             continuation_messages=continuation_messages,
             **({"resume_pending_tools": True} if resume_pending_tools else {}),
             **({"deferred_followups": deferred_followups} if deferred_followups else {}),
+            **({"continuation_request_content": True} if continuation_request_content else {}),
             provider_call_limit=provider_call_limit,
             before_provider_call=before_provider_call,
             transient_images=transient_images,

@@ -65,6 +65,8 @@ class InstalledExecution:
         self._callbacks = callbacks
         self.channel._checkpoint = callbacks.checkpoint
         self.channel._runtime_port = callbacks.runtime_port
+        self.channel._evidence_callback = callbacks.recovery_evidence
+        self.channel._evidence_policy_validator = getattr(self.factory, "validate_resource", None)
         self.channel._audit = lambda record: callbacks.audit(self.binding, record)
 
     async def configure_inference(self, config):

@@ -146,7 +146,7 @@ def test_wip_keeps_latest_progress_and_failure_when_event_rows_are_large(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_omitted_recovery_receipt_retrievable_by_scoped_agent_tool(tmp_path):
+async def test_omitted_recovery_receipt_retrievable_by_scoped_agent_tool(tmp_path, monkeypatch):
     from dataclasses import replace
     from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
     from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
@@ -197,6 +197,15 @@ async def test_omitted_recovery_receipt_retrievable_by_scoped_agent_tool(tmp_pat
     })
     registry = _EvidenceRecordingToolRegistry(registry, request)
     evidence = view["tool_receipts"]["evidence_ref"]
+    from orchestrator import request_diagnostics as diagnostics
+    build_report = diagnostics.build_request_diagnostics
+    report_calls = []
+
+    def counted_report(**kwargs):
+        report_calls.append(kwargs["request_id"])
+        return build_report(**kwargs)
+
+    monkeypatch.setattr(diagnostics, "build_request_diagnostics", counted_report)
     fragments = []
     offset = 0
     digest = ""
@@ -215,6 +224,8 @@ async def test_omitted_recovery_receipt_retrievable_by_scoped_agent_tool(tmp_pat
             break
         offset = page["next_offset"]
     assert json.loads("".join(fragments))["output"] == full_result
+    assert len(fragments) > 1
+    assert report_calls == ["source-request"], "later pages must not rebuild full request diagnostics"
     stale = await registry.execute("request_diagnostics", {
         "request_id": "source-request", "recovery_evidence_ref": evidence,
         "recovery_item_id": "read-old", "offset": 2048,

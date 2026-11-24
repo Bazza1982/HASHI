@@ -42,9 +42,14 @@ completed Tool effects, including when the original request contained structured
 media. At a completed Provider response boundary, the original conversation and
 response remain intact; a brief continuation cue avoids another full context
 assembly. A missing or mismatched exact checkpoint fails closed. Compatible
-Provider/model changes keep
-completed Tool results and structured media; vendor-specific reasoning fields
-are not forwarded across different Provider engines.
+Provider/model changes preserve completed Tool results and supported structured
+media only when the actual source and target continuation contracts are
+compatible; vendor-specific reasoning fields are not forwarded to a different
+route. A target such as HASHI API that does not accept a private message list
+receives a canonical reconstruction with bounded, evidence-linked completed Tool
+results. Unsupported historical media is not sent as if the target supported it.
+DeepSeek, Ollama and xAI forward structured successor content through their own
+existing transport paths.
 
 Older checkpoints without verified assembly ownership remain intact; their
 successors add incremental recovery facts and the new request rather than
@@ -58,11 +63,21 @@ can page the referenced receipt, side-effect or exact completed Tool result
 from a verified Provider checkpoint only for the canonical recovery source bound
 to the current Agent, owner, Session, instance, generation and workzone. Hidden
 reasoning and unrelated Provider messages are never returned. A page includes
-a digest and later pages must match it. Normal request-context refresh carries
-the current generation and workzone rather than a previous request's values.
+a digest and later pages must match it. On the ordinary tool path the first
+page includes the usual request diagnostics; later pages return the requested
+evidence without rebuilding the unrelated report. The protected path returns
+only the authorized evidence page. Segmented Provider evidence is still
+integrity-checked through the complete checkpoint when a page is read.
+Normal request-context refresh carries the current generation and workzone rather
+than a previous request's values.
 When this scope or the tool is unavailable, retrieval fails closed and must not
-be represented as verified. The installed protected execution channel does not
-currently expose this evidence paging tool; its retrieval path remains unverified.
+be represented as verified. The protected execution channel exposes the same
+evidence pages only through its current Run, with the original source Tool call
+and current permission policy checked by PAO; see
+[the L2 Workzone contract](permissions/L2_HARD_WORKZONE.md). Source calls without
+verifiable checkpoint provenance or a currently authorized scope remain
+unavailable. The isolated HERV3 host and PAO tests exercise this path; installed
+native-service and live-provider adoption remain separate acceptance evidence.
 
 The WIP journal and compacted recovery memory keep their source records. Their
 model views are bounded and carry a source reference. WIP projection trims

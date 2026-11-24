@@ -2099,6 +2099,13 @@ def _file_resource(arguments: dict) -> str:
 
 
 class OpenRouterAdapter(BaseBackend):
+    # The durable HERV3 checkpoint uses this adapter's chat-message contract.
+    HERV3_CONTEXT_FORMAT = "openai-chat-messages-v1"
+    HERV3_ACCEPTS_CONTEXT = True
+
+    def supports_herv3_context(self) -> bool:
+        return True
+
     # OpenRouter aggregates providers with different replay guarantees.  A
     # concrete compatible adapter may opt into narrowly scoped HTTP-call
     # recovery without replaying completed tool loops.

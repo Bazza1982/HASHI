@@ -843,8 +843,11 @@ def test_model_switch_closes_pending_batch_without_executing_it():
     assert stage._provider_recovery_resume_pending is False
 
 
-def test_model_switch_keeps_completed_tool_and_structured_media():
+def test_model_switch_keeps_completed_tool_and_structured_media(tmp_path):
     from orchestrator.her_v2.config import ProviderProfile
+    from tests.test_openrouter_multimodal import _adapter
+
+    target = _adapter(tmp_path, model="google/gemini-2.5-pro")
 
     history = [{"role": "system", "content": "old system"},
                {"role": "user", "content": "Original task"},
@@ -861,9 +864,9 @@ def test_model_switch_keeps_completed_tool_and_structured_media():
         recovery=_context("completed_tool_batch", history),
         resume_pending_tools=True, successor_turn=True)
     messages = stage._provider_recovery_messages(
-        profile=ProviderProfile("main", "openrouter-api", "configured/new"),
+        profile=ProviderProfile("main", "openrouter-api", "google/gemini-2.5-pro"),
         request=_direct_request(), stage_prompt="Assembled context",
-        original_request="New user instruction", system_prompt="new system")
+        original_request="New user instruction", system_prompt="new system", backend=target)
     assert messages is not None
     assert any(row.get("tool_call_id") == "read" and row.get("content") == "Useful completed result"
                for row in messages)

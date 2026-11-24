@@ -1750,6 +1750,25 @@ async def execute_request_diagnostics(
     request_id = str(args.get("request_id") or "").strip()
     if not request_id:
         return "Error: request_id is required"
+    evidence_ref = args.get("recovery_evidence_ref")
+    offset = args.get("offset", 0)
+    if evidence_ref and type(offset) is int and offset > 0:
+        # The first page already returned the complete request report. Later
+        # pages need only their current, re-authorized recovery value.
+        from orchestrator.request_diagnostics import FORMAT, read_scoped_recovery_evidence
+
+        page = await asyncio.to_thread(
+            read_scoped_recovery_evidence,
+            agent_home=agent_home or workspace_dir,
+            request_id=request_id,
+            evidence_ref=str(evidence_ref),
+            item_id=str(args.get("recovery_item_id") or ""),
+            offset=offset,
+            expected_digest=str(args.get("expected_digest") or ""),
+            scope=dict(audit_context or {}),
+        )
+        return json.dumps({"format": FORMAT, "request_id": request_id,
+                           "recovery_evidence": page}, ensure_ascii=False, indent=2)
     manager = _background_manager_from_context(audit_context)
     records: list[Any] = []
     history: dict[str, list[dict[str, Any]]] = {}
