@@ -39,6 +39,11 @@ _ACP_PROTOCOL_VERSION = 1
 _ACP_STDOUT_LIMIT = 16 * 1024 * 1024  # 16 MiB per JSON-RPC line
 _ACP_RPC_TIMEOUT_SEC = 30.0
 _ACP_CANCEL_GRACE_SEC = 5.0
+# ``dsh --help`` is a 4.5-12.6s synchronous spawn on cold workers. Every rebuilt
+# Execution used to pay it again; remember a recent successful probe per launch
+# invocation so model/effort switches do not re-run it.
+_HELP_CHECK_TTL_S = 600.0
+_HELP_CHECK_CACHE: dict[tuple[tuple[str, ...], str], float] = {}
 _SUPPORTED_IMAGE_MIMES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
 )
@@ -402,6 +407,14 @@ class DshCLIAdapter(BaseBackend):
         self.logger.info("Initializing DSH (DeepSeek Harness ACP) backend...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
         argv, launch_cwd, label = self._resolve_launch()
+        cache_key = (tuple(argv), str(launch_cwd or ""))
+        cached_at = _HELP_CHECK_CACHE.get(cache_key)
+        if cached_at is not None and (time.monotonic() - cached_at) < _HELP_CHECK_TTL_S:
+            self.logger.info(
+                "DSH ACP backend ready (%s): reused recent help check", label
+            )
+            self._probe_hashi_mcp()
+            return True
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -416,22 +429,26 @@ class DshCLIAdapter(BaseBackend):
                 err = stderr.decode("utf-8", errors="replace").strip()
                 self.logger.error("DSH ACP help check failed (%s): %s", label, err)
                 return False
+            _HELP_CHECK_CACHE[cache_key] = time.monotonic()
             self.logger.info(
                 "DSH ACP backend ready (%s): %s",
                 label,
                 self._preview_text(stdout, 120),
             )
-            try:
-                descriptor = prepare_hashi_mcp(self, backend="dsh-cli")
-                if descriptor is not None:
-                    descriptor.close()
-            except Exception as exc:
-                self._hashi_mcp_enabled = False
-                self.logger.debug("DSH HASHI MCP probe skipped during initialize: %s", exc)
+            self._probe_hashi_mcp()
             return True
         except Exception as exc:
             self.logger.error("DSH ACP backend not accessible (%s): %s", label, exc)
             return False
+
+    def _probe_hashi_mcp(self) -> None:
+        try:
+            descriptor = prepare_hashi_mcp(self, backend="dsh-cli")
+            if descriptor is not None:
+                descriptor.close()
+        except Exception as exc:
+            self._hashi_mcp_enabled = False
+            self.logger.debug("DSH HASHI MCP probe skipped during initialize: %s", exc)
 
     def set_session_mode(self, enabled: bool) -> None:
         self._session_mode = bool(enabled)
@@ -722,7 +739,7 @@ class DshCLIAdapter(BaseBackend):
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if line:
                     self._stderr_tail.append(line)
-                    self.logger.debug("[dsh stderr] %s", line)
+                    self.logger.info("[dsh stderr] %s", line)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1061,37 +1078,55 @@ class DshCLIAdapter(BaseBackend):
         if prompt:
             blocks.append({"type": "text", "text": prompt})
 
+        raw_blocks: list[Any] = []
+        if isinstance(request_content, Mapping):
+            candidate_blocks = request_content.get("content_blocks") or request_content.get("attachments") or []
+            if isinstance(candidate_blocks, list):
+                raw_blocks = candidate_blocks
+
         # Attach inline images only when DSH advertised image prompt support
-        if self._image_prompts_supported and isinstance(request_content, Mapping):
-            raw_blocks = request_content.get("content_blocks") or request_content.get("attachments") or []
-            if isinstance(raw_blocks, list):
-                for item in raw_blocks:
-                    if not isinstance(item, Mapping):
-                        continue
-                    path_str = str(
-                        item.get("path") or item.get("file_path") or ""
-                    ).strip()
-                    if not path_str:
-                        continue
-                    img_path = Path(path_str)
-                    if not img_path.is_file():
-                        continue
-                    mime = str(item.get("mime_type") or item.get("mimeType") or "").strip().lower()
-                    if not mime:
-                        mime = (mimetypes.guess_type(str(img_path))[0] or "").lower()
-                    if mime not in _SUPPORTED_IMAGE_MIMES:
-                        continue
-                    try:
-                        raw_bytes = img_path.read_bytes()
-                        blocks.append(
-                            {
-                                "type": "image",
-                                "mimeType": mime,
-                                "data": base64.b64encode(raw_bytes).decode("ascii"),
-                            }
-                        )
-                    except Exception as exc:
-                        self.logger.debug("Skipping unreadable image %s: %s", img_path, exc)
+        if self._image_prompts_supported:
+            for item in raw_blocks:
+                if not isinstance(item, Mapping):
+                    continue
+                path_str = str(
+                    item.get("path") or item.get("file_path") or ""
+                ).strip()
+                if not path_str:
+                    continue
+                img_path = Path(path_str)
+                if not img_path.is_file():
+                    continue
+                mime = str(item.get("mime_type") or item.get("mimeType") or "").strip().lower()
+                if not mime:
+                    mime = (mimetypes.guess_type(str(img_path))[0] or "").lower()
+                if mime not in _SUPPORTED_IMAGE_MIMES:
+                    continue
+                try:
+                    raw_bytes = img_path.read_bytes()
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "mimeType": mime,
+                            "data": base64.b64encode(raw_bytes).decode("ascii"),
+                        }
+                    )
+                except Exception as exc:
+                    self.logger.debug("Skipping unreadable image %s: %s", img_path, exc)
+        elif raw_blocks:
+            # Silent drops hide a real capability gap; make the skip observable
+            # in production logs (INFO and above) instead of only at DEBUG.
+            dropped = [
+                item
+                for item in raw_blocks
+                if isinstance(item, Mapping)
+                and str(item.get("path") or item.get("file_path") or "").strip()
+            ]
+            if dropped:
+                self.logger.warning(
+                    "DSH ACP did not advertise inline image prompts; %d inline attachment(s) were not sent.",
+                    len(dropped),
+                )
 
         if not blocks:
             blocks.append({"type": "text", "text": " "})
@@ -1155,6 +1190,8 @@ class DshCLIAdapter(BaseBackend):
             tool_titles: dict[str, str] = {}
             tool_call_count = 0
             latest_usage: dict[str, int] | None = None
+            thinking_chars = 0
+            thinking_event_count = 0
 
             def _flush_held_as_commentary() -> None:
                 nonlocal held_message_id, held_text_parts
@@ -1176,6 +1213,7 @@ class DshCLIAdapter(BaseBackend):
 
             def _handle_update(params: dict[str, Any]) -> None:
                 nonlocal held_message_id, latest_usage, tool_call_count
+                nonlocal thinking_chars, thinking_event_count
                 if params.get("sessionId") != session_id:
                     return
                 update = params.get("update")
@@ -1188,6 +1226,9 @@ class DshCLIAdapter(BaseBackend):
                     content = update.get("content")
                     if isinstance(content, Mapping) and content.get("type") == "text":
                         thought = str(content.get("text") or "")
+                        if thought:
+                            thinking_chars += len(thought)
+                            thinking_event_count += 1
                         if thought and on_stream_event is not None:
                             self._schedule_stream_event(
                                 on_stream_event,
@@ -1367,6 +1408,15 @@ class DshCLIAdapter(BaseBackend):
             }
             if latest_usage is not None:
                 stream_metadata["context_usage"] = latest_usage
+            # Reasoning volume is provider-reported by DSH through the ACP
+            # thought chunks; surface it so token accounting does not lose it
+            # when the request has no Telegram delivery or active audit.
+            stream_metadata["thinking"] = {
+                "thinking_chars": thinking_chars,
+                "thinking_event_count": thinking_event_count,
+                "thinking_redacted_count": 0,
+                "thinking_sources": ["dsh-cli"],
+            }
 
             session_committed = True
             return BackendResponse(
