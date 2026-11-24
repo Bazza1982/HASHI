@@ -670,3 +670,36 @@ async def test_session_valid_worker_screenshot_is_success(tmp_path):
     result = await registry.execute("browser_session", {"steps":[{"action":"screenshot"}]}, "session-image")
     assert not result.is_error
     assert result.content[0]["data"] == image
+
+
+@pytest.mark.asyncio
+async def test_session_one_invalid_screenshot_keeps_the_other_valid_image(tmp_path):
+    import base64
+    good = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"good-image").decode("ascii")
+    facade = _CapabilityFacade(
+        result={
+            "output": "before\nafter",
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "image", "mimeType": "image/png", "data": good},
+                {"type": "image", "mimeType": "image/png", "data": "not-base64!!"},
+                {"type": "text", "text": "after"},
+            ],
+            "is_error": False,
+        },
+        capabilities=[_browser_registration(actions=("session",))],
+    )
+    registry = _registry(tmp_path, "browser_session", facade)
+    result = await registry.execute(
+        "browser_session",
+        {"steps": [{"action": "screenshot"}, {"action": "screenshot"}]},
+        "partial",
+    )
+    assert result.is_error
+    images = [part for part in result.content if part.get("type") == "image"]
+    assert len(images) == 1
+    assert images[0]["data"] == good
+    texts = [part.get("text", "") for part in result.content if part.get("type") == "text"]
+    assert any("before" in t for t in texts)
+    assert any("after" in t for t in texts)
+    assert any("screenshot" in t.lower() for t in texts)

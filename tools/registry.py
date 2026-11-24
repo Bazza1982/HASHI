@@ -1327,23 +1327,52 @@ class ToolRegistry:
                     HASHI_API_MAX_IMAGE_BYTES,
                     validate_inline_image_data_url,
                 )
-                try:
-                    if not isinstance(content, list) or not all(isinstance(part, Mapping) for part in content):
-                        raise ValueError("invalid content")
-                    images = [part for part in content if part.get("type") == "image"]
-                    if not structured_error and len(images) < screenshot_count:
-                        raise ValueError("missing image")
-                    for part in images:
+                content_invalid = not isinstance(content, list) or not all(
+                    isinstance(part, Mapping) for part in content
+                )
+                invalid_images = 0
+                image_count = 0
+                kept_parts: list[dict[str, Any]] | None = None
+                if not content_invalid:
+                    kept_parts = []
+                    for part in content:
+                        if part.get("type") != "image":
+                            kept_parts.append(dict(part))
+                            continue
+                        image_count += 1
                         mime, data = part.get("mimeType"), part.get("data")
-                        if not isinstance(mime, str) or not isinstance(data, str):
-                            raise ValueError("invalid image")
-                        validate_inline_image_data_url(
-                            f"data:{mime};base64,{data}", max_bytes=HASHI_API_MAX_IMAGE_BYTES,
-                        )
-                except ValueError:
-                    error = "Error: screenshot returned missing or invalid image content"
+                        valid = isinstance(mime, str) and isinstance(data, str)
+                        if valid:
+                            try:
+                                validate_inline_image_data_url(
+                                    f"data:{mime};base64,{data}",
+                                    max_bytes=HASHI_API_MAX_IMAGE_BYTES,
+                                )
+                            except ValueError:
+                                valid = False
+                        if valid:
+                            kept_parts.append(dict(part))
+                        else:
+                            invalid_images += 1
+                missing_images = max(0, screenshot_count - image_count)
+                failed = (
+                    content_invalid or invalid_images > 0
+                    or (not structured_error and missing_images > 0)
+                )
+                if failed:
+                    problems = []
+                    if content_invalid:
+                        problems.append("invalid image content")
+                    else:
+                        if invalid_images:
+                            problems.append(f"{invalid_images} invalid image(s)")
+                        if missing_images and not structured_error:
+                            problems.append(f"{missing_images} missing image(s)")
+                    error = "Error: screenshot returned " + (
+                        " and ".join(problems) if problems else "missing or invalid image content"
+                    )
                     if tool_name == "browser_session":
-                        content = [
+                        content = kept_parts if kept_parts is not None else [
                             dict(part) for part in (content or [])
                             if isinstance(part, Mapping) and part.get("type") == "text"
                         ]
