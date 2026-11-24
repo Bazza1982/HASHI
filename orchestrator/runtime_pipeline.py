@@ -1303,11 +1303,13 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
 
     profile_backend_extra = getattr(getattr(backend, "config", None), "extra", None)
     her_v3_target_engine = None
+    her_v3_target_model = None
     her_v3_provider_extra = None
     if runtime.config.active_backend == "her-v2":
         try:
             target = runtime.backend_manager.get_her_v3_target()
             her_v3_target_engine = str(getattr(target, "provider", None) or "")
+            her_v3_target_model = str(getattr(target, "model", None) or "")
             option = runtime.backend_manager._her_v3_provider_option(
                 her_v3_target_engine
             )
@@ -1327,6 +1329,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 type(exc).__name__,
             )
             her_v3_target_engine = None
+            her_v3_target_model = None
     pcm_profile = resolve_pcm_profile(
         runtime.config.active_backend,
         backend_extra=profile_backend_extra,
@@ -1334,6 +1337,36 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         her_v3_target_engine=her_v3_target_engine,
     )
     prompt_kwargs["pcm_profile"] = pcm_profile
+    if (
+        runtime.config.active_backend == "her-v2"
+        and pcm_profile == PCM_PROFILE_LOCAL
+        and her_v3_target_engine
+        and her_v3_target_model
+        and "retrieval_capable" in inspect.signature(prompt_builder).parameters
+    ):
+        # HERV3 advertises the outer HASHI tool catalogue even when the
+        # selected model's model_tool_support configuration disables tools for
+        # that model. Read the same Provider/model configuration the provider
+        # consumes (allowed_backends extra) so a chat-only local model keeps
+        # [memory] and HCC inline instead of pointing at unreadable files.
+        try:
+            row = runtime.backend_manager._select_backend_cfg(
+                her_v3_target_engine,
+                target_model=her_v3_target_model,
+            )
+            row_extra = row.get("extra") if isinstance(row, Mapping) else None
+            support = (
+                row_extra.get("model_tool_support")
+                if isinstance(row_extra, Mapping)
+                else None
+            )
+            if (
+                isinstance(support, Mapping)
+                and support.get(her_v3_target_model) is False
+            ):
+                prompt_kwargs["retrieval_capable"] = False
+        except Exception:
+            pass
     if (
         pcm_profile == PCM_PROFILE_LOCAL
         and "prompt_budget_tokens" in inspect.signature(prompt_builder).parameters

@@ -334,6 +334,35 @@ def test_local_preserves_inline_content_without_file_read(tmp_path):
     assert "file_read" not in hcc_text
 
 
+def test_local_explicit_retrieval_disabled_keeps_inline_content(tmp_path):
+    """An explicit retrieval capability override keeps necessary memory/HCC
+    inline even when the outer advertised catalogue contains file_read."""
+    memory = "alpha-unit uses old settings\n\nbeta-unit holds the credential policy"
+    hcc = (
+        "[alpha]\nalpha cache item\n[alpha_end]\n"
+        "[beta]\nbeta credential rotation policy\n[beta_end]"
+    )
+    _store, assembler = _assembler(
+        tmp_path,
+        memory=memory,
+        hcc=hcc,
+        tools=[("file_read", "read a file")],
+    )
+    payload = assembler.build_prompt_payload(
+        "credential rotation",
+        "her-v2",
+        pcm_profile="local",
+        retrieval_capable=False,
+    )
+    memory_text = _section(payload, "permanent_memory")["text"]
+    hcc_text = _section(payload, "hcc")["text"]
+    # Full blocks stay inline; no reference the route cannot follow.
+    assert "alpha-unit" in memory_text
+    assert "alpha cache item" in hcc_text
+    assert "file_read" not in memory_text
+    assert "file_read" not in hcc_text
+
+
 def test_local_keeps_lean_projection_with_file_read(tmp_path):
     """A tool-capable local route keeps the lean relevance projection."""
     memory = "alpha-unit uses old settings\n\nbeta-unit holds the credential policy"

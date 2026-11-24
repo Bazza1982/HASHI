@@ -1964,6 +1964,7 @@ class BridgeContextAssembler:
         explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
         pcm_profile: str = pcm_profile_module.PCM_PROFILE_CLOUD,
+        retrieval_capable: bool | None = None,
     ) -> str:
         return self.build_prompt_payload(
             user_prompt,
@@ -1975,6 +1976,7 @@ class BridgeContextAssembler:
             explicit_history_context=explicit_history_context,
             prompt_budget_tokens=prompt_budget_tokens,
             pcm_profile=pcm_profile,
+            retrieval_capable=retrieval_capable,
         )["final_prompt"]
 
     @classmethod
@@ -2216,6 +2218,7 @@ class BridgeContextAssembler:
         explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
         pcm_profile: str = pcm_profile_module.PCM_PROFILE_CLOUD,
+        retrieval_capable: bool | None = None,
     ) -> dict[str, Any]:
         """Build PCM with token-aware, traceable non-HER history fallback."""
 
@@ -2225,8 +2228,14 @@ class BridgeContextAssembler:
         )
         # Local relevance projections point at agent.md for omitted content.
         # That is only usable when the actual route exposes a file-read tool;
-        # otherwise necessary content stays inline.
-        retrieval_capable = self._retrieval_capable()
+        # otherwise necessary content stays inline. An explicit caller-supplied
+        # capability (e.g. HERV3 resolving the selected model's
+        # model_tool_support configuration) is authoritative over the
+        # advertised-catalogue heuristic.
+        if retrieval_capable is None:
+            retrieval_capable = self._retrieval_capable()
+        else:
+            retrieval_capable = bool(retrieval_capable)
         document = self._load_pcm()
         sections: list[dict[str, Any]] = []
         hcc_enabled = bool(
