@@ -70,6 +70,9 @@ FUNCTION_GENERATION_ENTRYPOINTS = (
     "orchestrator.flexible_agent_runtime",
     "orchestrator.runtime_command_binding",
     "orchestrator.voice_manager",
+    # Imported lazily inside the Workbench API HAL setup block; seed it so the
+    # static closure cannot silently drop hal.* when that block changes.
+    "hal.service",
     "tools.registry",
     "transports.chat_router",
     "transports.whatsapp",
