@@ -1,0 +1,534 @@
+"""Tests for the DeepSeek Harness (dsh-cli / DSH) ACP stdio adapter and HASHI wiring."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+import sys
+import textwrap
+from types import SimpleNamespace
+
+import pytest
+
+from adapters.dsh_cli import DshCLIAdapter, _match_model_option, _normalize_dsh_effort
+from adapters.registry import get_backend_class, registered_backend_engines
+from adapters.stream_events import (
+    DELIVERY_REASONING,
+    DELIVERY_TECHNICAL,
+    DELIVERY_USER_COMMENTARY,
+    KIND_COMMENTARY,
+    KIND_FILE_READ,
+    KIND_SHELL_EXEC,
+    KIND_TEXT_DELTA,
+    KIND_THINKING,
+    KIND_TOOL_END,
+)
+from orchestrator.api_gateway_preflight import check_gateway_engine
+from orchestrator.backend_preflight import BackendPreflight
+from orchestrator.config import SESSION_MODE_BACKENDS
+from orchestrator.flexible_backend_registry import (
+    CLI_ENGINES,
+    canonical_backend_engine,
+    get_available_efforts,
+    get_available_models,
+    get_backend_label,
+    normalize_effort,
+    public_backend_engine,
+)
+from orchestrator.pathing import resolve_dsh_invocation
+
+
+_MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
+    """
+    import json, sys, time, uuid
+
+    if "--help" in sys.argv:
+        print("Usage: dsh --profile acp [options]")
+        sys.exit(0)
+
+    state = {
+        "sessions": {},
+        "active_prompt": None,
+        "rpc_out_id": 1000,
+    }
+
+    def send(obj):
+        sys.stdout.write(json.dumps(obj) + "\\n")
+        sys.stdout.flush()
+
+    def config_options(sess):
+        return [
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": sess["model"],
+                "options": [
+                    {
+                        "group": "deepseek-official",
+                        "name": "DeepSeek API",
+                        "options": [
+                            {"value": json.dumps(["deepseek-official", "deepseek-v4-flash"]), "name": "deepseek-v4-flash"},
+                            {"value": json.dumps(["deepseek-official", "deepseek-flash"]), "name": "DeepSeek-V4.1-Flash"},
+                            {"value": json.dumps(["deepseek-official", "deepseek-v4-pro"]), "name": "DeepSeek-V4-Pro"},
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "reasoning_effort",
+                "name": "Reasoning effort",
+                "category": "thought_level",
+                "type": "select",
+                "currentValue": sess["effort"],
+                "options": [
+                    {"value": "off", "name": "Off"},
+                    {"value": "low", "name": "Low"},
+                    {"value": "high", "name": "High"},
+                    {"value": "max", "name": "Max"},
+                ],
+            },
+        ]
+
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        msg = json.loads(raw)
+        method = msg.get("method")
+        rpc_id = msg.get("id")
+        params = msg.get("params") or {}
+
+        if method == "initialize":
+            send({
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "result": {
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "mock-dsh-acp", "version": "0.0.1"},
+                    "agentCapabilities": {
+                        "mcpCapabilities": {"http": True},
+                        "promptCapabilities": {"image": False, "audio": False, "embeddedContext": False},
+                        "sessionCapabilities": {"close": {}, "list": {}, "resume": {}},
+                    },
+                    "authMethods": [],
+                },
+            })
+            continue
+
+        if method == "session/new":
+            sid = f"mock-sid-{uuid.uuid4().hex[:8]}"
+            sess = {
+                "model": json.dumps(["deepseek-official", "deepseek-v4-flash"]),
+                "effort": "high",
+                "turns": [],
+                "resumed": False,
+                "cancelled": False,
+            }
+            state["sessions"][sid] = sess
+            send({"jsonrpc": "2.0", "id": rpc_id, "result": {"sessionId": sid, "configOptions": config_options(sess)}})
+            continue
+
+        if method == "session/resume":
+            sid = params.get("sessionId")
+            sess = {
+                "model": json.dumps(["deepseek-official", "deepseek-v4-pro"]),
+                "effort": "high",
+                "turns": [],
+                "resumed": True,
+                "cancelled": False,
+            }
+            state["sessions"][sid] = sess
+            send({"jsonrpc": "2.0", "id": rpc_id, "result": {"configOptions": config_options(sess)}})
+            continue
+
+        if method == "session/close":
+            state["sessions"].pop(params.get("sessionId"), None)
+            send({"jsonrpc": "2.0", "id": rpc_id, "result": {}})
+            continue
+
+        if method == "session/set_config_option":
+            sid = params["sessionId"]
+            sess = state["sessions"][sid]
+            if params["configId"] == "model":
+                sess["model"] = params["value"]
+            elif params["configId"] == "reasoning_effort":
+                sess["effort"] = params["value"]
+            send({"jsonrpc": "2.0", "id": rpc_id, "result": {"configOptions": config_options(sess)}})
+            continue
+
+        if method == "session/cancel":
+            ap = state.get("active_prompt")
+            if ap and ap["sid"] == params.get("sessionId"):
+                send({"jsonrpc": "2.0", "id": ap["rpc_id"], "result": {"stopReason": "cancelled"}})
+                state["active_prompt"] = None
+            continue
+
+        if method == "session/prompt":
+            sid = params["sessionId"]
+            sess = state["sessions"][sid]
+            text = " ".join(b.get("text", "") for b in params.get("prompt", []) if b.get("type") == "text")
+            sess["turns"].append(text)
+
+            if "HANG_FOR_STOP" in text:
+                state["active_prompt"] = {"sid": sid, "rpc_id": rpc_id}
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "messageId": "m-hang",
+                            "content": {"type": "text", "text": "thinking before cancel"},
+                        },
+                    },
+                })
+                continue
+
+            # Test permission roundtrip + thinking + commentary + tool + final answer + usage
+            if "WITH_TOOLS" in text:
+                state["rpc_out_id"] += 1
+                perm_id = state["rpc_out_id"]
+                send({
+                    "jsonrpc": "2.0",
+                    "id": perm_id,
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": sid,
+                        "toolCall": {"toolCallId": "call-1"},
+                        "options": [
+                            {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                            {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                        ],
+                    },
+                })
+                # Read client permission reply synchronously
+                perm_reply = json.loads(sys.stdin.readline())
+                outcome = ((perm_reply.get("result") or {}).get("outcome") or {}).get("optionId")
+                assert outcome == "allow-once", f"unexpected permission outcome: {perm_reply}"
+
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "messageId": "m1",
+                            "content": {"type": "text", "text": "Need to read config first."},
+                        },
+                    },
+                })
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "m1",
+                            "content": {"type": "text", "text": "Checking README now."},
+                        },
+                    },
+                })
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "call-1",
+                            "title": "read_file",
+                            "kind": "other",
+                            "status": "in_progress",
+                            "rawInput": {"path": "README.md"},
+                        },
+                    },
+                })
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "tool_call_update",
+                            "toolCallId": "call-1",
+                            "status": "completed",
+                            "content": [{"type": "content", "content": {"type": "text", "text": "README content"}}],
+                        },
+                    },
+                })
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "messageId": "m2",
+                            "content": {"type": "text", "text": f"Final answer turn={len(sess['turns'])} model={sess['model']} effort={sess['effort']} resumed={sess['resumed']}"},
+                        },
+                    },
+                })
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {"sessionUpdate": "usage_update", "used": 1234, "size": 1048576},
+                    },
+                })
+                send({"jsonrpc": "2.0", "id": rpc_id, "result": {"stopReason": "end_turn"}})
+                continue
+
+            send({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": f"m-{len(sess['turns'])}",
+                        "content": {
+                            "type": "text",
+                            "text": f"OK sid={sid} turns={len(sess['turns'])} model={sess['model']} effort={sess['effort']} resumed={sess['resumed']}",
+                        },
+                    },
+                },
+            })
+            send({"jsonrpc": "2.0", "id": rpc_id, "result": {"stopReason": "end_turn"}})
+    """
+)
+
+
+def _make_adapter(tmp_path: Path, mock_script: Path, *, session_mode: bool = True, model: str = "deepseek-v4-pro", effort: str = "high") -> DshCLIAdapter:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    agent_cfg = SimpleNamespace(
+        name="dsh-test-agent",
+        engine="dsh-cli",
+        model=model,
+        workspace_dir=workspace,
+        extra={"session_mode": session_mode, "effort": effort},
+        access_scope="drive",
+    )
+    global_cfg = SimpleNamespace(
+        dsh_cmd=f'"{sys.executable}" "{mock_script}"',
+        idle_timeout_sec=30,
+    )
+    return DshCLIAdapter(agent_cfg, global_cfg)
+
+
+def test_dsh_registry_and_public_display_contract():
+    assert "dsh-cli" in registered_backend_engines()
+    assert "dsh-cli" in CLI_ENGINES
+    assert "dsh-cli" in SESSION_MODE_BACKENDS
+    assert get_backend_class("dsh-cli") is DshCLIAdapter
+    assert get_backend_class("DSH") is DshCLIAdapter
+    assert get_backend_class("dsh") is DshCLIAdapter
+
+    assert public_backend_engine("dsh-cli") == "DSH"
+    assert canonical_backend_engine("DSH") == "dsh-cli"
+    assert canonical_backend_engine("dsh") == "dsh-cli"
+    assert get_backend_label("dsh-cli") == "DSH"
+
+    models = get_available_models("dsh-cli")
+    assert "deepseek-v4-pro" in models
+    assert "deepseek-flash" in models
+    assert get_available_efforts("dsh-cli") == ["off", "low", "high", "max"]
+    assert normalize_effort("dsh-cli", "zero") == "off"
+    assert normalize_effort("dsh-cli", "none") == "off"
+    assert normalize_effort("dsh-cli", "max") == "max"
+
+
+def test_dsh_model_and_effort_matching_helpers():
+    assert _normalize_dsh_effort("zero") == "off"
+    assert _normalize_dsh_effort("none") == "off"
+    assert _normalize_dsh_effort("low") == "low"
+    assert _normalize_dsh_effort("unknown") == "high"
+
+    opts = [
+        {
+            "id": "model",
+            "currentValue": '["deepseek-official","deepseek-v4-flash"]',
+            "options": [
+                {
+                    "group": "deepseek-official",
+                    "options": [
+                        {"value": '["deepseek-official","deepseek-v4-pro"]', "name": "DeepSeek-V4-Pro"},
+                        {"value": '["deepseek-official","deepseek-flash"]', "name": "DeepSeek-V4.1-Flash"},
+                    ],
+                }
+            ],
+        }
+    ]
+    matched, current = _match_model_option(opts, "deepseek-v4-pro")
+    assert matched == '["deepseek-official","deepseek-v4-pro"]'
+    assert current == '["deepseek-official","deepseek-v4-flash"]'
+
+
+@pytest.mark.asyncio
+async def test_dsh_acp_pcm_fixed_mode_tools_streaming_model_effort_and_stop(tmp_path: Path):
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(tmp_path, mock_script, session_mode=True, model="deepseek-v4-pro", effort="max")
+
+    assert adapter.capabilities.supports_sessions is True
+    assert adapter.capabilities.supports_thinking_stream is True
+    assert adapter.capabilities.supports_commentary_stream is True
+    assert adapter.capabilities.supports_tool_stream is True
+    assert await adapter.initialize() is True
+
+    try:
+        # Turn 1: full tools + auto-permission + /think + /commentary + /verbose + model & effort sync
+        events = []
+
+        async def _collect(evt):
+            events.append(evt)
+
+        res1 = await adapter.generate_response("WITH_TOOLS inspect", "req-1", on_stream_event=_collect)
+        assert res1.is_success is True
+        assert "turn=1" in res1.text
+        assert '["deepseek-official", "deepseek-v4-pro"]' in res1.text
+        assert "effort=max" in res1.text
+        assert res1.tool_call_count == 1
+        assert (res1.stream_metadata or {}).get("context_usage") == {"used": 1234, "size": 1048576}
+
+        kinds = [e.kind for e in events]
+        assert KIND_THINKING in kinds
+        assert KIND_COMMENTARY in kinds
+        assert KIND_FILE_READ in kinds
+        assert KIND_TOOL_END in kinds
+        assert KIND_TEXT_DELTA in kinds
+
+        thinking_evt = next(e for e in events if e.kind == KIND_THINKING)
+        assert thinking_evt.delivery_class == DELIVERY_REASONING
+        assert "Need to read config first." in thinking_evt.summary
+
+        commentary_evt = next(e for e in events if e.kind == KIND_COMMENTARY)
+        assert commentary_evt.delivery_class == DELIVERY_USER_COMMENTARY
+        assert commentary_evt.summary == "Checking README now."
+
+        tool_evt = next(e for e in events if e.kind == KIND_FILE_READ)
+        assert tool_evt.delivery_class == DELIVERY_TECHNICAL
+        assert tool_evt.file_path == "README.md"
+
+        first_sid = adapter._session_id
+        assert first_sid and first_sid.startswith("mock-sid-")
+
+        # Turn 2: PCM fixed mode reuses SAME session & warm worker, dynamically switches model + effort ("zero" -> "off")
+        adapter.config.model = "deepseek-flash"
+        adapter.effort = "zero"
+        res2 = await adapter.generate_response("incremental turn 2", "req-2")
+        assert res2.is_success is True
+        assert f"sid={first_sid}" in res2.text
+        assert "turns=2" in res2.text
+        assert '["deepseek-official", "deepseek-flash"]' in res2.text
+        assert "effort=off" in res2.text
+
+        # Turn 3: /stop graceful cancellation via interrupt_nowait + task cancel keeps session alive!
+        cancel_task = asyncio.create_task(adapter.generate_response("HANG_FOR_STOP", "req-3"))
+        await asyncio.sleep(0.25)
+        assert adapter.interrupt_nowait("USER_STOP") is True
+        cancel_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancel_task
+
+        # Turn 4 after /stop: SAME session continues cleanly without restart!
+        res4 = await adapter.generate_response("after stop", "req-4")
+        assert res4.is_success is True
+        assert f"sid={first_sid}" in res4.text
+        assert "turns=4" in res4.text
+
+        # Worker unexpected exit recovery: session/resume preserves session_id!
+        await adapter._stop_worker(reason="simulated_crash")
+        assert adapter._session_id == first_sid
+        res5 = await adapter.generate_response("after crash", "req-5")
+        assert res5.is_success is True
+        assert f"sid={first_sid}" in res5.text
+        assert "resumed=True" in res5.text
+
+        # /new resets session via session/close and opens a brand new session id
+        assert await adapter.handle_new_session() is True
+        assert adapter._session_id is None
+        res6 = await adapter.generate_response("brand new session", "req-6")
+        assert res6.is_success is True
+        assert f"sid={first_sid}" not in res6.text
+        assert "resumed=False" in res6.text
+        assert "turns=1" in res6.text
+    finally:
+        await adapter.shutdown()
+
+
+def test_dsh_preflight_and_local_invocation_resolution():
+    argv, cwd, label = resolve_dsh_invocation("dsh")
+    assert "--profile" in argv
+    assert "acp" in argv
+    if Path(label).is_file():
+        global_cfg = SimpleNamespace(
+            claude_cmd="claude",
+            codex_cmd="codex",
+            agy_cmd="agy",
+            grok_cmd="grok",
+            dsh_cmd="dsh",
+        )
+        gw = check_gateway_engine(global_cfg, {}, "dsh-cli")
+        assert gw["available"] is True
+        agent_cfg = SimpleNamespace(active_backend="dsh-cli", allowed_backends=[{"engine": "dsh-cli"}])
+        pf = BackendPreflight().check_backend_availability(global_cfg, [agent_cfg], {})
+        assert pf["dsh-cli"][0] is True
+
+
+def test_dsh_config_loader_pcm_fixed_mode_and_workbench_catalogue(tmp_path: Path):
+    from orchestrator.agent_creation_policy import build_effective_backend_catalogue
+    from orchestrator.config import ConfigManager
+
+    ws = tmp_path / "workspaces" / "dsh_agent"
+    ws.mkdir(parents=True)
+    (ws / "PCM.md").write_text("# Identity\nDSH test agent.\n", encoding="utf-8")
+    (tmp_path / "secrets.json").write_text("{}", encoding="utf-8")
+    cfg_path = tmp_path / "agents.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "global": {"workbench_port": 18899},
+                "agents": [
+                    {
+                        "name": "dsh_agent",
+                        "type": "flex",
+                        "default_mode": "fixed",
+                        "active_backend": "DSH",
+                        "workspace_dir": "workspaces/dsh_agent",
+                        "system_md": "workspaces/dsh_agent/PCM.md",
+                        "allowed_backends": [
+                            {"engine": "DSH", "model": "deepseek-v4-pro", "effort": "high"},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    global_cfg, agents, _secrets = ConfigManager(cfg_path, tmp_path / "secrets.json").load()
+    assert len(agents) == 1
+    ag = agents[0]
+    assert ag.default_mode == "fixed"
+    assert ag.active_backend == "dsh-cli"
+    assert public_backend_engine(ag.active_backend) == "DSH"
+
+    cat = build_effective_backend_catalogue(
+        ag.allowed_backends,
+        {},
+        availability={"dsh-cli": (True, global_cfg.dsh_cmd)},
+    )
+    assert "DSH" in cat
+    assert cat["DSH"]["engine"] == "DSH"
+    assert cat["DSH"]["label"] == "DSH"
+    assert cat["DSH"]["available"] is True
+    assert cat["DSH"]["efforts"] == ["off", "low", "high", "max"]
+    assert "deepseek-v4-pro" in cat["DSH"]["models"]
+    assert "deepseek-flash" in cat["DSH"]["models"]

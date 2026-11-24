@@ -23,6 +23,7 @@ _BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
     "codex-cli": ("adapters.codex_cli", "CodexCLIAdapter"),
     "her-v2": ("adapters.her_v2", "HERv2Adapter"),
     "grok-cli": ("adapters.grok_cli", "GrokCLIAdapter"),
+    "dsh-cli": ("adapters.dsh_cli", "DshCLIAdapter"),
     "ollama-api": ("adapters.ollama_api", "OllamaAdapter"),
     "hli-api": ("adapters.hli_api", "HLIAdapter"),
     "xai-api": ("adapters.xai_api", "XaiApiAdapter"),
