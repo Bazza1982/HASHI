@@ -220,21 +220,31 @@ def bounded_prompt_projection(
         elif key == "recent_settled_exchanges":
             result[key] = _project_settled_exchanges(value, evidence_ref=ref, budget_chars=value_budget)
         elif key == "provider_context_checkpoint" and isinstance(value, Mapping) and value:
-            encoded = _serialized(value)
-            available = bool(value.get("available")) if "available" in value else bool(value)
-            result[key] = {
-                "present": available, "bytes": len(encoded.encode("utf-8")),
-                "sha256": _sha256_text(encoded),
-                "digest": _bounded(
-                    value.get("digest") or value.get("provider_context_digest") or None,
-                    budget_chars=512, evidence_ref=_source_ref(context, "provider_context"),
-                ),
-                "evidence_ref": _source_ref(context, "provider_context"),
-            }
-            if available and (value.get("message_count") or value.get("reasoning_count")):
-                session = str(context.get("session_id") or "")
-                turn = str(context.get("interrupted_turn_id") or "")
-                result[key]["items_evidence_ref"] = f"her_provider_context_items:{session}:{turn}"
+            if "available" not in value and ("present" in value or value.get("truncated") is True):
+                # This is already a model view, not fresh checkpoint metadata.
+                # Keep its original evidence and never promote unknown or
+                # unavailable state to a present private checkpoint.
+                projected = dict(value)
+                if projected.get("present") is not True:
+                    projected["present"] = False
+                    projected.pop("items_evidence_ref", None)
+                result[key] = _bounded(projected, budget_chars=value_budget, evidence_ref=ref)
+            else:
+                encoded = _serialized(value)
+                available = bool(value.get("available")) if "available" in value else bool(value)
+                result[key] = {
+                    "present": available, "bytes": len(encoded.encode("utf-8")),
+                    "sha256": _sha256_text(encoded),
+                    "digest": _bounded(
+                        value.get("digest") or value.get("provider_context_digest") or None,
+                        budget_chars=512, evidence_ref=_source_ref(context, "provider_context"),
+                    ),
+                    "evidence_ref": _source_ref(context, "provider_context"),
+                }
+                if available and (value.get("message_count") or value.get("reasoning_count")):
+                    session = str(context.get("session_id") or "")
+                    turn = str(context.get("interrupted_turn_id") or "")
+                    result[key]["items_evidence_ref"] = f"her_provider_context_items:{session}:{turn}"
         else:
             result[key] = _bounded(value, budget_chars=value_budget, evidence_ref=ref)
         # Settled checkpoints are replaced on the next completed Turn. Keep a

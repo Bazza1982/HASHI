@@ -132,7 +132,10 @@ def test_provider_checkpoint_reference_queries_segmented_messages(tmp_path):
     successor = _accept(coordinator, "provider-successor", "Recover")
     recovery = coordinator.store.consume_recovery_context(
         session_id=successor.session_id, current_turn_id=successor.turn_id)
-    view = bounded_prompt_projection(recovery)["provider_context_checkpoint"]
+    projection = bounded_prompt_projection(recovery)
+    view = projection["provider_context_checkpoint"]
+    assert view["present"] is True
+    assert bounded_prompt_projection(projection)["provider_context_checkpoint"] == view
     kind, session, source_turn = view["items_evidence_ref"].split(":")
     assert (kind, session, source_turn) == ("her_provider_context_items", turn.session_id, turn.turn_id)
     with sqlite3.connect(coordinator.store.path) as conn:
@@ -150,6 +153,62 @@ def test_unavailable_provider_checkpoint_is_not_claimed_as_present():
     })["provider_context_checkpoint"]
     assert view["present"] is False
     assert "items_evidence_ref" not in view
+
+
+def test_unavailable_provider_checkpoint_stays_unavailable_after_reprojection(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    source = _accept(coordinator, "missing-provider-source", "Investigate")
+    coordinator.store.record_runtime_event(
+        session_id=source.session_id, turn_id=source.turn_id,
+        record=_runtime_event(
+            source.turn_id, "missing-provider-source:intent", "tool_intent",
+            operation_id="write-unknown", tool_call_id="write-unknown",
+            tool_name="write", read_only=False,
+        ),
+    )
+    assert coordinator.store.reconcile_interrupted() == 1
+    successor = _accept(coordinator, "missing-provider-successor", "Recover")
+    context = coordinator.store.consume_recovery_context(
+        session_id=successor.session_id, current_turn_id=successor.turn_id,
+    )
+    assert context["provider_context_checkpoint"]["available"] is False
+    for _ in range(3):
+        context = bounded_prompt_projection(context)
+        checkpoint = context["provider_context_checkpoint"]
+        assert checkpoint["present"] is False
+        assert "items_evidence_ref" not in checkpoint
+        assert context["safe_to_resume"] is False
+        assert context["side_effects"]["unresolved_total"] == 1
+
+
+@pytest.mark.parametrize("present", [None, "yes", 1])
+def test_malformed_projected_checkpoint_does_not_claim_presence(present):
+    projection = bounded_prompt_projection({
+        "session_id": "s", "interrupted_turn_id": "t",
+        "provider_context_checkpoint": {
+            "present": present,
+            "items_evidence_ref": "her_provider_context_items:s:t",
+        },
+    })
+    checkpoint = projection["provider_context_checkpoint"]
+    assert checkpoint["present"] is False
+    assert "items_evidence_ref" not in checkpoint
+
+
+def test_truncated_projected_checkpoint_never_becomes_present_again():
+    context = {
+        "session_id": "s", "interrupted_turn_id": "t", "safe_to_resume": False,
+        "provider_context_checkpoint": {
+            "present": False, "items_evidence_ref": "her_provider_context_items:s:t",
+            "unexpected_history": "oversized" * 10000,
+        },
+    }
+    for _ in range(3):
+        context = bounded_prompt_projection(context)
+        checkpoint = context["provider_context_checkpoint"]
+        assert checkpoint.get("present") is not True
+        assert "items_evidence_ref" not in checkpoint
+        assert context["safe_to_resume"] is False
 
 
 def test_settled_checkpoint_receipt_reference_resolves_actual_record(tmp_path):

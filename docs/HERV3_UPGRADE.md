@@ -11,7 +11,9 @@ receipt and unresolved-effect counts, and references to the corresponding
 canonical records. Omitted details are evidence-linked, not represented as
 completed work. Private Provider checkpoints identify both their metadata and
 their segmented message records when available; unavailable checkpoints are
-not presented as present. Re-projecting a view preserves those counts.
+not presented as present. Re-projecting a view preserves those counts, the
+checkpoint's availability, original digest and segmented-item evidence reference;
+an unavailable or malformed projected checkpoint never becomes present.
 
 Active recovery uses the actual Engine Session and interrupted Turn. Settled
 checkpoint references identify the stored checkpoint; the accepted user
