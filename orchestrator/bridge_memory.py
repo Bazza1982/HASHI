@@ -1765,6 +1765,7 @@ class BridgeContextAssembler:
         "codex-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "claude-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "grok-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "dsh-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "openrouter-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "deepseek-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "xai-api": DEFAULT_PROMPT_TOKEN_BUDGET,

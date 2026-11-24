@@ -22,7 +22,7 @@ from orchestrator.config_json import (
     ConfigDurabilityError,
     read_config_json,
 )
-from orchestrator.pathing import resolve_agy_executable, resolve_command_value, resolve_path_value
+from orchestrator.pathing import resolve_agy_executable, resolve_command_value, resolve_dsh_executable, resolve_path_value
 from orchestrator.pcm import (
     PCMValidationError,
     atomic_write_pcm,
@@ -49,7 +49,7 @@ from orchestrator.telegram_identity import (
 #   "drive"     - full drive root e.g. C:\ (least restrictive)
 VALID_ACCESS_SCOPES = {"workspace", "project", "drive"}
 SESSION_MODE_BACKENDS = frozenset(
-    {"claude-cli", "codex-cli", "grok-cli", "her-v2", "antigravity-cli"}
+    {"claude-cli", "codex-cli", "dsh-cli", "grok-cli", "her-v2", "antigravity-cli"}
 )
 DEFAULT_AGENT_MODE = "fixed"
 SUPPORTED_AGENT_MODES = frozenset({"fixed", "flex"})
@@ -153,6 +153,7 @@ class GlobalConfig:
     agy_cmd: str = "agy"
     agy_launch_mode: str = "direct"
     grok_cmd: str = "grok"
+    dsh_cmd: str = "dsh"
     gh_copilot_cmd: str = "gh copilot"
     hermes_home: str | None = None
     xai_api_base_url: str = "https://api.x.ai/v1"
@@ -723,6 +724,11 @@ class ConfigManager:
             ),
             grok_cmd=resolve_command_value(
                 g_raw.get("grok_cmd", "grok"),
+                config_dir=config_dir,
+                bridge_home=bridge_home,
+            ),
+            dsh_cmd=resolve_command_value(
+                resolve_dsh_executable(g_raw.get("dsh_cmd")),
                 config_dir=config_dir,
                 bridge_home=bridge_home,
             ),
