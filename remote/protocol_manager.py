@@ -643,13 +643,14 @@ class ProtocolManager:
         self._workbench_identity_cache = cache
         return ok
 
-    def _agent_snapshot_version(self, agents_path: Path, raw: bytes) -> str:
-        try:
-            stat = agents_path.stat()
-            basis = f"{stat.st_mtime_ns}:{stat.st_size}:".encode() + raw
-        except Exception:
-            basis = raw
-        return hashlib.sha256(basis).hexdigest()[:16]
+    def _agent_snapshot_version(self, raw: bytes) -> str:
+        """Content-only identity of the agent directory file.
+
+        File metadata (mtime/size) is intentionally excluded so a same-length
+        content edit with restored timestamps still yields a new version, while
+        a pure metadata touch does not.
+        """
+        return hashlib.sha256(raw).hexdigest()[:16]
 
     def _agent_directory_state(self, *, agents_readable: bool, core_online: bool, has_cache: bool) -> str:
         if core_online and agents_readable:
@@ -679,7 +680,7 @@ class ProtocolManager:
             )
         )
 
-    def get_local_agents_snapshot(self) -> list[dict]:
+    def get_local_agents_snapshot(self, *, refresh: bool = False) -> list[dict]:
         if not getattr(self, "_hashi_root", None):
             self._agent_snapshot_meta = {"version": "", "directory_state": "core_offline", "updated_at": int(time.time())}
             return []
@@ -699,9 +700,11 @@ class ProtocolManager:
         try:
             stat = agents_path.stat()
             signature = (int(stat.st_mtime_ns), int(stat.st_size))
+            last_version = getattr(self, "_last_agent_snapshot_version", "")
             if (
-                signature == getattr(self, "_last_agent_file_signature", None)
-                and getattr(self, "_last_agent_snapshot_version", "")
+                not refresh
+                and signature == getattr(self, "_last_agent_file_signature", None)
+                and last_version
             ):
                 directory_state = self._agent_directory_state(
                     agents_readable=True,
@@ -713,13 +716,32 @@ class ProtocolManager:
                 ]
                 self._agent_snapshot_cache = snapshot
                 self._agent_snapshot_meta = {
-                    "version": self._last_agent_snapshot_version,
+                    "version": last_version,
                     "directory_state": directory_state,
                     "updated_at": int(time.time()),
                 }
                 return snapshot
             raw = agents_path.read_bytes()
             self._count_activity("agent_snapshot_file_reads")
+            version = self._agent_snapshot_version(raw)
+            if refresh and last_version and version == last_version:
+                # Owner refresh verified the content is unchanged: project the
+                # cached snapshot without re-parsing JSON.
+                directory_state = self._agent_directory_state(
+                    agents_readable=True,
+                    core_online=core_online,
+                    has_cache=True,
+                )
+                snapshot = [
+                    dict(item, directory_state=directory_state) for item in cache
+                ]
+                self._agent_snapshot_cache = snapshot
+                self._agent_snapshot_meta = {
+                    "version": version,
+                    "directory_state": directory_state,
+                    "updated_at": int(time.time()),
+                }
+                return snapshot
             data = json.loads(raw.decode("utf-8-sig"))
         except Exception:
             directory_state = self._agent_directory_state(agents_readable=False, core_online=core_online, has_cache=bool(cache))
@@ -731,7 +753,7 @@ class ProtocolManager:
             }
             return snapshot
         self._last_agent_file_signature = signature
-        version = self._agent_snapshot_version(agents_path, raw)
+        self._last_agent_snapshot_version = version
         directory_state = self._agent_directory_state(agents_readable=True, core_online=core_online, has_cache=bool(cache))
         snapshot = []
         for agent in data.get("agents", []):
@@ -762,7 +784,7 @@ class ProtocolManager:
             return False
         previous = getattr(self, "_last_agent_snapshot_version", "")
         previous_state = getattr(self, "_last_agent_directory_state", "")
-        self.get_local_agents_snapshot()
+        self.get_local_agents_snapshot(refresh=True)
         current = getattr(self, "_last_agent_snapshot_version", "")
         current_state = str((getattr(self, "_agent_snapshot_meta", {}) or {}).get("directory_state") or "")
         changed = bool(previous and current and (previous != current or previous_state != current_state))

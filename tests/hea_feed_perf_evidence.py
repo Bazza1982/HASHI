@@ -12,7 +12,11 @@ from pathlib import Path
 
 import sys
 
-sys.path.insert(0, r"C:\Users\thene\projects\HASHI-hea-event-mvp-20261120")
+# Import the *current* repository checkout, never another installed or
+# historical HASHI package. This script lives in <repo>/tests/.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from orchestrator.session_store import SessionStore
 from orchestrator.automation_events import terminal_events_page
