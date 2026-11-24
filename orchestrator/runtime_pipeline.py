@@ -3070,8 +3070,13 @@ async def setup_interactive_feedback(
             # begins.  Later menu changes are woken by ``preference_event``.
             await asyncio.sleep(0)
 
-    if stream_callback is None and audit_active and not is_her_backend:
-        stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
+    if stream_callback is None and not is_her_backend:
+        # Reasoning volume must still be accounted for token estimation when
+        # the request has no Telegram delivery and no active audit; the
+        # callback without an event queue or buffers only accumulates it.
+        stream_callback = runtime._make_stream_callback(
+            audit_collector=audit_collector if audit_active else None,
+        )
 
     activity_store = getattr(runtime, "request_activity", None)
 

@@ -407,6 +407,11 @@ async def test_dsh_acp_pcm_fixed_mode_tools_streaming_model_effort_and_stop(tmp_
         assert "effort=max" in res1.text
         assert res1.tool_call_count == 1
         assert (res1.stream_metadata or {}).get("context_usage") == {"used": 1234, "size": 1048576}
+        thinking_meta = (res1.stream_metadata or {}).get("thinking") or {}
+        assert thinking_meta.get("thinking_chars") == len("Need to read config first.")
+        assert thinking_meta.get("thinking_event_count") == 1
+        assert thinking_meta.get("thinking_redacted_count") == 0
+        assert thinking_meta.get("thinking_sources") == ["dsh-cli"]
 
         kinds = [e.kind for e in events]
         assert KIND_THINKING in kinds
@@ -690,3 +695,69 @@ async def test_dsh_p1_03_truthful_model_and_effort_config_and_custom_model_suppo
         assert (res_bad_effort.stream_metadata or {}).get("effective_effort") == "high"
     finally:
         await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_cli_reuses_recent_help_probe_across_rebuilt_executions(tmp_path: Path, monkeypatch):
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    real_exec = asyncio.create_subprocess_exec
+    help_probes: list[tuple] = []
+
+    async def counting_exec(*args, **kwargs):
+        if "--help" in args:
+            help_probes.append(tuple(args))
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", counting_exec)
+    for _ in range(2):
+        adapter = _make_adapter(tmp_path, mock_script)
+        assert await adapter.initialize() is True
+        await adapter.shutdown()
+    assert len(help_probes) == 1
+
+
+def test_dsh_cli_reports_images_not_transmitted_for_legacy_and_canonical_content(tmp_path: Path, caplog):
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(tmp_path, mock_script)
+    assert adapter._image_prompts_supported is False
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    canonical = {
+        "version": 1,
+        "parts": [
+            {
+                "type": "media",
+                "item_index": 1,
+                "attachment_id": "att-1",
+                "modality": "image",
+                "mime_type": "image/png",
+                "local_ref": str(image),
+                "size_bytes": 8,
+                "sha256": "a" * 64,
+            },
+        ],
+    }
+    caplog.set_level("WARNING")
+
+    # Legacy compatibility shape still reports the skipped attachment.
+    blocks = adapter._build_prompt_blocks("hello", {"attachments": [{"path": str(image)}]})
+    assert blocks == [{"type": "text", "text": "hello"}]
+    assert "did not transmit 1 image attachment(s) (canonical=0, legacy=1" in caplog.text
+
+    # Canonical production content (contract v1 media part) is reported too.
+    caplog.clear()
+    blocks = adapter._build_prompt_blocks("hello", canonical)
+    assert blocks == [{"type": "text", "text": "hello"}]
+    assert "did not transmit 1 image attachment(s) (canonical=1, legacy=0" in caplog.text
+
+    # Legacy images stay transmitted when prompts were advertised; canonical
+    # images still have no DSH transport and remain reported.
+    caplog.clear()
+    adapter._image_prompts_supported = True
+    legacy_blocks = adapter._build_prompt_blocks("hello", {"attachments": [{"path": str(image)}]})
+    assert any(block.get("type") == "image" for block in legacy_blocks)
+    assert "did not transmit" not in caplog.text
+    adapter._build_prompt_blocks("hello", canonical)
+    assert "did not transmit 1 image attachment(s) (canonical=1, legacy=0" in caplog.text

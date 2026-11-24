@@ -714,3 +714,13 @@ def test_pricing_prewarm_failure_never_rolls_back_model_configuration(
 
     assert runtime_model_selection.apply_her_v2_configuration(runtime, selected) is None
     assert applied == [selected]
+
+
+def test_dsh_cli_shares_deepseek_pricing_namespace_and_exact_aliases():
+    assert pricing_sources.ENGINE_VENDOR_NAMESPACES.get("dsh-cli") == "deepseek"
+    assert pricing_sources.EXACT_OPENROUTER_MODEL_MAPPINGS.get(
+        ("dsh-cli", "deepseek-flash")
+    ) == ("~deepseek/deepseek-flash-latest",)
+    assert pricing_sources.EXACT_OPENROUTER_MODEL_MAPPINGS.get(
+        ("dsh-cli", "deepseek-v4-pro")
+    ) == ("~deepseek/deepseek-pro-latest",)
