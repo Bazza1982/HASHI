@@ -136,6 +136,44 @@ _SCHEMAS = {
 }
 
 
+_COMMENTARY_MODE_DESCRIPTIONS = {
+    "off": "always omit — do not author optional commentary",
+    "raw": (
+        "optional concise objective technical-progress update based only on this "
+        "completed stage result; never apply Persona styling; omit when no useful "
+        "update exists"
+    ),
+    "original": (
+        "optional concise user-facing update written directly in the active PCM "
+        "presentation Persona and grounded only in this completed stage result; "
+        "omit when no useful update exists"
+    ),
+    "packaged": (
+        "optional concise neutral technical-facts update based only on this "
+        "completed stage result; never apply Persona styling (a separate step "
+        "applies it); omit when no useful update exists"
+    ),
+}
+
+
+def commentary_schema_for(stage: Stage, mode: str | None = None) -> Mapping[str, Any]:
+    """Return the stage schema with its commentary field described for ``mode``.
+
+    ``None`` keeps the historical default (a mix of Persona-authored and neutral
+    stages) so callers that do not yet resolve a mode remain unchanged.
+    """
+
+    schema = copy.deepcopy(_SCHEMAS[stage])
+    if mode is None or "commentary" not in schema:
+        return schema
+    description = _COMMENTARY_MODE_DESCRIPTIONS.get(str(mode).casefold())
+    if description is None:
+        schema.pop("commentary", None)
+    else:
+        schema["commentary"] = description
+    return schema
+
+
 def _compact_tool_catalogue(
     items: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -432,7 +470,11 @@ def render_stage_prompt(request: StageRequest) -> str:
                 indent=2,
             ),
             schema_v3=json.dumps(
-                _SCHEMAS[Stage.TRIAGE], ensure_ascii=False, indent=2
+                commentary_schema_for(
+                    Stage.TRIAGE, request.context.get("commentary_mode")
+                ),
+                ensure_ascii=False,
+                indent=2,
             ),
             stage_tool_policy=_strategy_stage_tool_policy(request),
         )
@@ -466,7 +508,13 @@ def render_stage_prompt(request: StageRequest) -> str:
                 request.context.get("available_sub_agent_profiles") or [],
                 ensure_ascii=False,
             ),
-            schema=json.dumps(_SCHEMAS[Stage.PLANNING], ensure_ascii=False, indent=2),
+            schema=json.dumps(
+                commentary_schema_for(
+                    Stage.PLANNING, request.context.get("commentary_mode")
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
             stage_tool_policy=_planning_stage_tool_policy(request),
         )
     if request.stage is Stage.REPLANNING:
@@ -507,7 +555,13 @@ def render_stage_prompt(request: StageRequest) -> str:
                 request.context.get("available_sub_agent_profiles") or [],
                 ensure_ascii=False,
             ),
-            schema=json.dumps(_SCHEMAS[Stage.REPLANNING], ensure_ascii=False, indent=2),
+            schema=json.dumps(
+                commentary_schema_for(
+                    Stage.REPLANNING, request.context.get("commentary_mode")
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
     if request.stage is Stage.EXECUTION:
         if not request.role.startswith("sub_agent:"):
@@ -631,7 +685,13 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
                 indent=2,
             ),
             assignment=json.dumps(envelope, ensure_ascii=False, indent=2),
-            schema=json.dumps(_SCHEMAS[Stage.EXECUTION], ensure_ascii=False, indent=2),
+            schema=json.dumps(
+                commentary_schema_for(
+                    Stage.EXECUTION, request.context.get("commentary_mode")
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
     if request.stage is Stage.DREAM and request.context.get("dream_role") == "report":
         return load_prompt_asset("system_dream_report")

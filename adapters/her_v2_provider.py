@@ -5642,14 +5642,22 @@ class HashiStageProvider(StageProvider):
                 profile=profile,
                 request=request,
             )
-            prompt_request = request
+            prompt_request = replace(
+                request,
+                context={
+                    **dict(request.context),
+                    "commentary_mode": str(
+                        getattr(self, "_commentary_mode", "") or "off"
+                    ),
+                },
+            )
             if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
                 "available_execution_tools" not in request.context
             ):
                 prompt_request = replace(
-                    request,
+                    prompt_request,
                     context={
-                        **dict(request.context),
+                        **dict(prompt_request.context),
                         "available_execution_tools": list(
                             self.tool_catalogue(
                                 allow_side_effects=bool(

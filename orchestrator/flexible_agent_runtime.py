@@ -5830,7 +5830,11 @@ class FlexibleAgentRuntime:
                     ui_language.tr("menu.commentary.unavailable_alert")
                 )
                 return
-            self._set_commentary_enabled(value == "on")
+            mode = "raw" if value == "on" else value
+            if mode in telegram_stream_policy.COMMENTARY_MODES:
+                self._set_commentary_mode(mode)
+            else:
+                self._set_commentary_enabled(value == "on")
             await query.edit_message_text(
                 self._commentary_menu_text(),
                 parse_mode="HTML",
@@ -8324,24 +8328,24 @@ class FlexibleAgentRuntime:
     def _set_commentary_enabled(self, enabled: bool) -> None:
         self._set_commentary_mode("raw" if enabled else "off")
 
-    def _restrict_commentary_mode(self, mode: str) -> str:
-        """Local-inference backends only support the objective off/raw modes."""
-        engine = str(getattr(self.config, "active_backend", "") or "").strip().casefold()
-        if engine in {
-            "ollama", "ollama-api", "llama.cpp", "llama_cpp", "hli", "hli-api",
-        }:
-            return mode if mode in {"off", "raw"} else "raw"
-        return mode
-
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:
+        mode = getattr(self, "_commentary_mode", "off")
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(
-                selected_label(ui_language.tr("menu.toggle.on"), self._commentary),
-                callback_data="tgl:commentary:on",
+                selected_label("OFF", mode == "off"),
+                callback_data="tgl:commentary:off",
             ),
             InlineKeyboardButton(
-                selected_label(ui_language.tr("menu.toggle.off"), not self._commentary),
-                callback_data="tgl:commentary:off",
+                selected_label("RAW", mode == "raw"),
+                callback_data="tgl:commentary:raw",
+            ),
+            InlineKeyboardButton(
+                selected_label("ORIGINAL", mode == "original"),
+                callback_data="tgl:commentary:original",
+            ),
+            InlineKeyboardButton(
+                selected_label("PACKAGED", mode == "packaged"),
+                callback_data="tgl:commentary:packaged",
             ),
         ]])
 
@@ -8392,7 +8396,7 @@ class FlexibleAgentRuntime:
             elif arg in {"original", "packaged"}:
                 mode = arg
         if mode is not None:
-            self._set_commentary_mode(self._restrict_commentary_mode(mode))
+            self._set_commentary_mode(mode)
         await self._reply_text(
             update,
             self._commentary_menu_text(),

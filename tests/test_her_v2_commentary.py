@@ -247,9 +247,34 @@ async def test_model_findings_newest_supersedes_at_the_next_window_without_repet
     await services.close()
 
 
+def test_commentary_schema_describes_each_mode():
+    from orchestrator.her_v2.prompts import commentary_schema_for
+
+    original = commentary_schema_for(Stage.PLANNING, "original")
+    raw = commentary_schema_for(Stage.PLANNING, "raw")
+    packaged = commentary_schema_for(Stage.PLANNING, "packaged")
+    off = commentary_schema_for(Stage.PLANNING, "off")
+
+    assert "Persona" in original["commentary"]
+    assert "objective" in raw["commentary"]
+    assert "neutral" in packaged["commentary"]
+    assert "omit" in off["commentary"]
+    assert original["commentary"] != raw["commentary"] != packaged["commentary"]
+
+
+class _LivenessRecording:
+    def __init__(self):
+        self.texts = []
+
+    async def deliver_packaged_commentary(self, commentary):
+        self.texts.append(commentary.text)
+        return True
+
+
 @pytest.mark.asyncio
 async def test_long_tool_emits_one_keepalive_pulse():
     downstream = RecordingCommentaryPort()
+    liveness = _LivenessRecording()
     release = asyncio.Event()
 
     async def sleep(delay):
@@ -258,7 +283,7 @@ async def test_long_tool_emits_one_keepalive_pulse():
 
     services = TurnServices(
         turn_id="turn", downstream=downstream, sleep=sleep,
-        keepalive_threshold_s=180.0,
+        keepalive_threshold_s=180.0, liveness_delivery=liveness,
     )
     services.tool_started("shell", {}, "call-1")
     await asyncio.sleep(0)
@@ -266,14 +291,14 @@ async def test_long_tool_emits_one_keepalive_pulse():
     release.set()
     await asyncio.gather(keepalive, *tuple(services._tasks), return_exceptions=True)
 
-    texts = [record.text for record in downstream.records]
-    assert any("shell is still running" in text for text in texts)
+    assert any("shell is still running" in text for text in liveness.texts)
     await services.close()
 
 
 @pytest.mark.asyncio
 async def test_completed_tool_cancels_keepalive_pulse():
     downstream = RecordingCommentaryPort()
+    liveness = _LivenessRecording()
     release = asyncio.Event()
 
     async def sleep(delay):
@@ -281,7 +306,7 @@ async def test_completed_tool_cancels_keepalive_pulse():
 
     services = TurnServices(
         turn_id="turn", downstream=downstream, sleep=sleep,
-        keepalive_threshold_s=180.0,
+        keepalive_threshold_s=180.0, liveness_delivery=liveness,
     )
     services.tool_started("shell", {}, "call-1")
     await asyncio.sleep(0)
@@ -290,8 +315,7 @@ async def test_completed_tool_cancels_keepalive_pulse():
     release.set()
     await asyncio.gather(keepalive, *tuple(services._tasks), return_exceptions=True)
 
-    texts = [record.text for record in downstream.records]
-    assert not any("still running" in text for text in texts)
+    assert not any("still running" in text for text in liveness.texts)
     await services.close()
 
 

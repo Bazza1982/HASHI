@@ -2418,10 +2418,24 @@ class HERv2Adapter(BaseBackend):
         commentary_packager = getattr(self.config, "_her_v2_persona_packager", None)
         if commentary_packager is None:
             commentary_packager = configured_packager
-        if commentary is None and commentary_packager is not None:
-            from orchestrator import telegram_stream_policy
+        from orchestrator import telegram_stream_policy
 
-            commentary_mode = telegram_stream_policy.get_commentary_mode(self.config)
+        commentary_mode = telegram_stream_policy.get_commentary_mode(self.config)
+        # Local-inference providers present only the PCM prompt; they cannot run
+        # the Persona packager, so original/packaged degrade to objective raw.
+        if commentary_mode not in {"off", "raw"}:
+            try:
+                from adapters.her_v2_provider import _pcm_only_presentation
+
+                if _pcm_only_presentation(
+                    runtime_config.profile_for(Stage.IMMEDIATE_RESPONSE)
+                ):
+                    commentary_mode = "raw"
+            except Exception:
+                commentary_mode = "raw"
+        if isinstance(provider, HashiStageProvider):
+            provider._commentary_mode = commentary_mode
+        if commentary is None and commentary_packager is not None:
             if commentary_mode == "off":
                 # Truly end-to-end off: no pipeline, so no Persona packager call
                 # and no provider-authored commentary delivery.
@@ -2467,6 +2481,9 @@ class HERv2Adapter(BaseBackend):
                 turn_id=(fixed_turn.turn_id if fixed_turn is not None else request_id),
                 downstream=commentary,
                 commentary_interval_s=runtime_config.commentary_interval_s,
+                liveness_delivery=(
+                    delivery if commentary_mode != "off" else None
+                ),
                 companion_enabled=runtime_config.agent_companion.enabled,
                 companion_interval_s=(
                     runtime_config.agent_companion.interval_minutes * 60.0

@@ -19,6 +19,7 @@ from .commentary import (
     CommentaryPort,
     DraftResponseCommentary,
     NeutralCommentary,
+    PackagedCommentary,
 )
 from .models import Stage
 
@@ -82,6 +83,7 @@ class TurnServices(CommentaryPort):
         downstream: CommentaryPort | None,
         commentary_interval_s: float = 150.0,
         keepalive_threshold_s: float = 180.0,
+        liveness_delivery: Any | None = None,
         companion_enabled: bool = False,
         companion_interval_s: float = 300.0,
         companion_judge: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
@@ -92,6 +94,7 @@ class TurnServices(CommentaryPort):
         self.downstream = downstream
         self.commentary_interval_s = max(120.0, min(180.0, float(commentary_interval_s)))
         self.keepalive_threshold_s = max(60.0, min(3600.0, float(keepalive_threshold_s)))
+        self.liveness_delivery = liveness_delivery
         self.companion_enabled = bool(companion_enabled)
         self.companion_interval_s = max(1.0, float(companion_interval_s))
         self.companion_judge = companion_judge
@@ -181,7 +184,7 @@ class TurnServices(CommentaryPort):
             "arguments_sha256": _digest(dict(arguments or {})),
             "started_at": self.clock(),
         }
-        if not self._closed:
+        if not self._closed and self.liveness_delivery is not None:
             keepalive = asyncio.create_task(self._keepalive_liveness(call_id, name))
             self._keepalive_tasks[call_id] = keepalive
             keepalive.add_done_callback(
@@ -262,23 +265,31 @@ class TurnServices(CommentaryPort):
         self.last_activity_at = self.clock()
 
     async def _keepalive_liveness(self, call_id: str, name: str) -> None:
-        """Emit one lightweight liveness line only if the tool outlives its budget.
+        """Emit one deterministic, model-free liveness line after the budget.
 
-        A single ``sleep`` (no polling, no model call) is the whole mechanism.
-        The task is cancelled the moment the tool completes, so short tools cost
-        nothing and a completed long tool never emits a late liveness line.
+        The line is delivered directly as a pre-packaged ``PackagedCommentary``
+        through the transport boundary, so it never enters the Persona pipeline
+        and can never invoke the packager. A single ``sleep`` (no polling, no
+        model call) is the whole mechanism; the task is cancelled the moment the
+        tool completes.
         """
+
         try:
             await self.sleep(self.keepalive_threshold_s)
         except asyncio.CancelledError:
             raise
         if self._closed or call_id not in self._active_tools:
             return
-        await self._emit(
-            f"{name} is still running.",
-            required=False,
-            bypass_interval=True,
+        delivery = self.liveness_delivery
+        if delivery is None:
+            return
+        packaged = PackagedCommentary(
+            source_event_id=f"{self.turn_id}:keepalive:{call_id}",
+            stage=Stage.DIRECT,
+            text=f"{name} is still running.",
+            provenance="deterministic_keepalive",
         )
+        await delivery.deliver_packaged_commentary(packaged)
 
     def snapshot(self) -> dict[str, Any]:
         now = self.clock()
