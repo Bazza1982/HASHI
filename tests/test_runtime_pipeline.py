@@ -1141,8 +1141,7 @@ class _DeltaPCMAssembler:
         }
 
 
-def _promote(runtime, item, backend=None, success=True):
-    current = backend or runtime.backend_manager.current_backend
+def _promote(runtime, item, success=True):
     runtime_pipeline.promote_pcm_baseline_after_delivery(
         runtime,
         item,
