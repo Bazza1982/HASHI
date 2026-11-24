@@ -53,13 +53,38 @@ class _AcpRpcError(RuntimeError):
         self.data = data
 
 
+class _DshSessionResumeError(RuntimeError):
+    def __init__(self, session_id: str, cause: Exception):
+        super().__init__(
+            f"DSH failed to resume session {session_id}: {cause}. "
+            "Cleared stale session binding so the next request re-initializes full PCM context."
+        )
+        self.session_id = session_id
+        self.cause = cause
+
+
+class _DshConfigError(RuntimeError):
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        effective_model: str | None = None,
+        effective_effort: str | None = None,
+    ):
+        super().__init__(message)
+        self.error_code = error_code
+        self.effective_model = effective_model
+        self.effective_effort = effective_effort
+
+
 def _normalize_dsh_effort(raw: str | None) -> str:
+    """Normalize explicit HASHI effort aliases without silently coercing unknown values."""
+
     value = str(raw or "").strip().lower()
     if value in {"zero", "none", "disabled"}:
         return "off"
-    if value in _SUPPORTED_REASONING_EFFORTS:
-        return value
-    return "high"
+    return value
 
 
 def _classify_tool_event(tool_name: str, raw_input: Any) -> tuple[str, str, str]:
@@ -204,10 +229,67 @@ def _match_model_option(
     return None, current_val
 
 
+def _decode_opaque_model_value(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+        if isinstance(decoded, list) and len(decoded) == 2:
+            provider = str(decoded[0] or "").strip()
+            model_id = str(decoded[1] or "").strip()
+            return f"{provider}/{model_id}" if provider and model_id else (model_id or raw)
+    except Exception:
+        pass
+    return raw
+
+
+def _extract_effective_config(
+    config_options: list[dict[str, Any]],
+) -> tuple[str | None, str | None, list[str], list[str]]:
+    """Return ``(effective_model, effective_effort, available_models, available_efforts)``."""
+
+    effective_model: str | None = None
+    effective_effort: str | None = None
+    available_models: list[str] = []
+    available_efforts: list[str] = []
+
+    for item in config_options:
+        if not isinstance(item, Mapping):
+            continue
+        cid = item.get("id")
+        if cid == "model":
+            effective_model = _decode_opaque_model_value(item.get("currentValue"))
+            for entry in item.get("options") or []:
+                if not isinstance(entry, Mapping):
+                    continue
+                sub_opts = entry.get("options")
+                if isinstance(sub_opts, list):
+                    for sub in sub_opts:
+                        if isinstance(sub, Mapping) and sub.get("value") is not None:
+                            label = _decode_opaque_model_value(str(sub["value"]))
+                            if label:
+                                available_models.append(label)
+                elif entry.get("value") is not None:
+                    label = _decode_opaque_model_value(str(entry["value"]))
+                    if label:
+                        available_models.append(label)
+        elif cid == "reasoning_effort":
+            val = str(item.get("currentValue") or "").strip()
+            effective_effort = val or None
+            for opt in item.get("options") or []:
+                if isinstance(opt, Mapping) and opt.get("value") is not None:
+                    opt_val = str(opt["value"]).strip()
+                    if opt_val:
+                        available_efforts.append(opt_val)
+
+    return effective_model, effective_effort, available_models, available_efforts
+
+
 def _match_effort_option(
     config_options: list[dict[str, Any]],
     desired_effort: str | None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, list[str]]:
     effort_opt = next(
         (
             item
@@ -217,17 +299,17 @@ def _match_effort_option(
         None,
     )
     if not isinstance(effort_opt, Mapping):
-        return None, None
+        return None, None, []
     current_val = str(effort_opt.get("currentValue") or "").strip()
     normalized = _normalize_dsh_effort(desired_effort)
-    valid_values = {
+    valid_values = [
         str(opt.get("value") or "").strip()
         for opt in (effort_opt.get("options") or [])
-        if isinstance(opt, Mapping)
-    }
-    if normalized in valid_values:
-        return normalized, current_val
-    return None, current_val
+        if isinstance(opt, Mapping) and str(opt.get("value") or "").strip()
+    ]
+    if normalized and normalized in valid_values:
+        return normalized, current_val, valid_values
+    return None, current_val, valid_values
 
 
 class DshCLIAdapter(BaseBackend):
@@ -261,17 +343,22 @@ class DshCLIAdapter(BaseBackend):
             if isinstance(raw_patches, (list, tuple))
             else ()
         )
-        requested_effort = self._extra_str("effort", self.DEFAULT_REASONING_EFFORT)
-        self.effort = _normalize_dsh_effort(requested_effort)
+        raw_configured_effort = self._extra_str("effort", "")
+        self._effort: str = _normalize_dsh_effort(
+            raw_configured_effort or self.DEFAULT_REASONING_EFFORT
+        )
+        self._effort_explicit: bool = bool(raw_configured_effort)
         self._session_mode: bool = bool(
             (self.config.extra or {}).get("session_mode", False)
         )
         self._session_id: str | None = None
         self._session_in_current_worker: bool = False
         self._config_options: list[dict[str, Any]] = []
+        self._effective_model: str | None = None
+        self._effective_effort: str | None = None
         self._image_prompts_supported: bool = False
         self._hashi_mcp_enabled: bool = False
-        self._session_mcp_invocation: HashiMcpInvocation | None = None
+        self._active_run_mcp_invocation: HashiMcpInvocation | None = None
 
         # Persistent ACP stdio worker state
         self._request_lock = asyncio.Lock()
@@ -289,6 +376,15 @@ class DshCLIAdapter(BaseBackend):
         self._active_turn_session_id: str | None = None
         self._active_prompt_rpc_id: int | None = None
         self._update_handler: Callable[[dict[str, Any]], None] | None = None
+
+    @property
+    def effort(self) -> str:
+        return self._effort
+
+    @effort.setter
+    def effort(self, value: str | None) -> None:
+        self._effort = _normalize_dsh_effort(value)
+        self._effort_explicit = bool(self._effort)
 
     def _extra_str(self, key: str, default: str = "") -> str:
         extra = getattr(self.config, "extra", {}) or {}
@@ -325,6 +421,13 @@ class DshCLIAdapter(BaseBackend):
                 label,
                 self._preview_text(stdout, 120),
             )
+            try:
+                descriptor = prepare_hashi_mcp(self, backend="dsh-cli")
+                if descriptor is not None:
+                    descriptor.close()
+            except Exception as exc:
+                self._hashi_mcp_enabled = False
+                self.logger.debug("DSH HASHI MCP probe skipped during initialize: %s", exc)
             return True
         except Exception as exc:
             self.logger.error("DSH ACP backend not accessible (%s): %s", label, exc)
@@ -350,7 +453,7 @@ class DshCLIAdapter(BaseBackend):
                 )
             except Exception as exc:
                 self.logger.debug("DSH session/close on reset failed: %s", exc)
-        self._close_session_mcp()
+        self._close_run_mcp()
         self.logger.info("DSH session reset (previous session_id=%s).", old_sid)
         return True
 
@@ -430,10 +533,10 @@ class DshCLIAdapter(BaseBackend):
             and not self._proc.stdin.is_closing()
         )
 
-    def _close_session_mcp(self) -> None:
-        inv = self._session_mcp_invocation
-        self._session_mcp_invocation = None
-        self._hashi_mcp_enabled = False
+    def _close_run_mcp(self, invocation: HashiMcpInvocation | None = None) -> None:
+        inv = invocation if invocation is not None else self._active_run_mcp_invocation
+        if inv is self._active_run_mcp_invocation:
+            self._active_run_mcp_invocation = None
         if inv is not None:
             try:
                 inv.close()
@@ -488,7 +591,7 @@ class DshCLIAdapter(BaseBackend):
             except Exception:
                 pass
         await self._stop_worker(reason="shutdown")
-        self._close_session_mcp()
+        self._close_run_mcp()
 
     async def _ensure_worker(self) -> None:
         if self._is_worker_alive() and self._initialized:
@@ -699,19 +802,17 @@ class DshCLIAdapter(BaseBackend):
                 if handler is not None:
                     handler(params)
 
-    def _build_session_mcp_servers(self) -> list[dict[str, Any]]:
-        self._close_session_mcp()
+    def _build_run_mcp_servers(self) -> tuple[HashiMcpInvocation | None, list[dict[str, Any]]]:
+        """Prepare a strictly Run-scoped HASHI MCP invocation for the current turn."""
+
         if getattr(self, "tool_registry", None) is None:
-            return []
-        try:
-            descriptor = prepare_hashi_mcp(self, backend="dsh-cli")
-        except Exception as exc:
-            self.logger.warning("Skipping HASHI MCP for DSH session: %s", exc)
-            return []
+            self._hashi_mcp_enabled = False
+            return None, []
+        descriptor = prepare_hashi_mcp(self, backend="dsh-cli")
         if not descriptor:
-            return []
-        if isinstance(descriptor, HashiMcpInvocation):
-            self._session_mcp_invocation = descriptor
+            return None, []
+        invocation = descriptor if isinstance(descriptor, HashiMcpInvocation) else None
+        self._active_run_mcp_invocation = invocation
         command_path = str(Path(descriptor["command"]).resolve())
         project_root = str(Path(descriptor["cwd"]).resolve())
         existing_pythonpath = os.environ.get("PYTHONPATH", "").strip()
@@ -720,80 +821,85 @@ class DshCLIAdapter(BaseBackend):
             if existing_pythonpath
             else project_root
         )
-        return [
-            {
-                "name": str(descriptor.get("name") or "hashi_tools"),
-                "command": command_path,
-                "args": [str(a) for a in (descriptor.get("args") or [])],
-                "env": [{"name": "PYTHONPATH", "value": pythonpath}],
-            }
-        ]
+        server_decl = {
+            "name": str(descriptor.get("name") or "hashi_tools"),
+            "command": command_path,
+            "args": [str(a) for a in (descriptor.get("args") or [])],
+            "env": [{"name": "PYTHONPATH", "value": pythonpath}],
+        }
+        return invocation, [server_decl]
 
-    async def _ensure_session(self) -> str:
+    async def _close_in_worker_session(self, session_id: str, *, clear_id: bool) -> None:
+        if clear_id and self._session_id == session_id:
+            self._session_id = None
+        self._session_in_current_worker = False
+        if session_id and self._is_worker_alive():
+            try:
+                await asyncio.shield(
+                    self._rpc_call("session/close", {"sessionId": session_id}, timeout=5.0)
+                )
+            except Exception as exc:
+                self.logger.debug("DSH session/close(%s) failed: %s", session_id, exc)
+
+    async def _ensure_session(self, *, mcp_servers: list[dict[str, Any]]) -> tuple[str, bool]:
         workdir = str(self.effective_workdir.resolve())
 
+        # Stateless / flex mode: always close prior ephemeral session before opening a fresh one.
         if not self._session_mode and self._session_id and self._session_in_current_worker:
-            old_sid = self._session_id
-            self._session_id = None
-            self._session_in_current_worker = False
-            try:
-                await self._rpc_call("session/close", {"sessionId": old_sid}, timeout=5.0)
-            except Exception:
-                pass
-            self._close_session_mcp()
+            await self._close_in_worker_session(self._session_id, clear_id=True)
+
+        # If this Run requires fresh Run-scoped HASHI MCP servers and the session is still open
+        # in the warm worker from an earlier Run, close only the in-worker session scope so
+        # session/resume below mounts the current Run's fresh MCP authority while keeping the
+        # warm ACP worker and persisted DSH session intact.
+        if (
+            self._session_mode
+            and self._session_id
+            and self._session_in_current_worker
+            and mcp_servers
+        ):
+            await self._close_in_worker_session(self._session_id, clear_id=False)
 
         if self._session_mode and self._session_id and self._session_in_current_worker:
-            return self._session_id
+            return self._session_id, False
 
-        mcp_servers = self._build_session_mcp_servers()
-
-        # If we have a persisted session_id from before a worker restart, try session/resume first
+        # Persistent fixed mode with an existing session_id: MUST resume that exact session.
+        # Never silently fall through to session/new because HASHI's runtime_pipeline has
+        # already prepared an incremental prompt assuming this session's PCM context exists.
         if self._session_mode and self._session_id and not self._session_in_current_worker:
+            old_sid = self._session_id
             try:
                 resumed = await self._rpc_call(
                     "session/resume",
                     {
-                        "sessionId": self._session_id,
+                        "sessionId": old_sid,
                         "cwd": workdir,
                         "mcpServers": mcp_servers,
                     },
                     timeout=_ACP_RPC_TIMEOUT_SEC,
                 )
-                if isinstance(resumed, Mapping) and isinstance(resumed.get("configOptions"), list):
-                    self._config_options = list(resumed["configOptions"])
-                self._session_in_current_worker = True
-                self.logger.info("Resumed DSH ACP session %s", self._session_id)
-                return self._session_id
             except Exception as exc:
-                self.logger.warning(
-                    "DSH session/resume failed for %s (%s); starting fresh session.",
-                    self._session_id,
-                    exc,
-                )
                 self._session_id = None
                 self._session_in_current_worker = False
+                self.logger.error(
+                    "DSH session/resume failed for %s (%s); refusing to send incremental prompt to a fresh session.",
+                    old_sid,
+                    exc,
+                )
+                raise _DshSessionResumeError(old_sid, exc) from exc
 
-        # Start a new ACP session (fallback to mcpServers=[] if MCP startup fails)
-        try:
-            created = await self._rpc_call(
-                "session/new",
-                {"cwd": workdir, "mcpServers": mcp_servers},
-                timeout=_ACP_RPC_TIMEOUT_SEC,
-            )
-        except Exception as exc:
-            if not mcp_servers:
-                raise
-            self.logger.warning(
-                "DSH session/new with HASHI MCP failed (%s); retrying without HASHI MCP.",
-                exc,
-            )
-            self._close_session_mcp()
-            created = await self._rpc_call(
-                "session/new",
-                {"cwd": workdir, "mcpServers": []},
-                timeout=_ACP_RPC_TIMEOUT_SEC,
-            )
+            if isinstance(resumed, Mapping) and isinstance(resumed.get("configOptions"), list):
+                self._config_options = list(resumed["configOptions"])
+            self._session_in_current_worker = True
+            self.logger.info("Resumed DSH ACP session %s", old_sid)
+            return old_sid, False
 
+        # Fresh session (first turn or after explicit /new / reset).
+        created = await self._rpc_call(
+            "session/new",
+            {"cwd": workdir, "mcpServers": mcp_servers},
+            timeout=_ACP_RPC_TIMEOUT_SEC,
+        )
         sid = str((created or {}).get("sessionId") or "").strip()
         if not sid:
             raise RuntimeError(f"DSH session/new returned no sessionId: {created!r}")
@@ -802,53 +908,149 @@ class DshCLIAdapter(BaseBackend):
         self._session_id = sid
         self._session_in_current_worker = True
         self.logger.info("Created DSH ACP session %s (cwd=%s)", sid, workdir)
-        return sid
+        return sid, True
 
     async def _sync_session_config(
         self,
         session_id: str,
         *,
         desired_effort: str | None = None,
-    ) -> None:
+    ) -> tuple[str | None, str | None]:
+        """Apply requested model and reasoning_effort truthfully against live DSH configOptions."""
+
         # 1. Model selection
         desired_model = str(getattr(self.config, "model", "") or "").strip()
-        matched_model, current_model = _match_model_option(
-            self._config_options, desired_model
-        )
-        if matched_model and matched_model != current_model:
-            resp = await self._rpc_call(
-                "session/set_config_option",
-                {
-                    "sessionId": session_id,
-                    "configId": "model",
-                    "value": matched_model,
-                },
-                timeout=_ACP_RPC_TIMEOUT_SEC,
+        if desired_model:
+            matched_model, current_model = _match_model_option(
+                self._config_options, desired_model
             )
-            if isinstance(resp, Mapping) and isinstance(resp.get("configOptions"), list):
-                self._config_options = list(resp["configOptions"])
-            self.logger.info("DSH model switched to %s", matched_model)
+            eff_model, eff_effort, avail_models, _avail_efforts = _extract_effective_config(
+                self._config_options
+            )
+            self._effective_model = eff_model
+            self._effective_effort = eff_effort
+            if matched_model is None:
+                raise _DshConfigError(
+                    "dsh_model_unavailable",
+                    (
+                        f"Requested DSH model {desired_model!r} is not available in DSH catalog; "
+                        f"effective model remains {eff_model!r} "
+                        f"(available: {', '.join(avail_models) or 'none'})."
+                    ),
+                    effective_model=eff_model,
+                    effective_effort=eff_effort,
+                )
+            if matched_model != current_model:
+                try:
+                    resp = await self._rpc_call(
+                        "session/set_config_option",
+                        {
+                            "sessionId": session_id,
+                            "configId": "model",
+                            "value": matched_model,
+                        },
+                        timeout=_ACP_RPC_TIMEOUT_SEC,
+                    )
+                except Exception as exc:
+                    raise _DshConfigError(
+                        "dsh_model_set_failed",
+                        (
+                            f"DSH rejected requested model {desired_model!r}: {exc}; "
+                            f"effective model remains {eff_model!r}."
+                        ),
+                        effective_model=eff_model,
+                        effective_effort=eff_effort,
+                    ) from exc
+                if isinstance(resp, Mapping) and isinstance(resp.get("configOptions"), list):
+                    self._config_options = list(resp["configOptions"])
+                _, updated_model = _match_model_option(self._config_options, desired_model)
+                if updated_model != matched_model:
+                    actual_model, actual_effort, _, _ = _extract_effective_config(
+                        self._config_options
+                    )
+                    self._effective_model = actual_model
+                    self._effective_effort = actual_effort
+                    raise _DshConfigError(
+                        "dsh_model_mismatch",
+                        (
+                            f"DSH did not apply requested model {desired_model!r}; "
+                            f"effective model is {actual_model!r}."
+                        ),
+                        effective_model=actual_model,
+                        effective_effort=actual_effort,
+                    )
+                self.logger.info("DSH model switched to %s", matched_model)
 
         # 2. Reasoning effort selection
-        effective_effort = _normalize_dsh_effort(
-            desired_effort if desired_effort is not None else self.effort
-        )
-        matched_effort, current_effort = _match_effort_option(
-            self._config_options, effective_effort
-        )
-        if matched_effort and matched_effort != current_effort:
-            resp = await self._rpc_call(
-                "session/set_config_option",
-                {
-                    "sessionId": session_id,
-                    "configId": "reasoning_effort",
-                    "value": matched_effort,
-                },
-                timeout=_ACP_RPC_TIMEOUT_SEC,
+        effort_explicit = desired_effort is not None or self._effort_explicit
+        raw_effort = desired_effort if desired_effort is not None else self._effort
+        normalized_effort = _normalize_dsh_effort(raw_effort)
+        if normalized_effort:
+            matched_effort, current_effort, avail_efforts = _match_effort_option(
+                self._config_options, normalized_effort
             )
-            if isinstance(resp, Mapping) and isinstance(resp.get("configOptions"), list):
-                self._config_options = list(resp["configOptions"])
-            self.logger.info("DSH reasoning_effort switched to %s", matched_effort)
+            eff_model, eff_effort, _, _ = _extract_effective_config(self._config_options)
+            self._effective_model = eff_model
+            self._effective_effort = eff_effort
+            if matched_effort is None:
+                if effort_explicit:
+                    raise _DshConfigError(
+                        "dsh_effort_unavailable",
+                        (
+                            f"Requested DSH reasoning_effort {raw_effort!r} is not supported "
+                            f"for effective model {eff_model!r}; effective effort remains "
+                            f"{eff_effort!r} (available: {', '.join(avail_efforts) or 'none'})."
+                        ),
+                        effective_model=eff_model,
+                        effective_effort=eff_effort,
+                    )
+            elif matched_effort != current_effort:
+                try:
+                    resp = await self._rpc_call(
+                        "session/set_config_option",
+                        {
+                            "sessionId": session_id,
+                            "configId": "reasoning_effort",
+                            "value": matched_effort,
+                        },
+                        timeout=_ACP_RPC_TIMEOUT_SEC,
+                    )
+                except Exception as exc:
+                    raise _DshConfigError(
+                        "dsh_effort_set_failed",
+                        (
+                            f"DSH rejected requested reasoning_effort {raw_effort!r}: {exc}; "
+                            f"effective effort remains {eff_effort!r}."
+                        ),
+                        effective_model=eff_model,
+                        effective_effort=eff_effort,
+                    ) from exc
+                if isinstance(resp, Mapping) and isinstance(resp.get("configOptions"), list):
+                    self._config_options = list(resp["configOptions"])
+                _, updated_effort, _ = _match_effort_option(
+                    self._config_options, normalized_effort
+                )
+                if updated_effort != matched_effort:
+                    actual_model, actual_effort, _, _ = _extract_effective_config(
+                        self._config_options
+                    )
+                    self._effective_model = actual_model
+                    self._effective_effort = actual_effort
+                    raise _DshConfigError(
+                        "dsh_effort_mismatch",
+                        (
+                            f"DSH did not apply requested reasoning_effort {raw_effort!r}; "
+                            f"effective effort is {actual_effort!r}."
+                        ),
+                        effective_model=actual_model,
+                        effective_effort=actual_effort,
+                    )
+                self.logger.info("DSH reasoning_effort switched to %s", matched_effort)
+
+        eff_model, eff_effort, _, _ = _extract_effective_config(self._config_options)
+        self._effective_model = eff_model
+        self._effective_effort = eff_effort
+        return eff_model, eff_effort
 
     def _build_prompt_blocks(
         self,
@@ -929,196 +1131,282 @@ class DshCLIAdapter(BaseBackend):
     ) -> BackendResponse:
         started = time.monotonic()
         self._touch_activity()
+        run_mcp_invocation: HashiMcpInvocation | None = None
+        session_id: str | None = None
+        created_fresh_session = False
+        session_committed = False
+        effective_model: str | None = None
+        effective_effort: str | None = None
+
         try:
             await self._ensure_worker()
-            session_id = await self._ensure_session()
-            await self._sync_session_config(
+            run_mcp_invocation, mcp_servers = self._build_run_mcp_servers()
+            session_id, created_fresh_session = await self._ensure_session(
+                mcp_servers=mcp_servers
+            )
+            effective_model, effective_effort = await self._sync_session_config(
                 session_id,
                 desired_effort=reasoning_effort,
             )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            duration_ms = (time.monotonic() - started) * 1000.0
-            self.logger.error("DSH setup failed for %s: %s", request_id, exc)
-            return BackendResponse(
-                text="",
-                duration_ms=duration_ms,
-                is_success=False,
-                error=f"DSH backend setup failed: {exc}",
-            )
 
-        # Turn-level streaming state
-        held_message_id: str | None = None
-        held_text_parts: list[str] = []
-        tool_titles: dict[str, str] = {}
-        tool_call_count = 0
-        latest_usage: dict[str, int] | None = None
+            # Turn-level streaming state
+            held_message_id: str | None = None
+            held_text_parts: list[str] = []
+            tool_titles: dict[str, str] = {}
+            tool_call_count = 0
+            latest_usage: dict[str, int] | None = None
 
-        def _flush_held_as_commentary() -> None:
-            nonlocal held_message_id, held_text_parts
-            if not held_text_parts:
-                return
-            commentary = "".join(held_text_parts).strip()
-            held_text_parts = []
-            held_message_id = None
-            if commentary and on_stream_event is not None:
-                self._schedule_stream_event(
-                    on_stream_event,
-                    StreamEvent(
-                        kind=KIND_COMMENTARY,
-                        summary=commentary,
-                        delivery_class=DELIVERY_USER_COMMENTARY,
-                        origin="dsh-cli:commentary",
-                    ),
-                )
+            def _flush_held_as_commentary() -> None:
+                nonlocal held_message_id, held_text_parts
+                if not held_text_parts:
+                    return
+                commentary = "".join(held_text_parts).strip()
+                held_text_parts = []
+                held_message_id = None
+                if commentary and on_stream_event is not None:
+                    self._schedule_stream_event(
+                        on_stream_event,
+                        StreamEvent(
+                            kind=KIND_COMMENTARY,
+                            summary=commentary,
+                            delivery_class=DELIVERY_USER_COMMENTARY,
+                            origin="dsh-cli:commentary",
+                        ),
+                    )
 
-        def _handle_update(params: dict[str, Any]) -> None:
-            nonlocal held_message_id, latest_usage, tool_call_count
-            if params.get("sessionId") != session_id:
-                return
-            update = params.get("update")
-            if not isinstance(update, Mapping):
-                return
-            self._touch_activity()
-            utype = str(update.get("sessionUpdate") or "")
+            def _handle_update(params: dict[str, Any]) -> None:
+                nonlocal held_message_id, latest_usage, tool_call_count
+                if params.get("sessionId") != session_id:
+                    return
+                update = params.get("update")
+                if not isinstance(update, Mapping):
+                    return
+                self._touch_activity()
+                utype = str(update.get("sessionUpdate") or "")
 
-            if utype == "agent_thought_chunk":
-                content = update.get("content")
-                if isinstance(content, Mapping) and content.get("type") == "text":
-                    thought = str(content.get("text") or "")
-                    if thought and on_stream_event is not None:
-                        self._schedule_stream_event(
-                            on_stream_event,
-                            StreamEvent(
-                                kind=KIND_THINKING,
-                                summary=thought,
-                                raw_delta=thought,
-                                delivery_class=DELIVERY_REASONING,
-                                origin="dsh-cli:thought",
-                            ),
-                        )
-                return
+                if utype == "agent_thought_chunk":
+                    content = update.get("content")
+                    if isinstance(content, Mapping) and content.get("type") == "text":
+                        thought = str(content.get("text") or "")
+                        if thought and on_stream_event is not None:
+                            self._schedule_stream_event(
+                                on_stream_event,
+                                StreamEvent(
+                                    kind=KIND_THINKING,
+                                    summary=thought,
+                                    raw_delta=thought,
+                                    delivery_class=DELIVERY_REASONING,
+                                    origin="dsh-cli:thought",
+                                ),
+                            )
+                    return
 
-            if utype == "agent_message_chunk":
-                content = update.get("content")
-                if isinstance(content, Mapping) and content.get("type") == "text":
-                    chunk = str(content.get("text") or "")
-                    if not chunk:
-                        return
-                    msg_id = str(update.get("messageId") or "")
-                    if held_message_id and msg_id and msg_id != held_message_id and held_text_parts:
-                        _flush_held_as_commentary()
-                    if msg_id:
-                        held_message_id = msg_id
-                    held_text_parts.append(chunk)
+                if utype == "agent_message_chunk":
+                    content = update.get("content")
+                    if isinstance(content, Mapping) and content.get("type") == "text":
+                        chunk = str(content.get("text") or "")
+                        if not chunk:
+                            return
+                        msg_id = str(update.get("messageId") or "")
+                        if held_message_id and msg_id and msg_id != held_message_id and held_text_parts:
+                            _flush_held_as_commentary()
+                        if msg_id:
+                            held_message_id = msg_id
+                        held_text_parts.append(chunk)
+                        if on_stream_event is not None:
+                            self._schedule_stream_event(
+                                on_stream_event,
+                                StreamEvent(
+                                    kind=KIND_PROVIDER_ACTIVITY,
+                                    summary="DSH generating response",
+                                    origin="dsh-cli:activity",
+                                ),
+                            )
+                    return
+
+                if utype == "tool_call":
+                    # Any assistant text emitted right before a tool call is commentary!
+                    _flush_held_as_commentary()
+                    tool_call_count += 1
+                    call_id = str(update.get("toolCallId") or "")
+                    title = str(update.get("title") or "tool")
+                    if call_id:
+                        tool_titles[call_id] = title
+                    raw_input = update.get("rawInput")
+                    kind, file_path, summary = _classify_tool_event(title, raw_input)
+                    detail = ""
+                    if raw_input is not None:
+                        try:
+                            detail = json.dumps(raw_input, ensure_ascii=False)[:600]
+                        except Exception:
+                            detail = str(raw_input)[:600]
                     if on_stream_event is not None:
                         self._schedule_stream_event(
                             on_stream_event,
                             StreamEvent(
-                                kind=KIND_PROVIDER_ACTIVITY,
-                                summary="DSH generating response",
-                                origin="dsh-cli:activity",
+                                kind=kind,
+                                summary=summary,
+                                detail=detail,
+                                tool_name=title,
+                                file_path=file_path,
+                                delivery_class=DELIVERY_TECHNICAL,
+                                origin="dsh-cli:tool",
                             ),
                         )
-                return
+                    return
 
-            if utype == "tool_call":
-                # Any assistant text emitted right before a tool call is commentary!
-                _flush_held_as_commentary()
-                tool_call_count += 1
-                call_id = str(update.get("toolCallId") or "")
-                title = str(update.get("title") or "tool")
-                if call_id:
-                    tool_titles[call_id] = title
-                raw_input = update.get("rawInput")
-                kind, file_path, summary = _classify_tool_event(title, raw_input)
-                detail = ""
-                if raw_input is not None:
-                    try:
-                        detail = json.dumps(raw_input, ensure_ascii=False)[:600]
-                    except Exception:
-                        detail = str(raw_input)[:600]
-                if on_stream_event is not None:
-                    self._schedule_stream_event(
-                        on_stream_event,
-                        StreamEvent(
-                            kind=kind,
-                            summary=summary,
-                            detail=detail,
-                            tool_name=title,
-                            file_path=file_path,
-                            delivery_class=DELIVERY_TECHNICAL,
-                            origin="dsh-cli:tool",
-                        ),
-                    )
-                return
+                if utype == "tool_call_update":
+                    call_id = str(update.get("toolCallId") or "")
+                    title = tool_titles.get(call_id) or str(update.get("title") or "tool")
+                    status = str(update.get("status") or "completed")
+                    preview = _format_tool_result_preview(update.get("content"))
+                    if on_stream_event is not None:
+                        self._schedule_stream_event(
+                            on_stream_event,
+                            StreamEvent(
+                                kind=KIND_ERROR if status == "failed" else KIND_TOOL_END,
+                                summary=f"{title} ({status})",
+                                detail=preview,
+                                tool_name=title,
+                                delivery_class=DELIVERY_TECHNICAL,
+                                origin="dsh-cli:tool",
+                            ),
+                        )
+                    return
 
-            if utype == "tool_call_update":
-                call_id = str(update.get("toolCallId") or "")
-                title = tool_titles.get(call_id) or str(update.get("title") or "tool")
-                status = str(update.get("status") or "completed")
-                preview = _format_tool_result_preview(update.get("content"))
-                if on_stream_event is not None:
-                    self._schedule_stream_event(
-                        on_stream_event,
-                        StreamEvent(
-                            kind=KIND_ERROR if status == "failed" else KIND_TOOL_END,
-                            summary=f"{title} ({status})",
-                            detail=preview,
-                            tool_name=title,
-                            delivery_class=DELIVERY_TECHNICAL,
-                            origin="dsh-cli:tool",
-                        ),
-                    )
-                return
+                if utype == "usage_update":
+                    used = update.get("used")
+                    size = update.get("size")
+                    if isinstance(used, int) and isinstance(size, int):
+                        latest_usage = {"used": used, "size": size}
+                    return
 
-            if utype == "usage_update":
-                used = update.get("used")
-                size = update.get("size")
-                if isinstance(used, int) and isinstance(size, int):
-                    latest_usage = {"used": used, "size": size}
-                return
+            self._active_turn_session_id = session_id
+            self._active_prompt_rpc_id = None
+            self._update_handler = _handle_update
 
-        self._active_turn_session_id = session_id
-        self._active_prompt_rpc_id = None
-        self._update_handler = _handle_update
-
-        prompt_blocks = self._build_prompt_blocks(prompt, request_content)
-        prompt_task = asyncio.create_task(
-            self._rpc_call(
-                "session/prompt",
-                {"sessionId": session_id, "prompt": prompt_blocks},
-                timeout=None,
-                on_rpc_id=lambda rid: setattr(self, "_active_prompt_rpc_id", rid),
-            )
-        )
-
-        try:
-            timeout_kind = await self._wait_for_task_with_timeouts(
-                prompt_task,
-                started_monotonic=started,
-            )
-            if timeout_kind is not None:
-                await self._settle_cancelled_prompt(
-                    session_id,
-                    prompt_task,
-                    reason=f"timeout:{timeout_kind}:{request_id}",
+            prompt_blocks = self._build_prompt_blocks(prompt, request_content)
+            prompt_task = asyncio.create_task(
+                self._rpc_call(
+                    "session/prompt",
+                    {"sessionId": session_id, "prompt": prompt_blocks},
+                    timeout=None,
+                    on_rpc_id=lambda rid: setattr(self, "_active_prompt_rpc_id", rid),
                 )
-                duration_ms = (time.monotonic() - started) * 1000.0
+            )
+
+            try:
+                timeout_kind = await self._wait_for_task_with_timeouts(
+                    prompt_task,
+                    started_monotonic=started,
+                )
+                if timeout_kind is not None:
+                    await self._settle_cancelled_prompt(
+                        session_id,
+                        prompt_task,
+                        reason=f"timeout:{timeout_kind}:{request_id}",
+                    )
+                    duration_ms = (time.monotonic() - started) * 1000.0
+                    return BackendResponse(
+                        text="",
+                        duration_ms=duration_ms,
+                        is_success=False,
+                        error=self._timeout_diagnostic(timeout_kind, started_monotonic=started),
+                    )
+                result = await prompt_task
+            except asyncio.CancelledError:
+                await self._settle_cancelled_prompt(session_id, prompt_task, reason=f"cancel:{request_id}")
+                raise
+            finally:
+                self._active_turn_session_id = None
+                self._active_prompt_rpc_id = None
+                self._update_handler = None
+                await self._drain_stream_event_tasks()
+
+            final_text = "".join(held_text_parts).strip()
+            stop_reason = (
+                str(result.get("stopReason") or "").strip()
+                if isinstance(result, Mapping)
+                else ""
+            )
+            duration_ms = (time.monotonic() - started) * 1000.0
+
+            if stop_reason == "cancelled":
+                return BackendResponse(
+                    text=final_text,
+                    duration_ms=duration_ms,
+                    is_success=False,
+                    error="Request cancelled.",
+                )
+
+            if final_text and on_stream_event is not None:
+                self._schedule_stream_event(
+                    on_stream_event,
+                    StreamEvent(
+                        kind=KIND_TEXT_DELTA,
+                        summary=final_text,
+                        raw_delta=final_text,
+                        origin="dsh-cli:final",
+                    ),
+                )
+                await self._drain_stream_event_tasks()
+
+            if not final_text:
                 return BackendResponse(
                     text="",
                     duration_ms=duration_ms,
                     is_success=False,
-                    error=self._timeout_diagnostic(timeout_kind, started_monotonic=started),
+                    error=f"DSH returned empty response (stopReason={stop_reason or 'unknown'})",
                 )
-            result = await prompt_task
+
+            stream_metadata: dict[str, Any] = {
+                "session_id": session_id,
+                "stop_reason": stop_reason or "end_turn",
+                "effective_model": effective_model,
+                "effective_effort": effective_effort,
+            }
+            if latest_usage is not None:
+                stream_metadata["context_usage"] = latest_usage
+
+            session_committed = True
+            return BackendResponse(
+                text=final_text,
+                duration_ms=duration_ms,
+                is_success=True,
+                stop_reason=stop_reason or "end_turn",
+                tool_call_count=tool_call_count,
+                stream_metadata=stream_metadata,
+            )
+        except _DshSessionResumeError as exc:
+            duration_ms = (time.monotonic() - started) * 1000.0
+            return BackendResponse(
+                text="",
+                duration_ms=duration_ms,
+                is_success=False,
+                error=str(exc),
+                error_code="dsh_session_resume_failed",
+                error_retryable=True,
+            )
+        except _DshConfigError as exc:
+            duration_ms = (time.monotonic() - started) * 1000.0
+            self.logger.error("DSH configuration mismatch for %s: %s", request_id, exc)
+            return BackendResponse(
+                text="",
+                duration_ms=duration_ms,
+                is_success=False,
+                error=str(exc),
+                error_code=exc.error_code,
+                error_retryable=False,
+                stream_metadata={
+                    "effective_model": exc.effective_model,
+                    "effective_effort": exc.effective_effort,
+                },
+            )
         except asyncio.CancelledError:
-            await self._settle_cancelled_prompt(session_id, prompt_task, reason=f"cancel:{request_id}")
             raise
         except Exception as exc:
             duration_ms = (time.monotonic() - started) * 1000.0
-            self.logger.error("DSH ACP prompt failed (%s): %s", request_id, exc)
+            self.logger.error("DSH ACP error (%s): %s", request_id, exc)
             return BackendResponse(
                 text="",
                 duration_ms=duration_ms,
@@ -1126,62 +1414,31 @@ class DshCLIAdapter(BaseBackend):
                 error=f"DSH ACP error: {exc}",
             )
         finally:
-            self._active_turn_session_id = None
-            self._active_prompt_rpc_id = None
-            self._update_handler = None
-            await self._drain_stream_event_tasks()
-
-        final_text = "".join(held_text_parts).strip()
-        stop_reason = (
-            str(result.get("stopReason") or "").strip()
-            if isinstance(result, Mapping)
-            else ""
-        )
-        duration_ms = (time.monotonic() - started) * 1000.0
-
-        if stop_reason == "cancelled":
-            return BackendResponse(
-                text=final_text,
-                duration_ms=duration_ms,
-                is_success=False,
-                error="Request cancelled.",
+            # Never leave an unused fresh session_id bound after a failed first turn
+            # (otherwise runtime_pipeline would emit an incremental prompt without PCM context).
+            # P1-01: When Run-scoped HASHI MCP is active, close only the in-worker ACP session
+            # so this Run's MCP child is disposed while keeping the warm DSH worker alive and
+            # preserving committed self._session_id on disk for seamless next-Run session/resume.
+            discard_uncommitted_fresh = created_fresh_session and not session_committed
+            should_close_in_worker = (
+                bool(session_id)
+                and self._session_in_current_worker
+                and (discard_uncommitted_fresh or run_mcp_invocation is not None)
             )
-
-        if final_text and on_stream_event is not None:
-            self._schedule_stream_event(
-                on_stream_event,
-                StreamEvent(
-                    kind=KIND_TEXT_DELTA,
-                    summary=final_text,
-                    raw_delta=final_text,
-                    origin="dsh-cli:final",
-                ),
-            )
-            await self._drain_stream_event_tasks()
-
-        if not final_text:
-            return BackendResponse(
-                text="",
-                duration_ms=duration_ms,
-                is_success=False,
-                error=f"DSH returned empty response (stopReason={stop_reason or 'unknown'})",
-            )
-
-        stream_metadata: dict[str, Any] = {
-            "session_id": session_id,
-            "stop_reason": stop_reason or "end_turn",
-        }
-        if latest_usage is not None:
-            stream_metadata["context_usage"] = latest_usage
-
-        return BackendResponse(
-            text=final_text,
-            duration_ms=duration_ms,
-            is_success=True,
-            stop_reason=stop_reason or "end_turn",
-            tool_call_count=tool_call_count,
-            stream_metadata=stream_metadata,
-        )
+            if should_close_in_worker and session_id is not None:
+                try:
+                    await self._close_in_worker_session(
+                        session_id,
+                        clear_id=discard_uncommitted_fresh,
+                    )
+                except BaseException:
+                    self._session_in_current_worker = False
+                    if discard_uncommitted_fresh and self._session_id == session_id:
+                        self._session_id = None
+            elif discard_uncommitted_fresh and session_id and self._session_id == session_id:
+                self._session_id = None
+            if run_mcp_invocation is not None:
+                self._close_run_mcp(run_mcp_invocation)
 
     async def _settle_cancelled_prompt(
         self,

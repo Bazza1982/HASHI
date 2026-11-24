@@ -73,6 +73,7 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
                             {"value": json.dumps(["deepseek-official", "deepseek-v4-flash"]), "name": "deepseek-v4-flash"},
                             {"value": json.dumps(["deepseek-official", "deepseek-flash"]), "name": "DeepSeek-V4.1-Flash"},
                             {"value": json.dumps(["deepseek-official", "deepseek-v4-pro"]), "name": "DeepSeek-V4-Pro"},
+                            {"value": json.dumps(["custom-provider", "my-custom-v9"]), "name": "My Custom v9"},
                         ],
                     }
                 ],
@@ -126,6 +127,7 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
                 "turns": [],
                 "resumed": False,
                 "cancelled": False,
+                "mcp_args": [s.get("args", []) for s in (params.get("mcpServers") or [])],
             }
             state["sessions"][sid] = sess
             send({"jsonrpc": "2.0", "id": rpc_id, "result": {"sessionId": sid, "configOptions": config_options(sess)}})
@@ -133,12 +135,20 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
 
         if method == "session/resume":
             sid = params.get("sessionId")
+            if str(sid or "").startswith("unresumable-"):
+                send({
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "error": {"code": -32602, "message": f"session is not resumable: {sid}"},
+                })
+                continue
             sess = {
                 "model": json.dumps(["deepseek-official", "deepseek-v4-pro"]),
                 "effort": "high",
                 "turns": [],
                 "resumed": True,
                 "cancelled": False,
+                "mcp_args": [s.get("args", []) for s in (params.get("mcpServers") or [])],
             }
             state["sessions"][sid] = sess
             send({"jsonrpc": "2.0", "id": rpc_id, "result": {"configOptions": config_options(sess)}})
@@ -295,7 +305,7 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
                         "messageId": f"m-{len(sess['turns'])}",
                         "content": {
                             "type": "text",
-                            "text": f"OK sid={sid} turns={len(sess['turns'])} model={sess['model']} effort={sess['effort']} resumed={sess['resumed']}",
+                            "text": f"OK sid={sid} turns={len(sess['turns'])} model={sess['model']} effort={sess['effort']} resumed={sess['resumed']} mcp={json.dumps(sess.get('mcp_args', []))}",
                         },
                     },
                 },
@@ -349,7 +359,7 @@ def test_dsh_model_and_effort_matching_helpers():
     assert _normalize_dsh_effort("zero") == "off"
     assert _normalize_dsh_effort("none") == "off"
     assert _normalize_dsh_effort("low") == "low"
-    assert _normalize_dsh_effort("unknown") == "high"
+    assert _normalize_dsh_effort("unknown") == "unknown"
 
     opts = [
         {
@@ -532,3 +542,151 @@ def test_dsh_config_loader_pcm_fixed_mode_and_workbench_catalogue(tmp_path: Path
     assert cat["DSH"]["efforts"] == ["off", "low", "high", "max"]
     assert "deepseek-v4-pro" in cat["DSH"]["models"]
     assert "deepseek-flash" in cat["DSH"]["models"]
+
+
+@pytest.mark.asyncio
+async def test_dsh_p1_01_run_scoped_hashi_mcp_lifecycle_preserves_warm_worker_and_session(
+    tmp_path: Path, monkeypatch
+):
+    from adapters import dsh_cli
+    from adapters.hashi_mcp import HashiMcpInvocation
+
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(tmp_path, mock_script, session_mode=True, model="deepseek-v4-pro", effort="high")
+    adapter.tool_registry = SimpleNamespace(allowed_tool_names=lambda: ["memory_search"])
+
+    issued: list[HashiMcpInvocation] = []
+
+    def fake_prepare_hashi_mcp(target_adapter, *, backend="dsh-cli", audit_context=None):
+        idx = len(issued) + 1
+        ctx_path = tmp_path / f"run-ctx-{idx}.json"
+        ctx_path.write_text(json.dumps({"run": f"run-{idx}"}), encoding="utf-8")
+        inv = HashiMcpInvocation(
+            {
+                "name": "hashi_tools",
+                "command": sys.executable,
+                "args": ["-B", "-m", "tools.gateway.mcp_stdio", "--context", str(ctx_path)],
+                "cwd": str(tmp_path),
+                "context_path": str(ctx_path),
+            },
+            owner=target_adapter,
+        )
+        target_adapter._hashi_mcp_enabled = True
+        issued.append(inv)
+        return inv
+
+    monkeypatch.setattr(dsh_cli, "prepare_hashi_mcp", fake_prepare_hashi_mcp)
+
+    try:
+        # Run 1
+        res1 = await adapter.generate_response("run 1 prompt", "req-mcp-1")
+        assert res1.is_success is True
+        assert len(issued) == 1
+        assert issued[0]._closed is True, "Run 1 MCP invocation must be closed when Run 1 finishes"
+        assert not Path(issued[0]["context_path"]).exists()
+        assert "run-ctx-1.json" in res1.text
+        sid1 = adapter._session_id
+        pid1 = adapter._proc.pid
+        assert adapter._session_in_current_worker is False
+
+        # Run 2: same warm ACP worker PID + same persisted sessionId via session/resume + fresh Run 2 MCP context!
+        res2 = await adapter.generate_response("run 2 prompt", "req-mcp-2")
+        assert res2.is_success is True
+        assert len(issued) == 2
+        assert issued[1]._closed is True, "Run 2 MCP invocation must be closed when Run 2 finishes"
+        assert not Path(issued[1]["context_path"]).exists()
+        assert adapter._proc.pid == pid1, "Warm ACP worker must stay alive across Run-scoped MCP turns"
+        assert adapter._session_id == sid1, "Persisted DSH session ID must stay continuous across Runs"
+        assert "resumed=True" in res2.text
+        assert "run-ctx-2.json" in res2.text
+        assert "run-ctx-1.json" not in res2.text
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_p1_02_failed_session_resume_does_not_send_incremental_prompt_to_fresh_session(
+    tmp_path: Path,
+):
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(tmp_path, mock_script, session_mode=True, model="deepseek-v4-pro", effort="high")
+
+    try:
+        # Establish normal session first
+        res1 = await adapter.generate_response("seed PCM", "req-p102-1")
+        assert res1.is_success is True
+
+        # Simulate stale/unresumable persisted session after worker restart
+        await adapter._stop_worker(reason="simulated_restart")
+        adapter._session_id = "unresumable-dead-sid"
+
+        # Incremental prompt MUST fail explicitly instead of silently calling session/new
+        res2 = await adapter.generate_response("incremental followup", "req-p102-2")
+        assert res2.is_success is False
+        assert res2.error_code == "dsh_session_resume_failed"
+        assert res2.error_retryable is True
+        assert adapter._session_id is None, "Failed resume must clear _session_id so next request rebuilds full PCM"
+
+        # Subsequent request (now non-incremental with _session_id=None) opens a fresh session cleanly
+        res3 = await adapter.generate_response("full pcm re-init", "req-p102-3")
+        assert res3.is_success is True
+        assert adapter._session_id is not None
+        assert "resumed=False" in res3.text
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_p1_03_truthful_model_and_effort_config_and_custom_model_support(tmp_path: Path):
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(tmp_path, mock_script, session_mode=True, model="deepseek-v4-pro", effort="high")
+
+    try:
+        # Unmatched model on Turn 1 MUST fail truthfully AND leave _session_id=None
+        # so the next request rebuilds full PCM context instead of sending incremental.
+        fresh_bad = _make_adapter(tmp_path, mock_script, session_mode=True, model="nonexistent-first-turn", effort="high")
+        try:
+            res_first_bad = await fresh_bad.generate_response("first turn bad model", "req-p103-0")
+            assert res_first_bad.is_success is False
+            assert res_first_bad.error_code == "dsh_model_unavailable"
+            assert fresh_bad._session_id is None
+        finally:
+            await fresh_bad.shutdown()
+
+        res_ok = await adapter.generate_response("hello", "req-p103-1")
+        assert res_ok.is_success is True
+        established_sid = adapter._session_id
+        assert established_sid is not None
+        assert (res_ok.stream_metadata or {}).get("effective_model") == "deepseek-official/deepseek-v4-pro"
+        assert (res_ok.stream_metadata or {}).get("effective_effort") == "high"
+
+        # Unmatched model MUST fail truthfully without silently running on previous model,
+        # while preserving the already-established session_id for recovery on next turn.
+        adapter.config.model = "nonexistent-model-999"
+        res_bad_model = await adapter.generate_response("should not run", "req-p103-2")
+        assert res_bad_model.is_success is False
+        assert res_bad_model.error_code == "dsh_model_unavailable"
+        assert res_bad_model.error_retryable is False
+        assert "nonexistent-model-999" in (res_bad_model.error or "")
+        assert (res_bad_model.stream_metadata or {}).get("effective_model") == "deepseek-official/deepseek-v4-pro"
+        assert adapter._session_id == established_sid
+
+        # Custom model exposed by DSH live catalog works without any hardcoded allowlist
+        adapter.config.model = "my-custom-v9"
+        res_custom = await adapter.generate_response("custom model turn", "req-p103-3")
+        assert res_custom.is_success is True
+        assert (res_custom.stream_metadata or {}).get("effective_model") == "custom-provider/my-custom-v9"
+
+        # Unsupported effort MUST fail truthfully without silently coercing to high
+        adapter.effort = "xhigh"
+        res_bad_effort = await adapter.generate_response("should not run effort", "req-p103-4")
+        assert res_bad_effort.is_success is False
+        assert res_bad_effort.error_code == "dsh_effort_unavailable"
+        assert res_bad_effort.error_retryable is False
+        assert "xhigh" in (res_bad_effort.error or "")
+        assert (res_bad_effort.stream_metadata or {}).get("effective_effort") == "high"
+    finally:
+        await adapter.shutdown()
