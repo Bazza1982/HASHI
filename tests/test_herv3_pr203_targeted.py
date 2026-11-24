@@ -495,6 +495,7 @@ async def test_actual_cross_adapter_successor_preserves_recovery_evidence(tmp_pa
         {"role": "system", "content": "old system"},
         {"role": "user", "content": "Original task"},
         {"role": "assistant", "content": "", "reasoning_content": "private vendor reasoning",
+         "reasoning": "private reasoning field", "reasoning_details": [{"text": "private detail"}],
          "tool_calls": [{"id": "old-read", "type": "function",
                          "function": {"name": "file_read", "arguments": '{"path":"old.txt"}'}}]},
         {"role": "tool", "tool_call_id": "old-read", "content": "CHECKPOINT_ONLY_RESULT"},
@@ -518,3 +519,5 @@ async def test_actual_cross_adapter_successor_preserves_recovery_evidence(tmp_pa
     assert "CHECKPOINT_ONLY_RESULT" in sent
     assert "UNKNOWN_EFFECT" in sent
     assert "private vendor reasoning" not in sent
+    assert "private reasoning field" not in sent
+    assert "private detail" not in sent

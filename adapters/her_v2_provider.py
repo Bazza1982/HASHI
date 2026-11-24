@@ -3646,6 +3646,7 @@ class HashiStageProvider(StageProvider):
                     # content for another provider.
                     message.pop("reasoning_content", None)
                     message.pop("reasoning_details", None)
+                    message.pop("reasoning", None)
         raw_deferred = context.get("deferred_followups", [])
         if raw_deferred is None:
             raw_deferred = []
