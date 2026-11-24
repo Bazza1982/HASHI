@@ -54,7 +54,7 @@ def test_validate_maps_availability_truthfully():
         for stage in workflow["stages"]
     }
     assert availability["#turn_finish"] is True
-    assert availability["#system_idle"] is True
+    assert availability["#system_idle"] is False
     assert availability["#turn_commentary"] is False
     assert availability["#hashideploy_finish"] is False
     kinds = {d["kind"] for d in result["diagnostics"]}

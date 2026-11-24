@@ -420,26 +420,6 @@ def _dependent_source_matches(rule, trigger: HalTrigger) -> bool:
     return source_agent == trigger.agent_identity
 
 
-def plan_system_idle_edge(
-    *,
-    trigger: HalTrigger,
-    rules: Sequence[Mapping[str, Any]],
-    execs: Sequence[Mapping[str, Any]],
-    receipts: Sequence[Mapping[str, Any]],
-    consumed: set[tuple[str, str]],
-) -> tuple[list[CreateIntent], list[AdvanceIntent], list[Hint]]:
-    """Plan for a derived #system_idle edge (no agent identity, non-automation)."""
-    idle_trigger = HalTrigger(
-        event=EVENT_SYSTEM_IDLE,
-        agent_identity=None,
-        feed_event_id=trigger.feed_event_id,  # derived from the same real evidence
-        feed_kind="system_idle",
-        run_idempotency_key=None,
-        automation_origin=False,
-    )
-    return plan_for_trigger(idle_trigger, rules, execs, receipts, consumed)
-
-
 def stage_after_dispatch(stage: int, workflow_length: int) -> tuple[int, str]:
     """Advance stage, or complete the workflow."""
     next_stage = stage + 1

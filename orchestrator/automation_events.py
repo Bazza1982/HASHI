@@ -91,6 +91,45 @@ def terminal_events_page(store, *, owner_id: str, after: int, limit: int = 50) -
     }
 
 
+def terminal_event_for_key(store, *, owner_id: str, run_idempotency_key: str) -> dict | None:
+    """Return the newest committed terminal event whose Run carries the given
+    automation idempotency key (``hal:*`` / ``hea:*``), or ``None``.
+
+    HAL recovery uses this to decide whether a ``pending_retry`` prompt receipt
+    actually already completed: if a matching Run has terminated, the dispatch
+    must not be re-sent (its idempotency key proves the side effect happened).
+    """
+    if not run_idempotency_key:
+        return None
+    with store._lock, store._connection() as connection:
+        row = connection.execute(
+            """SELECT i.feed_id AS cursor, i.event_id, i.run_id, i.session_id,
+                      i.kind, i.created_at, i.agent_id,
+                      COALESCE(r.idempotency_key, '') AS run_idempotency_key
+               FROM runs AS r
+               JOIN automation_event_index AS i ON i.run_id = r.run_id
+               JOIN sessions AS s ON s.session_id = i.session_id
+               WHERE r.idempotency_key = ?
+                 AND i.owner_id = ?
+                 AND s.status != 'deleted'
+               ORDER BY i.feed_id DESC LIMIT 1""",
+            (run_idempotency_key, str(owner_id)),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "cursor": int(row["cursor"]),
+        "event_id": str(row["event_id"]),
+        "type": EVENT_KINDS[str(row["kind"])],
+        "agent_id": str(row["agent_id"]),
+        "run_id": str(row["run_id"] or ""),
+        "session_id": str(row["session_id"]),
+        "occurred_at": str(row["created_at"]),
+        "run_idempotency_key": str(row["run_idempotency_key"] or ""),
+        "automation_origin": str(row["run_idempotency_key"]).startswith(("hea:", "hal:")),
+    }
+
+
 async def handle_automation_events(server, request):
     """Authenticated, bounded long poll over committed Session event evidence."""
     owner_id = server._v1_owner_id(request)

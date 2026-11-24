@@ -241,43 +241,22 @@ def test_unavailable_dependent_stage_waits_honestly(tmp_path):
     assert "no reboot-completion" in (execs[0]["detail"] or "")
 
 
-def test_system_idle_edge_fires_once_and_binds_none(tmp_path):
+def test_system_idle_is_unavailable_in_v01(tmp_path):
+    """#system_idle keeps its vocabulary/compile support but has no reliable
+    active->idle transition source in v0.1: enabling is refused and no idle
+    edge is ever synthesized, so a terminal event never dispatches."""
     feed = FakeSessionStore()
     service, adapter = make_service(tmp_path, feed)
     rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = []  # nothing active
-    feed.add_event()       # one real non-automation terminal event
-    feed.add_event(key="x")  # same transition batch: must not fire twice
+    with pytest.raises(HalStoreError):
+        service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    assert service.store.get_rule("user:7", rule["rule_id"])["enabled"] == 0
 
-    run(service._process_owner("user:7"))
-    assert len(adapter.prompt_calls) == 1
-    assert adapter.prompt_calls[0]["text"] == "cleanup"
-
-
-def test_system_idle_does_not_fire_while_runs_active(tmp_path):
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = [{"run_id": "run-x"}]
-    feed.add_event()
-    run(service._process_owner("user:7"))
-    assert adapter.prompt_calls == []
-
-
-def test_idle_trigger_prompt_with_unbound_trigger_fails_honestly(tmp_path):
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "go @agent_trigger".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
     feed.active_rows = []
     feed.add_event()
     run(service._process_owner("user:7"))
     assert adapter.prompt_calls == []
-    execs = service.store.list_execs("user:7")
-    assert execs[0]["state"] == "failed"
-    assert "no Agent" in (execs[0]["detail"] or "")
+    assert adapter.command_calls == []
 
 
 def test_transient_prompt_failure_retries_same_key(tmp_path):
@@ -870,7 +849,7 @@ def test_api_status_and_validate(tmp_path):
             payload = await response.json()
             assert response.status == 200
             assert payload["ok"] is True
-            assert payload["workflows"][0]["entry_available"] is True
+            assert payload["workflows"][0]["entry_available"] is False
 
             response = await client.post("/hal/validate", json={"script": "if #system_idle then"})
             payload = await response.json()
@@ -962,7 +941,7 @@ def test_api_runs_listing(tmp_path):
     asyncio.run(scenario())
 
 
-# --- Round 4: A1 atomic enable / A3 #system_idle correctness ---------------
+# --- Round 4: A1 atomic enable ----------------------------------------------
 
 
 def test_enable_after_edit_with_stale_revision_conflicts(tmp_path):
@@ -990,147 +969,7 @@ def test_enable_after_edit_with_stale_revision_conflicts(tmp_path):
     assert r["enable_cursor"] is None
 
 
-def test_system_idle_pagination_does_not_multiply(tmp_path):
-    """250 already-finished runs paged 100/100/50 produce exactly ONE idle edge."""
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then /reboot max.')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = []  # the single active->idle transition already happened
-    for _ in range(250):
-        feed.add_event()
-    run(service._process_owner("user:7"))  # page 1 (100 events)
-    run(service._process_owner("user:7"))  # page 2 (100 events)
-    run(service._process_owner("user:7"))  # page 3 (50 events)
-    reboot_calls = [c for c in adapter.command_calls if c["command_text"] == "/reboot max"]
-    assert len(reboot_calls) == 1
-
-
-def test_system_idle_queries_active_state_bounded_per_cycle(tmp_path):
-    """Active-state evidence is sampled a bounded number of times per cycle,
-    never once per event."""
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = []
-    for _ in range(250):
-        feed.add_event()
-    feed.list_active_runs_calls = 0
-    run(service._process_owner("user:7"))
-    run(service._process_owner("user:7"))
-    run(service._process_owner("user:7"))
-    # Bounded per cycle (pre-batch sample + post-batch re-sample), never per
-    # event: 3 cycles x 2 = 6, far below the 250-event worst case.
-    assert feed.list_active_runs_calls == 6
-
-
-def test_system_idle_does_not_fire_at_startup_without_terminal_event(tmp_path):
-    """Already-idle startup with no terminal evidence fabricates no idle edge."""
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = []  # idle, and no terminal event at all
-    run(service._process_owner("user:7"))
-    assert adapter.prompt_calls == []
-
-
-def test_system_idle_ignores_automation_origin_events(tmp_path):
-    """Automation-origin terminal runs are not idle-transition evidence."""
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = []
-    feed.add_event(key="hal:some-automation-origin")
-    run(service._process_owner("user:7"))
-    assert adapter.prompt_calls == []
-
-
-# --- Round 5: A1 #system_idle latch persistence / re-sampling, A2 recovery ---
-
-
-def test_system_idle_fires_again_after_terminal_free_busy_period(tmp_path):
-    """idle -> busy (no terminal event) -> idle must fire the edge twice."""
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-
-    feed.active_rows = []
-    feed.add_event()  # terminal event; system idle
-    run(service._process_owner("user:7"))
-    assert len(adapter.prompt_calls) == 1
-
-    # Busy phase with NO terminal event: an empty page while a run is active.
-    # The latch must be cleared here, otherwise the next idle edge never fires.
-    feed.active_rows = [{"run_id": "busy-run"}]
-    run(service._process_owner("user:7"))
-    assert len(adapter.prompt_calls) == 1
-
-    feed.active_rows = []
-    feed.add_event()  # the busy run finishes -> second idle transition
-    run(service._process_owner("user:7"))
-    assert len(adapter.prompt_calls) == 2
-
-
-def test_system_idle_latch_survives_restart(tmp_path):
-    """A backlog page -> restart -> next page must not re-fire the idle edge."""
-    feed = FakeSessionStore()
-    path = tmp_path / "hal" / "hal_v1.sqlite"
-
-    store1 = HalStore(path)
-    adapter1 = RecordingDispatchAdapter()
-    service1 = HalService(
-        store=store1, session_store=feed, dispatch=adapter1,
-        logger=logging.getLogger("hal.test.restart1"),
-    )
-    rule = make_rule(service1, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-    feed.active_rows = []
-    for _ in range(100):
-        feed.add_event()
-    run(service1._process_owner("user:7"))
-    assert len(adapter1.prompt_calls) == 1  # idle fired once on page 1
-    store1.close()
-
-    # Simulate a restart: fresh service over the SAME persistent SQLite.
-    adapter2 = RecordingDispatchAdapter()
-    store2 = HalStore(path)
-    service2 = HalService(
-        store=store2, session_store=feed, dispatch=adapter2,
-        logger=logging.getLogger("hal.test.restart2"),
-    )
-    for _ in range(100):
-        feed.add_event()
-    run(service2._process_owner("user:7"))
-    assert adapter2.prompt_calls == []  # persisted latch: no re-fire on page 2
-    store2.close()
-
-
-def test_system_idle_does_not_fake_idle_when_batch_starts_new_run(tmp_path):
-    """A batch that itself starts a new run must not fabricate an idle edge from
-    the pre-batch 'idle' snapshot."""
-    feed = FakeSessionStore()
-    service, adapter = make_service(tmp_path, feed)
-    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
-    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
-
-    feed.active_rows = []
-    feed.add_event()  # a terminal event in this batch
-
-    calls = {"n": 0}
-
-    def flapping_active(*, owner_id, session_id=None):
-        calls["n"] += 1
-        # Pre-batch snapshot reports idle, but the batch started a new run, so
-        # the post-batch re-sample must report active.
-        return [] if calls["n"] == 1 else [{"run_id": "new-run"}]
-
-    feed.list_active_runs = flapping_active
-    run(service._process_owner("user:7"))
-    assert adapter.prompt_calls == []  # no fake idle edge
+# --- Round 5: A2 continuous workflow recovery ---------------------------------
 
 
 def test_continuous_workflow_recovers_before_matching_correlated_event(tmp_path):
@@ -1193,6 +1032,73 @@ def test_continuous_workflow_recovers_before_matching_correlated_event(tmp_path)
     # Stage 0 was NOT re-dispatched; stage 1 fired exactly once.
     assert len(adapter2.prompt_calls) == 1
     assert adapter2.prompt_calls[0]["target_agent"] == "bob"
+    execs = service2.store.list_execs("user:7")
+    assert execs[0]["stage"] == 2
+    assert execs[0]["state"] == "completed"
+    store2.close()
+def test_pending_receipt_with_completed_run_recovers_once(tmp_path):
+    """The stage-0 prompt was accepted and its Run completed, but HAL crashed
+    before writing the 'dispatched' receipt (receipt stuck in pending_retry).
+    Recovery must honour the persisted completion: do NOT re-dispatch stage 0,
+    preserve the correlation key, and advance stage 1 exactly once."""
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    script = (
+        'if @agent_any #turn_finish then @lily $prompt "start"; '
+        'if @alice@TESTINST #turn_finish then @bob $prompt "next".'
+    )
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.pending1"),
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-1",
+        trigger_agent="@lily@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    # Crash window: the pre-dispatch 'pending_retry' receipt was written but the
+    # 'dispatched' write never happened, even though the prompt was accepted.
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@lily",
+        payload='$prompt "start"',
+        state="pending_retry",
+        detail=None,
+        attempts=0,
+        next_retry_at=None,
+    )
+    assert store1.get_exec("user:7", "hx1")["stage"] == 0
+    store1.close()
+
+    # The correlated completion evidence is already persisted (the prompt's Run
+    # finished under the same idempotency key).
+    feed.add_event(agent_id="alice", key="hal:hx1:0")
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.pending2"),
+    )
+    run(service2._process_owner("user:7"))
+
+    # Stage 0 must NOT be re-dispatched: the only dispatch is stage 1 ("next").
+    assert [c["target_agent"] for c in adapter2.prompt_calls] == ["bob"]
+    assert adapter2.prompt_calls[0]["idempotency_key"] == "hal:hx1:1"
     execs = service2.store.list_execs("user:7")
     assert execs[0]["stage"] == 2
     assert execs[0]["state"] == "completed"

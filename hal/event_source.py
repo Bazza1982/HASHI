@@ -2,10 +2,11 @@
 
 Maps the author-defined event vocabulary onto the ONE existing durable event
 source (``orchestrator/automation_events.py``). HAL never invents a second event
-system: every available event is derived from the real append-only feed or from
-real committed SessionStore evidence.
+system: every available event is derived from the real append-only feed.
 
 Vocabulary without a real source is reported as unavailable, never faked.
+``#system_idle`` has no reliable active->idle transition source in v0.1, so it
+is reported unavailable; the vocabulary token and its compile support remain.
 """
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ from typing import Any, Mapping
 FEED_KIND_RUN_COMPLETED = "run.completed"
 FEED_KIND_RUN_FAILED = "run.failed"
 
-# The only real edge-derivable system event.
+# Author-defined system-idle vocabulary token. In v0.1 there is no reliable
+# active->idle transition event source, so this event stays unavailable.
 EVENT_SYSTEM_IDLE = "#system_idle"
 
 # Agent-scoped events mapped 1:1 from real feed kinds. The feed projects the
@@ -34,6 +36,7 @@ UNAVAILABLE_EVENT_REASONS = {
     "#turn_commentary": "no commentary event source exists in the durable event feed",
     "#hashideploy_finish": "no deployment-completion event source exists",
     "#reboot_ok": "no reboot-completion event source exists",
+    "#system_idle": "no reliable active-to-idle transition event source in v0.1",
 }
 
 # Automation-origin idempotency prefixes. Runs dispatched by automation must
@@ -47,14 +50,14 @@ HAL_IDEMPOTENCY_PREFIX = "hal:"
 
 @dataclass(frozen=True)
 class HalTrigger:
-    """One runtime trigger derived from the real feed (or the idle edge)."""
+    """One runtime trigger derived from the real feed."""
 
     event: str
     # Canonical agent identity (``@name@instance``) for agent events.
     agent_identity: str | None
     # Real feed event identity for dedupe/correlation.
     feed_event_id: str | None
-    # ``run.completed``/``run.failed`` for feed events, ``system_idle`` for the edge.
+    # ``run.completed``/``run.failed`` for feed events.
     feed_kind: str
     # Idempotency key of the originating run (correlation evidence).
     run_idempotency_key: str | None
@@ -88,8 +91,6 @@ def event_availability(event_name: str) -> tuple[bool, str]:
     """True when a real source can produce this event, plus a truthful reason."""
     if event_name in FEED_TO_HAL_EVENT.values():
         return True, "real durable run-terminal feed event"
-    if event_name == EVENT_SYSTEM_IDLE:
-        return True, "derived edge: active-to-idle transition from committed Session evidence"
     reason = UNAVAILABLE_EVENT_REASONS.get(event_name)
     if reason is not None:
         return False, reason

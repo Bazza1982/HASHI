@@ -25,7 +25,6 @@ from aiohttp import web
 from hal import compile_hal
 from hal.dispatch import DispatchAdapter, DispatchResult, resolve_agent_target
 from hal.event_source import (
-    EVENT_SYSTEM_IDLE,
     HalTrigger,
     feed_event_hal_event,
 )
@@ -346,22 +345,12 @@ class HalService:
         consumed: dict[str, set[str]] = {}
 
         if not events and not has_more:
-            # No new evidence. When an idle rule needs it, still sample the
-            # active state so an idle->busy transition (where the busy run has
-            # not yet produced a terminal event) clears the persisted idle latch
-            # for the next true idle edge. Then recover pending/unfinished
-            # executions so a transient failure (or a crash) is retried without
-            # waiting for the next event. The cursor still advances past this
-            # empty page. Returning the recovery result (True only when a
-            # dispatch was actually attempted) keeps a normal "waiting for a
-            # correlated event" state out of the 0.1s fast loop.
-            needs_idle = any(_rule_needs_idle(r) for r in rules)
-            if needs_idle:
-                now_active = await asyncio.to_thread(
-                    _active_runs, self.session_store, owner_id
-                )
-                if now_active:
-                    await asyncio.to_thread(self.store.set_idle_latch, owner_id, False)
+            # No new evidence: recover pending/unfinished executions so a
+            # transient failure (or a crash) is retried without waiting for the
+            # next event. The cursor still advances past this empty page.
+            # Returning the recovery result (True only when a dispatch was
+            # actually attempted) keeps a normal "waiting for a correlated
+            # event" state out of the 0.1s fast loop.
             await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
             return await self._recover_executions(owner_id, rules, execs_by_id, receipts)
 
@@ -385,22 +374,6 @@ class HalService:
         execs_by_id = {str(e["exec_id"]): e for e in execs}
         receipts = await self._load_receipts(execs)
 
-        # #system_idle is only consulted when some enabled rule actually needs
-        # it; otherwise no active-run query is made at all. The active state is
-        # sampled per cycle (never per event) and the edge fires once per idle
-        # period, so paginating a backlog of already-finished runs cannot
-        # multiply the edge or re-dispatch an idle rule.
-        needs_idle = any(_rule_needs_idle(r) for r in rules)
-        now_active: bool | None = None
-        if needs_idle:
-            now_active = await asyncio.to_thread(_active_runs, self.session_store, owner_id)
-            if now_active:
-                # Active again: clear the persisted idle-period latch so the next
-                # true active->idle transition can fire exactly once.
-                await asyncio.to_thread(self.store.set_idle_latch, owner_id, False)
-
-        saw_terminal_event = False
-        first_terminal: HalTrigger | None = None
         for event in events:
             trigger = feed_event_hal_event(event)
             if trigger is not None and trigger.agent_identity:
@@ -413,43 +386,6 @@ class HalService:
                     owner_id, trigger, rules, execs_by_id, receipts, consumed
                 ):
                     activity = True
-                if (
-                    not trigger.automation_origin
-                    and trigger.event in _TERMINAL_HAL_EVENTS
-                ):
-                    saw_terminal_event = True
-                    if first_terminal is None:
-                        first_terminal = trigger
-
-        if (
-            needs_idle
-            and saw_terminal_event
-            and first_terminal is not None
-            and now_active is False
-        ):
-            # Re-sample AFTER this batch: processing may have dispatched prompts
-            # that started new runs, so the pre-batch "idle" snapshot must never
-            # fabricate an idle edge while the system has just become busy again.
-            now_active = await asyncio.to_thread(
-                _active_runs, self.session_store, owner_id
-            )
-            if now_active:
-                await asyncio.to_thread(self.store.set_idle_latch, owner_id, False)
-            elif not await asyncio.to_thread(self.store.get_idle_latch, owner_id):
-                idle = HalTrigger(
-                    event=EVENT_SYSTEM_IDLE,
-                    agent_identity=None,
-                    feed_event_id=first_terminal.feed_event_id,
-                    feed_kind="system_idle",
-                    run_idempotency_key=None,
-                    automation_origin=False,
-                    feed_cursor=first_terminal.feed_cursor,
-                )
-                if await self._apply_trigger(
-                    owner_id, idle, rules, execs_by_id, receipts, consumed
-                ):
-                    activity = True
-                await asyncio.to_thread(self.store.set_idle_latch, owner_id, True)
 
         await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
 
@@ -903,9 +839,27 @@ class HalService:
                     detail="native command outcome unknown after interruption",
                 )
                 continue
-            # RECEIPT_PENDING (prompt): re-dispatch with the same idempotency
-            # key, but with a bounded retry count and exponential backoff so a
-            # network failure cannot become a continuous request storm.
+            # RECEIPT_PENDING (prompt). Before retrying, check the durable feed
+            # for a terminal Run carrying this idempotency key: if the prompt
+            # was already accepted and its Run finished (crash between accept
+            # and the 'dispatched' write), retrying would risk a duplicate side
+            # effect. Honour the persisted completion instead.
+            from orchestrator.automation_events import terminal_event_for_key
+
+            terminal = await asyncio.to_thread(
+                terminal_event_for_key,
+                self.session_store,
+                owner_id=owner_id,
+                run_idempotency_key=receipt["idempotency_key"],
+            )
+            if terminal is not None:
+                await self._settle_pending_from_terminal(
+                    owner_id, exec_row, receipt, terminal
+                )
+                continue
+            # Otherwise re-dispatch with the same idempotency key, but with a
+            # bounded retry count and exponential backoff so a network failure
+            # cannot become a continuous request storm.
             attempts = int(receipt.get("attempts") or 0)
             if attempts >= MAX_RETRY_ATTEMPTS:
                 await asyncio.to_thread(
@@ -940,6 +894,66 @@ class HalService:
             did_work = True
         return did_work
 
+    async def _settle_pending_from_terminal(
+        self,
+        owner_id: str,
+        exec_row: Mapping[str, Any],
+        receipt: Mapping[str, Any],
+        terminal: Mapping[str, Any],
+    ) -> None:
+        """Settle a ``pending_retry`` prompt whose Run already terminated.
+
+        The dispatch side effect already happened (proven by the Run's
+        idempotency key), so we must not re-send it. Advance exactly as the
+        accepted path would, using only the persisted evidence.
+        """
+        stage = int(exec_row["stage"])
+        if terminal["type"] == "agent.run.failed":
+            await asyncio.to_thread(
+                self.store.upsert_receipt,
+                exec_id=exec_row["exec_id"],
+                stage=stage,
+                idempotency_key=receipt["idempotency_key"],
+                kind=receipt["kind"],
+                target=receipt["target"],
+                payload=receipt["payload"],
+                state=RECEIPT_FAILED,
+                detail="prompt run failed",
+            )
+            await asyncio.to_thread(
+                self.store.fail_exec_if_active,
+                owner_id=owner_id,
+                exec_id=exec_row["exec_id"],
+                detail="prompt run failed",
+            )
+            return
+
+        await asyncio.to_thread(
+            self.store.upsert_receipt,
+            exec_id=exec_row["exec_id"],
+            stage=stage,
+            idempotency_key=receipt["idempotency_key"],
+            kind=receipt["kind"],
+            target=receipt["target"],
+            payload=receipt["payload"],
+            state=RECEIPT_DISPATCHED,
+            detail="prompt accepted (completed run observed)",
+        )
+        program = program_from_json(json.loads(exec_row["program_blob"]))
+        workflow = program.workflows[int(exec_row["workflow_index"])]
+        next_stage, state = stage_after_dispatch(stage, len(workflow))
+        detail = None
+        if state == EXEC_ACTIVE and next_stage < len(workflow):
+            detail = unavailable_wait_detail(workflow[next_stage].event)
+        await asyncio.to_thread(
+            self.store.advance_exec_if_active,
+            owner_id=owner_id,
+            exec_id=exec_row["exec_id"],
+            stage=next_stage,
+            state=state,
+            detail=detail,
+        )
+
 
 # ----------------------------------------------------------------- module APIs
 
@@ -956,37 +970,8 @@ def _feed_page(session_store, owner_id: str, after: int, limit: int) -> dict[str
     return terminal_events_page(session_store, owner_id=owner_id, after=after, limit=limit)
 
 
-def _active_runs(session_store, owner_id: str) -> bool:
-    try:
-        rows = session_store.list_active_runs(owner_id=owner_id)
-    except Exception:  # noqa: BLE001 — evidence unavailable means no idle edge
-        return True
-    return bool(rows)
-
-
 def _event_run_id(event: Mapping[str, Any]) -> str:
     return str(event.get("run_id") or event.get("event_id") or "")
-
-
-# Non-automation run-terminal HAL events that count as real evidence for the
-# active->idle transition. The idle edge is only ever derived from these.
-_TERMINAL_HAL_EVENTS = {"#turn_finish", "#turn_error"}
-
-
-def _rule_needs_idle(rule: dict[str, Any]) -> bool:
-    """True when an enabled rule has a workflow whose entry is ``#system_idle``.
-
-    Idle is an entry-only event (system events carry no per-workflow correlation
-    evidence), so only entry events need to be consulted. When no enabled rule
-    needs idle, no active-run query is performed at all.
-    """
-    program = rule.get("program")
-    if program is None:
-        return False
-    for workflow in program.workflows:
-        if workflow and workflow[0].event == EVENT_SYSTEM_IDLE:
-            return True
-    return False
 
 
 def _flatten_consumed(consumed: dict[str, set[str]]) -> set[tuple[str, str]]:
@@ -1007,7 +992,7 @@ def _program_for_rule(rules: list[dict[str, Any]], rule_id: str):
 _ALL_EVENT_AVAILABILITY = {
     "#turn_finish": (True, "real durable run-terminal feed event (run.completed)"),
     "#turn_error": (True, "real durable run-terminal feed event (run.failed)"),
-    "#system_idle": (True, "derived active-to-idle edge from committed Session evidence"),
+    "#system_idle": (False, "no reliable active-to-idle transition event source in v0.1"),
     "#turn_commentary": (False, "no commentary event source exists in the durable event feed"),
     "#hashideploy_finish": (False, "no deployment-completion event source exists"),
     "#reboot_ok": (False, "no reboot-completion event source exists"),
