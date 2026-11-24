@@ -790,7 +790,6 @@ class HalService:
 
         did_work = False
         now = self._clock()
-        recovered: list[HalTrigger] = []
         for exec_row in execs_by_id.values():
             if exec_row.get("state") != EXEC_ACTIVE:
                 continue
@@ -874,11 +873,9 @@ class HalService:
                 )
                 continue
             if terminal is not None:
-                recovered_trigger = await self._settle_pending_from_terminal(
+                await self._settle_pending_from_terminal(
                     owner_id, exec_row, receipt, terminal
                 )
-                if recovered_trigger is not None:
-                    recovered.append(recovered_trigger)
                 continue
             # Otherwise re-dispatch with the same idempotency key, but with a
             # bounded retry count and exponential backoff so a network failure
@@ -915,32 +912,105 @@ class HalService:
             )
             await self._dispatch_stage(owner_id, exec_row, directive, rules, receipts)
             did_work = True
-        if recovered:
-            # Settled pending stages have advanced. Re-drive each correlated
-            # dependent stage from the persisted terminal evidence exactly once:
-            # the evidence may already sit behind the feed cursor, and stage
-            # advancement plus the consumed-event dedupe keep it idempotent.
-            # Reload so the settle is visible to planning; a crash between the
-            # settle and this reload is still safe (the receipt is 'dispatched'
-            # and the stage advanced, so a later recovery reconciles instead of
-            # re-dispatching).
-            fresh_execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
-            fresh_by_id: dict[str, dict[str, Any]] = {}
-            for e in fresh_execs:
-                try:
-                    e["program"] = program_from_json(json.loads(e["program_blob"]))
-                except (ValueError, KeyError, TypeError):
-                    e["program"] = None
-                if e.get("program") is not None:
-                    fresh_by_id[str(e["exec_id"])] = e
-            fresh_receipts = await self._load_receipts(list(fresh_by_id.values()))
-            consumed: dict[str, set[str]] = {}
-            for trigger in recovered:
-                if await self._apply_trigger(
-                    owner_id, trigger, rules, fresh_by_id, fresh_receipts, consumed
-                ):
-                    did_work = True
+        if await self._recover_dependent_stages(owner_id, rules):
+            did_work = True
         return did_work
+
+    async def _recover_dependent_stages(
+        self,
+        owner_id: str,
+        rules: list[dict[str, Any]],
+    ) -> bool:
+        """Durably drive dependent stages whose correlated terminal event is
+        already BEHIND the owner feed cursor.
+
+        Recovery writes the prior receipt as ``dispatched`` and advances the
+        execution to the next stage, then the correlated terminal event must
+        drive the dependent stage. A crash can land between that durable settle
+        and the re-application of the recovered trigger, or a transient
+        terminal-evidence read failure can advance the feed cursor past the
+        correlated event before it is re-applied. In both cases any in-memory
+        trigger is gone, so re-derive it from the only facts that survive a
+        restart: the prior stage's durable receipt idempotency key plus the
+        persisted terminal Run evidence (``terminal_event_for_key``).
+
+        This adds no event queue, no executor, no background worker and no new
+        polling cadence: it runs inside the existing recovery pass at the
+        existing <=5s interval, does at most one indexed point lookup per
+        waiting dependent stage, and returns True only when a dispatch was
+        actually attempted (so a normal "still waiting" state never enters the
+        0.1s fast loop).
+        """
+        from orchestrator.automation_events import terminal_event_for_key
+
+        execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
+        loaded: list[dict[str, Any]] = []
+        for e in execs:
+            try:
+                e["program"] = program_from_json(json.loads(e["program_blob"]))
+            except (ValueError, KeyError, TypeError):
+                e["program"] = None
+            if e.get("program") is not None:
+                loaded.append(e)
+        execs_by_id = {str(e["exec_id"]): e for e in loaded}
+        receipts = await self._load_receipts(loaded)
+
+        did_work = False
+        consumed: dict[str, set[str]] = {}
+        for exec_row in execs_by_id.values():
+            if str(exec_row.get("state")) != EXEC_ACTIVE:
+                continue
+            stage = int(exec_row["stage"])
+            if stage <= 0:
+                continue  # the entry stage is never "dependent"
+            if receipts.get((exec_row["exec_id"], stage)) is not None:
+                continue  # already dispatched / pending retry / failed
+            prior = receipts.get((exec_row["exec_id"], stage - 1))
+            if prior is None or prior.get("state") != RECEIPT_DISPATCHED:
+                continue
+            if prior.get("kind") != "prompt":
+                # Native commands carry no durable Run terminal evidence and
+                # must never be blindly replayed; their acceptance is already
+                # recorded as 'unverified'. Leave such a stage to normal matching.
+                continue
+            try:
+                terminal = await asyncio.to_thread(
+                    terminal_event_for_key,
+                    self.session_store,
+                    owner_id=owner_id,
+                    run_idempotency_key=prior["idempotency_key"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    "HAL dependent-stage evidence read failed for exec %s stage %s: %s",
+                    exec_row["exec_id"], stage, exc,
+                )
+                continue
+            if terminal is None:
+                continue  # prior Run still in flight: legitimately waiting
+            trigger = self._terminal_trigger(terminal)
+            if trigger is None:
+                continue
+            if await self._apply_trigger(
+                owner_id, trigger, rules, execs_by_id, receipts, consumed
+            ):
+                did_work = True
+        return did_work
+
+    def _terminal_trigger(self, terminal: Mapping[str, Any]) -> HalTrigger | None:
+        """Convert a durable terminal Run event into a canonical HAL trigger.
+
+        Mirrors the feed-event loop's identity canonicalisation so the recovered
+        trigger matches dependent stages declared with ``@name@instance``.
+        """
+        trigger = feed_event_hal_event(terminal)
+        if trigger is None:
+            return None
+        if trigger.agent_identity:
+            instance_id = self._current_instance_id()
+            suffix = f"@{instance_id}" if instance_id else ""
+            trigger = _with_agent_identity(trigger, f"@{trigger.agent_identity}{suffix}")
+        return trigger
 
     async def _settle_pending_from_terminal(
         self,
@@ -948,7 +1018,7 @@ class HalService:
         exec_row: Mapping[str, Any],
         receipt: Mapping[str, Any],
         terminal: Mapping[str, Any],
-    ) -> HalTrigger | None:
+    ) -> None:
         """Settle a ``pending_retry`` prompt whose Run already terminated.
 
         The dispatch side effect already happened (proven by the Run's
@@ -958,7 +1028,9 @@ class HalService:
         record the dispatch receipt and advance the stage, exactly as the
         accepted path would. A failed Run still proves the prompt was accepted,
         so a legal dependent ``#turn_error`` stage must still fire rather than
-        being swallowed by prematurely failing the whole execution.
+        being swallowed by prematurely failing the whole execution. The
+        dependent stage is driven durably by ``_recover_dependent_stages``
+        (re-derived from the prior receipt, never an in-memory trigger).
         """
         stage = int(exec_row["stage"])
         outcome = "failed" if terminal["type"] == "agent.run.failed" else "completed"
@@ -987,25 +1059,6 @@ class HalService:
             state=state,
             detail=detail,
         )
-        if state != EXEC_ACTIVE or next_stage >= len(workflow):
-            # The workflow settled terminally (no dependent stage remains).
-            return None
-        # Reuse the correlated terminal evidence to drive the now-current
-        # dependent stage exactly once. The terminal event may already sit
-        # BEHIND the owner's feed cursor (its page was consumed while the
-        # terminal lookup was transiently failing), so it will never re-appear
-        # in a later feed page. Driving it here keeps the event from being
-        # silently lost — without rewinding the cursor and without re-sending
-        # the already-accepted prior stage. Canonicalize the agent identity
-        # exactly as the feed-event loop does.
-        trigger = feed_event_hal_event(terminal)
-        if trigger is None:
-            return None
-        if trigger.agent_identity:
-            instance_id = self._current_instance_id()
-            suffix = f"@{instance_id}" if instance_id else ""
-            trigger = _with_agent_identity(trigger, f"@{trigger.agent_identity}{suffix}")
-        return trigger
 
 
 # ----------------------------------------------------------------- module APIs

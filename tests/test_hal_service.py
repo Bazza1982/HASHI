@@ -1362,6 +1362,195 @@ def test_correlated_terminal_event_survives_transient_lookup_failure(
     store2.close()
 
 
+@pytest.mark.parametrize(
+    "alice_kind, dependent_event, bob_text",
+    [
+        ("run.failed", "#turn_error", "review failure"),
+        ("run.completed", "#turn_finish", "next"),
+    ],
+)
+def test_recovery_case1_dispatched_not_advanced_terminal_behind_cursor(
+    tmp_path, alice_kind, dependent_event, bob_text
+):
+    """Case 1: receipt=dispatched but the execution was NOT yet advanced, and the
+    correlated terminal event is already BEHIND the owner feed cursor. After a
+    restart the prior prompt must never be re-sent, the dependent stage must fire
+    exactly once, and unrelated rules must keep firing normally."""
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    script = (
+        'if @agent_any #turn_finish then @alice $prompt "work"; '
+        f'if @alice@TESTINST {dependent_event} then @bob $prompt "{bob_text}".'
+    )
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.case1"),
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    # An unrelated rule that must keep firing normally throughout.
+    other = make_rule(
+        service1, "user:7",
+        'if @carol@TESTINST #turn_error then @dave $prompt "independent".',
+        name="other",
+    )
+    service1.set_enabled(owner_id="user:7", rule_id=other["rule_id"], enabled=True)
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-0",
+        trigger_agent="@alice@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@alice",
+        payload='$prompt "work"',
+        state="dispatched",
+        detail=None,
+    )
+    # Crash BEFORE the stage advance: receipt=dispatched, exec still at stage 0.
+    assert store1.get_exec("user:7", "hx1")["stage"] == 0
+    store1.close()
+
+    # The correlated terminal evidence is persisted, then the cursor moves past it.
+    feed.add_event(agent_id="alice", key="hal:hx1:0", kind=alice_kind)  # feed_id 1
+    cursor_store = HalStore(path)
+    cursor_store.set_cursor("user:7", 1)  # next feed page starts AFTER feed_id 1
+    cursor_store.close()
+    # An unrelated rule's event arrives after the cursor (still visible).
+    feed.add_event(agent_id="carol", kind="run.failed", key="user-run-9")  # feed_id 2
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.case1r"),
+    )
+    run(service2._process_owner("user:7"))
+
+    alice_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "alice"]
+    bob_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "bob"]
+    dave_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "dave"]
+    assert alice_calls == []  # prior prompt never re-sent
+    assert len(bob_calls) == 1  # dependent stage fired exactly once
+    assert len(dave_calls) == 1  # unrelated rule kept firing
+
+    exec_row = store2.get_exec("user:7", "hx1")
+    assert exec_row["state"] == "completed"
+    assert exec_row["stage"] == 2
+
+    # A further cycle must not re-dispatch the dependent stage.
+    run(service2._process_owner("user:7"))
+    assert len([c for c in adapter2.prompt_calls if c["target_agent"] == "bob"]) == 1
+    store2.close()
+
+
+@pytest.mark.parametrize(
+    "alice_kind, dependent_event, bob_text",
+    [
+        ("run.failed", "#turn_error", "review failure"),
+        ("run.completed", "#turn_finish", "next"),
+    ],
+)
+def test_recovery_case2_advanced_dependent_receipt_absent_terminal_behind_cursor(
+    tmp_path, alice_kind, dependent_event, bob_text
+):
+    """Case 2: the execution was already advanced to the dependent stage, its
+    receipt is absent, and the correlated terminal event is BEHIND the cursor.
+    A restart must re-derive the dependent trigger from the prior receipt and
+    fire it exactly once, without re-sending the prior stage or blocking
+    unrelated rules."""
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    script = (
+        'if @agent_any #turn_finish then @alice $prompt "work"; '
+        f'if @alice@TESTINST {dependent_event} then @bob $prompt "{bob_text}".'
+    )
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.case2"),
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    other = make_rule(
+        service1, "user:7",
+        'if @carol@TESTINST #turn_error then @dave $prompt "independent".',
+        name="other",
+    )
+    service1.set_enabled(owner_id="user:7", rule_id=other["rule_id"], enabled=True)
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-0",
+        trigger_agent="@alice@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@alice",
+        payload='$prompt "work"',
+        state="dispatched",
+        detail=None,
+    )
+    # Crash AFTER the stage advance, BEFORE the dependent-stage receipt exists.
+    assert store1.advance_exec_if_active(
+        owner_id="user:7", exec_id="hx1", stage=1, state="active"
+    )
+    assert store1.get_exec("user:7", "hx1")["stage"] == 1
+    assert store1.get_receipt("hx1", 1) is None
+    store1.close()
+
+    feed.add_event(agent_id="alice", key="hal:hx1:0", kind=alice_kind)  # feed_id 1
+    cursor_store = HalStore(path)
+    cursor_store.set_cursor("user:7", 1)
+    cursor_store.close()
+    feed.add_event(agent_id="carol", kind="run.failed", key="user-run-9")  # feed_id 2
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.case2r"),
+    )
+    run(service2._process_owner("user:7"))
+
+    alice_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "alice"]
+    bob_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "bob"]
+    dave_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "dave"]
+    assert alice_calls == []
+    assert len(bob_calls) == 1
+    assert len(dave_calls) == 1
+
+    exec_row = store2.get_exec("user:7", "hx1")
+    assert exec_row["state"] == "completed"
+    assert exec_row["stage"] == 2
+
+    run(service2._process_owner("user:7"))
+    assert len([c for c in adapter2.prompt_calls if c["target_agent"] == "bob"]) == 1
+    store2.close()
+
+
 def test_migration_key_create_is_idempotent_and_non_destructive(tmp_path):
     feed = FakeSessionStore()
     service, _ = make_service(tmp_path, feed)
