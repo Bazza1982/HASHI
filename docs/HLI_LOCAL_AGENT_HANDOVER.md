@@ -21,11 +21,11 @@ Read the actual changed code, not only the PR summaries, before testing.
 
 Windows with AMD 5950X, 64 GB RAM, RTX 3090 24 GB and RTX 5070 Ti 16 GB;
 1000 W PSU and tight dual-card airflow. Existing Hashi Compute has Ollama
-and SOK creative services; both must remain functional. HASHI local path has
-previously been `C:\Users\thene\projects\HASHI4`; SOK at
-`D:\Projects\content_generation`. Discover the **actual** git roots and
-configured Compute port on this machine; do not assume those paths or
-ports represent a staging instance. Use fresh directories and *free* ports.
+and SOK creative services; both must remain functional. The HASHI and
+hashi_compute checkout roots, and the SOK project root, are machine-specific:
+discover the **actual** git roots and configured Compute port on this machine,
+and do not assume any prior workstation paths or ports. Use fresh directories
+and *free* ports.
 Suggested: staging HLI host 13100, llama worker 13110+, staging Compute 19546.
 
 1. `git fetch origin feat/hli-local-inference-20261119` in **each** repo;
