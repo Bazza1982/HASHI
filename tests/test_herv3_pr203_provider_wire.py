@@ -183,7 +183,7 @@ async def test_repeated_interrupted_successors_do_not_repeat_assembled_context(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["ready_provider_request", "pending_tool_batch"])
+@pytest.mark.parametrize("boundary", ["ready_provider_request", "pending_tool_batch", "completed_tool_batch"])
 async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boundary):
     from orchestrator.permissions.her_binding import ManagedHerTurn
     from tools.registry import ToolRegistry
@@ -258,6 +258,22 @@ async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boun
                 "path": str(tmp_path / "resumed.txt"), "content": "written once",
             })},
         }]})
+    elif boundary == "completed_tool_batch":
+        # Execute a real isolated side effect once and preserve its actual receipt.
+        # A later change makes replay visible even if it would write the same bytes.
+        effect_path = tmp_path / "completed.txt"
+        arguments = {"path": str(effect_path), "content": "written once"}
+        result = await registry.execute("file_write", arguments, tool_call_id="completed-once")
+        assert not result.is_error, result.output
+        assert effect_path.read_text(encoding="utf-8") == "written once"
+        effect_path.write_text("changed after completion", encoding="utf-8")
+        exact.extend([
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "completed-once", "type": "function",
+                "function": {"name": "file_write", "arguments": json.dumps(arguments)},
+            }]},
+            {"role": "tool", "tool_call_id": "completed-once", "content": result.output},
+        ])
     coordinator.record_provider_context_checkpoint(accepted, {
         "provider": "openrouter-api", "model": "configured/premium", "stage": "direct",
         "boundary": boundary, "messages": exact,
@@ -289,6 +305,8 @@ async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boun
         assert (tmp_path / "resumed.txt").read_text(encoding="utf-8") == "written once"
     else:
         assert main[0] == exact
+        if boundary == "completed_tool_batch":
+            assert (tmp_path / "completed.txt").read_text(encoding="utf-8") == "changed after completion"
     await adapter.shutdown()
 
 
@@ -347,6 +365,55 @@ async def test_successor_new_images_preserve_prior_provider_evidence(tmp_path):
                   and part.get("image_url", {}).get("url") != "data:image/png;base64,T0xE"]
     assert len(new_images) == 2
 # HASHI-Fingerprint: hfp_08e1baa68f7444b5ad4bd5a8c03afe76
+
+
+@pytest.mark.asyncio
+async def test_exact_completed_tool_resume_preserves_original_media_and_tool_result(tmp_path):
+    from dataclasses import replace
+    from orchestrator.her_v2.config import ProviderProfile
+    from orchestrator.multimodal_contract import attachment_manifest
+    from tests.test_openrouter_multimodal import _adapter, _two_images
+
+    captured = []
+
+    def answer(request):
+        captured.append(json.loads(request.content)["messages"])
+        events = [
+            {"id": "media-resume", "choices": [{"index": 0, "delta": {"content": "Done."}, "finish_reason": None}]},
+            {"id": "media-resume", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ]
+        body = "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    backend = _adapter(tmp_path)
+    backend.client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+
+    class Manager:
+        privacy_level = 1
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            return backend
+
+    content = _two_images(tmp_path)
+    request = replace(_direct_request(), goal="Compare both.",
+                      request_content=content, attachment_manifest=attachment_manifest(content))
+    request = replace(request, context={**request.context, "pcm_input": {
+        "current_request": "Compare both.", "runtime_context": {}, "sections": [], "history": [],
+    }})
+    history, _ = backend._initial_messages("Compare both.", content)
+    history.extend([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "completed-read", "type": "function",
+             "function": {"name": "file_read", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "completed-read", "content": "Important completed result"},
+    ])
+    checkpoint = {**_context("completed_tool_batch", history), "model": "google/gemini-2.5-pro"}
+    stage = HashiStageProvider(backend_manager=Manager())
+    stage.bind_provider_context(observer=lambda _: None, recovery=checkpoint, successor_turn=False)
+    await stage.invoke(ProviderProfile("main", "openrouter-api", "google/gemini-2.5-pro"), request)
+    assert captured == [history]
+    assert len([part for part in history[1]["content"] if part.get("type") == "image_url"]) == 2
 
 
 @pytest.mark.asyncio
@@ -652,6 +719,35 @@ def _context(boundary, messages, **extra):
     return {"format": "herv3-provider-context-v1", "provider": "openrouter-api",
             "model": "configured/old", "stage": "direct", "boundary": boundary,
             "messages": messages, "deferred_followups": [], **extra}
+
+
+@pytest.mark.parametrize("change", ["model", "stage", "missing_messages"])
+def test_exact_completed_batch_fails_closed_if_checkpoint_cannot_be_resumed(change):
+    from adapters.her_v2_provider import ProviderContextObserverError
+    from orchestrator.her_v2.config import ProviderProfile
+
+    checkpoint = _context("completed_tool_batch", [
+        {"role": "system", "content": "original system"},
+        {"role": "user", "content": "original task"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "completed", "type": "function",
+             "function": {"name": "file_read", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "completed", "content": "needed result"},
+    ])
+    if change == "stage":
+        checkpoint["stage"] = "plan"
+    elif change == "missing_messages":
+        checkpoint["messages"] = []
+    model = "configured/new" if change == "model" else "configured/old"
+    stage = HashiStageProvider(backend_manager=SimpleNamespace())
+    stage.bind_provider_context(observer=lambda _: None, recovery=checkpoint,
+                                successor_turn=False, resume_pending_tools=True)
+    with pytest.raises(ProviderContextObserverError):
+        stage._provider_recovery_messages(
+            profile=ProviderProfile("main", "openrouter-api", model),
+            request=_direct_request(), stage_prompt="newly compiled context",
+        )
 
 
 def test_changed_owned_message_is_not_deleted_or_misclassified():

@@ -3512,16 +3512,21 @@ class HashiStageProvider(StageProvider):
         if not matches or not isinstance(raw_messages, list) or not raw_messages:
             if (
                 self._provider_context_resume_pending
-                and context.get("boundary")
-                in {"pending_tool_batch", "ready_provider_request"}
+                and (
+                    boundary in {"pending_tool_batch", "ready_provider_request"}
+                    or (
+                        boundary == "completed_tool_batch"
+                        and request.context.get("her_v3")
+                        and not getattr(self, "_provider_context_successor", False)
+                    )
+                )
             ):
-                # Ordinary crash recovery resumes the exact pending Tool
-                # batch or provider request, so a changed provider, model or
-                # stage must fail closed instead of silently re-driving the
-                # old work under a different backend.
+                # An exact continuation needs its original, verified context.
+                # Do not silently drop completed results or re-drive old work
+                # when the original route or checkpoint is unavailable.
                 raise ProviderContextObserverError(
-                    "pending Tool continuation cannot change provider, "
-                    "model, or stage"
+                    "exact continuation requires a valid checkpoint on the "
+                    "original provider, model, and stage"
                 )
             # A /steer successor never replays the interrupted pending batch
             # or provider request. An incompatible private checkpoint is
@@ -3577,7 +3582,15 @@ class HashiStageProvider(StageProvider):
                     and not getattr(self, "_provider_context_successor", False))
             )
         )
-        if exact_pending:
+        exact_completed_batch = (
+            boundary == "completed_tool_batch"
+            and request.context.get("her_v3")
+            and self._provider_recovery_resume_pending
+            and not getattr(self, "_provider_context_successor", False)
+        )
+        if exact_pending or exact_completed_batch:
+            # This execution already owns its assembled prompt. A newly
+            # compiled one must not replace the checkpoint's ownership.
             self._provider_context_prompt_candidate = None
         if getattr(self, "_provider_context_successor", False) and request.context.get("her_v3"):
             if exact_pending:
@@ -3717,7 +3730,8 @@ class HashiStageProvider(StageProvider):
 
             continuation.extend(ordered_deferred_followups(deferred))
             deferred.clear()
-            continuation.append({"role": "user", "content": successor_prompt})
+            if not exact_completed_batch:
+                continuation.append({"role": "user", "content": successor_prompt})
         if (
             getattr(self, "_provider_context_successor", False)
             and request.context.get("her_v3") and not exact_pending
@@ -6408,6 +6422,10 @@ class HashiStageProvider(StageProvider):
             if (
                 provider_request_content is None
                 or self._provider_context_recovery.get("boundary") in {"pending_tool_batch", "ready_provider_request"}
+                or (
+                    request.context.get("her_v3")
+                    and self._provider_context_recovery.get("boundary") == "completed_tool_batch"
+                )
                 or has_successor_content
             ) and ("continuation_messages" in parameters or accepts_extra_keywords):
                 continuation_messages = self._provider_recovery_messages(
