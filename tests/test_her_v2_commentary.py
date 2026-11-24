@@ -297,6 +297,12 @@ def test_direct_prompt_renders_mode_specific_commentary_instruction():
     assert "Commentary mode (off)" in off
     assert "always omit" in off
 
+    # The old unconditional acknowledgement and Persona instructions are gone;
+    # the mode description alone decides generation and styling.
+    assert "brief acknowledgement" not in raw
+    assert "exact same persona voice" not in raw
+    assert "exact same persona voice" not in packaged
+
 
 class _LivenessRecording:
     def __init__(self):
