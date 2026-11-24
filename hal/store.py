@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS hal_feed_cursor (
     owner_id TEXT PRIMARY KEY,
     cursor   INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS hal_idle_latch (
+    owner_id TEXT PRIMARY KEY,
+    emitted  INTEGER NOT NULL
+);
 """
 
 
@@ -674,6 +679,29 @@ class HalStore:
                 "INSERT INTO hal_feed_cursor (owner_id, cursor) VALUES (?,?) "
                 "ON CONFLICT(owner_id) DO UPDATE SET cursor=excluded.cursor",
                 (owner_id, int(cursor)),
+            )
+            self._conn.commit()
+
+    # --- #system_idle edge latch (persisted) -------------------------------
+
+    def get_idle_latch(self, owner_id: str) -> bool:
+        """Whether the #system_idle edge already fired for the current idle period.
+
+        Persisted so a crash/restart between backlog pages cannot re-fire the
+        edge from a second page of already-finished runs.
+        """
+        with _LOCK:
+            row = self._conn.execute(
+                "SELECT emitted FROM hal_idle_latch WHERE owner_id=?", (owner_id,)
+            ).fetchone()
+        return bool(row["emitted"]) if row is not None else False
+
+    def set_idle_latch(self, owner_id: str, emitted: bool) -> None:
+        with _LOCK:
+            self._conn.execute(
+                "INSERT INTO hal_idle_latch (owner_id, emitted) VALUES (?,?) "
+                "ON CONFLICT(owner_id) DO UPDATE SET emitted=excluded.emitted",
+                (owner_id, 1 if emitted else 0),
             )
             self._conn.commit()
 

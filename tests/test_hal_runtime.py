@@ -140,6 +140,27 @@ def test_dependent_stage_requires_correlation():
     assert advances[0].directive.payload == "next"
 
 
+def test_dependent_stage_requires_matching_source_agent():
+    program = compile_hal(
+        'if @agent_any #turn_finish then @lily $prompt "start"; '
+        'if @alice@hashi4 #turn_finish then @bob $prompt "next".'
+    )
+    exec_row = _exec(stage=1, program=program)
+    receipt = {"exec_id": "hx1", "stage": 0, "idempotency_key": "hal:hx1:0"}
+
+    # A run from the WRONG source Agent carrying the same correlation key must
+    # never advance the workflow: the key alone is not proof of origin.
+    wrong_source = _trigger(agent="bob", key="hal:hx1:0", automation=True)
+    _, advances, _ = plan_for_trigger(wrong_source, [], [exec_row], [receipt], set())
+    assert advances == []
+
+    # The declared source Agent carrying the same correlation key advances once.
+    right_source = _trigger(agent="alice", key="hal:hx1:0", automation=True)
+    _, advances, _ = plan_for_trigger(right_source, [], [exec_row], [receipt], set())
+    assert len(advances) == 1
+    assert advances[0].directive.target == "@bob"
+
+
 def test_dependent_system_event_never_auto_advances():
     program = compile_hal(
         'if #system_idle then /hashideploy; if #hashideploy_finish then /reboot max.'

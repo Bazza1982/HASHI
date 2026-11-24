@@ -282,6 +282,8 @@ def plan_for_trigger(
         if trigger.event in _AGENT_EVENTS:
             if not _correlates_with_previous_stage(exec_row, stage, trigger, receipt_by_exec_stage):
                 continue
+            if not _dependent_source_matches(rule, trigger):
+                continue
         else:
             # System events carry no per-workflow correlation evidence; an
             # unrelated deployment/reboot must never advance this workflow.
@@ -400,6 +402,22 @@ def _correlates_with_previous_stage(
     if prior is None:
         return False
     return bool(trigger.run_idempotency_key) and trigger.run_idempotency_key == prior.get("idempotency_key")
+
+
+def _dependent_source_matches(rule, trigger: HalTrigger) -> bool:
+    """A dependent stage's declared source Agent must match the correlated run.
+
+    Mirrors the entry-rule source semantics: an unrelated Agent carrying the
+    same correlation key must never advance (or fail-hint) the workflow. A
+    missing declaration means "any source" only for stage 0 entry rules; for a
+    dependent stage the correlation key alone is not sufficient proof of origin.
+    """
+    source_agent = getattr(rule, "source_agent", None)
+    if source_agent is None:
+        return True
+    if source_agent == "@agent_any":
+        return bool(trigger.agent_identity)
+    return source_agent == trigger.agent_identity
 
 
 def plan_system_idle_edge(

@@ -21,6 +21,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from hal import service as hal_service_mod
+from hal import compile_hal
 from hal.dispatch import DispatchResult, RecordingDispatchAdapter
 from hal.event_source import HalTrigger
 from hal.runtime import DispatchDirective
@@ -1005,8 +1006,9 @@ def test_system_idle_pagination_does_not_multiply(tmp_path):
     assert len(reboot_calls) == 1
 
 
-def test_system_idle_queries_active_state_once_per_cycle(tmp_path):
-    """Active-state evidence is sampled once per cycle, never once per event."""
+def test_system_idle_queries_active_state_bounded_per_cycle(tmp_path):
+    """Active-state evidence is sampled a bounded number of times per cycle,
+    never once per event."""
     feed = FakeSessionStore()
     service, adapter = make_service(tmp_path, feed)
     rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
@@ -1018,7 +1020,9 @@ def test_system_idle_queries_active_state_once_per_cycle(tmp_path):
     run(service._process_owner("user:7"))
     run(service._process_owner("user:7"))
     run(service._process_owner("user:7"))
-    assert feed.list_active_runs_calls == 3  # 1/cycle, not 1/event (250)
+    # Bounded per cycle (pre-batch sample + post-batch re-sample), never per
+    # event: 3 cycles x 2 = 6, far below the 250-event worst case.
+    assert feed.list_active_runs_calls == 6
 
 
 def test_system_idle_does_not_fire_at_startup_without_terminal_event(tmp_path):
@@ -1042,4 +1046,155 @@ def test_system_idle_ignores_automation_origin_events(tmp_path):
     feed.add_event(key="hal:some-automation-origin")
     run(service._process_owner("user:7"))
     assert adapter.prompt_calls == []
+
+
+# --- Round 5: A1 #system_idle latch persistence / re-sampling, A2 recovery ---
+
+
+def test_system_idle_fires_again_after_terminal_free_busy_period(tmp_path):
+    """idle -> busy (no terminal event) -> idle must fire the edge twice."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+
+    feed.active_rows = []
+    feed.add_event()  # terminal event; system idle
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 1
+
+    # Busy phase with NO terminal event: an empty page while a run is active.
+    # The latch must be cleared here, otherwise the next idle edge never fires.
+    feed.active_rows = [{"run_id": "busy-run"}]
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 1
+
+    feed.active_rows = []
+    feed.add_event()  # the busy run finishes -> second idle transition
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 2
+
+
+def test_system_idle_latch_survives_restart(tmp_path):
+    """A backlog page -> restart -> next page must not re-fire the idle edge."""
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+
+    store1 = HalStore(path)
+    adapter1 = RecordingDispatchAdapter()
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=adapter1,
+        logger=logging.getLogger("hal.test.restart1"),
+    )
+    rule = make_rule(service1, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    feed.active_rows = []
+    for _ in range(100):
+        feed.add_event()
+    run(service1._process_owner("user:7"))
+    assert len(adapter1.prompt_calls) == 1  # idle fired once on page 1
+    store1.close()
+
+    # Simulate a restart: fresh service over the SAME persistent SQLite.
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.restart2"),
+    )
+    for _ in range(100):
+        feed.add_event()
+    run(service2._process_owner("user:7"))
+    assert adapter2.prompt_calls == []  # persisted latch: no re-fire on page 2
+    store2.close()
+
+
+def test_system_idle_does_not_fake_idle_when_batch_starts_new_run(tmp_path):
+    """A batch that itself starts a new run must not fabricate an idle edge from
+    the pre-batch 'idle' snapshot."""
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    rule = make_rule(service, "user:7", 'if #system_idle then @alice $prompt "cleanup".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+
+    feed.active_rows = []
+    feed.add_event()  # a terminal event in this batch
+
+    calls = {"n": 0}
+
+    def flapping_active(*, owner_id, session_id=None):
+        calls["n"] += 1
+        # Pre-batch snapshot reports idle, but the batch started a new run, so
+        # the post-batch re-sample must report active.
+        return [] if calls["n"] == 1 else [{"run_id": "new-run"}]
+
+    feed.list_active_runs = flapping_active
+    run(service._process_owner("user:7"))
+    assert adapter.prompt_calls == []  # no fake idle edge
+
+
+def test_continuous_workflow_recovers_before_matching_correlated_event(tmp_path):
+    """Crash after the stage-0 receipt write but before the stage advance:
+    recovery repairs the stage first, then the persisted correlated completion
+    event advances stage 1 exactly once — never re-dispatching stage 0."""
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.crash1"),
+    )
+    script = (
+        'if @agent_any #turn_finish then @lily $prompt "start"; '
+        'if @alice@TESTINST #turn_finish then @bob $prompt "next".'
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+
+    # Simulate the crash window: stage-0 receipt persisted (dispatched) but the
+    # execution stage was never advanced.
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-1",
+        trigger_agent="@lily@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@lily",
+        payload='$prompt "start"',
+        state="dispatched",
+        detail=None,
+    )
+    assert store1.get_exec("user:7", "hx1")["stage"] == 0
+    store1.close()
+
+    # The correlated completion event (from @alice@TESTINST) is already persisted.
+    feed.add_event(agent_id="alice", key="hal:hx1:0")
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.crash2"),
+    )
+    run(service2._process_owner("user:7"))
+
+    # Stage 0 was NOT re-dispatched; stage 1 fired exactly once.
+    assert len(adapter2.prompt_calls) == 1
+    assert adapter2.prompt_calls[0]["target_agent"] == "bob"
+    execs = service2.store.list_execs("user:7")
+    assert execs[0]["stage"] == 2
+    assert execs[0]["state"] == "completed"
+    store2.close()
 # HASHI-Fingerprint: hfp_9717a97af9924e26925d98bfde62bb3d

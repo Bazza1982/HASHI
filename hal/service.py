@@ -85,7 +85,6 @@ class HalService:
         self._loop_task: asyncio.Task | None = None
         self._stopping = False
         self._wake = asyncio.Event()
-        self._idle_emitted: dict[str, bool] = {}  # owner -> idle edge emitted for current idle period
 
     # ------------------------------------------------------------------ API
 
@@ -347,28 +346,58 @@ class HalService:
         consumed: dict[str, set[str]] = {}
 
         if not events and not has_more:
-            # No new evidence: still recover pending/unfinished executions so a
-            # transient failure (or a crash) is retried without waiting for the
-            # next event. The cursor still advances past this empty page.
-            # Returning the recovery result (True only when a dispatch was
-            # actually attempted) keeps a normal "waiting for a correlated
-            # event" state out of the 0.1s fast loop.
+            # No new evidence. When an idle rule needs it, still sample the
+            # active state so an idle->busy transition (where the busy run has
+            # not yet produced a terminal event) clears the persisted idle latch
+            # for the next true idle edge. Then recover pending/unfinished
+            # executions so a transient failure (or a crash) is retried without
+            # waiting for the next event. The cursor still advances past this
+            # empty page. Returning the recovery result (True only when a
+            # dispatch was actually attempted) keeps a normal "waiting for a
+            # correlated event" state out of the 0.1s fast loop.
+            needs_idle = any(_rule_needs_idle(r) for r in rules)
+            if needs_idle:
+                now_active = await asyncio.to_thread(
+                    _active_runs, self.session_store, owner_id
+                )
+                if now_active:
+                    await asyncio.to_thread(self.store.set_idle_latch, owner_id, False)
             await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
             return await self._recover_executions(owner_id, rules, execs_by_id, receipts)
 
+        # Recover BEFORE matching any event. A crash between the receipt write
+        # and the stage advance leaves a dispatched-but-not-advanced stage whose
+        # correlated completion event may already be persisted in this feed page.
+        # Repair the stage first so the event matches the correct (advanced)
+        # stage — never the stale one — and a dispatched stage is never
+        # re-executed. The cursor is advanced only after this repair.
+        if await self._recover_executions(owner_id, rules, execs_by_id, receipts):
+            activity = True
+        # Reload so recovery's stage advances are visible to this page's
+        # planning; the same page then sees one consistent execution snapshot.
+        execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
+        for row in execs:
+            try:
+                row["program"] = program_from_json(json.loads(row["program_blob"]))
+            except (ValueError, KeyError, TypeError):
+                row["program"] = None
+        execs = [row for row in execs if row.get("program") is not None]
+        execs_by_id = {str(e["exec_id"]): e for e in execs}
+        receipts = await self._load_receipts(execs)
+
         # #system_idle is only consulted when some enabled rule actually needs
         # it; otherwise no active-run query is made at all. The active state is
-        # sampled ONCE per cycle (never per event) and the edge fires once per
-        # idle period, so paginating a backlog of already-finished runs cannot
+        # sampled per cycle (never per event) and the edge fires once per idle
+        # period, so paginating a backlog of already-finished runs cannot
         # multiply the edge or re-dispatch an idle rule.
         needs_idle = any(_rule_needs_idle(r) for r in rules)
         now_active: bool | None = None
         if needs_idle:
             now_active = await asyncio.to_thread(_active_runs, self.session_store, owner_id)
             if now_active:
-                # Active again: clear the idle-period latch so the next true
-                # active->idle transition can fire exactly once.
-                self._idle_emitted.pop(owner_id, None)
+                # Active again: clear the persisted idle-period latch so the next
+                # true active->idle transition can fire exactly once.
+                await asyncio.to_thread(self.store.set_idle_latch, owner_id, False)
 
         saw_terminal_event = False
         first_terminal: HalTrigger | None = None
@@ -397,22 +426,30 @@ class HalService:
             and saw_terminal_event
             and first_terminal is not None
             and now_active is False
-            and not self._idle_emitted.get(owner_id, False)
         ):
-            idle = HalTrigger(
-                event=EVENT_SYSTEM_IDLE,
-                agent_identity=None,
-                feed_event_id=first_terminal.feed_event_id,
-                feed_kind="system_idle",
-                run_idempotency_key=None,
-                automation_origin=False,
-                feed_cursor=first_terminal.feed_cursor,
+            # Re-sample AFTER this batch: processing may have dispatched prompts
+            # that started new runs, so the pre-batch "idle" snapshot must never
+            # fabricate an idle edge while the system has just become busy again.
+            now_active = await asyncio.to_thread(
+                _active_runs, self.session_store, owner_id
             )
-            if await self._apply_trigger(
-                owner_id, idle, rules, execs_by_id, receipts, consumed
-            ):
-                activity = True
-            self._idle_emitted[owner_id] = True
+            if now_active:
+                await asyncio.to_thread(self.store.set_idle_latch, owner_id, False)
+            elif not await asyncio.to_thread(self.store.get_idle_latch, owner_id):
+                idle = HalTrigger(
+                    event=EVENT_SYSTEM_IDLE,
+                    agent_identity=None,
+                    feed_event_id=first_terminal.feed_event_id,
+                    feed_kind="system_idle",
+                    run_idempotency_key=None,
+                    automation_origin=False,
+                    feed_cursor=first_terminal.feed_cursor,
+                )
+                if await self._apply_trigger(
+                    owner_id, idle, rules, execs_by_id, receipts, consumed
+                ):
+                    activity = True
+                await asyncio.to_thread(self.store.set_idle_latch, owner_id, True)
 
         await asyncio.to_thread(self.store.set_cursor, owner_id, new_cursor)
 
