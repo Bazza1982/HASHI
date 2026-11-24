@@ -50,9 +50,15 @@ class WorkerHerCallbacks:
 
     async def recovery_context(self, *, binding):
         turn, guard = self._turn(binding)
-        # Only open_turn can populate this field after the PAO resume ticket
-        # has adopted the exact private context. The host supplies no snapshot.
+        # Only the owning Worker supplies an adopted permission continuation
+        # or a successor context verified by the canonical HER store. The host
+        # cannot choose either the snapshot or its continuation semantics.
         result = copy.deepcopy(turn.recovery)
+        continuation = getattr(turn, "successor_continuation", None)
+        if continuation is not None:
+            if not isinstance(result, dict):
+                raise PermissionDenied("successor provider context is unavailable")
+            result["_herv3_continuation"] = copy.deepcopy(continuation)
         with guard(binding.context):
             pass
         return result

@@ -4129,10 +4129,12 @@ class OpenRouterAdapter(BaseBackend):
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
         # contains more than one call.
-        if self._deferred_tool_followups:
-            messages.extend(self._deferred_tool_followups)
-            self._deferred_tool_followups.clear()
-        messages.extend(deferred_tool_result_messages)
+        from orchestrator.her_v2.provider_continuation import ordered_deferred_followups
+
+        messages.extend(ordered_deferred_followups(
+            self._deferred_tool_followups, deferred_tool_result_messages,
+        ))
+        self._deferred_tool_followups.clear()
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
@@ -4723,6 +4725,7 @@ class OpenRouterAdapter(BaseBackend):
         continuation_messages: list[dict[str, Any]] | None = None,
         resume_pending_tools: bool = False,
         deferred_followups: Sequence[Mapping[str, Any]] | None = None,
+        continuation_request_content: bool = False,
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
@@ -4842,11 +4845,42 @@ class OpenRouterAdapter(BaseBackend):
                     dict(item) if isinstance(item, Mapping) else item
                     for item in continuation_messages
                 ]
-                media_routing = ()
-                self._last_media_routing = ()
-                native_attachment_ids = set()
-                native_local_refs = set()
-                all_media_native = False
+                if continuation_request_content:
+                    from orchestrator.her_v2.provider_continuation import (
+                        SUCCESSOR_AFTER_TOOL_BATCH, SUCCESSOR_CONTENT_DIGEST,
+                    )
+
+                    if provider_request_content is None:
+                        raise ProviderContextObserverError("successor request content is unavailable")
+                    if resume_pending_tools:
+                        target = next(
+                            (item for item in reversed(self._deferred_tool_followups)
+                             if item.get(SUCCESSOR_AFTER_TOOL_BATCH) is True),
+                            None,
+                        )
+                    else:
+                        target = messages[-1] if messages else None
+                    if not isinstance(target, dict) or target.get("role") != "user" or not isinstance(target.get("content"), str):
+                        raise ProviderContextObserverError("successor content has no owned user message")
+                    current_messages, media_routing = self._initial_messages(
+                        target["content"], provider_request_content,
+                        transient_images=transient_images,
+                    )
+                    target["content"] = current_messages[1]["content"]
+                    if resume_pending_tools and isinstance(target["content"], list):
+                        parts = target["content"]
+                        if not parts or not isinstance(parts[0], Mapping) or parts[0].get("type") != "text":
+                            raise ProviderContextObserverError("successor media has no owned text part")
+                        target[SUCCESSOR_CONTENT_DIGEST] = "sha256:" + hashlib.sha256(
+                            str(parts[0].get("text") or "").encode("utf-8")
+                        ).hexdigest()
+                    self._last_media_routing = media_routing
+                else:
+                    media_routing = ()
+                    self._last_media_routing = ()
+                    native_attachment_ids = set()
+                    native_local_refs = set()
+                    all_media_native = False
 
             if resume_pending_tools:
                 from orchestrator.her_v2.provider_continuation import pending_tool_calls

@@ -283,8 +283,14 @@ def test_projection_is_always_bounded(tmp_path):
     assert size <= TOTAL_BUDGET_CHARS, size
     assert projection["tool_receipts"]["total"] == 1200
     assert projection["tool_receipts"]["omitted"] > 0
-    # full receipt array is never copied into the prompt
-    assert "output" not in json.dumps(projection["tool_receipts"], default=str)
+    # Large receipts retain useful bounded excerpts, never full raw outputs.
+    for receipt in projection["tool_receipts"]["recent"]:
+        output = receipt.get("output")
+        if output is not None:
+            assert output["truncated"] is True
+            assert output["sha256"].startswith("sha256:")
+            assert len(output.get("excerpt", "")) < 10000
+            assert receipt["canonical_evidence_ref"]
     # unresolved side effects are summarised with an evidence reference
     assert projection["side_effects"]["unresolved_total"] == 500
     assert "evidence_ref" in projection["side_effects"]

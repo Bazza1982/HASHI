@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from orchestrator.her_v2.recovery_projection import _bounded, bounded_goal
+from orchestrator.her_v2.recovery_projection import _bounded, _json_size, bounded_goal
 from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.storage_profile import flush_projection
 
@@ -170,6 +170,35 @@ def _project_audit(record: Mapping[str, Any]) -> dict[str, Any] | None:
         if projected_payload:
             projected["facts"] = projected_payload
     return projected
+
+
+def _project_wip_activity(row: Any, *, evidence_ref: str) -> Any:
+    if not isinstance(row, Mapping) or _json_size(row) <= 1024:
+        return _bounded(row, budget_chars=1024, evidence_ref=evidence_ref)
+    result = {
+        key: _bounded(row[key], budget_chars=160, evidence_ref=evidence_ref)
+        for key in ("recorded_at", "event", "event_id", "stage", "role", "provider", "model", "attempt", "request_ref")
+        if row.get(key) not in (None, "", {}, [])
+    }
+    facts = row.get("facts")
+    if isinstance(facts, Mapping):
+        ordered = sorted(
+            facts,
+            key=lambda key: (str(key) not in {"summary", "error", "message", "reason", "status", "to", "output", "text"}, str(key)),
+        )
+        retained: dict[str, Any] = {}
+        for key in ordered:
+            candidate = _bounded(facts[key], budget_chars=384, evidence_ref=evidence_ref)
+            trial = {**result, "facts": {**retained, str(key): candidate},
+                     "facts_omitted": len(ordered), "evidence_ref": evidence_ref}
+            if _json_size(trial) <= 1024:
+                retained[str(key)] = candidate
+        if retained:
+            result["facts"] = retained
+        if len(retained) < len(ordered):
+            result["facts_omitted"] = len(ordered) - len(retained)
+            result["evidence_ref"] = evidence_ref
+    return result
 
 
 @dataclass(frozen=True)
@@ -525,21 +554,55 @@ class WIPJournal:
             value = capsule[key]
             if key == "unfinished_requests" and isinstance(value, list):
                 selected = value if len(value) <= 4 else [value[0], *value[-3:]]
-                recent = [
-                    {
-                        str(name): _bounded(item, budget_chars=2048, evidence_ref=evidence_ref)
-                        for name, item in row.items()
-                        if name != "request_summary_full"
+                rows = [row for row in selected if isinstance(row, Mapping)]
+                # The aggregate field, not only each individual summary, has
+                # an 8 KiB budget. Shrink excerpts progressively so the
+                # original and the most recent unfinished goals stay visible.
+                summary_budget = 2048
+                while True:
+                    recent = [
+                        {
+                            str(name): _bounded(
+                                item,
+                                budget_chars=summary_budget if name == "request_summary" else 256,
+                                evidence_ref=evidence_ref,
+                            )
+                            for name, item in row.items()
+                            if name != "request_summary_full"
+                        }
+                        for row in rows
+                    ]
+                    candidate = {
+                        "total": len(value), "recent": recent,
+                        "omitted": len(value) - len(recent), "evidence_ref": evidence_ref,
                     }
-                    for row in selected if isinstance(row, Mapping)
-                ]
-                value = {"total": len(value), "recent": recent, "omitted": len(value) - len(recent), "evidence_ref": evidence_ref}
+                    encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
+                    if len(encoded.encode("utf-8")) <= 8 * 1024:
+                        value = candidate
+                        break
+                    if summary_budget <= 256:
+                        # Metadata is lower priority than the goals and source.
+                        for row in recent:
+                            for name in list(row):
+                                if name not in {"request_id", "request_summary"}:
+                                    row.pop(name, None)
+                        while _json_size(candidate) > 8 * 1024 and len(recent) > 2:
+                            recent.pop(1)
+                            candidate["omitted"] += 1
+                        value = candidate
+                        break
+                    summary_budget = max(256, summary_budget * 3 // 4)
             elif key in {"unfinished_work_activity", "failures"} and isinstance(value, list):
                 recent = [
-                    _bounded(row, budget_chars=1024, evidence_ref=evidence_ref)
+                    _project_wip_activity(row, evidence_ref=evidence_ref)
                     for row in value[-8:]
                 ]
-                value = {"total": len(value), "recent": recent, "omitted": len(value) - len(recent), "evidence_ref": evidence_ref}
+                summary = {"total": len(value), "recent": recent,
+                           "omitted": len(value) - len(recent), "evidence_ref": evidence_ref}
+                while _json_size(summary) > 8 * 1024 and len(recent) > 1:
+                    recent.pop(0)
+                    summary["omitted"] += 1
+                value = summary
             projected[key] = _bounded(value, budget_chars=8 * 1024, evidence_ref=evidence_ref)
         omitted = {key: value for key, value in capsule.items() if key not in projected}
         if omitted:

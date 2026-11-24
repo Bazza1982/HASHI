@@ -23,10 +23,45 @@ Turn rather than recursively embedding its remaining-work object. Completed
 receipts and uncertain effects remain durable and uncertain effects are not
 automatically replayed.
 
+On a successor Turn, private Provider checkpoints carry the exact position and
+digest of the assembled user context and its original user request. The next
+compatible Provider replaces only that verified assembly, preserves the original
+request and Tool protocol, and adds the latest canonical context once. Exact
+pending execution keeps its original conversation; new successor instructions
+and media wait until all Tool results and their follow-ups are paired. A /steer
+or Provider/model change closes pending calls without executing them, retaining
+a warning to verify their effects. The existing protected-Worker handoff carries
+these successor semantics only after the canonical HER owner verifies the source;
+a successor must persist its own pending boundary before Tool execution. Exact
+continuation within the same execution still requires the original route.
+Compatible Provider/model changes keep
+completed Tool results and structured media; vendor-specific reasoning fields
+are not forwarded across different Provider engines.
+
+Older checkpoints without verified assembly ownership remain intact; their
+successors add incremental recovery facts and the new request rather than
+appending another full PCM/history snapshot. Existing duplicated legacy
+messages cannot be removed safely without ownership evidence.
+
+Small Tool receipts retain completion and result details. Larger results keep
+bounded excerpts and a canonical reference, with unresolved effects and useful
+results prioritized when the view is full. The existing request_diagnostics tool
+can page the referenced receipt, side-effect or exact completed Tool result
+from a verified Provider checkpoint only for the canonical recovery source bound
+to the current Agent, owner, Session, instance, generation and workzone. Hidden
+reasoning and unrelated Provider messages are never returned. A page includes
+a digest and later pages must match it. Normal request-context refresh carries
+the current generation and workzone rather than a previous request's values.
+When this scope or the tool is unavailable, retrieval fails closed and must not
+be represented as verified. The installed protected execution channel does not
+currently expose this evidence paging tool; its retrieval path remains unverified.
+
 The WIP journal and compacted recovery memory keep their source records. Their
-model views are bounded and carry a source reference; multiple compacted WIP
-entries share one 64 KiB model-view budget and omitted entries remain queryable
-by memory-row range. An assembled provider prompt is never used as a fallback
+model views are bounded and carry a source reference. WIP projection trims
+individual excerpts before omitting rows so the original and latest unfinished
+goals, recent progress and failure facts survive an aggregate field limit.
+Multiple compacted WIP entries share one 64 KiB model-view budget and omitted
+entries remain queryable by memory-row range. An assembled provider prompt is never used as a fallback
 request summary. A main Provider/model
 change rebuilds the provider context from the settled checkpoint. Profile
 ordering, reasoning effort, auxiliary profiles and a voice flag alone do not

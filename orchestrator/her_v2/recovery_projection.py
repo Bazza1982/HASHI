@@ -14,12 +14,14 @@ from typing import Any
 FIELD_BUDGET_CHARS = 24 * 1024
 TOTAL_BUDGET_CHARS = 96 * 1024
 GOAL_BUDGET_CHARS = 4 * 1024
-RECENT_RECEIPTS_MAX = 8
 RECENT_EXCHANGES_MAX = 4
 _TRUNCATION_MARKER = "…[truncated]"
 _PROJECTION_NOTICE = (
-    "Quoted recovery context only. Consult the referenced canonical HER records "
-    "for omitted details; never replay an uncertain side effect automatically."
+    "Quoted recovery context only. If request_diagnostics is authorized and available, "
+    "use it for omitted receipts, side effects or a completed Tool result, with "
+    "source_request_id, the canonical evidence reference and, for Provider items, "
+    "the exact Tool call ID. "
+    "Never replay an uncertain side effect automatically."
 )
 
 
@@ -34,6 +36,14 @@ def _json_size(value: Any) -> int:
 
 def _sha256_text(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 71
+        and value.startswith("sha256:")
+        and all(char in "0123456789abcdef" for char in value[7:])
+    )
 
 
 def _source_ref(context: Mapping[str, Any], field: str) -> str:
@@ -76,13 +86,75 @@ def _as_mappings(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)]
 
 
+def _project_receipt_value(value: Any, *, evidence_ref: str, budget_chars: int) -> Any:
+    if not isinstance(value, Mapping) or _json_size(value) <= budget_chars:
+        return _bounded(value, budget_chars=budget_chars, evidence_ref=evidence_ref)
+    # Keep useful small fields inside a large structured result instead of
+    # replacing the whole result with a witness.
+    meta = {
+        "truncated": True, "sha256": _sha256_text(_serialized(value)),
+        "evidence_ref": evidence_ref, "omitted_fields": 0,
+    }
+    projected: dict[str, Any] = {"_projection": meta}
+    priority = {"summary", "status", "completed", "path", "error", "result", "output"}
+    for key in sorted(value, key=lambda item: (str(item) not in priority, str(item))):
+        if str(key) == "_projection":
+            meta["omitted_fields"] += 1
+            continue
+        item = _bounded(value[key], budget_chars=min(512, budget_chars // 2), evidence_ref=evidence_ref)
+        if _json_size({**projected, str(key): item}) <= budget_chars:
+            projected[str(key)] = item
+        else:
+            meta["omitted_fields"] += 1
+    return projected
+
+
 def _receipt_identity(receipt: Mapping[str, Any], evidence_ref: str) -> dict[str, Any]:
+    # Small receipts are already useful recovery evidence; don't discard their
+    # completion/result fields just to extract an identity.
+    if _json_size(receipt) <= 4096:
+        return dict(receipt)
     identity: dict[str, Any] = {}
-    for key in ("operation_id", "invocation_id", "tool_name", "tool", "name", "status", "state", "read_only"):
+    for key in (
+        "operation_id", "invocation_id", "tool_call_id", "tool_name", "tool",
+        "name", "status", "state", "completed", "read_only", "evidence_ref",
+        "result", "output", "summary", "error",
+    ):
         value = receipt.get(key)
         if value not in (None, "", [], {}):
-            identity[key] = _bounded(value, budget_chars=256, evidence_ref=evidence_ref)
-    return identity or {"evidence_ref": evidence_ref}
+            budget = 1024 if key in {"result", "output", "summary", "error"} else 256
+            identity[key] = _project_receipt_value(
+                value, budget_chars=budget, evidence_ref=evidence_ref
+            )
+    identity["receipt_sha256"] = _sha256_text(_serialized(receipt))
+    identity["canonical_evidence_ref"] = evidence_ref
+    return identity
+
+
+def _receipt_priority(receipt: Mapping[str, Any]) -> int:
+    state = str(receipt.get("state") or receipt.get("status") or "").casefold()
+    return (
+        (8 if state in {"unknown", "pending", "failed", "error"} else 0)
+        + (4 if any(receipt.get(key) not in (None, "", {}, []) for key in ("result", "output", "summary", "error")) else 0)
+        + (2 if receipt.get("read_only") is False else 0)
+        + (1 if receipt.get("invocation_id") or receipt.get("tool_call_id") else 0)
+    )
+
+
+def _select_receipts(items: list[dict[str, Any]], *, evidence_ref: str, budget_chars: int) -> list[dict[str, Any]]:
+    projected = [_receipt_identity(item, evidence_ref) for item in items]
+    # Keep everything that fits. If it does not, prioritize safety and useful
+    # result evidence, with chronology preserved in the selected output.
+    if _json_size(projected) <= max(0, budget_chars - 256):
+        return projected
+    selected: list[tuple[int, dict[str, Any]]] = []
+    remaining = max(0, budget_chars - 256)
+    for index in sorted(range(len(items)), key=lambda i: (_receipt_priority(items[i]), i), reverse=True):
+        cost = _json_size(projected[index]) + 2
+        if cost <= remaining:
+            selected.append((index, projected[index]))
+            remaining -= cost
+    return [row for _, row in sorted(selected, key=lambda item: item[0])]
 
 
 def _fit_summary(summary: dict[str, Any], *, budget_chars: int, list_key: str) -> dict[str, Any]:
@@ -104,7 +176,7 @@ def _project_tool_receipts(value: Any, *, evidence_ref: str, budget_chars: int) 
         items = _as_mappings(value)
         total = len(items)
         ref = evidence_ref
-        recent = [_receipt_identity(item, ref) for item in items[-RECENT_RECEIPTS_MAX:]]
+        recent = _select_receipts(items, evidence_ref=ref, budget_chars=budget_chars)
         omitted = total - len(recent)
     result = {"total": total, "recent": recent, "omitted": omitted, "evidence_ref": ref}
     return _fit_summary(result, budget_chars=budget_chars, list_key="recent")
@@ -122,7 +194,7 @@ def _project_side_effects(value: Any, *, evidence_ref: str, budget_chars: int) -
         unresolved = [item for item in items if item.get("state") in {"pending", "unknown", None}]
         total, unresolved_total = len(items), len(unresolved)
         ref = evidence_ref
-        recent = [_receipt_identity(item, ref) for item in unresolved[-RECENT_RECEIPTS_MAX:]]
+        recent = _select_receipts(unresolved, evidence_ref=ref, budget_chars=budget_chars)
         omitted = unresolved_total - len(recent)
     result = {
         "total": total, "unresolved_total": unresolved_total, "unresolved": recent,
@@ -219,31 +291,69 @@ def bounded_prompt_projection(
             result[key] = _project_remaining_work(value, evidence_ref=ref, budget_chars=value_budget)
         elif key == "recent_settled_exchanges":
             result[key] = _project_settled_exchanges(value, evidence_ref=ref, budget_chars=value_budget)
-        elif key == "provider_context_checkpoint" and isinstance(value, Mapping) and value:
-            if "available" not in value and ("present" in value or value.get("truncated") is True):
-                # This is already a model view, not fresh checkpoint metadata.
-                # Keep its original evidence and never promote unknown or
-                # unavailable state to a present private checkpoint.
-                projected = dict(value)
-                if projected.get("present") is not True:
+        elif key == "provider_context_checkpoint":
+            metadata = dict(value) if isinstance(value, Mapping) else {}
+            session = context.get("session_id")
+            turn = context.get("interrupted_turn_id") or context.get("settled_through_turn_id")
+            canonical_identity = (
+                isinstance(session, str) and bool(session.strip())
+                and isinstance(turn, str) and bool(turn.strip())
+            )
+            if "available" not in metadata and ("present" in metadata or metadata.get("truncated") is True):
+                # A view may be projected more than once. Only keep presence
+                # when the prior view actually carries its canonical witness.
+                projected = dict(metadata)
+                valid_view = (
+                    projected.get("present") is True
+                    and canonical_identity
+                    and ("truncated" not in projected or projected["truncated"] is False)
+                    and _is_sha256(projected.get("digest"))
+                    and _is_sha256(projected.get("sha256"))
+                    and projected.get("format") == "herv3-provider-context-v1"
+                    and all(isinstance(projected.get(name), str) and projected.get(name)
+                            for name in ("provider", "model", "stage"))
+                    and projected.get("boundary") in {
+                        "completed_tool_batch", "completed_provider_response",
+                        "pending_tool_batch", "ready_provider_request",
+                    }
+                    and projected.get("evidence_ref") == _source_ref(context, "provider_context")
+                    and projected.get("items_evidence_ref") == (
+                        f"her_provider_context_items:{session}:{turn}"
+                    )
+                )
+                if not valid_view:
                     projected["present"] = False
                     projected.pop("items_evidence_ref", None)
                 result[key] = _bounded(projected, budget_chars=value_budget, evidence_ref=ref)
             else:
                 encoded = _serialized(value)
-                available = bool(value.get("available")) if "available" in value else bool(value)
+                digest = metadata.get("digest")
+                available = (
+                    metadata.get("available") is True
+                    and canonical_identity
+                    and ("truncated" not in metadata or metadata["truncated"] is False)
+                    and metadata.get("format") == "herv3-provider-context-v1"
+                    and all(isinstance(metadata.get(name), str) and metadata.get(name)
+                            for name in ("provider", "model", "stage"))
+                    and metadata.get("boundary") in {
+                        "completed_tool_batch", "completed_provider_response",
+                        "pending_tool_batch", "ready_provider_request",
+                    }
+                    and _is_sha256(digest)
+                    and type(metadata.get("message_count")) is int
+                    and metadata["message_count"] > 0
+                    and type(metadata.get("reasoning_count")) is int
+                    and metadata["reasoning_count"] >= 0
+                )
                 result[key] = {
                     "present": available, "bytes": len(encoded.encode("utf-8")),
                     "sha256": _sha256_text(encoded),
-                    "digest": _bounded(
-                        value.get("digest") or value.get("provider_context_digest") or None,
-                        budget_chars=512, evidence_ref=_source_ref(context, "provider_context"),
-                    ),
+                    "digest": digest if available else None,
                     "evidence_ref": _source_ref(context, "provider_context"),
                 }
-                if available and (value.get("message_count") or value.get("reasoning_count")):
-                    session = str(context.get("session_id") or "")
-                    turn = str(context.get("interrupted_turn_id") or "")
+                if available:
+                    for name in ("format", "provider", "model", "stage", "boundary"):
+                        result[key][name] = metadata[name]
                     result[key]["items_evidence_ref"] = f"her_provider_context_items:{session}:{turn}"
         else:
             result[key] = _bounded(value, budget_chars=value_budget, evidence_ref=ref)
@@ -277,7 +387,7 @@ def bounded_prompt_projection(
         "authority": "quoted_recovery_context", "notice": _PROJECTION_NOTICE,
     }
     essential = {
-        "session_id", "interrupted_turn_id", "settled_through_turn_id",
+        "session_id", "interrupted_turn_id", "settled_through_turn_id", "source_request_id",
         "safe_to_resume", "recovery_disposition", "tool_receipts", "side_effects",
         "projection_limits",
     }

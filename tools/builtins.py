@@ -1743,6 +1743,7 @@ async def execute_request_diagnostics(
     args: dict,
     workspace_dir: Path,
     audit_context: dict | None = None,
+    agent_home: Path | None = None,
 ) -> str:
     """Join existing sanitised evidence for one request without changing it."""
 
@@ -1783,6 +1784,20 @@ async def execute_request_diagnostics(
         background_jobs=records,
         background_history=history,
     )
+    evidence_ref = args.get("recovery_evidence_ref")
+    if evidence_ref:
+        from orchestrator.request_diagnostics import read_scoped_recovery_evidence
+
+        report["recovery_evidence"] = await asyncio.to_thread(
+            read_scoped_recovery_evidence,
+            agent_home=agent_home or workspace_dir,
+            request_id=request_id,
+            evidence_ref=str(evidence_ref),
+            item_id=str(args.get("recovery_item_id") or ""),
+            offset=args.get("offset", 0),
+            expected_digest=str(args.get("expected_digest") or ""),
+            scope=dict(audit_context or {}),
+        )
     return json.dumps(report, ensure_ascii=False, indent=2)
 
 

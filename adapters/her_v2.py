@@ -1898,6 +1898,7 @@ class HERv2Adapter(BaseBackend):
         private_provider_context: dict[str, Any] | None = None
         permission_execution = None
         pcm_runtime_context: dict[str, Any] = {}
+        recovery_pcm_delta: list[dict[str, Any]] = []
         if (
             not self._initialized
             or not self._v2_config
@@ -2051,6 +2052,15 @@ class HERv2Adapter(BaseBackend):
                     error_code="turn_already_active",
                     error_retryable=False,
                 )
+            # The accepted fixed envelope supplies typed PCM changes. They
+            # let legacy checkpoints receive genuinely new reference data
+            # without re-injecting the complete PCM snapshot.
+            fixed_envelope = self._session_coordinator.decode(original_request) or {}
+            delta = fixed_envelope.get("pcm_delta")
+            if isinstance(delta, Mapping) and isinstance(delta.get("operations"), list):
+                recovery_pcm_delta = [
+                    dict(item) for item in delta["operations"] if isinstance(item, Mapping)
+                ]
             prompt = fixed_turn.materialized_prompt
             steer_source_run_claim = None
             if str(request_id or "") in self._steer_continuation_tracking():
@@ -2339,7 +2349,20 @@ class HERv2Adapter(BaseBackend):
                 ),
                 recovery=private_provider_context,
                 resume_pending_tools=not steer_adopted,
+                successor_turn=canonical_recovery_context is not None,
+                pcm_delta=recovery_pcm_delta,
             )
+            successor_binder = getattr(permission_execution, "bind_successor_provider_context", None)
+            if (
+                canonical_recovery_context is not None
+                and private_provider_context is not None
+                and callable(successor_binder)
+            ):
+                successor_binder(
+                    private_provider_context,
+                    resume_pending_tools=not steer_adopted,
+                    pcm_delta=recovery_pcm_delta,
+                )
         if permission_execution is not None:
             permission_execution.bind_provider(provider)
         runtime_config = replace(

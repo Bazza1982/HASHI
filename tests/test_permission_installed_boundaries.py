@@ -128,3 +128,36 @@ async def test_failed_executor_close_attempts_all_owners_and_is_retryable():
     assert factory._owned == {} and execution._closed
     await asyncio.gather(execution.close(), execution.close())
     assert len(calls) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("successor", [False, True])
+async def test_successor_requires_its_own_pending_checkpoint_before_tool_admission(successor):
+    checkpoint = {"boundary": "pending_tool_batch", "messages": []}
+    if successor:
+        checkpoint["_herv3_continuation"] = {
+            "successor_turn": True, "resume_pending_tools": False, "pcm_delta": [],
+        }
+    seeded, received = [], []
+
+    class Callbacks:
+        async def recovery(self, _binding):
+            return checkpoint
+
+    class Runner:
+        async def run_her(self, _execution, command):
+            received.append(command["recovery"])
+            return {"state": "completed"}
+
+    factory = SimpleNamespace(runner=Runner())
+    models = SimpleNamespace(usage_receipts=lambda: [])
+    channel = SimpleNamespace(registry=None, _models=models, _completed_tool_calls=set(),
+                              seed_trusted_recovery=seeded.append)
+    binding = SimpleNamespace(context=SimpleNamespace(execution_epoch="epoch"))
+    policy = SimpleNamespace(settings=SimpleNamespace(requested_level=PermissionLevel.L2))
+    execution = InstalledExecution(factory, binding, policy, channel, None, "private")
+    execution._callbacks = Callbacks()
+    await execution.run_restricted_her({})
+    assert received == [checkpoint]
+    assert seeded == ([None] if successor else [checkpoint])
+# HASHI-Fingerprint: hfp_3eeb5952b98f4d1084a55e633c0050d7

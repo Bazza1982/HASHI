@@ -1352,6 +1352,7 @@ class HerSessionStore:
         deferred_followups: Sequence[Mapping[str, Any]] = (),
         provider_request_id: str = "",
         invocation_id: str = "",
+        context_ownership: Mapping[str, Any] | None = None,
         producer_run_claim: Mapping[str, Any] | None = None,
         execution_owner_id: str = "",
     ) -> dict[str, Any]:
@@ -1415,6 +1416,10 @@ class HerSessionStore:
             "reasoning_count": len(clean_reasoning),
             "deferred_followup_count": len(clean_deferred),
         }
+        if context_ownership:
+            # This describes only a provider message owned by prompt assembly.
+            # It is private and covered by the same checkpoint digest.
+            context_metadata["context_ownership"] = dict(context_ownership)
         encoded_metadata = _json(context_metadata)
         digest = _provider_context_digest(
             context_metadata,
@@ -2260,6 +2265,7 @@ class HerSessionStore:
                 "authority": "quoted_recovery_context",
                 "session_id": session_id,
                 "interrupted_turn_id": str(state.get("turn_id") or ""),
+                "source_request_id": state_request_id,
                 "current_stage": str(state.get("current_stage") or ""),
                 "routing_revision": int(state.get("routing_revision") or 0),
                 "strategy": state.get("strategy") or {},
@@ -3353,6 +3359,7 @@ class HerSessionStore:
             "format": "her-settled-session-checkpoint-v1",
             "session_id": session_id,
             "settled_through_turn_id": turn_id,
+            "source_request_id": str(turn["request_id"] or ""),
             "settled_through_turn_sequence": int(turn["sequence"]),
             "state_version": int(session["state_version"]),
             "pcm_revision": int(session["pcm_revision"]),

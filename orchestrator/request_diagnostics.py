@@ -7,9 +7,11 @@ evidence remain owned by their existing ledgers and receipts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import sqlite3
 from collections import deque
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -169,6 +171,134 @@ def _tool_action(row: Mapping[str, Any], *, source: str) -> dict[str, Any]:
         "target": str(args.get("path") or ""),
         "effect_receipt": dict(detail_map["effect_receipt"]) if isinstance(detail_map.get("effect_receipt"), Mapping) else None,
     }
+
+
+def read_scoped_recovery_evidence(
+    *, agent_home: Path, request_id: str, evidence_ref: str,
+    item_id: str, offset: int, expected_digest: str, scope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read one recovery value only within the caller's authenticated Session."""
+    unavailable = {"status": "not available"}
+    raw_ref = str(evidence_ref or "")
+    if raw_ref.startswith("her_provider_context_items:"):
+        parts = raw_ref.split(":", 2)
+        if len(parts) != 3 or not item_id:
+            return unavailable
+        field, session_id, turn_id = "provider_tool_result", parts[1], parts[2]
+    else:
+        parts = raw_ref.split(":", 3)
+        if (
+            len(parts) != 4
+            or parts[0] not in {"her_active_turn_recovery", "her_settled_checkpoints"}
+            or parts[1] not in {"tool_receipts", "side_effects"}
+        ):
+            return unavailable
+        field, session_id, turn_id = parts[1], parts[2], parts[3]
+    if not session_id or not turn_id or type(offset) is not int or offset < 0:
+        return unavailable
+    allowed_scopes = scope.get("_herv3_recovery_scopes")
+    if not isinstance(allowed_scopes, (list, tuple)) or not any(
+        isinstance(item, Mapping)
+        and item.get("session_id") == session_id
+        and item.get("turn_id") == turn_id
+        and item.get("request_id") == request_id
+        for item in allowed_scopes
+    ):
+        return unavailable
+    agent = str(scope.get("agent_name") or "")
+    owner = str(scope.get("owner_id") or "")
+    conversation = str(scope.get("hashi_session_id") or "")
+    instance = str(scope.get("instance_id") or getattr(scope.get("global_config"), "instance_id", "") or "")
+    generation = scope.get("context_generation")
+    workzone = str(scope.get("session_workspace") or agent_home)
+    if not agent or not owner or not conversation or not instance or type(generation) is not int:
+        return unavailable
+    db_path = Path(agent_home) / "backend_state" / "her_v2" / "fixed_sessions.sqlite3"
+    if not db_path.is_file():
+        return unavailable
+    try:
+        with sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT r.tool_receipts_json, r.side_effects_json, r.provider_context_json,
+                       r.provider_context_digest, r.provider_context_producer_claim_json,
+                       r.provider_context_producer_claim_digest
+                FROM her_active_turn_recovery r
+                JOIN her_turns t ON t.session_id = r.session_id AND t.turn_id = r.turn_id
+                JOIN her_sessions s ON s.session_id = r.session_id
+                WHERE r.session_id = ? AND r.turn_id = ? AND t.request_id = ?
+                  AND s.agent_id = ? COLLATE NOCASE AND s.owner_id = ?
+                  AND s.instance_id = ? COLLATE NOCASE
+                  AND s.hashi_conversation_id = ? AND s.context_generation = ?
+                  AND s.workzone_identity = ?
+                """,
+                (session_id, turn_id, str(request_id), agent, owner, instance,
+                 conversation, generation, workzone),
+            ).fetchone()
+            if row is None:
+                return unavailable
+            if field == "provider_tool_result":
+                from orchestrator.her_v2.session_store import (
+                    HerSessionStore, _PROVIDER_CONTEXT_STORAGE, _digest,
+                )
+
+                claim = HerSessionStore._normalise_run_claim(
+                    json.loads(row["provider_context_producer_claim_json"]),
+                    expected_request_id=request_id,
+                )
+                if (
+                    not claim or claim.get("state") != "running"
+                    or _digest(claim) != row["provider_context_producer_claim_digest"]
+                ):
+                    return unavailable
+                metadata = json.loads(row["provider_context_json"])
+                context_digest = str(row["provider_context_digest"] or "")
+                if not isinstance(metadata, Mapping):
+                    return unavailable
+                if metadata.get("storage") == _PROVIDER_CONTEXT_STORAGE:
+                    context = HerSessionStore._read_segmented_provider_context(
+                        connection, session_id=session_id, turn_id=turn_id,
+                        metadata=metadata, expected_digest=context_digest,
+                    )
+                elif context_digest and _digest(metadata) == context_digest:
+                    context = metadata
+                else:
+                    return unavailable
+                matches = [
+                    message for message in context.get("messages", [])
+                    if isinstance(message, Mapping) and message.get("role") == "tool"
+                    and str(message.get("tool_call_id") or "") == item_id
+                ]
+                if len(matches) != 1:
+                    return unavailable
+                value = {"tool_call_id": item_id, "content": matches[0].get("content")}
+            else:
+                value = json.loads(row["tool_receipts_json"] if field == "tool_receipts" else row["side_effects_json"])
+                if not isinstance(value, list):
+                    return unavailable
+                if item_id:
+                    matches = [
+                        item for item in value if isinstance(item, Mapping)
+                        and any(str(item.get(key) or "") == item_id
+                                for key in ("operation_id", "tool_call_id", "invocation_id", "evidence_ref"))
+                    ]
+                    if len(matches) != 1:
+                        return unavailable
+                    value = matches[0]
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        if (offset and not expected_digest) or (expected_digest and expected_digest != digest):
+            return unavailable
+        content = serialized[offset:offset + 2048]
+        next_offset = offset + len(content)
+        return {
+            "status": "available", "field": field, "digest": digest,
+            "content": content,
+            "next_offset": next_offset if next_offset < len(serialized) else None,
+        }
+    except (OSError, sqlite3.Error, ValueError, TypeError, RuntimeError):
+        return unavailable
 
 
 def _job_dict(value: Any) -> dict[str, Any]:

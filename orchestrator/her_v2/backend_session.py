@@ -129,6 +129,11 @@ class HerBackendSessionCoordinator:
                 checkpoint.get("provider_request_id") or ""
             ),
             invocation_id=str(checkpoint.get("invocation_id") or ""),
+            context_ownership=(
+                checkpoint.get("context_ownership")
+                if isinstance(checkpoint.get("context_ownership"), Mapping)
+                else None
+            ),
             producer_run_claim=(
                 checkpoint.get("producer_run_claim")
                 if isinstance(checkpoint.get("producer_run_claim"), Mapping)

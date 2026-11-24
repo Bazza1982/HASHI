@@ -2130,6 +2130,7 @@ class ToolRegistry:
                 arguments,
                 workspace_dir=self.workspace_dir,
                 audit_context=self._effective_audit_context(),
+                agent_home=Path(self.search_scope["agent_home"]) if self.search_scope else self.workspace_dir,
             )
 
         if tool_name == "process_list":
