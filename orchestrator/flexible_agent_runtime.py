@@ -3086,6 +3086,7 @@ class FlexibleAgentRuntime:
         fixed_mcp = active_backend in {
             "codex-cli",
             "claude-cli",
+            "dsh-cli",
         }
         if fixed_mcp and not bool(getattr(backend, "_hashi_mcp_enabled", False)):
             return []
@@ -3130,7 +3131,7 @@ class FlexibleAgentRuntime:
         active_backend = str(getattr(self.config, "active_backend", ""))
         if active_backend == "grok-cli":
             return False
-        if active_backend in {"codex-cli", "claude-cli"}:
+        if active_backend in {"codex-cli", "claude-cli", "dsh-cli"}:
             if not bool(getattr(backend, "_hashi_mcp_enabled", False)):
                 return False
             from tools.gateway.mcp_stdio import exposed_tool_name

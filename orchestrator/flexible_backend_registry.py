@@ -2,6 +2,9 @@ from __future__ import annotations
 
 HER_V2_ENGINE = "her-v2"
 HER_V3_ENGINE = "her-v3"
+DSH_CLI_ENGINE = "dsh-cli"
+DSH_PUBLIC_ENGINE = "DSH"
+DSH_ENGINE_ALIASES = frozenset({"dsh", "DSH", "deepseek-harness"})
 # ``her-v2`` remains the storage/adapter identifier until that compatibility
 # boundary is removed.  Public commands and projections use ``her-v3``.
 RETIRED_HER_ENGINE_ALIASES = frozenset({"her", HER_V3_ENGINE})
@@ -21,6 +24,7 @@ CLI_ENGINES = frozenset(
         "antigravity-cli",
         "claude-cli",
         "codex-cli",
+        "dsh-cli",
         "grok-cli",
     }
 )
@@ -122,6 +126,20 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "default_model": "grok-4.5",
         "efforts": ["low", "medium", "high"],
         "default_effort": "medium",
+        "secret_keys": [],
+    },
+    "dsh-cli": {
+        "label": "DSH",
+        "gateway_enabled": True,
+        "privacy_levels": [0, 1],
+        "models": [
+            "deepseek-v4-pro",
+            "deepseek-flash",
+        ],
+        "allow_custom_models": True,
+        "default_model": "deepseek-v4-pro",
+        "efforts": ["off", "low", "high", "max"],
+        "default_effort": "high",
         "secret_keys": [],
     },
     "deepseek-api": {
@@ -275,7 +293,7 @@ def get_backend_entry(engine: str) -> dict:
 
 
 def canonical_backend_engine(engine: str | None) -> str:
-    """Resolve the public HER compatibility ID to the supported runtime.
+    """Resolve the public HER/DSH compatibility IDs to the supported runtimes.
 
     ``her`` remains a public migration alias. ``claw-cli`` is deliberately not
     an alias: it named the removed upstream-derived runtime and must not imply
@@ -283,7 +301,11 @@ def canonical_backend_engine(engine: str | None) -> str:
     """
 
     value = str(engine or "").strip()
-    return HER_V2_ENGINE if value in RETIRED_HER_ENGINE_ALIASES else value
+    if value in RETIRED_HER_ENGINE_ALIASES:
+        return HER_V2_ENGINE
+    if value in DSH_ENGINE_ALIASES or value.casefold() in {"dsh", "dsh-cli", "deepseek-harness"}:
+        return DSH_CLI_ENGINE
+    return value
 
 
 def canonical_model_provider(provider: str | None) -> str:
@@ -310,7 +332,11 @@ def public_backend_engine(engine: str | None) -> str:
     """Return the product-facing Engine ID without exposing storage aliases."""
 
     canonical = canonical_backend_engine(engine)
-    return HER_V3_ENGINE if canonical == HER_V2_ENGINE else canonical
+    if canonical == HER_V2_ENGINE:
+        return HER_V3_ENGINE
+    if canonical == DSH_CLI_ENGINE:
+        return DSH_PUBLIC_ENGINE
+    return canonical
 
 
 def removed_backend_reason(engine: str | None) -> str | None:
@@ -630,6 +656,12 @@ def normalize_effort(
             str(effort or "").strip().casefold().replace("-", "_").replace(" ", "_"),
             effort,
         )
+    if canonical_backend_engine(engine) == "dsh-cli":
+        effort = {
+            "none": "off",
+            "zero": "off",
+            "off": "off",
+        }.get(str(effort or "").strip().casefold(), effort)
     efforts = get_available_efforts(engine, model)
     if not efforts:
         return None

@@ -285,6 +285,7 @@ class BaseBackend(ABC):
                 "OpenRouterAdapter": "openrouter-api",
                 "HashiApiAdapter": "hashi-api",
                 "CodexCLIAdapter": "codex-cli",
+                "DshCLIAdapter": "dsh-cli",
                 "HERv2Adapter": "her-v2",
             }.get(type(self).__name__, "")
         return resolve_input_capability(

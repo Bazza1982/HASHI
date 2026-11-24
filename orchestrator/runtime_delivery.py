@@ -103,6 +103,7 @@ def _backend_runtime_name(engine: str) -> str:
         "gemini-cli": "Gemini CLI",  # Historical failures remain readable.
         "antigravity-cli": "Antigravity CLI",
         "grok-cli": "Grok CLI",
+        "dsh-cli": "DSH",
         "her": "HASHI Engine Runtime (HER)",
         "her-v2": "HASHI Engine Runtime (HER)",
     }
