@@ -239,4 +239,50 @@ def test_concurrent_enable_rule_does_not_corrupt_baselines(store):
     assert store.get_rule("user:7", rule_b["rule_id"])["enable_cursor"] == 42
     # The shared owner cursor is anchored exactly once, never clobbered.
     assert store.get_cursor("user:7") == 42
+
+
+def test_migration_key_schema_migration_on_existing_store(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Simulate a pre-migration_key store: hal_rules without the new column.
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE hal_rules (
+            rule_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+            name TEXT NOT NULL, script TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            enable_cursor INTEGER,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_hal_rules_owner ON hal_rules(owner_id);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening the pre-existing store must add the column + unique index without
+    # crashing, and the create/find contract must work on the migrated schema.
+    s = HalStore(path)
+    try:
+        rule, created = s.upsert_rule(
+            owner_id="user:7", name="n1", script=SCRIPT, migration_key="hea:1@A",
+        )
+        assert created is True
+        assert rule["migration_key"] == "hea:1@A"
+        found = s.find_rule_by_migration_key("user:7", "hea:1@A")
+        assert found is not None
+        assert found["rule_id"] == rule["rule_id"]
+
+        # Reopen to prove the migrated schema (column + index) persists.
+        s.close()
+        s = HalStore(path)
+        found2 = s.find_rule_by_migration_key("user:7", "hea:1@A")
+        assert found2 is not None
+        assert found2["rule_id"] == rule["rule_id"]
+    finally:
+        s.close()
 # HASHI-Fingerprint: hfp_1a8547dce6b446f69a5d6009ef471ff1

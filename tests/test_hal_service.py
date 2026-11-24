@@ -1103,4 +1103,203 @@ def test_pending_receipt_with_completed_run_recovers_once(tmp_path):
     assert execs[0]["stage"] == 2
     assert execs[0]["state"] == "completed"
     store2.close()
+
+
+def test_pending_receipt_with_failed_run_recovers_turn_error_once(tmp_path):
+    """The stage-0 prompt was accepted and its Run FAILED, but HAL crashed
+    before writing the 'dispatched' receipt (receipt stuck in pending_retry).
+    Recovery must NOT fail the whole execution: the dispatch receipt and the
+    Run outcome are separate signals. Do NOT re-dispatch stage 0 (Alice),
+    preserve the correlation key, and let the terminal event drive the legal
+    dependent #turn_error stage so Bob is dispatched exactly once."""
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    script = (
+        'if @agent_any #turn_finish then @alice $prompt "work"; '
+        'if @alice@TESTINST #turn_error then @bob $prompt "review failure".'
+    )
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.failed1"),
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-1",
+        trigger_agent="@lily@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    # Crash window: the pre-dispatch 'pending_retry' receipt was written but the
+    # 'dispatched' write never happened, even though Alice accepted the prompt.
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@alice",
+        payload='$prompt "work"',
+        state="pending_retry",
+        detail=None,
+        attempts=0,
+        next_retry_at=None,
+    )
+    assert store1.get_exec("user:7", "hx1")["stage"] == 0
+    store1.close()
+
+    # Alice's Run FAILED and that terminal evidence is already persisted under
+    # the same idempotency key.
+    feed.add_event(agent_id="alice", kind="run.failed", key="hal:hx1:0")
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.failed2"),
+    )
+    run(service2._process_owner("user:7"))
+
+    # Stage 0 must NOT be re-dispatched (Alice accepted already): the only
+    # dispatch is stage 1 (#turn_error -> Bob "review failure").
+    assert [c["target_agent"] for c in adapter2.prompt_calls] == ["bob"]
+    assert adapter2.prompt_calls[0]["text"] == "review failure"
+    assert adapter2.prompt_calls[0]["idempotency_key"] == "hal:hx1:1"
+    execs = service2.store.list_execs("user:7")
+    assert execs[0]["stage"] == 2
+    assert execs[0]["state"] == "completed"
+
+    # Replay must NOT re-dispatch Bob (idempotent).
+    run(service2._process_owner("user:7"))
+    assert len(adapter2.prompt_calls) == 1
+    store2.close()
+
+
+def test_terminal_evidence_read_failure_keeps_loop_alive(tmp_path, monkeypatch):
+    """A transient failure reading terminal evidence must neither kill the HAL
+    runtime loop nor be treated as "no related Run" (which would re-dispatch an
+    already-accepted prompt). The receipt stays pending and the loop survives."""
+    import orchestrator.automation_events as automation_events
+
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    script = (
+        'if @agent_any #turn_finish then @alice $prompt "work"; '
+        'if @alice@TESTINST #turn_error then @bob $prompt "review failure".'
+    )
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.evfail1"),
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-1",
+        trigger_agent="@lily@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@alice",
+        payload='$prompt "work"',
+        state="pending_retry",
+        detail=None,
+        attempts=0,
+        next_retry_at=None,
+    )
+    store1.close()
+
+    feed.add_event(agent_id="alice", kind="run.failed", key="hal:hx1:0")
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("transient terminal feed read failure")
+
+    monkeypatch.setattr(automation_events, "terminal_event_for_key", _raise)
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.evfail2"),
+    )
+    # Must not raise: the loop survives a transient evidence read failure.
+    run(service2._process_owner("user:7"))
+
+    # No re-dispatch of the already-accepted prompt.
+    assert adapter2.prompt_calls == []
+    # The execution is still active with the receipt pending for a later retry.
+    exec_row = store2.get_exec("user:7", "hx1")
+    assert exec_row["state"] == "active"
+    assert exec_row["stage"] == 0
+    assert store2.get_receipt("hx1", 0)["state"] == "pending_retry"
+    store2.close()
+
+
+def test_migration_key_create_is_idempotent_and_non_destructive(tmp_path):
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    key = "hea:legacy-1@TESTINST"
+    script = 'if @agent_any #turn_finish then @alice $prompt "hi".'
+
+    rule1, created1 = service.upsert_rule(
+        owner_id="user:7", name="migrated", script=script, migration_key=key,
+    )
+    assert created1 is True
+    assert rule1["migration_key"] == key
+    assert rule1["enabled"] == 0
+
+    # A repeated create with the same migration key returns the SAME draft:
+    # no duplicate, no revision bump.
+    rule2, created2 = service.upsert_rule(
+        owner_id="user:7", name="migrated", script=script, migration_key=key,
+    )
+    assert created2 is False
+    assert rule2["rule_id"] == rule1["rule_id"]
+    assert rule2["revision"] == rule1["revision"]
+
+    # A user edit + re-enable must not be clobbered by a later idempotent
+    # create: script preserved, and the enabled rule is NOT silently disabled.
+    edited = 'if @agent_any #turn_finish then @bob $prompt "review".'
+    updated, _ = service.upsert_rule(
+        owner_id="user:7", name="migrated", script=edited,
+        rule_id=rule1["rule_id"], expected_revision=1,
+    )
+    assert updated["revision"] == 2
+    service.set_enabled(owner_id="user:7", rule_id=rule1["rule_id"], enabled=True)
+
+    rule3, created3 = service.upsert_rule(
+        owner_id="user:7", name="whatever",
+        script='if @agent_any #turn_finish then @carl $prompt "x".',
+        migration_key=key,
+    )
+    assert created3 is False
+    assert rule3["rule_id"] == rule1["rule_id"]
+    assert rule3["script"] == edited
+    assert rule3["enabled"] == 1
+
+    # Exactly one rule was ever created for this migration key.
+    matches = [
+        r for r in service.store.list_rules("user:7")
+        if r.get("migration_key") == key
+    ]
+    assert len(matches) == 1
 # HASHI-Fingerprint: hfp_9717a97af9924e26925d98bfde62bb3d

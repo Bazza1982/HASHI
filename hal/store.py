@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS hal_rules (
     revision     INTEGER NOT NULL DEFAULT 1,
     enabled      INTEGER NOT NULL DEFAULT 0,
     enable_cursor INTEGER,
+    migration_key TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -111,6 +112,7 @@ class HalStore:
             self._conn.executescript(_SCHEMA)
             self._migrate_exec_dedupe_index()
             self._migrate_rule_enable_cursor()
+            self._migrate_rule_migration_key()
             self._migrate_receipt_retry()
             self._conn.commit()
 
@@ -144,6 +146,26 @@ class HalStore:
         if "enable_cursor" not in cols:
             self._conn.execute("ALTER TABLE hal_rules ADD COLUMN enable_cursor INTEGER")
 
+    def _migrate_rule_migration_key(self) -> None:
+        """Add the optional migration-key column to pre-existing stores.
+
+        The key is a stable, client-supplied identity (e.g. the source HEA rule
+        id + target instance) used to make a migration create idempotent: a
+        repeated create with the same key returns the SAME draft instead of a
+        duplicate. It is never used to rewrite or disable an existing rule.
+
+        Caller must already hold ``_LOCK`` (this runs inside ``__init__``).
+        """
+        cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(hal_rules)")}
+        if "migration_key" not in cols:
+            self._conn.execute("ALTER TABLE hal_rules ADD COLUMN migration_key TEXT")
+        # The unique index is created here (not in _SCHEMA) so it is only built
+        # AFTER the column exists on both fresh and pre-existing stores.
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_hal_rules_migration_key "
+            "ON hal_rules(owner_id, migration_key)"
+        )
+
     def _migrate_receipt_retry(self) -> None:
         """Add bounded-retry bookkeeping to pre-existing receipt stores."""
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(hal_dispatch_receipts)")}
@@ -173,6 +195,7 @@ class HalStore:
         script: str,
         rule_id: str | None = None,
         expected_revision: int | None = None,
+        migration_key: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         name = (name or "").strip()
         if not name:
@@ -187,8 +210,9 @@ class HalStore:
                 created = True
                 self._conn.execute(
                     "INSERT INTO hal_rules (rule_id, owner_id, name, script, revision, "
-                    "enabled, created_at, updated_at) VALUES (?,?,?,?,1,0,?,?)",
-                    (rule_id, owner_id, name, script, now, now),
+                    "enabled, migration_key, created_at, updated_at) "
+                    "VALUES (?,?,?,?,1,0,?,?,?)",
+                    (rule_id, owner_id, name, script, migration_key, now, now),
                 )
             else:
                 row = self._conn.execute(
@@ -199,8 +223,9 @@ class HalStore:
                     created = True
                     self._conn.execute(
                         "INSERT INTO hal_rules (rule_id, owner_id, name, script, revision, "
-                        "enabled, created_at, updated_at) VALUES (?,?,?,?,1,0,?,?)",
-                        (rule_id, owner_id, name, script, now, now),
+                        "enabled, migration_key, created_at, updated_at) "
+                        "VALUES (?,?,?,?,1,0,?,?,?)",
+                        (rule_id, owner_id, name, script, migration_key, now, now),
                     )
                 else:
                     if expected_revision is not None and int(row["revision"]) != expected_revision:
@@ -224,6 +249,16 @@ class HalStore:
             row = self._conn.execute(
                 "SELECT * FROM hal_rules WHERE rule_id=? AND owner_id=?",
                 (rule_id, owner_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def find_rule_by_migration_key(
+        self, owner_id: str, migration_key: str
+    ) -> dict[str, Any] | None:
+        with _LOCK:
+            row = self._conn.execute(
+                "SELECT * FROM hal_rules WHERE owner_id=? AND migration_key=?",
+                (owner_id, migration_key),
             ).fetchone()
         return dict(row) if row is not None else None
 

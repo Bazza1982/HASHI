@@ -116,16 +116,25 @@ class HalService:
         script: str,
         rule_id: str | None = None,
         expected_revision: int | None = None,
+        migration_key: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         result = validate_script(script)
         if not result["ok"]:
             raise HalStoreError(result["error"] or "invalid HAL script")
+        # Idempotent migration create: a repeated create for the same source HEA
+        # rule + target instance returns the SAME draft unchanged — it never
+        # bumps revision, overwrites user edits, or disables an enabled rule.
+        if rule_id is None and migration_key:
+            existing = self.store.find_rule_by_migration_key(owner_id, migration_key)
+            if existing is not None:
+                return existing, False
         rule, created = self.store.upsert_rule(
             owner_id=owner_id,
             name=name,
             script=script,
             rule_id=rule_id,
             expected_revision=expected_revision,
+            migration_key=migration_key,
         )
         if not created:
             # Saving a modification returns the rule to draft (disabled); settle
@@ -846,12 +855,23 @@ class HalService:
             # effect. Honour the persisted completion instead.
             from orchestrator.automation_events import terminal_event_for_key
 
-            terminal = await asyncio.to_thread(
-                terminal_event_for_key,
-                self.session_store,
-                owner_id=owner_id,
-                run_idempotency_key=receipt["idempotency_key"],
-            )
+            try:
+                terminal = await asyncio.to_thread(
+                    terminal_event_for_key,
+                    self.session_store,
+                    owner_id=owner_id,
+                    run_idempotency_key=receipt["idempotency_key"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A transient terminal-evidence read failure must neither kill
+                # the runtime loop nor be treated as "no related Run" (which
+                # would risk a duplicate re-dispatch of an already-accepted
+                # prompt). Leave the receipt pending and retry on a later cycle.
+                self.logger.warning(
+                    "HAL terminal evidence read failed for exec %s stage %s: %s",
+                    exec_row["exec_id"], stage, exc,
+                )
+                continue
             if terminal is not None:
                 await self._settle_pending_from_terminal(
                     owner_id, exec_row, receipt, terminal
@@ -904,30 +924,16 @@ class HalService:
         """Settle a ``pending_retry`` prompt whose Run already terminated.
 
         The dispatch side effect already happened (proven by the Run's
-        idempotency key), so we must not re-send it. Advance exactly as the
-        accepted path would, using only the persisted evidence.
+        idempotency key), so we must not re-send it. The Run's outcome
+        (completed vs failed) is a SEPARATE signal handled by the normal event
+        matching logic as ``#turn_finish`` / ``#turn_error``; here we only
+        record the dispatch receipt and advance the stage, exactly as the
+        accepted path would. A failed Run still proves the prompt was accepted,
+        so a legal dependent ``#turn_error`` stage must still fire rather than
+        being swallowed by prematurely failing the whole execution.
         """
         stage = int(exec_row["stage"])
-        if terminal["type"] == "agent.run.failed":
-            await asyncio.to_thread(
-                self.store.upsert_receipt,
-                exec_id=exec_row["exec_id"],
-                stage=stage,
-                idempotency_key=receipt["idempotency_key"],
-                kind=receipt["kind"],
-                target=receipt["target"],
-                payload=receipt["payload"],
-                state=RECEIPT_FAILED,
-                detail="prompt run failed",
-            )
-            await asyncio.to_thread(
-                self.store.fail_exec_if_active,
-                owner_id=owner_id,
-                exec_id=exec_row["exec_id"],
-                detail="prompt run failed",
-            )
-            return
-
+        outcome = "failed" if terminal["type"] == "agent.run.failed" else "completed"
         await asyncio.to_thread(
             self.store.upsert_receipt,
             exec_id=exec_row["exec_id"],
@@ -937,7 +943,7 @@ class HalService:
             target=receipt["target"],
             payload=receipt["payload"],
             state=RECEIPT_DISPATCHED,
-            detail="prompt accepted (completed run observed)",
+            detail=f"prompt accepted ({outcome} run observed)",
         )
         program = program_from_json(json.loads(exec_row["program_blob"]))
         workflow = program.workflows[int(exec_row["workflow_index"])]
@@ -1135,6 +1141,7 @@ async def handle_hal_rules_post(server, request):
         script = payload.get("script")
         rule_id = payload.get("rule_id")
         expected_revision = payload.get("expected_revision")
+        migration_key = payload.get("migration_key")
         enable = bool(payload.get("enabled"))
         if not isinstance(name, str) or not isinstance(script, str):
             return web.json_response(
@@ -1144,10 +1151,21 @@ async def handle_hal_rules_post(server, request):
             return web.json_response(
                 {"ok": False, "error_code": "invalid_rule_id"}, status=400
             )
+        if migration_key is not None:
+            if not isinstance(migration_key, str) or not migration_key.strip():
+                return web.json_response(
+                    {"ok": False, "error_code": "invalid_migration_key"}, status=400
+                )
+            migration_key = migration_key.strip()
+            if len(migration_key) > 256:
+                return web.json_response(
+                    {"ok": False, "error_code": "migration_key_too_long"}, status=400
+                )
     except (ValueError, UnicodeDecodeError):
         return web.json_response(
             {"ok": False, "error_code": "invalid_json"}, status=400
         )
+
     try:
         rule, created = service.upsert_rule(
             owner_id=owner_id,
@@ -1155,6 +1173,7 @@ async def handle_hal_rules_post(server, request):
             script=script,
             rule_id=rule_id,
             expected_revision=expected_revision,
+            migration_key=migration_key if rule_id is None else None,
         )
         if enable:
             service.set_enabled(owner_id=owner_id, rule_id=rule["rule_id"], enabled=True)
@@ -1164,6 +1183,7 @@ async def handle_hal_rules_post(server, request):
             {"ok": False, "error_code": "hal_store_error", "detail": str(exc)},
             status=409 if "revision" in str(exc) else 400,
         )
+
     return web.json_response(
         {
             "ok": True,
