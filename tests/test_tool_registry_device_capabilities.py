@@ -589,3 +589,45 @@ async def test_legacy_capability_screenshot_does_not_leak_truncated_bytes(tmp_pa
     assert data not in result.output
     assert result.content is None
     assert len(facade.calls) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parts", [[], [{"type": "text", "text": "captured"}], [{"type": "image", "mimeType": "image/png", "data": "AAAA"}]])
+async def test_screenshot_requires_valid_image_part(tmp_path, parts):
+    facade = _CapabilityFacade(result={"output": "captured", "content": parts}, capabilities=[_browser_registration(actions=("screenshot",))])
+    registry = _registry(tmp_path, "browser_screenshot", facade)
+    result = await registry.execute("browser_screenshot", {"url": "https://example.com"}, "capture")
+    assert result.is_error
+    assert "image" in result.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_screenshot_valid_typed_image_works_without_upgrade(tmp_path):
+    import base64
+    image = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"test-image").decode("ascii")
+    facade = _CapabilityFacade(result={"output": "captured", "content": [{"type":"image", "mimeType":"image/png", "data":image}]}, capabilities=[_browser_registration(actions=("screenshot",))])
+    registry = _registry(tmp_path, "browser_screenshot", facade)
+    result = await registry.execute("browser_screenshot", {"url": "https://example.com"}, "capture")
+    assert not result.is_error
+    assert result.content[0]["data"] == image
+
+
+@pytest.mark.asyncio
+async def test_partial_session_status_is_preserved_in_audit(tmp_path, monkeypatch):
+    parts = [{"type":"text", "text":"before"}, {"type":"text", "text":"screenshot failed"}, {"type":"text", "text":"after"}]
+    facade = _CapabilityFacade(result={"output":"before\nscreenshot failed\nafter", "content":parts, "is_error":True}, capabilities=[_browser_registration(actions=("session",))])
+    registry = _registry(tmp_path, "browser_session", facade)
+    captured = []
+    monkeypatch.setattr(registry, "_record_tool_audit", lambda name, args, result, started: captured.append(result))
+    result = await registry.execute("browser_session", {"steps":[{"action":"get_text"}, {"action":"screenshot"}, {"action":"get_text"}]}, "session")
+    assert result.is_error
+    assert [x["text"] for x in result.content] == ["before", "screenshot failed", "after"]
+    assert captured[-1].is_error
+
+@pytest.mark.asyncio
+async def test_screenshot_worker_failure_is_preserved(tmp_path):
+    facade = _CapabilityFacade(result={"output": "Error: camera unavailable", "content": [], "is_error": True}, capabilities=[_browser_registration(actions=("screenshot",))])
+    registry = _registry(tmp_path, "browser_screenshot", facade)
+    result = await registry.execute("browser_screenshot", {"url": "https://example.com"}, "failure")
+    assert result.is_error
+    assert result.output == "Error: camera unavailable"
+    assert "upgrade" not in result.output.lower()

@@ -234,6 +234,7 @@ class StructuredToolOutput:
 
     output: str
     content: list[dict[str, Any]]
+    is_error: bool = False
 
 
 class ToolRegistry:
@@ -1310,9 +1311,33 @@ class ToolRegistry:
         from tools.builtins import BuiltinExecutionResult
 
         details = None
+        structured_error = False
         if isinstance(dispatched, StructuredToolOutput):
             output = dispatched.output
             content = dispatched.content
+            structured_error = dispatched.is_error
+            if tool_name in _IMAGE_OUTPUT_TOOLS and not structured_error and not output.startswith("Error:"):
+                from orchestrator.multimodal_contract import (
+                    HASHI_API_MAX_IMAGE_BYTES,
+                    validate_inline_image_data_url,
+                )
+                try:
+                    if not isinstance(content, list) or not all(isinstance(part, Mapping) for part in content):
+                        raise ValueError("invalid content")
+                    images = [part for part in content if part.get("type") == "image"]
+                    if not images:
+                        raise ValueError("missing image")
+                    for part in images:
+                        mime, data = part.get("mimeType"), part.get("data")
+                        if not isinstance(mime, str) or not isinstance(data, str):
+                            raise ValueError("invalid image")
+                        validate_inline_image_data_url(
+                            f"data:{mime};base64,{data}", max_bytes=HASHI_API_MAX_IMAGE_BYTES,
+                        )
+                except ValueError:
+                    output = "Error: screenshot returned missing or invalid image content"
+                    content = None
+                    structured_error = True
         elif isinstance(dispatched, BuiltinExecutionResult):
             output = dispatched.output
             content = None
@@ -1320,6 +1345,14 @@ class ToolRegistry:
         else:
             output = dispatched
             content = None
+        if (
+            tool_name in _IMAGE_OUTPUT_TOOLS
+            and not isinstance(dispatched, StructuredToolOutput)
+            and not output.startswith("Error:")
+        ):
+            output = "Error: screenshot returned missing or invalid image content"
+            content = None
+            structured_error = True
         content, content_truncated = _bound_structured_text(content)
         if resource_wait_ms >= 50:
             details = {**(details or {}), "resource_wait_ms":resource_wait_ms}
@@ -1338,7 +1371,7 @@ class ToolRegistry:
                 "output_truncated": True,
                 "output_original_chars": original_chars,
             }
-        is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
+        is_error = structured_error or output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
         if tool_name in OFFICE_TOOL_NAMES:
             is_error = (details or {}).get("office_result", {}).get("status") == "error"
         elif tool_name in TOOLKIT_TOOL_NAMES:
@@ -1807,10 +1840,12 @@ class ToolRegistry:
             and isinstance(result.get("output"), str)
             and isinstance(result.get("content"), list)
         ):
+            if not all(isinstance(part, Mapping) for part in result["content"]):
+                return "Error: capability worker returned malformed structured content"
             return StructuredToolOutput(
                 output=result["output"],
-                content=[dict(part) for part in result["content"]
-                         if isinstance(part, Mapping)],
+                content=[dict(part) for part in result["content"]],
+                is_error=result.get("is_error") is True,
             )
         if capability_kind in {"browser_control", "computer_control"} and screenshot_requested:
             return (
@@ -1879,15 +1914,17 @@ class ToolRegistry:
                     return "Error: browser capability result exceeds gateway limit"
                 result = json.loads(raw.decode("utf-8"))
                 output = str(result.get("output") or "")
-                if result.get("is_error") and not output.startswith("Error:"):
-                    return "Error: " + output
                 native_parts = result.get("content")
                 if isinstance(native_parts, list) and native_parts:
+                    if not all(isinstance(part, dict) for part in native_parts):
+                        return "Error: browser gateway returned malformed structured content"
                     return StructuredToolOutput(
                         output=output,
-                        content=[dict(part) for part in native_parts
-                                 if isinstance(part, dict)],
+                        content=[dict(part) for part in native_parts],
+                        is_error=result.get("is_error") is True,
                     )
+                if result.get("is_error") and not output.startswith("Error:"):
+                    return "Error: " + output
                 return output
             except HTTPError as exc:
                 try:

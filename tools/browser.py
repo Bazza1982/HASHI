@@ -1192,6 +1192,7 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                 parts: list[dict] = []
                 summary: list[str] = []
                 found_image = False
+                partial_error = False
                 for raw in envelope["steps"]:
                     if not isinstance(raw, dict):
                         continue
@@ -1211,6 +1212,7 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                                 payload, f"{label} screenshot captured"
                             )
                         except (ValueError, binascii.Error):
+                            partial_error = True
                             line = f"{label} ERROR: screenshot returned invalid image"
                             summary.append(line)
                             parts.append({"type": "text", "text": line})
@@ -1219,6 +1221,8 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                         parts.extend(native.content)
                         found_image = True
                     else:
+                        if raw.get("ok") is False:
+                            partial_error = True
                         value = raw.get("output") if raw.get("ok") else raw.get("error")
                         line = label + " " + (
                             value if isinstance(value, str)
@@ -1231,7 +1235,7 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                     for step in steps
                 ):
                     return StructuredToolOutput(
-                        output="\n".join(summary), content=parts,
+                        output="\n".join(summary), content=parts, is_error=partial_error,
                     )
             if any(
                 isinstance(step, dict) and step.get("action") == "screenshot"
@@ -1245,7 +1249,8 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
 
     pw = browser = context = page = None
     results: list[str] = []
-    screenshots: dict[int, bytes] = {}
+    screenshots: dict[int, dict] = {}
+    partial_error = False
 
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -1333,7 +1338,9 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                     full_page = bool(step.get("full_page", False))
                     png = await page.screenshot(full_page=full_page)
                     if typed_media:
-                        screenshots[len(results)] = png
+                        from tools.typed_media_result import screenshot_tool_result
+                        native = screenshot_tool_result(png, "[screenshot] image attached")
+                        screenshots[len(results)] = native.content[-1]
                         results.append("[screenshot] image attached")
                     else:
                         b64 = base64.b64encode(png).decode()
@@ -1367,16 +1374,17 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                     results.append("[reload]")
 
                 else:
+                    partial_error = True
                     results.append(f"[step {i}] ERROR: unknown action '{action}'")
 
             except Exception as step_err:
+                partial_error = True
                 results.append(f"[{action}] ERROR: {step_err}")
 
         if typed_media and any(
             isinstance(step, dict) and step.get("action") == "screenshot"
             for step in steps
         ):
-            from tools.typed_media_result import screenshot_tool_result
             from tools.registry import StructuredToolOutput
 
             # Preserve the original step order with typed text and image parts.
@@ -1384,12 +1392,9 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
             for index, line in enumerate(results):
                 parts.append({"type": "text", "text": line})
                 if index in screenshots:
-                    native = screenshot_tool_result(
-                        screenshots[index], line,
-                    )
-                    parts.append(native.content[-1])
+                    parts.append(screenshots[index])
             return StructuredToolOutput(
-                output="\n".join(results), content=parts,
+                output="\n".join(results), content=parts, is_error=partial_error,
             )
         return "\n".join(results)
 

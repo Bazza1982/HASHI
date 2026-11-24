@@ -808,7 +808,7 @@ async def _execute_browser_action(action: str, args: dict[str, Any]) -> str:
 
         result = await dispatch[action](extension_args, typed_media=True)
         if isinstance(result, StructuredToolOutput):
-            return {"output": result.output, "content": result.content}
+            return {"output": result.output, "content": result.content, "is_error": result.is_error}
         return result
     return await dispatch[action](extension_args)
 

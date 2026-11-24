@@ -126,3 +126,40 @@ def test_deepseek_official_remote_url_length_limit():
     assert urls == [accepted]
     with pytest.raises(MultimodalContractError):
         _structured_tool_media([{"type":"image_url", "image_url":{"url":accepted + "a"}}])
+
+@pytest.mark.asyncio
+async def test_partial_session_explicit_status(monkeypatch):
+    from tools import browser
+    async def bridge(action, args):
+        return json.dumps({"steps": [
+            {"index": 0, "action": "get_text", "ok": True, "output": "before"},
+            {"index": 1, "action": "screenshot", "ok": False, "error": "capture failed"},
+            {"index": 2, "action": "get_text", "ok": True, "output": "after"}]})
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", bridge)
+    result = await browser.execute_browser_session({"steps": [{"action":"get_text"}, {"action":"screenshot"}, {"action":"get_text"}]}, typed_media=True)
+    assert result.is_error is True
+    assert [x["text"] for x in result.content] == ["[0:get_text] before", "[1:screenshot] capture failed", "[2:get_text] after"]
+
+@pytest.mark.asyncio
+async def test_partial_session_status_survives_worker_boundary(monkeypatch):
+    from tools import browser
+    from tools.device_control_worker import _execute_browser_action
+    async def bridge(action, args):
+        return json.dumps({"steps": [
+            {"index": 0, "action": "get_text", "ok": True, "output": "before"},
+            {"index": 1, "action": "screenshot", "ok": False, "error": "capture failed"},
+            {"index": 2, "action": "get_text", "ok": True, "output": "after"}]})
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", bridge)
+    result = await _execute_browser_action("session", {"steps": [{"action":"get_text"}, {"action":"screenshot"}, {"action":"get_text"}]})
+    assert result["is_error"] is True
+    assert [x["text"] for x in result["content"]] == ["[0:get_text] before", "[1:screenshot] capture failed", "[2:get_text] after"]
+
+
+def test_partial_session_provider_message_retains_failure_and_text():
+    adapter = object.__new__(DeepSeekAdapter)
+    parts = [{"type":"text", "text":"before"}, {"type":"text", "text":"screenshot failed"}, {"type":"text", "text":"after"}]
+    messages = adapter._tool_result_messages(tool_name="browser_session", tool_call_id="partial", output="before\nscreenshot failed\nafter", content=parts)
+    assert messages[0]["tool_call_id"] == "partial"
+    assert "before" in messages[0]["content"]
+    assert "screenshot failed" in messages[0]["content"]
+    assert "after" in messages[0]["content"]

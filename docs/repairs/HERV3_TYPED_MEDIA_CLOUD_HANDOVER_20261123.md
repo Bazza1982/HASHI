@@ -136,3 +136,12 @@ it must be updated rather than leaking or truncating screenshot bytes as text.
 A legacy flattened mixed browser session reports the same limitation. Structured
 sessions retain surrounding text and step order when screenshot bytes are bad.
 These compatibility errors do not affect text-only sessions.
+
+## Truthful screenshot and session status
+
+A successful standalone screenshot must contain a verified typed image;
+empty, text-only or malformed image results are explicit errors, not success.
+A legitimate worker failure remains a failure. Browser session step failures
+retain surrounding text and ordering and propagate a typed error flag through
+the worker and gateway to ToolResult and audit; page text is never classified
+by keyword. Valid structured screenshots need no worker upgrade.
