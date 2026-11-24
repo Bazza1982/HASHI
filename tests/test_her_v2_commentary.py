@@ -195,7 +195,7 @@ async def test_tool_result_changes_never_author_user_progress_or_block_a_finding
 
 
 @pytest.mark.asyncio
-async def test_model_findings_are_merged_at_the_next_window_without_repetition():
+async def test_model_findings_newest_supersedes_at_the_next_window_without_repetition():
     now = [1_000.0]
     sleeping = asyncio.Event()
     release = asyncio.Event()
@@ -235,13 +235,63 @@ async def test_model_findings_are_merged_at_the_next_window_without_repetition()
     now[0] = 1_151
     release.set()
     await asyncio.wait_for(delivered.wait(), 2)
-    assert downstream.records[1].text == second.text + "\n\n" + third.text
+    # De-stitched: only the newest pending finding is delivered; older interim
+    # text is never concatenated into one contradictory message.
+    assert downstream.records[1].text == third.text
     now[0] = 1_400
     assert await services.publish(NeutralCommentary(
         event_id="turn:repeated", turn_id="turn", stage=Stage.DIRECT, attempt=1,
         text=second.text,
     )) is False
     assert len(downstream.records) == 2
+    await services.close()
+
+
+@pytest.mark.asyncio
+async def test_long_tool_emits_one_keepalive_pulse():
+    downstream = RecordingCommentaryPort()
+    release = asyncio.Event()
+
+    async def sleep(delay):
+        assert delay == 180.0
+        await release.wait()
+
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, sleep=sleep,
+        keepalive_threshold_s=180.0,
+    )
+    services.tool_started("shell", {}, "call-1")
+    await asyncio.sleep(0)
+    keepalive = services._keepalive_tasks["call-1"]
+    release.set()
+    await asyncio.gather(keepalive, *tuple(services._tasks), return_exceptions=True)
+
+    texts = [record.text for record in downstream.records]
+    assert any("shell is still running" in text for text in texts)
+    await services.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_tool_cancels_keepalive_pulse():
+    downstream = RecordingCommentaryPort()
+    release = asyncio.Event()
+
+    async def sleep(delay):
+        await release.wait()
+
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, sleep=sleep,
+        keepalive_threshold_s=180.0,
+    )
+    services.tool_started("shell", {}, "call-1")
+    await asyncio.sleep(0)
+    keepalive = services._keepalive_tasks["call-1"]
+    services.tool_completed("shell", tool_call_id="call-1", output="done")
+    release.set()
+    await asyncio.gather(keepalive, *tuple(services._tasks), return_exceptions=True)
+
+    texts = [record.text for record in downstream.records]
+    assert not any("still running" in text for text in texts)
     await services.close()
 
 

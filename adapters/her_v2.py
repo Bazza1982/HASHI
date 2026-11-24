@@ -36,7 +36,11 @@ from orchestrator.her_v2.backend_session import (
     HerBackendSessionCoordinator,
     HerFixedProtocolError,
 )
-from orchestrator.her_v2.commentary import PersonaCommentaryPipeline
+from orchestrator.her_v2.commentary import (
+    COMMENTARY_STAGES,
+    NullCommentaryPort,
+    PersonaCommentaryPipeline,
+)
 from orchestrator.her_v2.config import (
     HERv2Config,
     HERv2ConfigurationError,
@@ -2415,13 +2419,27 @@ class HERv2Adapter(BaseBackend):
         if commentary_packager is None:
             commentary_packager = configured_packager
         if commentary is None and commentary_packager is not None:
-            commentary = PersonaCommentaryPipeline(
-                packager=commentary_packager,
-                delivery=delivery,
-                stage_authored_persona_stages=frozenset(
-                    {Stage.TRIAGE, Stage.PLANNING}
-                ),
-            )
+            from orchestrator import telegram_stream_policy
+
+            commentary_mode = telegram_stream_policy.get_commentary_mode(self.config)
+            if commentary_mode == "off":
+                # Truly end-to-end off: no pipeline, so no Persona packager call
+                # and no provider-authored commentary delivery.
+                commentary = NullCommentaryPort()
+            elif commentary_mode in {"raw", "original"}:
+                # The main model already authored its own progress text (raw =
+                # objective, original = Persona-styled); never re-package it.
+                commentary = PersonaCommentaryPipeline(
+                    packager=commentary_packager,
+                    delivery=delivery,
+                    stage_authored_persona_stages=frozenset(COMMENTARY_STAGES),
+                )
+            else:  # packaged
+                commentary = PersonaCommentaryPipeline(
+                    packager=commentary_packager,
+                    delivery=delivery,
+                    stage_authored_persona_stages=frozenset(),
+                )
         turn_services = None
         if isinstance(provider, HashiStageProvider):
             from orchestrator.her_v2.turn_services import HEALTH_QUESTION, TurnServices

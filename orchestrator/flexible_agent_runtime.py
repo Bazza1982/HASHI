@@ -342,12 +342,11 @@ class FlexibleAgentRuntime:
         # The same JSON survives sessions, runtime recreation, and host reboot.
         self._think = telegram_stream_policy.get_display_preference(self, "think")
         # Model-authored commentary is deliberately independent from
-        # provider reasoning and technical progress.
-        self._commentary = telegram_stream_policy.get_display_preference(
-            self,
-            "commentary",
-            default=True,
-        )
+        # provider reasoning and technical progress. The mode (off/raw/
+        # original/packaged) is the durable setting; ``_commentary`` keeps the
+        # legacy boolean for presentation consumers.
+        self._commentary_mode = telegram_stream_policy.get_commentary_mode(self)
+        self._commentary = self._commentary_mode != "off"
         # Per-turn cost tail. Eligibility is frozen in _request_meta_by_id and
         # receipts are correlated by request ID; overlapping foreground and
         # background turns must never share a mutable "current" receipt.
@@ -8307,24 +8306,32 @@ class FlexibleAgentRuntime:
             or self._is_her_commentary_backend()
         )
 
-    def _set_commentary_enabled(self, enabled: bool) -> None:
-        self._commentary = bool(enabled)
-        marker = self.workspace_dir / ".commentary_off"
-        if self._commentary:
-            marker.unlink(missing_ok=True)
-        else:
-            marker.touch()
+    def _set_commentary_mode(self, mode: str) -> None:
+        mode = str(mode or "").strip().casefold()
+        if mode not in telegram_stream_policy.COMMENTARY_MODES:
+            raise ValueError(f"Unknown commentary mode: {mode}")
+        self._commentary_mode = mode
+        self._commentary = mode != "off"
+        telegram_stream_policy.set_commentary_mode(self, mode)
+        if mode == "off":
             # Visibility changes are a hard boundary: commentary authored
             # while hidden must never be replayed after a later On selection.
             buffer = getattr(self, "_commentary_buffer", None)
             if isinstance(buffer, list):
                 buffer.clear()
-        telegram_stream_policy.set_display_preference(
-            self,
-            "commentary",
-            self._commentary,
-        )
         runtime_pipeline.notify_display_preference_change(self)
+
+    def _set_commentary_enabled(self, enabled: bool) -> None:
+        self._set_commentary_mode("raw" if enabled else "off")
+
+    def _restrict_commentary_mode(self, mode: str) -> str:
+        """Local-inference backends only support the objective off/raw modes."""
+        engine = str(getattr(self.config, "active_backend", "") or "").strip().casefold()
+        if engine in {
+            "ollama", "ollama-api", "llama.cpp", "llama_cpp", "hli", "hli-api",
+        }:
+            return mode if mode in {"off", "raw"} else "raw"
+        return mode
 
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[
@@ -8375,10 +8382,17 @@ class FlexibleAgentRuntime:
             )
             return
         args = [a.strip().lower() for a in (context.args or []) if a.strip()]
-        if args and args[0] in {"on", "true", "1"}:
-            self._set_commentary_enabled(True)
-        elif args and args[0] in {"off", "false", "0"}:
-            self._set_commentary_enabled(False)
+        mode: str | None = None
+        if args:
+            arg = args[0]
+            if arg in {"off", "false", "0"}:
+                mode = "off"
+            elif arg in {"on", "true", "1", "raw"}:
+                mode = "raw"
+            elif arg in {"original", "packaged"}:
+                mode = arg
+        if mode is not None:
+            self._set_commentary_mode(self._restrict_commentary_mode(mode))
         await self._reply_text(
             update,
             self._commentary_menu_text(),

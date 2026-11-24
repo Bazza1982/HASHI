@@ -380,3 +380,54 @@ def component_status(runtime: Any, name: str) -> tuple[bool, bool, str]:
     configured = bool(getattr(policy, name))
     effective = bool(getattr(policy, f"{name}_enabled"))
     return configured, effective, policy.component_sources[name]
+
+
+COMMENTARY_MODES = frozenset({"off", "raw", "original", "packaged"})
+DEFAULT_COMMENTARY_MODE = "off"
+
+
+def _commentary_off_marker(runtime: Any) -> Path:
+    return preferences_path(runtime).parent.parent / ".commentary_off"
+
+
+def get_commentary_mode(runtime: Any) -> str:
+    """Resolve the durable HERV3 commentary mode for a workspace.
+
+    Modes are ``off`` (default), ``raw``, ``original`` and ``packaged``. The
+    legacy boolean ``commentary`` preference and the historical
+    ``.commentary_off`` marker migrate without changing a user's intent: an
+    explicit On becomes ``raw`` and an explicit Off becomes ``off``.
+    """
+
+    payload = load_preferences(runtime)
+    display = payload.get("telegram_display")
+    if isinstance(display, dict):
+        mode = display.get("commentary_mode")
+        if mode in COMMENTARY_MODES:
+            return mode
+        if isinstance(display.get("commentary"), bool):
+            return "raw" if display["commentary"] else "off"
+    if _commentary_off_marker(runtime).exists():
+        return "off"
+    return DEFAULT_COMMENTARY_MODE
+
+
+def set_commentary_mode(runtime: Any, mode: str) -> Path:
+    """Persist a commentary mode and keep the legacy readers in sync."""
+
+    if mode not in COMMENTARY_MODES:
+        raise ValueError(f"Unknown commentary mode: {mode}")
+    payload = load_preferences(runtime, strict=True)
+    display = payload.get("telegram_display")
+    if not isinstance(display, dict):
+        display = {}
+    display["commentary_mode"] = mode
+    display["commentary"] = mode != "off"
+    payload["telegram_display"] = display
+    _write_preferences(runtime, payload)
+    marker = _commentary_off_marker(runtime)
+    if mode == "off":
+        marker.touch()
+    else:
+        marker.unlink(missing_ok=True)
+    return preferences_path(runtime)
