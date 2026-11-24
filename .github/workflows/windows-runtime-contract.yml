@@ -127,6 +127,8 @@ jobs:
           ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-help.json
           ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-cold-receipt.json
           ${{ runner.temp }}/hashi-qualified-runtime-roles/**/real-entry-cold.log
+          ${{ runner.temp }}/hashi-qualified-runtime-roles/**/entry-instance/logs/function-workers/*.log
+          ${{ runner.temp }}/hashi-qualified-runtime-roles/**/entry-instance/logs/entry_probe/**/errors.log
           ${{ runner.temp }}/hashi-entry-build-metadata/**
           ${{ runner.temp }}/hashi-offline-regression.xml
     needs:
