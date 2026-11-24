@@ -2,6 +2,7 @@
 # ruff: noqa: E402 -- dependency stubs must be installed before project imports.
 
 import asyncio
+import os
 import stat
 import sys
 import time
@@ -3120,6 +3121,111 @@ def test_agent_snapshot_change_forces_handshake(tmp_path):
 
     assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is True
     assert manager._force_handshake is True
+
+
+def test_agent_snapshot_refresh_detects_same_size_content_change_with_restored_mtime(tmp_path):
+    agents_path = tmp_path / "agents.json"
+    original = json.dumps({"agents": [{"name": "zelda", "is_active": True}]})
+    agents_path.write_text(original, encoding="utf-8")
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    initial = ProtocolManager.get_local_agents_snapshot(manager)
+    assert [item["agent_name"] for item in initial] == ["zelda"]
+
+    stat_before = agents_path.stat()
+    original_atime_ns = stat_before.st_atime_ns
+    original_mtime_ns = stat_before.st_mtime_ns
+
+    # "zelda" -> "akane" keeps the exact same byte length.
+    replacement = json.dumps({"agents": [{"name": "akane", "is_active": True}]})
+    assert len(replacement.encode("utf-8")) == len(original.encode("utf-8"))
+    agents_path.write_text(replacement, encoding="utf-8")
+
+    # Restore the original modification timestamp so (mtime_ns, size) is
+    # indistinguishable from the previous revision.
+    os.utime(agents_path, ns=(original_atime_ns, original_mtime_ns))
+    assert agents_path.stat().st_size == stat_before.st_size
+    assert agents_path.stat().st_mtime_ns == original_mtime_ns
+
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is True
+    assert manager._force_handshake is True
+
+    refreshed = ProtocolManager.get_local_agents_snapshot(manager)
+    assert [item["agent_name"] for item in refreshed] == ["akane"]
+
+
+def test_agent_snapshot_refresh_unchanged_content_does_not_repeat_handshake(tmp_path):
+    agents_path = tmp_path / "agents.json"
+    agents_path.write_text(json.dumps({"agents": [{"name": "zelda", "is_active": True}]}), encoding="utf-8")
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is False
+    manager._force_handshake = False
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is False
+    assert manager._force_handshake is False
+
+
+def test_agent_snapshot_refresh_detects_rapid_consecutive_changes(tmp_path):
+    agents_path = tmp_path / "agents.json"
+    agents_path.write_text(json.dumps({"agents": [{"name": "alpha", "is_active": True}]}), encoding="utf-8")
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is False
+    agents_path.write_text(json.dumps({"agents": [{"name": "beta", "is_active": True}]}), encoding="utf-8")
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is True
+    agents_path.write_text(json.dumps({"agents": [{"name": "gamma", "is_active": True}]}), encoding="utf-8")
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is True
+
+
+def test_agent_snapshot_refresh_unchanged_content_does_not_reparse_json(tmp_path, monkeypatch):
+    agents_path = tmp_path / "agents.json"
+    agents_path.write_text(json.dumps({"agents": [{"name": "zelda", "is_active": True}]}), encoding="utf-8")
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    # Establish the baseline version and directory state first.
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is False
+
+    parse_calls = []
+    real_loads = protocol_manager_module.json.loads
+
+    def counting_loads(*args, **kwargs):
+        parse_calls.append(1)
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(protocol_manager_module.json, "loads", counting_loads)
+
+    assert ProtocolManager._refresh_local_agent_snapshot_if_changed(manager) is False
+    assert parse_calls == []
+
+
+def test_local_agents_snapshot_missing_file_keeps_previous_snapshot(tmp_path):
+    agents_path = tmp_path / "agents.json"
+    agents_path.write_text(json.dumps({"agents": [{"name": "zelda", "is_active": True}]}), encoding="utf-8")
+    manager = object.__new__(ProtocolManager)
+    manager._hashi_root = tmp_path
+    manager._instance_info = {"instance_id": "HASHI1"}
+    manager._core_online = lambda: True
+
+    initial = ProtocolManager.get_local_agents_snapshot(manager)
+    assert [item["agent_name"] for item in initial] == ["zelda"]
+
+    agents_path.unlink()
+
+    snapshot = ProtocolManager.get_local_agents_snapshot(manager)
+    assert [item["agent_name"] for item in snapshot] == ["zelda"]
+    assert snapshot[0]["directory_state"] == "stale"
 
 
 def test_registry_prunes_legacy_alias_with_same_host_and_workbench(tmp_path):
