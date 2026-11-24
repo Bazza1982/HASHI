@@ -24,7 +24,13 @@ from orchestrator.pcm_profile import (
 )
 
 
-def _assembler(tmp_path: Path, *, memory: str = "Long-term memory facts.", hcc: str | None = None):
+def _assembler(
+    tmp_path: Path,
+    *,
+    memory: str = "Long-term memory facts.",
+    hcc: str | None = None,
+    tools: list[tuple[str, str]] | None = None,
+):
     pcm = tmp_path / "agent.md"
     pcm.parent.mkdir(parents=True, exist_ok=True)
     pcm.write_text(
@@ -32,7 +38,10 @@ def _assembler(tmp_path: Path, *, memory: str = "Long-term memory facts.", hcc: 
         encoding="utf-8",
     )
     store = BridgeMemoryStore(tmp_path)
-    return store, BridgeContextAssembler(store, pcm)
+    provider = (lambda: list(tools or [])) if tools is not None else None
+    return store, BridgeContextAssembler(
+        store, pcm, tool_catalog_provider=provider
+    )
 
 
 def _section(payload: dict, key: str) -> dict | None:
@@ -297,6 +306,49 @@ def test_local_hcc_projection_marks_omitted_entries(tmp_path):
     assert "alpha cache" not in text
     assert "omitted" in text.lower()
     assert "agent.md#hcc" in text
+    assert "file_read" in text
+
+
+def test_local_preserves_inline_content_without_file_read(tmp_path):
+    """A local route without file_read must keep necessary memory/HCC inline."""
+    memory = "alpha-unit uses old settings\n\nbeta-unit holds the credential policy"
+    hcc = (
+        "[alpha]\nalpha cache item\n[alpha_end]\n"
+        "[beta]\nbeta credential rotation policy\n[beta_end]"
+    )
+    _store, assembler = _assembler(
+        tmp_path,
+        memory=memory,
+        hcc=hcc,
+        tools=[("shell", "run commands"), ("search", "scoped search")],
+    )
+    payload = assembler.build_prompt_payload(
+        "credential rotation", "codex-cli", pcm_profile="local"
+    )
+    memory_text = _section(payload, "permanent_memory")["text"]
+    hcc_text = _section(payload, "hcc")["text"]
+    # Full blocks stay inline; no reference the route cannot follow.
+    assert "alpha-unit" in memory_text
+    assert "alpha cache item" in hcc_text
+    assert "file_read" not in memory_text
+    assert "file_read" not in hcc_text
+
+
+def test_local_keeps_lean_projection_with_file_read(tmp_path):
+    """A tool-capable local route keeps the lean relevance projection."""
+    memory = "alpha-unit uses old settings\n\nbeta-unit holds the credential policy"
+    _store, assembler = _assembler(
+        tmp_path, memory=memory, tools=[("file_read", "read a file")]
+    )
+    text = _section(
+        assembler.build_prompt_payload(
+            "credential policy", "codex-cli", pcm_profile="local"
+        ),
+        "permanent_memory",
+    )["text"]
+    assert "beta-unit" in text
+    assert "alpha-unit" not in text
+    assert "omitted" in text.lower()
     assert "file_read" in text
 
 

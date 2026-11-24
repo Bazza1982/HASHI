@@ -1867,6 +1867,35 @@ class BridgeContextAssembler:
         )
         return (3 * stride) + (identity % stride)
 
+    def _retrieval_capable(self) -> bool:
+        """Whether this route exposes an existing file-read capability.
+
+        Reuses the same tool catalogue that advertises tools to the model.
+        A missing provider means "unknown" (keep the lean projection); an
+        empty advertised catalogue means the route has no usable retrieval,
+        so local projections must keep necessary inline content instead of
+        pointing at an unreadable file.
+        """
+        provider = self.tool_catalog_provider
+        if not callable(provider):
+            return True
+        try:
+            items = list(provider() or [])
+        except Exception:
+            return True
+        names: set[str] = set()
+        for item in items:
+            if isinstance(item, Mapping):
+                names.add(str(item.get("name") or item.get("id") or "").strip().casefold())
+            elif isinstance(item, (tuple, list)) and item:
+                names.add(str(item[0] or "").strip().casefold())
+            else:
+                names.add(str(item or "").strip().casefold())
+        names.discard("")
+        if not names:
+            return False
+        return "file_read" in names
+
     @staticmethod
     def _catalogue_lines(provider) -> list[str]:
         if not callable(provider):
@@ -2194,6 +2223,10 @@ class BridgeContextAssembler:
         local_profile = (
             str(pcm_profile).strip().casefold() == pcm_profile_module.PCM_PROFILE_LOCAL
         )
+        # Local relevance projections point at agent.md for omitted content.
+        # That is only usable when the actual route exposes a file-read tool;
+        # otherwise necessary content stays inline.
+        retrieval_capable = self._retrieval_capable()
         document = self._load_pcm()
         sections: list[dict[str, Any]] = []
         hcc_enabled = bool(
@@ -2295,7 +2328,7 @@ class BridgeContextAssembler:
                 "local_system", protected=True,
             )
             hcc_body = hcc_text
-            if local_profile:
+            if local_profile and retrieval_capable:
                 # Deterministic relevance projection: keep the cache entries
                 # that lexically relate to the current request, bounded and in
                 # document order; the full cache stays readable via file_read.
@@ -2411,7 +2444,7 @@ class BridgeContextAssembler:
             )
 
         if document and document.memory:
-            if local_profile:
+            if local_profile and retrieval_capable:
                 # Local keeps the memory units that lexically relate to the
                 # current request (bounded, deterministic, no new retrieval
                 # subsystem) plus a retrieval reference. The canonical block
@@ -2432,6 +2465,9 @@ class BridgeContextAssembler:
                     protected=True,
                 )
             else:
+                # Cloud, or a local route without usable file-read retrieval:
+                # necessary memory stays inline rather than pointing at a file
+                # the route cannot read.
                 add_section(
                     "permanent_memory",
                     "LONG-TERM MEMORY FROM agent.md",

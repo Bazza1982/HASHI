@@ -784,11 +784,14 @@ a permission change. Resolving it never deletes memory or data.
 Projections are lexical and deterministic (no classifier, embedding, router
 call or new storage). When relevance excludes unmatched units, or the budget
 cuts selected units, the projection says so and carries a short usable
-retrieval reference (`file_read` on `agent.md` / `agent.md#hcc`). Omitted
-memory and context always remain retrievable through the existing authorized
-retrieval/read mechanisms, and necessary inline context is never replaced by
-an unavailable tool reference. Omission never moves, rewrites or deletes
-user-authored memories.
+retrieval reference (`file_read` on `agent.md` / `agent.md#hcc`). When the
+actual inference route has no usable file-read capability (checked against
+the same tool catalogue that advertises tools to the model), the necessary
+`[memory]` and HCC content stays inline instead, and the lean projection is
+used only on tool-capable routes. Omitted memory and context always remain
+retrievable through the existing authorized retrieval/read mechanisms, and
+necessary inline context is never replaced by an unavailable tool reference.
+Omission never moves, rewrites or deletes user-authored memories.
 
 ### 13.3 Incremental model-facing injection
 
