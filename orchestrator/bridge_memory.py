@@ -21,6 +21,12 @@ from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
 from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled, project_hcc_for_request
 from orchestrator import pcm_forget_memory
 from orchestrator import pcm_profile as pcm_profile_module
+from orchestrator.pcm_profile import (
+    CJK_RUN_RE as _CJK_RUN_RE,
+    LATIN_TOKEN_RE as _LATIN_TOKEN_RE,
+    cjk_query_substrings as _cjk_query_substrings,
+    tokenize_multilingual as _tokenize_multilingual,
+)
 from orchestrator.config_json import (
     ConfigConflictError,
     new_config_json,
@@ -66,10 +72,6 @@ def global_sys_prompt_state_path(global_config: Any) -> Path:
     return Path(bridge_home) / "state" / "global_sys_prompts.json"
 
 
-_CJK_RUN_RE = re.compile(
-    r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
-)
-_LATIN_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _BGE_CACHE_LOCK = threading.Lock()
 _BGE_ENCODER_CACHE: dict[tuple[str, str], "BgeM3Encoder"] = {}
 
@@ -98,40 +100,6 @@ def _memory_topic_query(query: str) -> str:
         return text
     # A broad request such as "我喜欢什么" still asks for preferences.
     return next((word for word in ("喜欢", "偏爱", "偏好") if word in query), "")
-
-
-def _tokenize_multilingual(text: str) -> list[str]:
-    """Extract ASCII/alphanumeric words plus CJK/Kana/Hangul n-grams.
-
-    Ensures pure Chinese, Japanese, Korean, and mixed-script texts produce
-    meaningful non-zero hash vectors and lexical overlap without external
-    segmentation dependencies.
-    """
-    lowered = (text or "").lower()
-    tokens: list[str] = _LATIN_TOKEN_RE.findall(lowered)
-    for run in _CJK_RUN_RE.findall(lowered):
-        n = len(run)
-        if n == 1:
-            tokens.append(run)
-            continue
-        for i in range(n - 1):
-            tokens.append(run[i : i + 2])
-        if 2 < n <= 6:
-            tokens.append(run)
-    return tokens
-
-
-def _cjk_query_substrings(text: str) -> list[str]:
-    """Return compact CJK/Kana/Hangul query terms for substring candidate lookup."""
-    terms: list[str] = []
-    seen: set[str] = set()
-    for run in _CJK_RUN_RE.findall(text or ""):
-        candidates = [run] if len(run) <= 4 else [run[i : i + 2] for i in range(len(run) - 1)]
-        for term in candidates:
-            if term not in seen:
-                seen.add(term)
-                terms.append(term)
-    return terms[:12]
 
 
 class LocalEmbeddingEncoder:

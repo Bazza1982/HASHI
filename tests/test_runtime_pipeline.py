@@ -1318,6 +1318,105 @@ async def test_isolated_turn_does_not_pollute_persistent_baseline():
 
 
 @pytest.mark.asyncio
+async def test_stale_pending_baseline_is_not_promoted_by_another_backend():
+    """A pending snapshot from an earlier turn must never be promoted later."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(["STATIC-A", "STATIC-B"])
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    await runtime_pipeline.build_turn_prompt(runtime, item2, is_bridge_request=False)
+    _promote(runtime, item2, success=False)  # B was not delivered
+
+    runtime.config.active_backend = "openrouter-api"
+    runtime.backend_manager.agent_mode = "flex"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+        config=SimpleNamespace(model="m", extra=None),
+    )
+    other = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, other)
+    await runtime_pipeline.build_turn_prompt(runtime, other, is_bridge_request=False)
+    _promote(runtime, other, success=True)
+
+    assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
+        hashlib.sha256(b"STATIC-A").hexdigest()
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_profile_uses_capacity_derived_prompt_budget(monkeypatch):
+    """Local engines take the prompt budget from the actual model capacity."""
+    runtime = _runtime()
+    runtime.config.active_backend = "ollama-api"
+    runtime.backend_manager.agent_mode = "flex"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+        config=SimpleNamespace(model="small", extra=None),
+    )
+    observed = {}
+
+    class _BudgetAssembler:
+        MAX_RECENT_EXCHANGES = 10
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+            prompt_budget_tokens=None,
+            pcm_profile="cloud",
+        ):
+            observed["budget"] = prompt_budget_tokens
+            observed["profile"] = pcm_profile
+            return {"final_prompt": prompt, "audit": {"sections": []}}
+
+    runtime.context_assembler = _BudgetAssembler()
+    from orchestrator import context_compaction
+
+    monkeypatch.setattr(
+        context_compaction,
+        "resolve_capacity_profile",
+        lambda *args, **kwargs: SimpleNamespace(usable_input_tokens=4321),
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
+
+    assert observed == {"budget": 4321, "profile": "local"}
+
+
+@pytest.mark.asyncio
 async def test_build_turn_prompt_passes_backend_pcm_token_budget():
     runtime = _runtime()
     runtime.config.active_backend = "openrouter-api"

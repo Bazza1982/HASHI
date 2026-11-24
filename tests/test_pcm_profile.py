@@ -166,6 +166,37 @@ def test_local_memory_head_fallback_when_no_overlap(tmp_path):
     assert "file_read" in text
 
 
+def test_local_memory_relevance_works_for_chinese(tmp_path):
+    memory = (
+        "项目使用旧版设置\n\n"
+        + "凭据轮换策略：每 90 天轮换一次，存放在保险库\n\n"
+        + ("填充说明" * 80)
+    )
+    _store, assembler = _assembler(tmp_path, memory=memory)
+    payload = assembler.build_prompt_payload(
+        "凭据轮换策略是什么", "codex-cli", pcm_profile="local"
+    )
+    text = _section(payload, "permanent_memory")["text"]
+    # CJK bigram matching must find the credential-rotation unit, not the head.
+    assert "凭据轮换策略" in text
+    assert "旧版设置" not in text
+
+
+def test_local_hcc_relevance_works_for_chinese(tmp_path):
+    # HCC entry names are ASCII identifiers; their bodies may be Chinese.
+    hcc = "\n".join(
+        f"[entry{i}]\n第{i}项：" + ("无关内容" * 8) + f"\n[entry{i}_end]"
+        for i in range(4)
+    ) + "\n[credential]\n凭据轮换周期为九十天，需要保险库审批\n[credential_end]"
+    _store, assembler = _assembler(tmp_path, hcc=hcc)
+    payload = assembler.build_prompt_payload(
+        "凭据轮换周期多久", "codex-cli", pcm_profile="local"
+    )
+    text = _section(payload, "hcc")["text"]
+    assert "凭据轮换周期" in text
+    assert "第0项" not in text
+
+
 def test_local_skips_skill_and_tool_catalogues(tmp_path):
     _store, assembler = _assembler(tmp_path)
     payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")

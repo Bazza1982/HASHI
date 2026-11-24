@@ -1602,8 +1602,14 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 prompt_payload, previous_digests
             )
         # Record what this turn intends to deliver; it becomes the baseline
-        # for this Engine Session only after a successful generation.
-        runtime._pending_pcm_baseline = (session_key, current_digests)
+        # for this Engine Session only after a successful generation. The
+        # request id binds the promotion to this turn so a stale pending
+        # record can never be promoted by a later, different backend turn.
+        runtime._pending_pcm_baseline = (
+            str(getattr(item, "request_id", "") or ""),
+            session_key,
+            current_digests,
+        )
 
     if phone_audit:
         prompt_payload.setdefault("audit", {})["phone_context_handoff"] = phone_audit
@@ -1694,15 +1700,24 @@ def promote_pcm_baseline_after_delivery(runtime, item, generation) -> None:
     used for delivery (the adapter knows it only after the first turn).
     """
     pending = getattr(runtime, "_pending_pcm_baseline", None)
-    if not isinstance(pending, tuple) or len(pending) != 2:
+    if not isinstance(pending, tuple) or len(pending) != 3:
+        return
+    pending_request_id, pending_key, digests = pending
+    if str(getattr(item, "request_id", "") or "") != str(pending_request_id):
+        # A different turn (possibly a different backend) must never promote
+        # the pending snapshot recorded by an earlier request.
         return
     response = getattr(generation, "response", None)
     if not getattr(response, "is_success", False):
         return
-    pending_key, digests = pending
     if not isinstance(digests, dict):
         return
     backend = getattr(runtime.backend_manager, "current_backend", None)
+    supports_sessions = bool(
+        getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+    )
+    if not supports_sessions:
+        return
     session_key = str(getattr(backend, "_session_id", None) or "") or str(pending_key)
     baselines = getattr(runtime, "_pcm_baselines", None)
     if not isinstance(baselines, dict):

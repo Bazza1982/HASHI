@@ -92,11 +92,51 @@ def resolve_pcm_profile(
     )
 
 
-_QUERY_TOKEN_RE = re.compile(r"[a-z0-9_]{2,}")
+# Multilingual lexical tokenization. Shared by the PCM relevance projections
+# and the durable-memory encoder so every path uses the same deterministic
+# vocabulary (ASCII words plus CJK/Kana/Hangul bigrams) without an external
+# segmentation dependency. CJK text is otherwise invisible to ASCII-only
+# token matching, which would silently degrade relevance selection to prefix
+# truncation.
+CJK_RUN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]+")
+LATIN_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+
+def tokenize_multilingual(text: object) -> list[str]:
+    """Extract ASCII/alphanumeric words plus CJK/Kana/Hangul n-grams."""
+
+    lowered = str(text or "").lower()
+    tokens: list[str] = LATIN_TOKEN_RE.findall(lowered)
+    for run in CJK_RUN_RE.findall(lowered):
+        n = len(run)
+        if n == 1:
+            tokens.append(run)
+            continue
+        for i in range(n - 1):
+            tokens.append(run[i : i + 2])
+        if 2 < n <= 6:
+            tokens.append(run)
+    return tokens
+
+
+def cjk_query_substrings(text: object) -> list[str]:
+    """Return compact CJK/Kana/Hangul query terms for substring candidate lookup."""
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for run in CJK_RUN_RE.findall(str(text or "")):
+        candidates = (
+            [run] if len(run) <= 4 else [run[i : i + 2] for i in range(len(run) - 1)]
+        )
+        for term in candidates:
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
+    return terms[:12]
 
 
 def _query_terms(query: object) -> set[str]:
-    return set(_QUERY_TOKEN_RE.findall(str(query or "").casefold()))
+    return {token for token in tokenize_multilingual(query) if len(token) >= 2}
 
 
 def lexical_unit_selection(
@@ -117,7 +157,9 @@ def lexical_unit_selection(
     terms = _query_terms(query)
     scored: list[tuple[int, int, str, str]] = []
     for index, (label, body) in enumerate(units):
-        body_words = set(_QUERY_TOKEN_RE.findall(str(body or "").casefold()))
+        body_words = {
+            token for token in tokenize_multilingual(body) if len(token) >= 2
+        }
         scored.append((len(body_words & terms), index, str(label or ""), str(body or "")))
     matches = [row for row in scored if row[0] > 0]
     chosen = matches if matches else scored
