@@ -1099,7 +1099,9 @@ class WorkbenchApiServer:
             )
         except Exception as exc:  # noqa: BLE001 — HAL absence must never break the gateway
             logging.getLogger("HASHI.Workbench.HAL").warning(
-                "HAL endpoints unavailable (%s)", type(exc).__name__
+                "HAL endpoints unavailable: %s. The Core host role is "
+                "stdlib-only, so any third-party import (e.g. aiohttp) fails here.",
+                exc,
             )
 
         self.app.router.add_get(

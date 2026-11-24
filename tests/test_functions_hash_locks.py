@@ -23,7 +23,7 @@ def test_portable_hash_lock_preserves_all_functions_and_its_own_closure():
     canonical = pinned_versions((ROOT / "constraints/standard-py312.lock").read_text(encoding="utf-8"))
     portable = pinned_versions((ROOT / "packaging/portable_windows/requirements.lock").read_text(encoding="utf-8"))
     assert all(portable.get(name) == value for name, value in canonical.items())
-    assert portable.keys() - canonical.keys() == {"edge-tts", "playwright", "pyee", "greenlet", "tabulate"}
+    assert portable.keys() - canonical.keys() == {"edge-tts", "tabulate"}
 
 
 @pytest.mark.parametrize("invalid", ["aiohttp>=3", "aiohttp==3\naiohttp==4", "-r elsewhere.txt"])

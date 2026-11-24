@@ -147,7 +147,7 @@ class WhatsAppTransport:
 
         except ImportError:
             logger.error(
-                "neonize is not installed. Run: pip install neonize\n"
+                "neonize is not installed. Run: python -m pip install -e '.[whatsapp]'\n"
                 "WhatsApp transport will not be available."
             )
             raise

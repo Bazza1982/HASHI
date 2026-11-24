@@ -334,12 +334,16 @@ the explicit HERV3 row or the provider row consumed by HERV3:
 
 ### Prerequisites
 
+The normal `standard` install already includes Playwright. For minimal
+installations, add the browser profile once:
+
 ```bash
 python -m pip install -e ".[browser]"
 playwright install chromium
 ```
 
-Playwright is isolated in the `browser` dependency profile.
+Playwright is isolated in the `browser` dependency profile (part of
+`standard`).
 
 ### Cross-Platform
 
