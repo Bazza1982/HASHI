@@ -3797,7 +3797,7 @@ class HashiStageProvider(StageProvider):
                                 + ("when the Provider/model changed. " if changed_pending_route
                                    else "before a newer user instruction. "
                                    if getattr(self, "_provider_context_successor", False)
-                                   else "before execution resumed. ")
+                                   else "before the steer continuation. ")
                                 + "Do not assume it ran; verify any affected state before "
                                 "acting and never replay it automatically."
                             ),
