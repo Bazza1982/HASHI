@@ -37,7 +37,10 @@ continuation within the same execution still requires the original route. At a
 completed Tool batch boundary, it reuses the checkpointed conversation and
 paired Tool results without appending a freshly assembled prompt or replaying
 completed Tool effects, including when the original request contained structured
-media. Compatible Provider/model changes keep
+media. At a completed Provider response boundary, the original conversation and
+response remain intact; a brief continuation cue avoids another full context
+assembly. A missing or mismatched exact checkpoint fails closed. Compatible
+Provider/model changes keep
 completed Tool results and structured media; vendor-specific reasoning fields
 are not forwarded across different Provider engines.
 

@@ -183,7 +183,7 @@ async def test_repeated_interrupted_successors_do_not_repeat_assembled_context(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["ready_provider_request", "pending_tool_batch", "completed_tool_batch"])
+@pytest.mark.parametrize("boundary", ["ready_provider_request", "pending_tool_batch", "completed_tool_batch", "completed_provider_response"])
 async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boundary):
     from orchestrator.permissions.her_binding import ManagedHerTurn
     from tools.registry import ToolRegistry
@@ -258,6 +258,8 @@ async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boun
                 "path": str(tmp_path / "resumed.txt"), "content": "written once",
             })},
         }]})
+    elif boundary == "completed_provider_response":
+        exact.append({"role": "assistant", "content": "The original report is complete."})
     elif boundary == "completed_tool_batch":
         # Execute a real isolated side effect once and preserve its actual receipt.
         # A later change makes replay visible even if it would write the same bytes.
@@ -303,6 +305,13 @@ async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boun
     if boundary == "pending_tool_batch":
         assert main[0][-1]["tool_call_id"] == "pending-once"
         assert (tmp_path / "resumed.txt").read_text(encoding="utf-8") == "written once"
+    elif boundary == "completed_provider_response":
+        # Keep the completed response and the exact previous conversation.
+        # A small resume cue is allowed, but not another assembled PCM/history.
+        assert len(main[0]) == len(exact) + 1
+        assert main[0][-1]["role"] == "user"
+        assert len(main[0][-1]["content"]) < 512
+        assert "Context and reference material" not in main[0][-1]["content"]
     else:
         assert main[0] == exact
         if boundary == "completed_tool_batch":
@@ -368,7 +377,8 @@ async def test_successor_new_images_preserve_prior_provider_evidence(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_exact_completed_tool_resume_preserves_original_media_and_tool_result(tmp_path):
+@pytest.mark.parametrize("boundary", ["completed_tool_batch", "completed_provider_response"])
+async def test_exact_completed_resume_preserves_original_media_and_tool_result(tmp_path, boundary):
     from dataclasses import replace
     from orchestrator.her_v2.config import ProviderProfile
     from orchestrator.multimodal_contract import attachment_manifest
@@ -408,11 +418,14 @@ async def test_exact_completed_tool_resume_preserves_original_media_and_tool_res
         ]},
         {"role": "tool", "tool_call_id": "completed-read", "content": "Important completed result"},
     ])
-    checkpoint = {**_context("completed_tool_batch", history), "model": "google/gemini-2.5-pro"}
+    if boundary == "completed_provider_response":
+        history.append({"role": "assistant", "content": "Comparison complete."})
+    checkpoint = {**_context(boundary, history), "model": "google/gemini-2.5-pro"}
     stage = HashiStageProvider(backend_manager=Manager())
     stage.bind_provider_context(observer=lambda _: None, recovery=checkpoint, successor_turn=False)
     await stage.invoke(ProviderProfile("main", "openrouter-api", "google/gemini-2.5-pro"), request)
-    assert captured == [history]
+    assert len(captured) == 1 and captured[0][:len(history)] == history
+    assert len(captured[0]) == len(history) + (boundary == "completed_provider_response")
     assert len([part for part in history[1]["content"] if part.get("type") == "image_url"]) == 2
 
 
@@ -722,11 +735,12 @@ def _context(boundary, messages, **extra):
 
 
 @pytest.mark.parametrize("change", ["model", "stage", "missing_messages"])
-def test_exact_completed_batch_fails_closed_if_checkpoint_cannot_be_resumed(change):
+@pytest.mark.parametrize("boundary", ["completed_tool_batch", "completed_provider_response"])
+def test_exact_completed_boundary_fails_closed_if_checkpoint_cannot_be_resumed(change, boundary):
     from adapters.her_v2_provider import ProviderContextObserverError
     from orchestrator.her_v2.config import ProviderProfile
 
-    checkpoint = _context("completed_tool_batch", [
+    checkpoint = _context(boundary, [
         {"role": "system", "content": "original system"},
         {"role": "user", "content": "original task"},
         {"role": "assistant", "content": "", "tool_calls": [
@@ -735,6 +749,8 @@ def test_exact_completed_batch_fails_closed_if_checkpoint_cannot_be_resumed(chan
         ]},
         {"role": "tool", "tool_call_id": "completed", "content": "needed result"},
     ])
+    if boundary == "completed_provider_response":
+        checkpoint["messages"].append({"role": "assistant", "content": "Finished."})
     if change == "stage":
         checkpoint["stage"] = "plan"
     elif change == "missing_messages":

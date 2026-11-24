@@ -3515,7 +3515,7 @@ class HashiStageProvider(StageProvider):
                 and (
                     boundary in {"pending_tool_batch", "ready_provider_request"}
                     or (
-                        boundary == "completed_tool_batch"
+                        boundary in {"completed_tool_batch", "completed_provider_response"}
                         and request.context.get("her_v3")
                         and not getattr(self, "_provider_context_successor", False)
                     )
@@ -3588,7 +3588,13 @@ class HashiStageProvider(StageProvider):
             and self._provider_recovery_resume_pending
             and not getattr(self, "_provider_context_successor", False)
         )
-        if exact_pending or exact_completed_batch:
+        exact_completed_response = (
+            boundary == "completed_provider_response"
+            and request.context.get("her_v3")
+            and self._provider_recovery_resume_pending
+            and not getattr(self, "_provider_context_successor", False)
+        )
+        if exact_pending or exact_completed_batch or exact_completed_response:
             # This execution already owns its assembled prompt. A newly
             # compiled one must not replace the checkpoint's ownership.
             self._provider_context_prompt_candidate = None
@@ -3730,7 +3736,19 @@ class HashiStageProvider(StageProvider):
 
             continuation.extend(ordered_deferred_followups(deferred))
             deferred.clear()
-            if not exact_completed_batch:
+            if exact_completed_response:
+                # The final response is retained above. Re-driving this same
+                # execution needs only a continuation cue, not another PCM,
+                # history, or recovery assembly. Keep the original ownership.
+                continuation.append({
+                    "role": "user",
+                    "content": (
+                        "Continue the original task using the preceding conversation. "
+                        "If the task is complete, deliver the completed result; "
+                        "do not repeat completed actions."
+                    ),
+                })
+            elif not exact_completed_batch:
                 continuation.append({"role": "user", "content": successor_prompt})
         if (
             getattr(self, "_provider_context_successor", False)
@@ -6424,7 +6442,9 @@ class HashiStageProvider(StageProvider):
                 or self._provider_context_recovery.get("boundary") in {"pending_tool_batch", "ready_provider_request"}
                 or (
                     request.context.get("her_v3")
-                    and self._provider_context_recovery.get("boundary") == "completed_tool_batch"
+                    and self._provider_context_recovery.get("boundary") in {
+                        "completed_tool_batch", "completed_provider_response"
+                    }
                 )
                 or has_successor_content
             ) and ("continuation_messages" in parameters or accepts_extra_keywords):
