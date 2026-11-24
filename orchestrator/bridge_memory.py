@@ -274,6 +274,12 @@ class BgeM3Encoder:
             from transformers import AutoTokenizer
         except Exception as exc:
             self._error = f"dependencies unavailable: {exc}"
+            logging.getLogger("hashi.bridge_memory").warning(
+                "Semantic vector memory encoder unavailable (%s); using the "
+                "local-hash fallback encoder instead. Install the vector profile "
+                "for semantic embeddings: python -m pip install -e '.[vector]'",
+                exc,
+            )
             return
 
         tokenizer_candidates: list[str] = []
