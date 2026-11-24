@@ -50,6 +50,34 @@ _SUPPORTED_IMAGE_MIMES = frozenset(
 _SUPPORTED_REASONING_EFFORTS = frozenset({"off", "low", "high", "max"})
 
 
+def _canonical_image_parts(
+    request_content: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Return the canonical image media parts of one contract v1 request.
+
+    Reuses the shared multimodal contract so the production ``parts`` envelope
+    (``type: media``, ``modality: image``, ``local_ref``) is recognised instead
+    of only the legacy ``content_blocks``/``attachments`` shapes.  Invalid or
+    absent canonical content yields no parts rather than failing the turn.
+    """
+
+    if not isinstance(request_content, Mapping):
+        return ()
+    if not isinstance(request_content.get("parts"), list):
+        return ()
+    try:
+        from orchestrator.multimodal_contract import attachment_manifest
+
+        manifest = attachment_manifest(request_content)
+    except Exception:
+        return ()
+    return tuple(
+        part
+        for part in manifest
+        if str(part.get("modality") or "").strip().casefold() == "image"
+    )
+
+
 class _AcpRpcError(RuntimeError):
     def __init__(self, code: int, message: str, data: Any = None):
         super().__init__(f"ACP RPC error {code}: {message}")
@@ -1078,29 +1106,32 @@ class DshCLIAdapter(BaseBackend):
         if prompt:
             blocks.append({"type": "text", "text": prompt})
 
+        # Legacy compatibility shape: ``content_blocks``/``attachments`` carrying
+        # local paths.  Canonical production requests instead use the contract v1
+        # ``parts`` envelope (``type: media``, ``modality: image``, ``local_ref``).
         raw_blocks: list[Any] = []
         if isinstance(request_content, Mapping):
             candidate_blocks = request_content.get("content_blocks") or request_content.get("attachments") or []
             if isinstance(candidate_blocks, list):
                 raw_blocks = candidate_blocks
+        legacy_images: list[tuple[Mapping[str, Any], Path, str]] = []
+        for item in raw_blocks:
+            if not isinstance(item, Mapping):
+                continue
+            path_str = str(item.get("path") or item.get("file_path") or "").strip()
+            if not path_str:
+                continue
+            mime = str(item.get("mime_type") or item.get("mimeType") or "").strip().lower()
+            if not mime:
+                mime = (mimetypes.guess_type(path_str)[0] or "").lower()
+            if mime not in _SUPPORTED_IMAGE_MIMES:
+                continue
+            legacy_images.append((item, Path(path_str), mime))
 
-        # Attach inline images only when DSH advertised image prompt support
+        attached_legacy = 0
         if self._image_prompts_supported:
-            for item in raw_blocks:
-                if not isinstance(item, Mapping):
-                    continue
-                path_str = str(
-                    item.get("path") or item.get("file_path") or ""
-                ).strip()
-                if not path_str:
-                    continue
-                img_path = Path(path_str)
+            for _item, img_path, mime in legacy_images:
                 if not img_path.is_file():
-                    continue
-                mime = str(item.get("mime_type") or item.get("mimeType") or "").strip().lower()
-                if not mime:
-                    mime = (mimetypes.guess_type(str(img_path))[0] or "").lower()
-                if mime not in _SUPPORTED_IMAGE_MIMES:
                     continue
                 try:
                     raw_bytes = img_path.read_bytes()
@@ -1111,22 +1142,24 @@ class DshCLIAdapter(BaseBackend):
                             "data": base64.b64encode(raw_bytes).decode("ascii"),
                         }
                     )
+                    attached_legacy += 1
                 except Exception as exc:
                     self.logger.debug("Skipping unreadable image %s: %s", img_path, exc)
-        elif raw_blocks:
-            # Silent drops hide a real capability gap; make the skip observable
-            # in production logs (INFO and above) instead of only at DEBUG.
-            dropped = [
-                item
-                for item in raw_blocks
-                if isinstance(item, Mapping)
-                and str(item.get("path") or item.get("file_path") or "").strip()
-            ]
-            if dropped:
-                self.logger.warning(
-                    "DSH ACP did not advertise inline image prompts; %d inline attachment(s) were not sent.",
-                    len(dropped),
-                )
+
+        # Canonical image attachments have no DSH transport here, so they are
+        # always among the images that were not transmitted.
+        canonical_images = _canonical_image_parts(request_content)
+        unattached_legacy = len(legacy_images) - attached_legacy
+        unattached = unattached_legacy + len(canonical_images)
+        if unattached:
+            self.logger.warning(
+                "DSH ACP did not transmit %d image attachment(s) "
+                "(canonical=%d, legacy=%d, image_prompts=%s).",
+                unattached,
+                len(canonical_images),
+                unattached_legacy,
+                self._image_prompts_supported,
+            )
 
         if not blocks:
             blocks.append({"type": "text", "text": " "})

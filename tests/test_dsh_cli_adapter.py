@@ -717,14 +717,47 @@ async def test_dsh_cli_reuses_recent_help_probe_across_rebuilt_executions(tmp_pa
     assert len(help_probes) == 1
 
 
-def test_dsh_cli_warns_when_inline_images_are_dropped_without_capability(tmp_path: Path, caplog):
+def test_dsh_cli_reports_images_not_transmitted_for_legacy_and_canonical_content(tmp_path: Path, caplog):
     mock_script = tmp_path / "mock_dsh_acp.py"
     mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
     adapter = _make_adapter(tmp_path, mock_script)
     assert adapter._image_prompts_supported is False
     image = tmp_path / "photo.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    canonical = {
+        "version": 1,
+        "parts": [
+            {
+                "type": "media",
+                "item_index": 1,
+                "attachment_id": "att-1",
+                "modality": "image",
+                "mime_type": "image/png",
+                "local_ref": str(image),
+                "size_bytes": 8,
+                "sha256": "a" * 64,
+            },
+        ],
+    }
     caplog.set_level("WARNING")
+
+    # Legacy compatibility shape still reports the skipped attachment.
     blocks = adapter._build_prompt_blocks("hello", {"attachments": [{"path": str(image)}]})
     assert blocks == [{"type": "text", "text": "hello"}]
-    assert "inline attachment" in caplog.text
+    assert "did not transmit 1 image attachment(s) (canonical=0, legacy=1" in caplog.text
+
+    # Canonical production content (contract v1 media part) is reported too.
+    caplog.clear()
+    blocks = adapter._build_prompt_blocks("hello", canonical)
+    assert blocks == [{"type": "text", "text": "hello"}]
+    assert "did not transmit 1 image attachment(s) (canonical=1, legacy=0" in caplog.text
+
+    # Legacy images stay transmitted when prompts were advertised; canonical
+    # images still have no DSH transport and remain reported.
+    caplog.clear()
+    adapter._image_prompts_supported = True
+    legacy_blocks = adapter._build_prompt_blocks("hello", {"attachments": [{"path": str(image)}]})
+    assert any(block.get("type") == "image" for block in legacy_blocks)
+    assert "did not transmit" not in caplog.text
+    adapter._build_prompt_blocks("hello", canonical)
+    assert "did not transmit 1 image attachment(s) (canonical=1, legacy=0" in caplog.text
