@@ -2338,6 +2338,7 @@ class HERv2Adapter(BaseBackend):
                 str(request_id or "") in self._steer_continuation_tracking()
             )
             self._steer_continuation_tracking().discard(str(request_id or ""))
+            successor_turn = canonical_recovery_context is not None and not permission_exact_continuation
             provider.bind_provider_context(
                 observer=lambda checkpoint: (
                     self._session_coordinator.record_provider_context_checkpoint(
@@ -2350,8 +2351,8 @@ class HERv2Adapter(BaseBackend):
                     )
                 ),
                 recovery=private_provider_context,
-                resume_pending_tools=not steer_adopted,
-                successor_turn=canonical_recovery_context is not None and not permission_exact_continuation,
+                resume_pending_tools=not steer_adopted and not successor_turn,
+                successor_turn=successor_turn,
                 pcm_delta=recovery_pcm_delta,
             )
             successor_binder = getattr(permission_execution, "bind_successor_provider_context", None)
@@ -2363,7 +2364,7 @@ class HERv2Adapter(BaseBackend):
             ):
                 successor_binder(
                     private_provider_context,
-                    resume_pending_tools=not steer_adopted,
+                    resume_pending_tools=not steer_adopted and not successor_turn,
                     pcm_delta=recovery_pcm_delta,
                 )
         if permission_execution is not None:

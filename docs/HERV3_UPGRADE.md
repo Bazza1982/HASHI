@@ -27,10 +27,12 @@ On a successor Turn, private Provider checkpoints carry the exact position and
 digest of the assembled user context and its original user request. The next
 compatible Provider replaces only that verified assembly, preserves the original
 request and Tool protocol, and adds the latest canonical context once. Exact
-pending execution keeps its original conversation; new successor instructions
-and media wait until all Tool results and their follow-ups are paired. A /steer
-or Provider/model change closes pending calls without executing them, retaining
-a warning to verify their effects. The existing protected-Worker handoff carries
+pending execution within the same Run keeps its original conversation. A newly
+accepted user Turn, whether ordinary or /steer, closes unresolved old Tool calls
+without executing them; completed results and deferred media remain paired and
+the latest instruction reaches the model before it chooses further actions. A
+Provider/model change likewise closes pending calls and retains a warning to
+verify uncertain effects. The existing protected-Worker handoff carries
 these successor semantics only after the canonical HER owner verifies the source;
 a successor must persist its own pending boundary before Tool execution. Exact
 continuation within the same execution still requires the original route. At a

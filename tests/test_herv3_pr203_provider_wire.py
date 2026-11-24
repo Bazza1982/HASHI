@@ -484,8 +484,9 @@ async def test_pending_successor_media_follows_all_tool_results(tmp_path):
                                 successor_turn=True, resume_pending_tools=True)
     await stage.invoke(ProviderProfile("main", "openrouter-api", "google/gemini-2.5-pro"), request)
     outgoing = captured[0]["messages"]
-    assert (tmp_path / "pending.txt").read_text(encoding="utf-8") == "written once"
+    assert not (tmp_path / "pending.txt").exists()
     tool_index = next(i for i, row in enumerate(outgoing) if row.get("tool_call_id") == "pending-write")
+    assert "verify" in outgoing[tool_index]["content"].lower()
     old_index = next(i for i, row in enumerate(outgoing) if "T0xE" in json.dumps(row))
     advisory_index = next(i for i, row in enumerate(outgoing) if row.get("content") == "Older tool advisory")
     assert tool_index < old_index < advisory_index < len(outgoing) - 1
@@ -786,7 +787,7 @@ def test_changed_owned_message_is_not_deleted_or_misclassified():
     assert "New user instruction" in result[-1]["content"]
 
 
-def test_pending_successor_keeps_protocol_and_defers_latest_instruction():
+def test_pending_successor_closes_old_call_before_latest_instruction():
     from orchestrator.her_v2.config import ProviderProfile
     from orchestrator.her_v2.provider_continuation import pending_tool_calls
 
@@ -804,12 +805,15 @@ def test_pending_successor_keeps_protocol_and_defers_latest_instruction():
         profile=ProviderProfile("main", "openrouter-api", "configured/old"),
         request=_direct_request(), stage_prompt="Assembled context",
         original_request="New user instruction", system_prompt="new system")
-    assert messages == pending
-    assert [item["id"] for item in pending_tool_calls(messages)] == ["c1"]
-    deferred = stage._provider_recovery_deferred_followups[-1]
-    assert deferred["role"] == "user"
-    assert "New user instruction" in deferred["content"]
-    assert '"safe_to_resume": false' in deferred["content"]
+    assert messages[1:3] == pending[1:3]
+    assert messages[3]["role"] == "tool" and messages[3]["tool_call_id"] == "c1"
+    assert "verify" in messages[3]["content"].lower()
+    assert messages[-1]["role"] == "user"
+    assert "New user instruction" in messages[-1]["content"]
+    assert '"safe_to_resume": false' in messages[-1]["content"]
+    assert stage._provider_recovery_deferred_followups == []
+    with pytest.raises(ValueError, match="no pending Tool call"):
+        pending_tool_calls(messages)
 
 
 def test_model_switch_closes_pending_batch_without_executing_it():
@@ -893,6 +897,16 @@ async def test_real_file_effects_survive_interrupted_recovery(tmp_path, monkeypa
                 for n in range(2)
             ]
             delta = {"tool_calls": tool_calls}
+            finish = "tool_calls"
+        elif (boundary == "pending_tool_batch" and not steered and not model_switched
+              and any(row.get("tool_call_id") == "write-1" for row in payload["messages"])
+              and not any(row.get("tool_call_id") == "write-reconsidered" for row in payload["messages"])):
+            # A newly accepted instruction is considered first; only the
+            # model's new decision may request the remaining write.
+            delta = {"tool_calls": [{"index": 0, "id": "write-reconsidered", "type": "function",
+                     "function": {"name": "file_write", "arguments": json.dumps({
+                         "path": str(tmp_path / "effect-1.txt"), "content": "effect-1"
+                     })}}]}
             finish = "tool_calls"
         else:
             delta = {"content": "Both files are written."}
@@ -1028,14 +1042,25 @@ async def test_real_file_effects_survive_interrupted_recovery(tmp_path, monkeypa
     else:
         response = await adapter.generate_response(second, "second")
     assert response.is_success, response.error
-    assert counts == ({"write-0": 1} if steered or model_switched else {"write-0": 1, "write-1": 1})
+    if steered or model_switched:
+        assert counts == {"write-0": 1}
+    elif boundary == "pending_tool_batch":
+        assert counts == {"write-0": 1, "write-reconsidered": 1}
+        reconsideration = next(call["messages"] for call in wire
+                               if any(row.get("tool_call_id") == "write-1" for row in call["messages"]))
+        assert "Continue and verify both files" in json.dumps(reconsideration)
+    else:
+        assert counts == {"write-0": 1, "write-1": 1}
     assert (tmp_path / "effect-0.txt").read_text(encoding="utf-8") == "effect-0"
     if steered or model_switched:
         assert not (tmp_path / "effect-1.txt").exists()
     else:
         assert (tmp_path / "effect-1.txt").read_text(encoding="utf-8") == "effect-1"
     outgoing = wire[-1]["messages"]
-    assert [m.get("tool_call_id") for m in outgoing if m.get("role") == "tool"] == ["write-0", "write-1"]
+    tool_ids = [m.get("tool_call_id") for m in outgoing if m.get("role") == "tool"]
+    assert tool_ids == (["write-0", "write-1", "write-reconsidered"]
+                        if boundary == "pending_tool_batch" and not steered and not model_switched
+                        else ["write-0", "write-1"])
     serialized = json.dumps(outgoing, ensure_ascii=False)
     assert "unknown-other" in serialized
     assert "Continue and verify both files" in serialized

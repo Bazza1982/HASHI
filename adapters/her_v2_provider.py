@@ -3545,7 +3545,9 @@ class HashiStageProvider(StageProvider):
             compatible_successor and boundary in {"pending_tool_batch", "ready_provider_request"}
         )
         self._provider_recovery_resume_pending = (
-            self._provider_context_resume_pending and not changed_pending_route
+            self._provider_context_resume_pending
+            and not changed_pending_route
+            and not getattr(self, "_provider_context_successor", False)
         )
         if compatible_successor and previous_engine != next_engine:
             for message in continuation:
@@ -3704,7 +3706,9 @@ class HashiStageProvider(StageProvider):
                             "content": (
                                 "This Tool call was interrupted before it returned a result "
                                 + ("when the Provider/model changed. " if changed_pending_route
-                                   else "by /steer. ")
+                                   else "before a newer user instruction. "
+                                   if getattr(self, "_provider_context_successor", False)
+                                   else "before execution resumed. ")
                                 + "Do not assume it ran; verify any affected state before "
                                 "acting and never replay it automatically."
                             ),
