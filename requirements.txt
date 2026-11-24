@@ -1,8 +1,9 @@
 # HASHI standard local runtime.
 #
 # The minimal package core is declared in pyproject.toml. This source-checkout
-# profile additionally keeps the standard media, Remote, and TUI surfaces used
-# by the normal launchers. Optional integrations live in named project extras.
+# profile additionally keeps the standard media, Remote, TUI, and browser-tool
+# surfaces used by the normal launchers. Optional integrations live in named
+# project extras.
 
 # Shared and Agent Functions runtime
 python-telegram-bot>=20.0

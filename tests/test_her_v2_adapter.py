@@ -2454,6 +2454,11 @@ async def test_ollama_presentation_uses_only_pcm_main_call(tmp_path, engine, ada
     manager = PresentationManager(config.system_md)
     provider = HashiStageProvider(backend_manager=manager, on_stream_event=capture)
     config._her_v2_stage_provider = provider
+    from orchestrator import telegram_stream_policy
+
+    # The commentary default is ``off``; select ``packaged`` so the provider
+    # commentary pipeline is active (local providers then degrade to raw).
+    telegram_stream_policy.set_commentary_mode(config, "packaged")
     adapter = HERv2Adapter(config, _global_config(tmp_path))
 
     assert await adapter.initialize()
@@ -2486,7 +2491,7 @@ async def test_ollama_presentation_uses_only_pcm_main_call(tmp_path, engine, ada
         assert style_calls == []
         assert response.text == final_text
         assert [event.summary for event in commentary] == ["Raw provider progress"]
-        assert commentary[0].provenance == "ollama_pcm_only"
+        assert commentary[0].provenance == "stage_authored_persona"
     else:
         assert len(persona_calls) == 1
         assert len(style_calls) == 1

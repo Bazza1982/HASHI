@@ -342,8 +342,8 @@ python -m pip install -e ".[browser]"
 playwright install chromium
 ```
 
-Playwright is isolated in the `browser` dependency profile (part of
-`standard`).
+Playwright ships with the `standard` profile (also selectable alone via the
+`browser` extra).
 
 ### Cross-Platform
 
