@@ -271,6 +271,7 @@ class HerBackendSessionCoordinator:
         removed_section_keys: Sequence[str] = (),
         revoked_resource_ids: Sequence[str] = (),
         conversation_at: str = "",
+        pcm_profile: str = "cloud",
     ) -> tuple[str, dict[str, Any]]:
         """Build one full open or minimal append envelope from durable ACK state."""
 
@@ -295,6 +296,7 @@ class HerBackendSessionCoordinator:
                 "her_backend_session_id": session_id,
                 "session_epoch": 1,
                 "session_binding": binding,
+                "pcm_profile": str(pcm_profile),
                 "pcm_snapshot": {
                     "revision": 1,
                     "digest": _digest(section_map),
@@ -413,6 +415,7 @@ class HerBackendSessionCoordinator:
             "expected_state_version": int(current["state_version"]),
             "expected_canonical_sequence": int(current["canonical_sequence"]),
             "session_binding": binding,
+            "pcm_profile": str(pcm_profile),
             "turn": {
                 "turn_id": turn_id,
                 "parent_turn_id": str(current.get("last_turn_id") or ""),
@@ -631,10 +634,20 @@ class HerBackendSessionCoordinator:
         ]
         materialized = ""
         pcm_dict = session.get("pcm") or {}
+        turn_pcm_profile = str(payload.get("pcm_profile") or "cloud")
         history = self._uncompacted_history(
             pcm_dict,
             self.store.recent_completed_turns(session_id),
         )
+        from orchestrator.pcm_profile import (
+            LOCAL_MAX_RECENT_EXCHANGES,
+            PCM_PROFILE_LOCAL,
+        )
+
+        if turn_pcm_profile.strip().casefold() == PCM_PROFILE_LOCAL:
+            # Local prioritizes the most recent relevant exchanges; the full
+            # canonical history stays durable and retrievable.
+            history = history[-LOCAL_MAX_RECENT_EXCHANGES:]
         pcm_sections = [
             dict(value)
             for value in pcm_dict.values()
@@ -644,6 +657,7 @@ class HerBackendSessionCoordinator:
             "sections": pcm_sections,
             "history": [dict(item) for item in history if isinstance(item, Mapping)],
             "current_request": str(turn.get("user_message") or ""),
+            "pcm_profile": turn_pcm_profile,
         }
         if not duplicate or str(turn.get("status") or "") == "active":
             materialized = self._render_prompt(
@@ -736,18 +750,13 @@ class HerBackendSessionCoordinator:
         def rendered(section: Mapping[str, Any]) -> str:
             return f"--- {section.get('title') or section.get('key')} ---\n\n{section.get('text') or ''}"
 
-        parts = [
-            (
-                "Bridge-managed PCM follows. Authority is carried by the typed envelope; "
-                "section order is presentation order and does not flatten authority."
-            )
-        ]
+        parts: list[str] = []
         for authority in ("permanent_system", "global_system", "local_system"):
             parts.extend(rendered(item) for item in groups.get(authority, []))
         parts.append(
             "--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
-            "The following is the authoritative request for this turn at user-instruction "
-            "level. It overrides conflicting earlier user requests, not system instructions.\n\n"
+            "This request overrides conflicting earlier user requests, "
+            "not system instructions.\n\n"
             + str(user_message)
         )
         attachments = [

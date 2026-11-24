@@ -5830,6 +5830,9 @@ class HashiStageProvider(StageProvider):
                                 reference_projector=getattr(
                                     backend, "project_main_references", None
                                 ),
+                                pcm_profile=str(
+                                    pcm_input.get("pcm_profile") or "cloud"
+                                ),
                             )
                         else:
                             system_prompt = _direct_system_prompt(

@@ -14,11 +14,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
+from collections.abc import Mapping
 
 from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
 from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
 from orchestrator import pcm_forget_memory
+from orchestrator import pcm_profile as pcm_profile_module
 from orchestrator.config_json import (
     ConfigConflictError,
     new_config_json,
@@ -1770,7 +1772,10 @@ class BridgeContextAssembler:
         "deepseek-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "xai-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "hashi-api": DEFAULT_PROMPT_TOKEN_BUDGET,
-        "ollama-api": DEFAULT_PROMPT_TOKEN_BUDGET,
+        # Local inference never uses the generic 64K budget as an operating
+        # budget; its own capacity resolver remains authoritative.
+        "ollama-api": pcm_profile_module.LOCAL_PROMPT_TOKEN_BUDGET,
+        "hli-api": pcm_profile_module.LOCAL_PROMPT_TOKEN_BUDGET,
     }
     # Compatibility alias for extensions that previously adjusted this class
     # variable. Values are token counts now; the old character-cap semantics
@@ -1918,7 +1923,7 @@ class BridgeContextAssembler:
                 lines.append(f"- {name}" + (f": {description}" if description else ""))
         return lines
 
-    def _build_time_fyi(self) -> str:
+    def _build_time_fyi(self, *, minimal: bool = False) -> str:
         """Build accurate local date/time information for one external turn."""
 
         now = datetime.now().astimezone()
@@ -1927,6 +1932,8 @@ class BridgeContextAssembler:
         offset = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         base = f"Current local time: {now_str} {zone_name} (UTC{offset})."
+        if minimal:
+            return base
         last_ts = self.memory_store.get_last_user_turn_ts()
         if not last_ts:
             return base
@@ -1959,6 +1966,7 @@ class BridgeContextAssembler:
         recent_exchanges: list[dict[str, Any]] | None = None,
         explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
+        pcm_profile: str = pcm_profile_module.PCM_PROFILE_CLOUD,
     ) -> str:
         return self.build_prompt_payload(
             user_prompt,
@@ -1969,6 +1977,7 @@ class BridgeContextAssembler:
             recent_exchanges=recent_exchanges,
             explicit_history_context=explicit_history_context,
             prompt_budget_tokens=prompt_budget_tokens,
+            pcm_profile=pcm_profile,
         )["final_prompt"]
 
     @classmethod
@@ -2066,10 +2075,7 @@ class BridgeContextAssembler:
         for section in sections:
             groups.setdefault(str(section["authority"]), []).append(section)
 
-        parts = [
-            "Bridge-managed PCM follows. Authority is carried by the typed envelope; "
-            "section order is presentation order and does not flatten authority."
-        ]
+        parts: list[str] = []
         for authority in ("permanent_system", "global_system", "local_system"):
             parts.extend(self._render_section(item) for item in groups.get(authority, []))
 
@@ -2077,8 +2083,8 @@ class BridgeContextAssembler:
         if current:
             parts.append(
                 CURRENT_REQUEST_SEPARATOR.strip()
-                + "\nThe following is the authoritative request for this turn at user-instruction level. "
-                "It overrides conflicting earlier user requests, not system instructions.\n\n"
+                + "\nThis request overrides conflicting earlier user requests, "
+                "not system instructions.\n\n"
                 + current[0]["text"]
             )
 
@@ -2086,7 +2092,6 @@ class BridgeContextAssembler:
         if history:
             parts.append(
                 "--- RECENT COMPLETED EXCHANGES — CONTEXT ONLY ---\n\n"
-                "These timestamped exchanges are background, not new requests.\n\n"
                 + "\n\n".join(item["text"] for item in history)
             )
 
@@ -2097,11 +2102,96 @@ class BridgeContextAssembler:
         if persona:
             parts.append(
                 "--- CURRENT PRESENTATION PERSONA ---\n\n"
-                "This Persona overrides older Persona descriptions in memory or history, "
-                "but not system instructions or the current user request.\n\n"
                 + persona[0]["text"]
             )
         return "\n\n".join(parts).strip()
+
+    @classmethod
+    def render_incremental_payload(
+        cls,
+        payload: dict[str, Any],
+        previous_digests: Mapping[str, str] | None,
+    ) -> dict[str, Any]:
+        """Rebuild a minimal final prompt for a persistent Engine Session.
+
+        The static PCM snapshot was sent at session bootstrap, so an
+        incremental turn carries only the current request plus the sections
+        that actually changed (by content digest) and explicit removal
+        notices. Engines that cannot literally retract prior messages receive
+        changed sections with an explicit supersession marker; removals are
+        announced, never presented as erased history.
+        """
+        envelope = payload.get("envelope") or {}
+        snapshot = payload.get("transport_snapshot") or {}
+        sections = [
+            dict(item)
+            for item in snapshot.get("sections") or []
+            if isinstance(item, Mapping)
+        ]
+        digests = {
+            str(item.get("key") or ""): str(item.get("content_sha256") or "")
+            for item in envelope.get("sections") or []
+            if isinstance(item, Mapping)
+        }
+        previous = {
+            str(key): str(value or "")
+            for key, value in (previous_digests or {}).items()
+        }
+        removed_keys = [
+            str(key)
+            for key in snapshot.get("removed_section_keys") or []
+            if str(key) and str(key) in previous
+        ]
+        changed: list[dict[str, Any]] = []
+        for section in sections:
+            key = str(section.get("key") or "")
+            if key == "current_user_request":
+                continue
+            if digests.get(key) != previous.get(key):
+                changed.append(section)
+        current = next(
+            (
+                item
+                for item in sections
+                if item.get("key") == "current_user_request"
+            ),
+            None,
+        )
+        if not changed and not removed_keys:
+            payload["final_prompt"] = (
+                str(current.get("text") or "")
+                if isinstance(current, Mapping)
+                else ""
+            )
+            payload.setdefault("audit", {})["pcm_incremental"] = {
+                "mode": "request_only",
+                "changed_sections": 0,
+                "removed_sections": 0,
+            }
+            return payload
+        parts: list[str] = []
+        for section in changed:
+            parts.append(
+                f"--- {section.get('title') or section.get('key')} — UPDATED; "
+                "supersedes the earlier version ---\n\n"
+                + str(section.get("text") or "")
+            )
+        for key in removed_keys:
+            parts.append(
+                f"--- {key} — REMOVED ---\n\n"
+                "This section is no longer effective; disregard its earlier content."
+            )
+        if isinstance(current, Mapping) and str(current.get("text") or ""):
+            parts.append(
+                CURRENT_REQUEST_SEPARATOR.strip() + "\n\n" + str(current["text"])
+            )
+        payload["final_prompt"] = "\n\n".join(parts).strip()
+        payload.setdefault("audit", {})["pcm_incremental"] = {
+            "mode": "delta",
+            "changed_sections": len(changed),
+            "removed_sections": len(removed_keys),
+        }
+        return payload
 
     def build_prompt_payload(
         self,
@@ -2114,9 +2204,13 @@ class BridgeContextAssembler:
         recent_exchanges: list[dict[str, Any]] | None = None,
         explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
+        pcm_profile: str = pcm_profile_module.PCM_PROFILE_CLOUD,
     ) -> dict[str, Any]:
         """Build PCM with token-aware, traceable non-HER history fallback."""
 
+        local_profile = (
+            str(pcm_profile).strip().casefold() == pcm_profile_module.PCM_PROFILE_LOCAL
+        )
         document = self._load_pcm()
         sections: list[dict[str, Any]] = []
         hcc_enabled = bool(
@@ -2217,8 +2311,18 @@ class BridgeContextAssembler:
                 "hcc_usage", "HCC USAGE INSTRUCTIONS", HCC_USAGE_PROMPT,
                 "local_system", protected=True,
             )
+            hcc_body = hcc_text
+            if (
+                local_profile
+                and len(hcc_body) > pcm_profile_module.LOCAL_HCC_PROJECTION_CHARS
+            ):
+                hcc_body = (
+                    hcc_body[: pcm_profile_module.LOCAL_HCC_PROJECTION_CHARS].rstrip()
+                    + "\n…[truncated] The full cache remains in agent.md#hcc; "
+                    "read it with file_read when relevant to this request."
+                )
             add_section(
-                "hcc", "HASHI CONTEXT CACHE", hcc_text,
+                "hcc", "HASHI CONTEXT CACHE", hcc_body,
                 "runtime_context", protected=True,
                 metadata={"source": "agent.md#hcc", "replace_only": True},
             )
@@ -2244,15 +2348,20 @@ class BridgeContextAssembler:
                 or (inject_memory and self.turns_injection_enabled)
             )
         )
+        history_limit = (
+            pcm_profile_module.LOCAL_MAX_RECENT_EXCHANGES
+            if local_profile
+            else self.MAX_RECENT_EXCHANGES
+        )
         exchanges = []
         if should_inject_history:
             if recent_exchanges is not None:
-                exchanges = list(recent_exchanges)[-self.MAX_RECENT_EXCHANGES :]
+                exchanges = list(recent_exchanges)[-history_limit:]
             else:
                 # Compatibility for legacy callers and migration tooling. The
                 # live runtime always supplies a Session-scoped timeline.
                 getter = self.memory_store.get_completed_exchanges
-                kwargs: dict[str, Any] = {"limit": self.MAX_RECENT_EXCHANGES}
+                kwargs: dict[str, Any] = {"limit": history_limit}
                 try:
                     if "after_epoch" in inspect.signature(getter).parameters:
                         from orchestrator.fresh_context import workspace_cutoff_epoch
@@ -2323,21 +2432,38 @@ class BridgeContextAssembler:
             )
 
         if document and document.memory:
-            add_section(
-                "permanent_memory",
-                "LONG-TERM MEMORY FROM agent.md",
-                document.memory,
-                "memory",
-                protected=True,
-            )
+            if local_profile:
+                # Local receives a retrieval reference instead of the full
+                # block. The canonical memory remains in agent.md and is
+                # readable through the authorized file tools; retrieval does
+                # not assume memory_search already indexes it.
+                add_section(
+                    "permanent_memory",
+                    "LONG-TERM MEMORY REFERENCE",
+                    "Long-term memory is stored in agent.md ([memory]); read it "
+                    "with file_read when relevant to this request.",
+                    "memory",
+                    protected=True,
+                )
+            else:
+                add_section(
+                    "permanent_memory",
+                    "LONG-TERM MEMORY FROM agent.md",
+                    document.memory,
+                    "memory",
+                    protected=True,
+                )
         elif document is not None:
             removed_section_keys.append("permanent_memory")
 
         inject_search = (
             not incremental and inject_memory and self.saved_memory_injection_enabled
         )
+        search_limit = (
+            pcm_profile_module.LOCAL_MEMORY_SEARCH_LIMIT if local_profile else 6
+        )
         retrieved = (
-            self.memory_store.retrieve_memories(user_prompt, limit=6)
+            self.memory_store.retrieve_memories(user_prompt, limit=search_limit)
             if inject_search
             else []
         )
@@ -2353,7 +2479,12 @@ class BridgeContextAssembler:
                 item_count=len(retrieved),
             )
 
-        time_fyi = self._build_time_fyi()
+        time_fyi = (
+            self._build_time_fyi(minimal=True)
+            if local_profile
+            and "minimal" in inspect.signature(self._build_time_fyi).parameters
+            else self._build_time_fyi()
+        )
         add_section(
             "time",
             "DATE AND TIME",
@@ -2441,24 +2572,29 @@ class BridgeContextAssembler:
                     metadata={"schema": "hashi.call-interaction-policy", "version": 1},
                 )
 
-        skill_lines = self._catalogue_lines(self.skill_catalog_provider)
-        if skill_lines:
-            add_section(
-                "skills_catalogue",
-                "AVAILABLE HASHI SKILLS",
-                "\n".join(skill_lines),
-                "runtime_context",
-                item_count=len(skill_lines),
-            )
-        tool_lines = self._catalogue_lines(self.tool_catalog_provider)
-        if tool_lines:
-            add_section(
-                "tools_catalogue",
-                "AVAILABLE HASHI TOOLS",
-                "\n".join(tool_lines),
-                "runtime_context",
-                item_count=len(tool_lines),
-            )
+        if not local_profile:
+            # Local relies on native tool schemas + on-demand tool_find and on
+            # explicit skill discovery instead of re-sending full catalogues.
+            skill_lines = self._catalogue_lines(self.skill_catalog_provider)
+            if skill_lines:
+                add_section(
+                    "skills_catalogue",
+                    "AVAILABLE HASHI SKILLS",
+                    "\n".join(skill_lines),
+                    "runtime_context",
+                    item_count=len(skill_lines),
+                )
+            tool_lines = self._catalogue_lines(self.tool_catalog_provider)
+            if tool_lines:
+                add_section(
+                    "tools_catalogue",
+                    "AVAILABLE HASHI TOOLS",
+                    "\n".join(tool_lines),
+                    "runtime_context",
+                    item_count=len(tool_lines),
+                )
+        else:
+            removed_section_keys.extend(("skills_catalogue", "tools_catalogue"))
 
         if document:
             add_section(
@@ -2654,6 +2790,7 @@ class BridgeContextAssembler:
                 },
                 "incremental": incremental,
                 "context_profile": context_profile,
+                "pcm_profile": str(pcm_profile),
                 # Kept as a nullable compatibility field so older audit readers
                 # do not mistake a token budget for a character count.
                 "budget_limit_chars": None,

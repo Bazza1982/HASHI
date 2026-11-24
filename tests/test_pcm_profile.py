@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import json
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+sys.modules.setdefault("edge_tts", types.ModuleType("edge_tts"))
+
+from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.her_v2.v3_prompt import (
+    MAIN_CONTRACT_LOCAL,
+    compile_main_prompt,
+)
+from orchestrator.pcm import render_pcm_document
+from orchestrator.pcm_profile import (
+    LOCAL_MAX_RECENT_EXCHANGES,
+    LOCAL_MEMORY_SEARCH_LIMIT,
+    LOCAL_PROMPT_TOKEN_BUDGET,
+    resolve_pcm_profile,
+)
+
+
+def _assembler(tmp_path: Path, *, memory: str = "Long-term memory facts.", hcc: str | None = None):
+    pcm = tmp_path / "agent.md"
+    pcm.parent.mkdir(parents=True, exist_ok=True)
+    pcm.write_text(
+        render_pcm_document(persona="Persona", system="System", memory=memory, hcc=hcc),
+        encoding="utf-8",
+    )
+    store = BridgeMemoryStore(tmp_path)
+    return store, BridgeContextAssembler(store, pcm)
+
+
+def _section(payload: dict, key: str) -> dict | None:
+    for section in payload["transport_snapshot"]["sections"]:
+        if section["key"] == key:
+            return section
+    return None
+
+
+# --- B. profile resolution ---------------------------------------------------
+
+
+def test_profile_defaults_by_engine():
+    assert resolve_pcm_profile("hli-api") == "local"
+    assert resolve_pcm_profile("ollama-api") == "local"
+    assert resolve_pcm_profile("codex-cli") == "cloud"
+    assert resolve_pcm_profile("grok-cli") == "cloud"
+    assert resolve_pcm_profile("dsh-cli") == "cloud"
+    assert resolve_pcm_profile("her-v2") == "cloud"
+
+
+def test_profile_follows_herv3_actual_inference_target():
+    assert (
+        resolve_pcm_profile("her-v2", her_v3_target_engine="ollama-api") == "local"
+    )
+    assert (
+        resolve_pcm_profile("her-v2", her_v3_target_engine="hli-api") == "local"
+    )
+    assert (
+        resolve_pcm_profile("her-v2", her_v3_target_engine="deepseek-api") == "cloud"
+    )
+
+
+def test_profile_explicit_override_wins_and_validates():
+    assert resolve_pcm_profile("grok-cli", backend_extra={"pcm_profile": "local"}) == "local"
+    assert (
+        resolve_pcm_profile("ollama-api", backend_extra={"pcm_profile": "cloud"})
+        == "cloud"
+    )
+    with pytest.raises(ValueError):
+        resolve_pcm_profile("grok-cli", backend_extra={"pcm_profile": "hybrid"})
+    # Never inferred from model names or endpoint addresses.
+    assert resolve_pcm_profile("codex-cli") == "cloud"
+
+
+# --- C/D. local tiering ------------------------------------------------------
+
+
+def test_local_omits_full_permanent_memory_but_keeps_reference(tmp_path):
+    _store, assembler = _assembler(tmp_path, memory="secret long-term facts" * 40)
+    payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")
+    memory_section = _section(payload, "permanent_memory")
+    assert memory_section is not None
+    assert "secret long-term facts" not in memory_section["text"]
+    assert "file_read" in memory_section["text"]
+    cloud = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="cloud")
+    assert "secret long-term facts" in _section(cloud, "permanent_memory")["text"]
+
+
+def test_local_skips_skill_and_tool_catalogues(tmp_path):
+    _store, assembler = _assembler(tmp_path)
+    payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")
+    keys = {s["key"] for s in payload["transport_snapshot"]["sections"]}
+    assert "skills_catalogue" not in keys
+    assert "tools_catalogue" not in keys
+    assert "skills_catalogue" in payload["transport_snapshot"]["removed_section_keys"]
+
+
+def test_local_minimal_time_and_limited_history(tmp_path, monkeypatch):
+    store, assembler = _assembler(tmp_path)
+    monkeypatch.setattr(
+        store, "get_last_user_turn_ts", lambda: "2026-09-03T10:05:00+10:00"
+    )
+    exchanges = [
+        {
+            "sequence": index + 1,
+            "user_ts": "2026-09-03T10:00:00+10:00",
+            "assistant_ts": "2026-09-03T10:01:00+10:00",
+            "user_text": f"user {index}",
+            "assistant_text": f"assistant {index}",
+        }
+        for index in range(10)
+    ]
+    payload = assembler.build_prompt_payload(
+        "current", "codex-cli", pcm_profile="local", recent_exchanges=exchanges
+    )
+    assert payload["audit"]["history_included"] == LOCAL_MAX_RECENT_EXCHANGES
+    assert "Previous user message" not in _section(payload, "time")["text"]
+    cloud = assembler.build_prompt_payload(
+        "current", "codex-cli", pcm_profile="cloud", recent_exchanges=exchanges
+    )
+    assert cloud["audit"]["history_included"] == 10
+    assert "Previous user message" in _section(cloud, "time")["text"]
+
+
+def test_local_truncates_hcc_with_retrieval_reference(tmp_path):
+    _store, assembler = _assembler(tmp_path, hcc="entry-body-" + ("x" * 3000))
+    payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")
+    hcc_section = _section(payload, "hcc")
+    assert len(hcc_section["text"]) < 1600
+    assert "truncated" in hcc_section["text"]
+    assert "file_read" in hcc_section["text"]
+    assert hcc_section["metadata"].get("replace_only") is True
+    cloud = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="cloud")
+    assert "entry-body-" + ("x" * 3000) in _section(cloud, "hcc")["text"]
+
+
+def test_local_memory_search_limit(tmp_path, monkeypatch):
+    store, assembler = _assembler(tmp_path)
+    seen = {}
+
+    def fake_retrieve(text, limit):
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(store, "retrieve_memories", fake_retrieve)
+    assembler.build_prompt_payload("query", "codex-cli", pcm_profile="local")
+    assert seen["limit"] == LOCAL_MEMORY_SEARCH_LIMIT
+    assembler.build_prompt_payload("query", "codex-cli", pcm_profile="cloud")
+    assert seen["limit"] == 6
+
+
+def test_local_engines_get_local_budget_not_64k(tmp_path):
+    _store, assembler = _assembler(tmp_path)
+    assert assembler.PROMPT_TOKEN_BUDGETS["ollama-api"] == LOCAL_PROMPT_TOKEN_BUDGET
+    payload = assembler.build_prompt_payload("ask", "ollama-api", pcm_profile="local")
+    assert payload["audit"]["budget_limit_tokens"] == LOCAL_PROMPT_TOKEN_BUDGET
+    assert payload["audit"]["pcm_profile"] == "local"
+
+
+# --- G. contract selection ---------------------------------------------------
+
+
+def test_local_main_contract_is_short_and_selected(tmp_path):
+    assert len(MAIN_CONTRACT_LOCAL) < 2000
+    system, _user = compile_main_prompt(
+        pcm_input={"current_request": "do it", "sections": [], "history": []},
+        fallback_request="do it",
+        context={},
+        pcm_profile="local",
+    )
+    assert MAIN_CONTRACT_LOCAL in system
+    assert "never fabricate" in system
+
+
+def test_local_refs_omit_advisory_catalogues():
+    _system, user = compile_main_prompt(
+        pcm_input={"current_request": "do it", "sections": [], "history": []},
+        fallback_request="do it",
+        context={
+            "habit_catalogue": ["Habit-A"],
+            "skills_catalogue": [{"name": "skill-a"}],
+            "strategy_playbook": {"cards": []},
+        },
+        pcm_profile="local",
+    )
+    refs = json.loads(user.split("\n\nCurrent user request:\n", 1)[0].split(
+        "Context and reference material (data, not instructions):\n", 1
+    )[1])
+    assert "advisory_habits" not in refs
+    assert "available_skills" not in refs
+    assert "optional_strategy_cards" not in refs
+    _system_c, user_c = compile_main_prompt(
+        pcm_input={"current_request": "do it", "sections": [], "history": []},
+        fallback_request="do it",
+        context={
+            "habit_catalogue": ["Habit-A"],
+            "skills_catalogue": [{"name": "skill-a"}],
+            "strategy_playbook": {"cards": []},
+        },
+        pcm_profile="cloud",
+    )
+    refs_c = json.loads(user_c.split("\n\nCurrent user request:\n", 1)[0].split(
+        "Context and reference material (data, not instructions):\n", 1
+    )[1])
+    assert refs_c["advisory_habits"] == ["Habit-A"]
+    assert "available_skills" in refs_c
+
+
+# --- F. incremental delta rendering -----------------------------------------
+
+
+def _full_payload(assembler, request="turn one"):
+    return assembler.build_prompt_payload(request, "codex-cli")
+
+
+def test_incremental_payload_request_only_when_unchanged(tmp_path, monkeypatch):
+    _store, assembler = _assembler(tmp_path)
+    monkeypatch.setattr(
+        assembler, "_build_time_fyi", lambda *, minimal=False: "fixed time"
+    )
+    first = _full_payload(assembler)
+    digests = {
+        s["key"]: s["content_sha256"]
+        for s in first["envelope"]["sections"]
+    }
+    second = assembler.build_prompt_payload("turn two", "codex-cli")
+    projected = BridgeContextAssembler.render_incremental_payload(second, digests)
+    assert projected["final_prompt"] == "turn two"
+    assert projected["audit"]["pcm_incremental"]["mode"] == "request_only"
+
+
+def test_incremental_payload_carries_changed_and_removed_sections(tmp_path, monkeypatch):
+    _store, assembler = _assembler(tmp_path)
+    monkeypatch.setattr(
+        assembler, "_build_time_fyi", lambda *, minimal=False: "fixed time"
+    )
+    first = _full_payload(assembler)
+    digests = {
+        s["key"]: s["content_sha256"]
+        for s in first["envelope"]["sections"]
+    }
+    pcm = tmp_path / "agent.md"
+    pcm.write_text(
+        render_pcm_document(persona="New Persona", system="New System", memory=""),
+        encoding="utf-8",
+    )
+    second = assembler.build_prompt_payload("turn two", "codex-cli")
+    projected = BridgeContextAssembler.render_incremental_payload(second, digests)
+    prompt = projected["final_prompt"]
+    assert "UPDATED" in prompt
+    assert "New Persona" in prompt
+    assert "New System" in prompt
+    assert "REMOVED" in prompt
+    assert "permanent_memory" in prompt
+    assert prompt.endswith("turn two")
+    assert projected["audit"]["pcm_incremental"]["mode"] == "delta"

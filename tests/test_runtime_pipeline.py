@@ -1131,7 +1131,10 @@ async def test_direct_small_ollama_projects_discovery_without_losing_pcm(tmp_pat
     backend = OllamaAdapter(SimpleNamespace(
         name="small", engine="ollama-api", model="small-qwen",
         workspace_dir=tmp_path, system_md=pcm,
-        extra={"model_capabilities": {"small-qwen": {
+        # This test exercises the Ollama reference projection machinery, so it
+        # pins the cloud PCM profile explicitly; ollama-api otherwise defaults
+        # to the local profile, which omits the text tool catalogue entirely.
+        extra={"pcm_profile": "cloud", "model_capabilities": {"small-qwen": {
             "ollama_native_context": True, "context_window_tokens": 8192,
             "response_headroom_tokens": 2048, "ollama_max_input_chars": 25000,
         }}},

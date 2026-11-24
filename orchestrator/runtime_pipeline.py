@@ -1295,6 +1295,27 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             configured_budget = backend_extra.get("pcm_prompt_token_budget")
             if configured_budget is not None:
                 prompt_kwargs["prompt_budget_tokens"] = configured_budget
+
+    # Resolve the PCM projection profile from the actual inference target so
+    # HERV3 model/provider switching and explicit per-Provider configuration
+    # both take effect without a separate configuration subsystem.
+    from orchestrator.pcm_profile import resolve_pcm_profile
+
+    profile_backend_extra = getattr(getattr(backend, "config", None), "extra", None)
+    her_v3_target_engine = None
+    if runtime.config.active_backend == "her-v2":
+        try:
+            target = runtime.backend_manager.get_her_v3_target()
+            her_v3_target_engine = str(getattr(target, "provider", None) or "")
+        except Exception:
+            her_v3_target_engine = None
+    pcm_profile = resolve_pcm_profile(
+        runtime.config.active_backend,
+        backend_extra=profile_backend_extra,
+        her_v3_target_engine=her_v3_target_engine,
+    )
+    if "pcm_profile" in inspect.signature(prompt_builder).parameters:
+        prompt_kwargs["pcm_profile"] = pcm_profile
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -1465,6 +1486,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 user_message=effective_prompt,
                 request_id=item.request_id,
                 request_meta=request_meta,
+                pcm_profile=pcm_profile,
             )
             if preparation_isolation.active:
                 isolated_provider_session_id = getattr(
@@ -1507,6 +1529,26 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 runtime,
                 request_id=item.request_id,
             )
+
+    # Persistent CLI Engine Sessions received the static PCM snapshot at
+    # bootstrap.  Incremental turns therefore carry only the current request
+    # plus sections that actually changed; removals are announced explicitly.
+    if runtime.config.active_backend != "her-v2" and supports_sessions:
+        from orchestrator.bridge_memory import BridgeContextAssembler
+
+        envelope = prompt_payload.get("envelope") or {}
+        current_digests = {
+            str(section.get("key") or ""): str(section.get("content_sha256") or "")
+            for section in envelope.get("sections") or []
+            if isinstance(section, Mapping)
+        }
+        previous_digests = getattr(runtime, "_last_pcm_section_digests", None)
+        if incremental and isinstance(previous_digests, dict):
+            prompt_payload = BridgeContextAssembler.render_incremental_payload(
+                prompt_payload, previous_digests
+            )
+        if not incremental:
+            runtime._last_pcm_section_digests = current_digests
 
     if phone_audit:
         prompt_payload.setdefault("audit", {})["phone_context_handoff"] = phone_audit

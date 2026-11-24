@@ -1238,6 +1238,7 @@ class HERv2Adapter(BaseBackend):
         user_message: str,
         request_id: str,
         request_meta: Mapping[str, Any],
+        pcm_profile: str = "cloud",
     ) -> tuple[str, dict[str, Any]]:
         """Create one full-open or incremental fixed-backend transport envelope.
 
@@ -1286,6 +1287,7 @@ class HERv2Adapter(BaseBackend):
             request_id=str(request_id),
             message_id=str(request_meta.get("hashi_message_id") or request_id),
             conversation_at=str(request_meta.get("conversation_at") or ""),
+            pcm_profile=str(pcm_profile),
             **binding,
             removed_section_keys=removed_sections,
             revoked_resource_ids=[str(item) for item in revoked_resources],
