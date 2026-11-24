@@ -183,6 +183,116 @@ async def test_repeated_interrupted_successors_do_not_repeat_assembled_context(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["ready_provider_request", "pending_tool_batch"])
+async def test_permission_resume_of_successor_keeps_exact_request(tmp_path, boundary):
+    from orchestrator.permissions.her_binding import ManagedHerTurn
+    from tools.registry import ToolRegistry
+    from tests.test_her_v2_control_plane import _run_claim
+
+    captured = []
+    global_config = _global_config(tmp_path)
+
+    def answer(request):
+        captured.append(json.loads(request.content)["messages"])
+        events = [
+            {"id": "resume", "choices": [{"index": 0, "delta": {"content": "Done."},
+                                             "finish_reason": None}]},
+            {"id": "resume", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ]
+        body = "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    class Manager:
+        agent_mode = "fixed"
+        privacy_level = 1
+
+        def create_ephemeral_backend(self, engine, target_model=None):
+            cfg = SimpleNamespace(name="agent", engine=engine, workspace_dir=tmp_path / "workspace",
+                                  model=target_model, system_md=None, extra={})
+            backend = OpenRouterAdapter(cfg, global_config, api_key="isolated-test-key")
+            backend.client = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+            return backend
+
+    class PaoRuns:
+        def get_run(self, run_id, *, owner_id=None):
+            return {"run_id": run_id, "request_id": run_id.removeprefix("run-"),
+                    "agent_id": "agent", "attempt": 1, "fencing_token": 1,
+                    "request_digest": "sha256:input", "state": "running", "parent_run_id": None}
+
+    manager = Manager()
+    runtime = SimpleNamespace(backend_manager=manager, _request_meta_by_id={},
+                              current_request_meta={}, session_store=PaoRuns())
+    config = _agent_config(tmp_path)
+    config._hashi_runtime = runtime
+    registry = ToolRegistry(allowed_tools=["file_write"], access_root=tmp_path,
+                            workspace_dir=tmp_path, secrets={})
+    registry.permission_durable_wait = True
+    config._her_v2_stage_provider = HashiStageProvider(backend_manager=manager, tool_registry=registry)
+    adapter = HERv2Adapter(config, global_config)
+    assert await adapter.initialize()
+    coordinator = adapter._session_coordinator
+    payload = {"transport_snapshot": {"version": 1, "sections": []}}
+
+    def prepare(request_id, text):
+        meta = {"request_id": request_id, "owner_id": "owner", "hashi_run_id": "run-" + request_id,
+                "hashi_fencing_token": 1, "hashi_session_id": "isolated-session",
+                "hashi_message_id": "message-" + request_id, "context_generation": 1,
+                "session_workspace": str(tmp_path / "session")}
+        runtime._request_meta_by_id[request_id] = meta
+        runtime.current_request_meta = meta
+        return adapter.prepare_fixed_turn_input(prompt_payload=payload, user_message=text,
+                                                request_id=request_id, request_meta=meta)[0]
+
+    first = coordinator.accept(prepare("source", "Original task"))
+    assert coordinator.store.reconcile_interrupted(process_is_alive=lambda _pid: False) == 1
+    resumed_input = prepare("resume", "Continue original task")
+    accepted = coordinator.accept(resumed_input)
+    assert coordinator.store.consume_recovery_context(
+        session_id=accepted.session_id, current_turn_id=accepted.turn_id) is not None
+    exact = [{"role": "system", "content": "original system"},
+             {"role": "user", "content": "exact frozen ready request"}]
+    if boundary == "pending_tool_batch":
+        exact.append({"role": "assistant", "content": "", "tool_calls": [{
+            "id": "pending-once", "type": "function",
+            "function": {"name": "file_write", "arguments": json.dumps({
+                "path": str(tmp_path / "resumed.txt"), "content": "written once",
+            })},
+        }]})
+    coordinator.record_provider_context_checkpoint(accepted, {
+        "provider": "openrouter-api", "model": "configured/premium", "stage": "direct",
+        "boundary": boundary, "messages": exact,
+        "producer_run_claim": _run_claim("run-resume", "resume"),
+    })
+
+    class PermissionOwner:
+        async def open_turn(self, _adapter, _accepted, request_id):
+            binding = SimpleNamespace(context=SimpleNamespace(turn_id=accepted.turn_id))
+            executor = SimpleNamespace(bind_provider=lambda _provider: None)
+            return ManagedHerTurn(self, binding, executor,
+                recovery=coordinator.store.provider_context_for_turn(accepted.session_id, accepted.turn_id),
+                adapter=adapter, accepted=accepted)
+
+        def is_park(self, _exc):
+            return False
+
+    runtime.permission_runs = PermissionOwner()
+    response = await adapter.generate_response(resumed_input, "resume")
+    assert response.is_success, response.error
+    # Tool activity can also trigger a separate commentary call; check the
+    # main provider request by the exact frozen protocol it carries.
+    main = [messages for messages in captured if any(
+        row.get("content") == "exact frozen ready request" for row in messages
+    )]
+    assert len(main) == 1 and main[0][:len(exact)] == exact
+    if boundary == "pending_tool_batch":
+        assert main[0][-1]["tool_call_id"] == "pending-once"
+        assert (tmp_path / "resumed.txt").read_text(encoding="utf-8") == "written once"
+    else:
+        assert main[0] == exact
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_successor_new_images_preserve_prior_provider_evidence(tmp_path):
     from dataclasses import replace
     from orchestrator.her_v2.config import ProviderProfile

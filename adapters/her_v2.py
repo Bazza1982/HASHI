@@ -1897,6 +1897,7 @@ class HERv2Adapter(BaseBackend):
         canonical_recovery_context: dict[str, Any] | None = None
         private_provider_context: dict[str, Any] | None = None
         permission_execution = None
+        permission_exact_continuation = False
         pcm_runtime_context: dict[str, Any] = {}
         recovery_pcm_delta: list[dict[str, Any]] = []
         if (
@@ -2022,6 +2023,7 @@ class HERv2Adapter(BaseBackend):
             if permission_owner is not None and not fixed_turn.duplicate_text:
                 permission_execution = await permission_owner.open_turn(self, fixed_turn, request_id)
                 if permission_execution.recovery is not None or permission_execution.resumed_unstarted:
+                    permission_exact_continuation = permission_execution.recovery is not None
                     private_provider_context = permission_execution.recovery
                     fixed_turn = replace(self._session_coordinator.accept(prompt), duplicate=False)
             if fixed_turn.duplicate:
@@ -2349,12 +2351,13 @@ class HERv2Adapter(BaseBackend):
                 ),
                 recovery=private_provider_context,
                 resume_pending_tools=not steer_adopted,
-                successor_turn=canonical_recovery_context is not None,
+                successor_turn=canonical_recovery_context is not None and not permission_exact_continuation,
                 pcm_delta=recovery_pcm_delta,
             )
             successor_binder = getattr(permission_execution, "bind_successor_provider_context", None)
             if (
                 canonical_recovery_context is not None
+                and not permission_exact_continuation
                 and private_provider_context is not None
                 and callable(successor_binder)
             ):
