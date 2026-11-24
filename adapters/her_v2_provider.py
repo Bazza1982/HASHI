@@ -3487,17 +3487,26 @@ class HashiStageProvider(StageProvider):
         metadata = recovery.get("provider_context_checkpoint", {}) if isinstance(recovery, Mapping) else {}
         reference = str(metadata.get("items_evidence_ref") or "") if isinstance(metadata, Mapping) else ""
         inherited = context.get("recovery_reconstruction") if isinstance(context, Mapping) else None
-        if isinstance(inherited, Mapping) and inherited.get("total"):
-            # A prior incompatible recovery already projected the completed
-            # Tool evidence. Preserve its identity and provenance instead of
-            # re-deriving from messages that no longer carry the full output.
-            return _project_tool_receipts(inherited, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
-        rows = []
+        inherited_summary = inherited if isinstance(inherited, Mapping) and inherited.get("total") else None
+        inherited_recent: list[dict[str, Any]] = []
+        known_ids: set[str] = set()
+        if isinstance(inherited_summary, Mapping):
+            for item in inherited_summary.get("recent") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                inherited_recent.append(dict(item))
+                for key in ("tool_call_id", "operation_id", "invocation_id"):
+                    identity = item.get(key)
+                    if isinstance(identity, str) and identity:
+                        known_ids.add(identity)
+        rows: list[dict[str, Any]] = []
         for message in context.get("messages", []):
             if not isinstance(message, Mapping) or message.get("role") != "tool":
                 continue
             call_id, content = str(message.get("tool_call_id") or ""), message.get("content")
-            if not call_id:
+            if not call_id or call_id in known_ids:
+                # Keep the prior projection's identity and provenance; never
+                # duplicate a Tool result a previous recovery already retained.
                 continue
             if isinstance(content, list):
                 # Reconstruct supported text while retaining an exact evidence
@@ -3514,7 +3523,24 @@ class HashiStageProvider(StageProvider):
                 content = parts
             if isinstance(content, (str, list, dict)):
                 rows.append({"tool_call_id": call_id, "status": "completed", "output": content})
-        return _project_tool_receipts(rows, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
+        if inherited_summary is None:
+            return _project_tool_receipts(rows, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
+        if not rows:
+            # A prior incompatible recovery already projected the completed
+            # Tool evidence. Preserve its identity and provenance instead of
+            # re-deriving from messages that no longer carry the full output.
+            return _project_tool_receipts(inherited_summary, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
+        # Combine the previously reconstructed evidence with Tool results newly
+        # completed in the current checkpoint. The prior projection keeps its
+        # identity and provenance; only genuinely new results are added.
+        new_summary = _project_tool_receipts(rows, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
+        combined = {
+            "total": int(inherited_summary.get("total") or 0) + int(new_summary.get("total") or 0),
+            "recent": [*inherited_recent, *(new_summary.get("recent") or [])],
+            "omitted": int(inherited_summary.get("omitted") or 0) + int(new_summary.get("omitted") or 0),
+            "evidence_ref": reference or str(inherited_summary.get("evidence_ref") or ""),
+        }
+        return _project_tool_receipts(combined, evidence_ref=reference, budget_chars=FIELD_BUDGET_CHARS)
 
     @staticmethod
     def _checkpoint_media_supported(messages: Any, backend: Any) -> bool:

@@ -71,6 +71,62 @@ def test_reconstruction_derives_from_tool_messages_when_no_durable_field():
     assert result["recent"][0]["output"] == "FRESH_FACT"
 
 
+def test_reconstruction_merges_new_tool_results_with_durable_projection():
+    """A later incompatible recovery keeps prior evidence and adds new results."""
+    context = {
+        "recovery_reconstruction": {
+            "total": 1,
+            "recent": [{
+                "tool_call_id": "read-old",
+                "status": "completed",
+                "output": "UNIQUE_USEFUL_FACT",
+            }],
+            "omitted": 0,
+            "evidence_ref": "her_provider_context_items:sess:turn",
+        },
+        "messages": [
+            {"role": "tool", "tool_call_id": "read-new", "content": "NEW_FACT"},
+        ],
+    }
+    request = SimpleNamespace(context={
+        "pcm_input": {"runtime_context": {"active_turn_recovery": {
+            "provider_context_checkpoint": {"items_evidence_ref": "her_provider_context_items:sess:turn"},
+        }}},
+    })
+    result = HashiStageProvider._reconstructed_tool_evidence(context, request)
+    assert result["total"] == 2
+    by_id = {row["tool_call_id"]: row for row in result["recent"]}
+    assert set(by_id) == {"read-old", "read-new"}
+    assert by_id["read-old"]["output"] == "UNIQUE_USEFUL_FACT"
+    assert by_id["read-new"]["output"] == "NEW_FACT"
+
+
+def test_reconstruction_does_not_duplicate_prior_results():
+    """Already reconstructed Tool results are not added a second time."""
+    context = {
+        "recovery_reconstruction": {
+            "total": 1,
+            "recent": [{"tool_call_id": "read-a", "status": "completed", "output": "FACT_A"}],
+            "omitted": 0,
+            "evidence_ref": "her_provider_context_items:sess:turn",
+        },
+        "messages": [
+            {"role": "tool", "tool_call_id": "read-a", "content": "FACT_A"},
+            {"role": "tool", "tool_call_id": "read-b", "content": "FACT_B"},
+        ],
+    }
+    request = SimpleNamespace(context={
+        "pcm_input": {"runtime_context": {"active_turn_recovery": {
+            "provider_context_checkpoint": {"items_evidence_ref": "her_provider_context_items:sess:turn"},
+        }}},
+    })
+    result = HashiStageProvider._reconstructed_tool_evidence(context, request)
+    assert result["total"] == 2
+    by_id = {row["tool_call_id"]: row for row in result["recent"]}
+    assert set(by_id) == {"read-a", "read-b"}
+    assert by_id["read-b"]["output"] == "FACT_B"
+
+
 def test_recovery_reconstruction_survives_checkpoint_roundtrip(tmp_path):
     """The durable reconstruction survives the store write/read round-trip."""
     from tests.test_permission_pao_fence import setup_run
