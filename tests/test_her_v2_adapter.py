@@ -2359,6 +2359,10 @@ async def test_adapter_binds_provider_commentary_to_persona_pipeline(tmp_path):
     packager = _StaticPersonaPackager()
     setattr(config, "_her_v2_stage_provider", provider)
     setattr(config, "_her_v2_persona_packager", packager)
+    from orchestrator import telegram_stream_policy
+
+    # The new default is ``off``; select ``packaged`` to exercise the packager.
+    telegram_stream_policy.set_commentary_mode(config, "packaged")
     adapter = HERv2Adapter(config, _global_config(tmp_path))
 
     assert await adapter.initialize() is True
