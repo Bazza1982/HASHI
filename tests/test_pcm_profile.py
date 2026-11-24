@@ -269,6 +269,56 @@ def test_local_hcc_head_fill_without_overlap(tmp_path):
     assert len(hcc_section["text"]) < 1600
 
 
+def test_local_memory_projection_marks_omitted_units(tmp_path):
+    memory = "alpha-unit uses old settings\n\nbeta-unit holds the credential policy"
+    _store, assembler = _assembler(tmp_path, memory=memory)
+    text = _section(
+        assembler.build_prompt_payload(
+            "credential policy", "codex-cli", pcm_profile="local"
+        ),
+        "permanent_memory",
+    )["text"]
+    assert "beta-unit" in text
+    assert "alpha-unit" not in text
+    assert "omitted" in text.lower()
+    assert "file_read" in text
+
+
+def test_local_hcc_projection_marks_omitted_entries(tmp_path):
+    hcc = "[alpha]\nalpha cache item\n[alpha_end]\n[beta]\nbeta credential rotation policy\n[beta_end]"
+    _store, assembler = _assembler(tmp_path, hcc=hcc)
+    text = _section(
+        assembler.build_prompt_payload(
+            "credential rotation", "codex-cli", pcm_profile="local"
+        ),
+        "hcc",
+    )["text"]
+    assert "beta credential" in text
+    assert "alpha cache" not in text
+    assert "omitted" in text.lower()
+    assert "agent.md#hcc" in text
+    assert "file_read" in text
+
+
+def test_local_soft_budget_never_rejects(tmp_path, monkeypatch):
+    from orchestrator.pcm import PCMValidationError
+
+    hcc = "[alpha]\n" + ("cache-entry " * 40) + "\n[alpha_end]"
+    _store, assembler = _assembler(tmp_path, hcc=hcc)
+    monkeypatch.setitem(assembler.PROMPT_TOKEN_BUDGETS, "ollama-api", 50)
+    payload = assembler.build_prompt_payload(
+        "ask", "ollama-api", pcm_profile="local"
+    )
+    assert payload["final_prompt"]
+    assert payload["audit"]["budget_unresolved"] is True
+
+    # Cloud keeps the existing strict HCC budget contract.
+    with pytest.raises(PCMValidationError):
+        assembler.build_prompt_payload(
+            "ask", "codex-cli", pcm_profile="cloud", prompt_budget_tokens=50
+        )
+
+
 def test_local_memory_search_limit(tmp_path, monkeypatch):
     store, assembler = _assembler(tmp_path)
     seen = {}

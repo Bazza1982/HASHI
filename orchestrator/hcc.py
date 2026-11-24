@@ -142,7 +142,10 @@ def project_hcc_for_request(body: str, query: object, max_chars: int) -> str:
         units,
         query,
         max_chars,
-        truncation_note="\n…[projected by relevance; the rest remains in agent.md#hcc]",
+        truncation_note=(
+            "\n…[projected by relevance; some cache entries are omitted. Read the "
+            "full cache in agent.md#hcc with file_read when relevant.]"
+        ),
     )
 
 

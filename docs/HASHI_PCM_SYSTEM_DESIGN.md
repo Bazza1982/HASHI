@@ -782,9 +782,13 @@ a permission change. Resolving it never deletes memory or data.
 | Time/Workzone/provenance | current facts | current facts only (no previous-message gap line) |
 
 Projections are lexical and deterministic (no classifier, embedding, router
-call or new storage). Omitted memory and context always remain retrievable
-through the existing authorized retrieval/read mechanisms. Omission never
-moves, rewrites or deletes user-authored memories.
+call or new storage). When relevance excludes unmatched units, or the budget
+cuts selected units, the projection says so and carries a short usable
+retrieval reference (`file_read` on `agent.md` / `agent.md#hcc`). Omitted
+memory and context always remain retrievable through the existing authorized
+retrieval/read mechanisms, and necessary inline context is never replaced by
+an unavailable tool reference. Omission never moves, rewrites or deletes
+user-authored memories.
 
 ### 13.3 Incremental model-facing injection
 
@@ -799,7 +803,9 @@ Persistent Engine Sessions send the necessary PCM snapshot at session start and
 - The baseline is scoped **per Engine Session** and only advances after a
   successful delivery, so a section that changes and later reverts (A→B→A)
   is still re-sent, failed turns re-send their deltas, and sessions that
-  interleave on one backend cannot pollute each other's baseline.
+  interleave on one backend cannot pollute each other's baseline. The
+  pending (not-yet-delivered) snapshot is request-scoped, so concurrent
+  Sessions cannot overwrite each other's pending state.
 - Direct persistent CLI paths (codex-cli, claude-cli, grok-cli, dsh-cli,
   antigravity-cli) now emit the delta prompt instead of re-assembling the
   static PCM into every outgoing prompt.
@@ -821,11 +827,13 @@ The generic non-HER 64K token budget is a cloud fallback, not a universal
 operating budget. For Local engines the actual model capacity
 (`resolve_capacity_profile`, including HLI per-slot context and output
 headroom) supplies the prompt budget; the 16K table entry remains only a
-soft fallback when no capacity is known. The budget reduces redundant
-generated content first, then irrelevant references, catalogues and older
-history; existing Compact is the last resort and is never used to compensate
-for avoidable injection, and no valid user task is rejected on an estimated
-budget.
+soft fallback when no capacity is known. Local budgets are projection
+targets, never a rejection: unresolved pressure is recorded in the audit and
+the actual Provider capacity handling decides what is sent, whereas the
+cloud HCC budget retains its existing strict contract. The budget reduces
+redundant generated content first, then irrelevant references, catalogues
+and older history; existing Compact is the last resort and is never used to
+compensate for avoidable injection.
 
 ### 13.5 HASHI-generated contracts
 

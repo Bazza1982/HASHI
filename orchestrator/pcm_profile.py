@@ -175,9 +175,14 @@ def lexical_unit_selection(
         used += len(block)
         included += 1
     text = "\n\n".join(parts)
-    if len(text) > max_chars:
+    truncated = len(text) > max_chars
+    if truncated:
         text = text[:max_chars].rstrip() + "…"
-    if truncation_note and (len(text) >= max_chars or included < len(chosen)):
+    # Omission happens both when the budget cuts selected units and when
+    # relevance excludes unmatched units. Either way the model must be told
+    # that content was omitted and how to retrieve it.
+    omitted_units = len(units) - included
+    if truncation_note and (omitted_units > 0 or truncated):
         text += truncation_note
     return text
 
@@ -199,5 +204,8 @@ def project_memory_for_request(memory_text: object, query: object, max_chars: in
         units,
         query,
         max_chars,
-        truncation_note="\n…[projected by relevance; the rest remains in agent.md]",
+        truncation_note=(
+            "\n…[projected by relevance; some memory units are omitted. Read the "
+            "full [memory] block with file_read on agent.md when relevant.]"
+        ),
     )

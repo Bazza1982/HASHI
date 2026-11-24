@@ -2691,11 +2691,25 @@ class BridgeContextAssembler:
                 install_capsule()
         final_prompt = self._render_pcm_prompt(sections)
         final_prompt_tokens = _estimate_tokens(final_prompt)
-        if hcc_included and limit is not None and final_prompt_tokens > limit:
+        over_budget = (
+            hcc_included and limit is not None and final_prompt_tokens > limit
+        )
+        if over_budget and not local_profile:
             raise PCMValidationError(
                 "pcm_hcc_capacity_exceeded",
                 f"PCM with HCC exceeds the input budget ({final_prompt_tokens} > {limit} "
                 "estimated tokens). Reduce the configured cache; it was not truncated.",
+            )
+        if over_budget and local_profile:
+            # Local projection budgets are soft targets, never a rejection:
+            # retain the content, record the unresolved pressure in the audit,
+            # and leave the real limit to the Provider capacity handling.
+            memory_logger.warning(
+                "PCM local projection exceeds the soft budget: engine=%s "
+                "estimated=%s soft_limit=%s; content retained for Provider capacity",
+                engine,
+                final_prompt_tokens,
+                limit,
             )
         if omitted:
             memory_logger.warning(

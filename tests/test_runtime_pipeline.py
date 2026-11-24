@@ -1174,7 +1174,7 @@ async def test_incremental_baseline_rebuilt_after_restart_recovery():
 
     assert first.incremental is True
     assert "STATIC-V1" in first.final_prompt
-    assert runtime._pending_pcm_baseline is not None
+    assert getattr(item, "_pending_pcm_baseline", None) is not None
     _promote(runtime, item)
 
     item2 = _item(source="text")
@@ -1360,6 +1360,48 @@ async def test_stale_pending_baseline_is_not_promoted_by_another_backend():
     assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
         hashlib.sha256(b"STATIC-A").hexdigest()
     )
+
+
+@pytest.mark.asyncio
+async def test_pending_baseline_is_request_scoped_for_concurrent_sessions():
+    """Two Sessions building concurrently must not overwrite each other's pending."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="session-a",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(["STATIC-A", "STATIC-B"])
+    item_a = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item_a)
+    await runtime_pipeline.build_turn_prompt(runtime, item_a, is_bridge_request=False)
+
+    runtime.backend_manager.current_backend._session_id = "session-b"
+    item_b = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item_b)
+    await runtime_pipeline.build_turn_prompt(runtime, item_b, is_bridge_request=False)
+
+    # Both pending snapshots survive independently on their own request items.
+    assert getattr(item_a, "_pending_pcm_baseline", None) is not None
+    assert getattr(item_b, "_pending_pcm_baseline", None) is not None
+    assert item_a._pending_pcm_baseline[1] == "session-a"
+    assert item_b._pending_pcm_baseline[1] == "session-b"
+
+    _promote(runtime, item_a)
+    assert runtime._pcm_baselines["session-a"]["permanent_system"] == hashlib.sha256(
+        b"STATIC-A"
+    ).hexdigest()
+    assert "session-b" not in runtime._pcm_baselines
+
+    _promote(runtime, item_b)
+    assert runtime._pcm_baselines["session-b"]["permanent_system"] == hashlib.sha256(
+        b"STATIC-B"
+    ).hexdigest()
 
 
 @pytest.mark.asyncio

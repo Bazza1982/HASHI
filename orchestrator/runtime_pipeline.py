@@ -1601,14 +1601,18 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             prompt_payload = BridgeContextAssembler.render_incremental_payload(
                 prompt_payload, previous_digests
             )
-        # Record what this turn intends to deliver; it becomes the baseline
-        # for this Engine Session only after a successful generation. The
-        # request id binds the promotion to this turn so a stale pending
-        # record can never be promoted by a later, different backend turn.
-        runtime._pending_pcm_baseline = (
-            str(getattr(item, "request_id", "") or ""),
-            session_key,
-            current_digests,
+        # Record what this turn intends to deliver on the request-scoped item,
+        # not a shared Agent-level slot: concurrent Engine Sessions must not
+        # overwrite each other's pending snapshot. It becomes the baseline for
+        # this Session only after a successful generation.
+        setattr(
+            item,
+            "_pending_pcm_baseline",
+            (
+                str(getattr(item, "request_id", "") or ""),
+                session_key,
+                current_digests,
+            ),
         )
 
     if phone_audit:
@@ -1699,7 +1703,11 @@ def promote_pcm_baseline_after_delivery(runtime, item, generation) -> None:
     being silently skipped. The baseline key is the Engine Session actually
     used for delivery (the adapter knows it only after the first turn).
     """
-    pending = getattr(runtime, "_pending_pcm_baseline", None)
+    # Pending state is request-scoped (attached to this turn's item), so
+    # concurrent Sessions cannot overwrite each other's snapshot.
+    pending = getattr(item, "_pending_pcm_baseline", None)
+    if pending is None:
+        pending = getattr(runtime, "_pending_pcm_baseline", None)
     if not isinstance(pending, tuple) or len(pending) != 3:
         return
     pending_request_id, pending_key, digests = pending
@@ -1718,13 +1726,22 @@ def promote_pcm_baseline_after_delivery(runtime, item, generation) -> None:
     )
     if not supports_sessions:
         return
-    session_key = str(getattr(backend, "_session_id", None) or "") or str(pending_key)
+    # Prefer the session captured when the turn was built; the adapter only
+    # learns its real session id during the first (bootstrap) turn, where the
+    # captured key is empty and the current backend session id is used.
+    session_key = str(pending_key or "") or str(
+        getattr(backend, "_session_id", None) or ""
+    )
     baselines = getattr(runtime, "_pcm_baselines", None)
     if not isinstance(baselines, dict):
         baselines = {}
         runtime._pcm_baselines = baselines
     baselines[session_key] = dict(digests)
     runtime._pending_pcm_baseline = None
+    try:
+        setattr(item, "_pending_pcm_baseline", None)
+    except Exception:
+        pass
 
 
 async def run_backend_generation(
