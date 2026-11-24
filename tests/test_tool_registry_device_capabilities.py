@@ -617,11 +617,16 @@ async def test_partial_session_status_is_preserved_in_audit(tmp_path, monkeypatc
     facade = _CapabilityFacade(result={"output":"before\nscreenshot failed\nafter", "content":parts, "is_error":True}, capabilities=[_browser_registration(actions=("session",))])
     registry = _registry(tmp_path, "browser_session", facade)
     captured = []
-    monkeypatch.setattr(registry, "_record_tool_audit", lambda name, args, result, started: captured.append(result))
+    class Audit:
+        def record(self, kind, data, **kwargs):
+            captured.append((kind, data))
+    registry.canonical_audit = Audit()
     result = await registry.execute("browser_session", {"steps":[{"action":"get_text"}, {"action":"screenshot"}, {"action":"get_text"}]}, "session")
     assert result.is_error
     assert [x["text"] for x in result.content] == ["before", "screenshot failed", "after"]
-    assert captured[-1].is_error
+    assert captured[-1][0] == "tool_call"
+    assert captured[-1][1]["is_error"] is True
+    assert captured[-1][1]["content"] == parts
 
 @pytest.mark.asyncio
 async def test_screenshot_worker_failure_is_preserved(tmp_path):
@@ -631,3 +636,4 @@ async def test_screenshot_worker_failure_is_preserved(tmp_path):
     assert result.is_error
     assert result.output == "Error: camera unavailable"
     assert "upgrade" not in result.output.lower()
+# HASHI-Fingerprint: hfp_8ee37f8b596a433bae68eccaf6c86f97
