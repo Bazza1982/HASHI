@@ -245,6 +245,60 @@ async def test_protected_worker_pages_only_authorized_canonical_recovery_evidenc
             future = asyncio.run_coroutine_threadsafe(getattr(channel, method)(**arguments), loop)
             return await asyncio.wrap_future(future)
 
+    # On Windows use the real authenticated private IPC for both the host
+    # execution channel and the canonical Worker callback. The disposable
+    # host runs in-process here; this does not claim an LPAC installation.
+    import os
+    endpoints = []
+    host_client = HostConnection()
+    if os.name == "nt":
+        import base64
+        from uuid import uuid4
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from orchestrator.her_v2.audit import DurableAuditLog
+        from orchestrator.permissions.execution_channel import EXECUTION_METHODS
+        from orchestrator.permissions.her_callbacks import CallbackClient
+        from orchestrator.permissions.ipc_rpc import PermissionPipeClient
+        from orchestrator.permissions.ipc_server import PermissionEndpoint
+        from orchestrator.permissions.windows_ipc import WindowsPipeListener, PipePeerPolicy, current_process_user_sid
+        from orchestrator.permissions.wire import PermissionServiceRouter
+
+        sid = current_process_user_sid()
+        callback_key = Ed25519PrivateKey.generate()
+        callback_address = r"\\.\pipe\LOCAL\HASHI.Permissions.test-worker." + uuid4().hex
+        callback_endpoint = PermissionEndpoint(
+            WindowsPipeListener(callback_address, service_sid=sid, peer_policy=PipePeerPolicy(sid)),
+            PermissionServiceRouter(callbacks, methods=WorkerHerCallbacks.METHODS),
+            signing_key=callback_key, service_generation="test-worker",
+        )
+        await callback_endpoint.start()
+        endpoints.append(callback_endpoint)
+        callback_client = CallbackClient({
+            "endpoint": callback_address,
+            "public_key": base64.b64encode(callback_key.public_key().public_bytes_raw()).decode(),
+            "process_id": os.getpid(),
+        })
+        adapter._canonical_pao_run_claim = lambda _meta: _run_claim(context.run_id, binding.request_id)
+        adapter._audit_log = DurableAuditLog(primary_path=tmp_path / "protected-audit.jsonl",
+                                             fallback_path=tmp_path / "protected-audit-fallback.jsonl")
+        turn.runtime.delivery = SimpleNamespace(allow_immediate_response=False)
+        turn.runtime.workzone_ref = str(home)
+        channel._checkpoint = callback_client.checkpoint
+        channel._audit = lambda record: callback_client.audit(binding, record)
+        channel._runtime_port = callback_client.runtime_port
+        channel._evidence_callback = callback_client.recovery_evidence
+        execution_key = Ed25519PrivateKey.generate()
+        execution_address = r"\\.\pipe\LOCAL\HASHI.Permissions.test-execution." + uuid4().hex
+        execution_endpoint = PermissionEndpoint(
+            WindowsPipeListener(execution_address, service_sid=sid, peer_policy=PipePeerPolicy(sid)),
+            PermissionServiceRouter(channel, methods=EXECUTION_METHODS),
+            signing_key=execution_key, service_generation="test-execution",
+        )
+        await execution_endpoint.start()
+        endpoints.append(execution_endpoint)
+        host_client = PermissionPipeClient(
+            execution_address, execution_key.public_key(), methods=EXECUTION_METHODS, idle_timeout_s=20)
+
     host_root = tmp_path / "host-scratch"
     host_root.mkdir()
     payload = command(registry)
@@ -255,9 +309,13 @@ async def test_protected_worker_pages_only_authorized_canonical_recovery_evidenc
                               "runtime_context": {"active_turn_recovery": view}})
     async def emit(_event):
         pass
-    outcome = await asyncio.to_thread(lambda: asyncio.run(run_command(
-        payload, client=HostConnection(), scratch_root=host_root, emit=emit,
-        execution_epoch=context.execution_epoch)))
+    try:
+        outcome = await asyncio.to_thread(lambda: asyncio.run(run_command(
+            payload, client=host_client, scratch_root=host_root, emit=emit,
+            execution_epoch=context.execution_epoch)))
+    finally:
+        for endpoint in reversed(endpoints):
+            await endpoint.close()
     assert outcome["state"] == "completed", outcome
     assert unpack(outcome["result"]).text == "Recovered the evidence."
     assert len(model_wire) == 2

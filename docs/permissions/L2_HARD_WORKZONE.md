@@ -52,9 +52,10 @@ Tool 准入、原动作范围及现有授权，并在读取后再次检查当前
 没有可验证的原调用或当前授权时，该条证据不可用；不会申请额外权限、
 执行原 Tool、重放效果或暴露私有推理。未决效果仍按既有规则处理。
 
-测试使用真实 HER 恢复数据库、PAO 账本、Run fence 和受限 HERV3 host，
-native launcher/IPC 仍为注入边界。这里不声称新版本已安装、运行采用
-或通过完整 OS 隔离验收。
+测试使用真实 HER 恢复数据库、PAO 账本、Run fence 和受限 HERV3 host；
+Windows 用例通过实际认证私有 IPC 连接执行通道及原 Worker 回调。
+测试 host 在进程内运行，native launcher 仍为注入边界。这里不声称
+新版本已安装、运行采用或通过完整 OS 隔离验收。
 
 ## 4. HASHI Compute 的配合范围
 
