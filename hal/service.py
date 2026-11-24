@@ -790,6 +790,7 @@ class HalService:
 
         did_work = False
         now = self._clock()
+        recovered: list[HalTrigger] = []
         for exec_row in execs_by_id.values():
             if exec_row.get("state") != EXEC_ACTIVE:
                 continue
@@ -873,9 +874,11 @@ class HalService:
                 )
                 continue
             if terminal is not None:
-                await self._settle_pending_from_terminal(
+                recovered_trigger = await self._settle_pending_from_terminal(
                     owner_id, exec_row, receipt, terminal
                 )
+                if recovered_trigger is not None:
+                    recovered.append(recovered_trigger)
                 continue
             # Otherwise re-dispatch with the same idempotency key, but with a
             # bounded retry count and exponential backoff so a network failure
@@ -912,6 +915,31 @@ class HalService:
             )
             await self._dispatch_stage(owner_id, exec_row, directive, rules, receipts)
             did_work = True
+        if recovered:
+            # Settled pending stages have advanced. Re-drive each correlated
+            # dependent stage from the persisted terminal evidence exactly once:
+            # the evidence may already sit behind the feed cursor, and stage
+            # advancement plus the consumed-event dedupe keep it idempotent.
+            # Reload so the settle is visible to planning; a crash between the
+            # settle and this reload is still safe (the receipt is 'dispatched'
+            # and the stage advanced, so a later recovery reconciles instead of
+            # re-dispatching).
+            fresh_execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
+            fresh_by_id: dict[str, dict[str, Any]] = {}
+            for e in fresh_execs:
+                try:
+                    e["program"] = program_from_json(json.loads(e["program_blob"]))
+                except (ValueError, KeyError, TypeError):
+                    e["program"] = None
+                if e.get("program") is not None:
+                    fresh_by_id[str(e["exec_id"])] = e
+            fresh_receipts = await self._load_receipts(list(fresh_by_id.values()))
+            consumed: dict[str, set[str]] = {}
+            for trigger in recovered:
+                if await self._apply_trigger(
+                    owner_id, trigger, rules, fresh_by_id, fresh_receipts, consumed
+                ):
+                    did_work = True
         return did_work
 
     async def _settle_pending_from_terminal(
@@ -920,7 +948,7 @@ class HalService:
         exec_row: Mapping[str, Any],
         receipt: Mapping[str, Any],
         terminal: Mapping[str, Any],
-    ) -> None:
+    ) -> HalTrigger | None:
         """Settle a ``pending_retry`` prompt whose Run already terminated.
 
         The dispatch side effect already happened (proven by the Run's
@@ -959,6 +987,25 @@ class HalService:
             state=state,
             detail=detail,
         )
+        if state != EXEC_ACTIVE or next_stage >= len(workflow):
+            # The workflow settled terminally (no dependent stage remains).
+            return None
+        # Reuse the correlated terminal evidence to drive the now-current
+        # dependent stage exactly once. The terminal event may already sit
+        # BEHIND the owner's feed cursor (its page was consumed while the
+        # terminal lookup was transiently failing), so it will never re-appear
+        # in a later feed page. Driving it here keeps the event from being
+        # silently lost — without rewinding the cursor and without re-sending
+        # the already-accepted prior stage. Canonicalize the agent identity
+        # exactly as the feed-event loop does.
+        trigger = feed_event_hal_event(terminal)
+        if trigger is None:
+            return None
+        if trigger.agent_identity:
+            instance_id = self._current_instance_id()
+            suffix = f"@{instance_id}" if instance_id else ""
+            trigger = _with_agent_identity(trigger, f"@{trigger.agent_identity}{suffix}")
+        return trigger
 
 
 # ----------------------------------------------------------------- module APIs

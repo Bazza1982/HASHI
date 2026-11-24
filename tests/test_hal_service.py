@@ -1254,6 +1254,114 @@ def test_terminal_evidence_read_failure_keeps_loop_alive(tmp_path, monkeypatch):
     store2.close()
 
 
+@pytest.mark.parametrize(
+    "alice_kind, dependent_event, bob_text",
+    [
+        ("run.failed", "#turn_error", "review failure"),
+        ("run.completed", "#turn_finish", "next"),
+    ],
+)
+def test_correlated_terminal_event_survives_transient_lookup_failure(
+    tmp_path, monkeypatch, alice_kind, dependent_event, bob_text
+):
+    """A transient terminal-evidence read failure must not consume the correlated
+    terminal event out from under a pending execution. Once the lookup recovers,
+    the persisted evidence still drives the dependent stage exactly once — no
+    event is lost, the already-accepted prior stage is never re-sent, and
+    unrelated rules keep firing normally."""
+    import orchestrator.automation_events as automation_events
+
+    feed = FakeSessionStore()
+    path = tmp_path / "hal" / "hal_v1.sqlite"
+    script = (
+        'if @agent_any #turn_finish then @alice $prompt "work"; '
+        f'if @alice@TESTINST {dependent_event} then @bob $prompt "{bob_text}".'
+    )
+
+    store1 = HalStore(path)
+    service1 = HalService(
+        store=store1, session_store=feed, dispatch=RecordingDispatchAdapter(),
+        logger=logging.getLogger("hal.test.evfail-recover1"),
+    )
+    rule = make_rule(service1, "user:7", script)
+    service1.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    # An unrelated rule that must keep firing normally throughout.
+    other = make_rule(
+        service1, "user:7",
+        'if @carol@TESTINST #turn_error then @dave $prompt "independent".',
+        name="other",
+    )
+    service1.set_enabled(owner_id="user:7", rule_id=other["rule_id"], enabled=True)
+    store1.create_exec(
+        owner_id="user:7",
+        rule_id=rule["rule_id"],
+        rule_revision=rule["revision"],
+        rule_name="rule",
+        workflow_index=0,
+        exec_id="hx1",
+        trigger_event_id="evt-1",
+        trigger_agent="@lily@TESTINST",
+        trigger_kind="run.completed",
+        program_blob=compile_hal(script),
+    )
+    store1.upsert_receipt(
+        exec_id="hx1",
+        stage=0,
+        idempotency_key="hal:hx1:0",
+        kind="prompt",
+        target="@alice",
+        payload='$prompt "work"',
+        state="pending_retry",
+        detail=None,
+        attempts=0,
+        next_retry_at=None,
+    )
+    store1.close()
+
+    # Alice's run already terminated (the correlated terminal event).
+    feed.add_event(agent_id="alice", kind=alice_kind, key="hal:hx1:0")
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("transient terminal feed read failure")
+
+    monkeypatch.setattr(automation_events, "terminal_event_for_key", _raise)
+
+    adapter2 = RecordingDispatchAdapter()
+    store2 = HalStore(path)
+    service2 = HalService(
+        store=store2, session_store=feed, dispatch=adapter2,
+        logger=logging.getLogger("hal.test.evfail-recover2"),
+    )
+    # Cycle with the lookup failing: the loop survives, nothing is dispatched,
+    # but the correlated event is now behind the cursor (the bug window).
+    run(service2._process_owner("user:7"))
+    assert adapter2.prompt_calls == []
+    assert store2.get_exec("user:7", "hx1")["stage"] == 0
+    assert store2.get_receipt("hx1", 0)["state"] == "pending_retry"
+
+    # Restore the lookup; add an unrelated event for the same recovery cycle.
+    monkeypatch.undo()
+    feed.add_event(agent_id="carol", kind="run.failed", key="user-run-9")
+
+    run(service2._process_owner("user:7"))
+
+    bob_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "bob"]
+    assert len(bob_calls) == 1
+    alice_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "alice"]
+    assert alice_calls == []
+    dave_calls = [c for c in adapter2.prompt_calls if c["target_agent"] == "dave"]
+    assert len(dave_calls) == 1
+
+    exec_row = store2.get_exec("user:7", "hx1")
+    assert exec_row["state"] == "completed"
+    assert exec_row["stage"] == 2
+
+    # A further cycle must not re-dispatch the dependent stage.
+    run(service2._process_owner("user:7"))
+    assert len([c for c in adapter2.prompt_calls if c["target_agent"] == "bob"]) == 1
+    store2.close()
+
+
 def test_migration_key_create_is_idempotent_and_non_destructive(tmp_path):
     feed = FakeSessionStore()
     service, _ = make_service(tmp_path, feed)
