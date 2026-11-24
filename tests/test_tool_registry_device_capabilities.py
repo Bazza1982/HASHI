@@ -221,13 +221,14 @@ def test_connected_browser_catalogue_describes_bridge_without_standalone_options
 @pytest.mark.parametrize(
     ("tool", "registration"),
     [
-        ("browser_screenshot", _browser_registration(actions=("screenshot",))),
-        ("windows_screenshot", _computer_registration(actions=("screenshot",))),
+        ("browser_screenshot", _browser_registration),
+        ("windows_screenshot", _computer_registration),
     ],
 )
 async def test_capability_worker_preserves_typed_image_content(tmp_path, tool, registration):
     from base64 import b64encode
 
+    registration = registration(actions=("screenshot",))
     encoded = b64encode(b"\x89PNG\r\n\x1a\n" + b"native").decode("ascii")
     facade = _CapabilityFacade(
         result={"output": "capture complete", "content": [

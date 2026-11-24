@@ -1218,7 +1218,10 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                         )
                         summary.append(line)
                         parts.append({"type": "text", "text": line})
-                if found_image:
+                if found_image or any(
+                    isinstance(step, dict) and step.get("action") == "screenshot"
+                    for step in steps
+                ):
                     return StructuredToolOutput(
                         output="\n".join(summary), content=parts,
                     )
@@ -1353,7 +1356,10 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
             except Exception as step_err:
                 results.append(f"[{action}] ERROR: {step_err}")
 
-        if typed_media and screenshots:
+        if typed_media and any(
+            isinstance(step, dict) and step.get("action") == "screenshot"
+            for step in steps
+        ):
             from tools.typed_media_result import screenshot_tool_result
             from tools.registry import StructuredToolOutput
 

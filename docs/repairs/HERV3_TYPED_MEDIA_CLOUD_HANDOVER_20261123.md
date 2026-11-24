@@ -41,6 +41,24 @@ preserves Tool Call correlation.
    native images. get_text/evaluate results stay text, even if they contain
    a syntactically valid data URL.
 
+## Browser session compatibility boundary
+
+When the structured Chrome Extension or local browser session requests a
+screenshot, return structured text parts even if that screenshot fails.
+Successful screenshot steps keep their image parts and normal page text remains
+text in the same result.
+
+A legacy unstructured browser_session response cannot reliably identify the
+source step of its output. When such a response includes a requested screenshot,
+the gateway reports an explicit unsupported legacy result and asks for the
+browser worker to be updated. It does not inspect arbitrary page text for
+image-shaped strings or send potentially large screenshot bytes as plain text.
+Legacy single-purpose screenshot tools retain their existing compatibility
+path. Text-only browser_session results continue to pass through unchanged.
+
+Device capability test registrations are created when each test runs, so their
+normal expiration remains meaningful even after a long collection or test run.
+
 ## Provider support and deliberate non-support
 
 - DeepSeek Chat Completions: official `tool`-message `image_url`

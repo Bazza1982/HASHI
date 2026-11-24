@@ -183,6 +183,17 @@ def _bridge_legacy_screenshot_output(
             for step in steps
         ):
             return None, False
+        # A legacy session concatenates arbitrary page text and screenshot
+        # bytes without per-step boundaries. Never interpret that text as
+        # media or expose a potentially large screenshot in a text result.
+        return [{
+            "type": "text",
+            "text": (
+                "Browser session screenshot unavailable: the worker returned "
+                "an unstructured legacy result. Update the browser worker and "
+                "retry the session to receive structured text and images."
+            ),
+        }], True
     matches = list(_LEGACY_SCREENSHOT_PATTERN.finditer(output))
     if not matches:
         return None, False

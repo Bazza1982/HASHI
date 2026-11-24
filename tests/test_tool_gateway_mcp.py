@@ -683,7 +683,7 @@ async def test_gateway_bridges_legacy_browser_screenshot_string_to_image(tmp_pat
     assert original_payload not in json.dumps(result)
 
 
-def test_gateway_bridges_legacy_desktop_and_session_screenshots_in_order():
+def test_gateway_bridges_legacy_desktop_and_rejects_unstructured_session():
     payload = _png_base64()
     desktop_content, desktop_error = _bridge_legacy_screenshot_output(
         "desktop_screenshot",
@@ -698,14 +698,10 @@ def test_gateway_bridges_legacy_desktop_and_session_screenshots_in_order():
         f"[goto] https://example.com\n[screenshot] base64:{payload}\n[click] button",
         arguments={"steps": [{"action": "screenshot"}]},
     )
-    assert session_error is False
-    assert session_content and [block["type"] for block in session_content] == [
-        "text",
-        "image",
-        "text",
-    ]
-    assert "[goto]" in session_content[0]["text"]
-    assert "[click]" in session_content[2]["text"]
+    assert session_error is True
+    assert session_content and [block["type"] for block in session_content] == ["text"]
+    assert "unstructured legacy result" in session_content[0]["text"]
+    assert payload not in json.dumps(session_content)
 
 
 def test_gateway_rejects_malformed_legacy_screenshot_payload():
@@ -731,15 +727,67 @@ def test_gateway_does_not_extract_image_examples_from_browser_text():
     assert errored is False
 
 
-def test_gateway_bounds_legacy_browser_session_screenshot_count():
+@pytest.mark.asyncio
+async def test_gateway_does_not_infer_legacy_mixed_session_images(tmp_path, monkeypatch):
+    registry = ToolRegistry(
+        allowed_tools=["browser_session"],
+        access_root=tmp_path,
+        workspace_dir=tmp_path,
+        secrets={},
+    )
+    gateway = ToolGateway(load_gateway_context(_write_context(registry, tmp_path)))
+    example = "data:" + "image/png;base64," + "AAAA"
+
+    async def execute(name, arguments, tool_call_id=""):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="[get_text] " + example + "\n[screenshot] ERROR: unavailable",
+        )
+
+    monkeypatch.setattr(gateway.registry, "execute", execute)
+    result = await gateway.call(
+        "browser_session",
+        {"steps": [{"action": "get_text"}, {"action": "screenshot"}]},
+        "mixed",
+    )
+    assert result["isError"] is True
+    assert all(part["type"] == "text" for part in result["content"])
+    assert "structured" in json.dumps(result).lower()
+    assert "Screenshot unavailable: screenshot decode failed" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_browser_session_text_survives_failed_screenshot(monkeypatch):
+    from tools import browser
+    from tools.registry import StructuredToolOutput
+
+    example = "data:" + "image/png;base64," + "AAAA"
+    envelope = {"steps": [
+        {"index": 0, "action": "get_text", "ok": True, "output": example},
+        {"index": 1, "action": "screenshot", "ok": False, "error": "unavailable"},
+    ]}
+
+    async def bridge(action, args):
+        return json.dumps(envelope)
+
+    monkeypatch.setattr(browser, "_maybe_execute_extension_bridge", bridge)
+    result = await browser.execute_browser_session(
+        {"steps": [{"action": "get_text"}, {"action": "screenshot"}]},
+        typed_media=True,
+    )
+    assert isinstance(result, StructuredToolOutput)
+    assert any(example in part.get("text", "") for part in result.content)
+    assert all(part["type"] == "text" for part in result.content)
+
+
+def test_gateway_bounds_legacy_screenshot_count():
     payload = _png_base64()
     output = "\n".join(
         f"[screenshot] base64:{payload}" for _index in range(7)
     )
 
     content, is_error = _bridge_legacy_screenshot_output(
-        "browser_session", output,
-        arguments={"steps": [{"action": "screenshot"}]},
+        "desktop_screenshot", output,
     )
 
     assert is_error is False
