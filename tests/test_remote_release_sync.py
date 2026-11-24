@@ -184,11 +184,27 @@ def test_restart_remote_after_cutover_requires_new_pid_and_commit(
     assert result["source_commit"] == TARGET
 
 
-def test_restart_remote_falls_back_and_reports_failure(tmp_path, monkeypatch):
+def test_restart_remote_skips_when_it_was_never_running(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     monkeypatch.setattr(remote_lifecycle, "load_settings", lambda root=None: settings)
     monkeypatch.setattr(remote_lifecycle, "read_disabled_state", lambda root=None: None)
     monkeypatch.setattr(remote_lifecycle, "read_runtime_claim", lambda root: None)
+
+    async def find(settings_arg):
+        return None
+
+    monkeypatch.setattr(remote_lifecycle, "_find_owned_remote", find)
+
+    result = asyncio.run(remote_lifecycle.restart_remote_after_cutover())
+
+    assert result == {"ok": True, "status": "skipped", "reason": "remote_not_running"}
+
+
+def test_restart_remote_falls_back_and_reports_failure(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(remote_lifecycle, "load_settings", lambda root=None: settings)
+    monkeypatch.setattr(remote_lifecycle, "read_disabled_state", lambda root=None: None)
+    monkeypatch.setattr(remote_lifecycle, "read_runtime_claim", lambda root: {"pid": 5})
 
     async def control(root, *, action, **kwargs):
         return {"ok": False, "action": "supervisor_unavailable"}

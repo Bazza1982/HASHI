@@ -1038,7 +1038,10 @@ class RebootManager:
         try:
             from orchestrator.remote_lifecycle import restart_remote_after_cutover
 
+            paths = getattr(self.kernel, "paths", None)
             return await restart_remote_after_cutover(
+                root=getattr(paths, "bridge_home", None),
+                code_root=getattr(paths, "code_root", None),
                 expected_commit=expected or None,
             )
         except Exception as exc:

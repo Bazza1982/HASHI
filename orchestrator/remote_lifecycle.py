@@ -864,6 +864,13 @@ async def restart_remote_after_cutover(
         previous_pid = int(previous_pid or before.get("pid") or 0) or None
     except (TypeError, ValueError):
         previous_pid = None
+    if not before and previous_pid is None:
+        # /reboot does not turn a stopped optional sidecar into a running one.
+        return {
+            "ok": True,
+            "status": "skipped",
+            "reason": "remote_not_running",
+        }
     controller = await control_remote_supervisor(
         settings.root, action="restart", **source_options
     )
