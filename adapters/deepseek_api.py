@@ -118,8 +118,12 @@ def _structured_tool_media(
                 part.get("mimeType") or part.get("mime_type") or ""
             ).strip().casefold()
             payload = part.get("data")
-            if mime_type in _DEEPSEEK_IMAGE_MIME_TYPES and isinstance(payload, str):
-                urls.append(f"data:{mime_type};base64,{payload}")
+            if mime_type not in _DEEPSEEK_IMAGE_MIME_TYPES or not isinstance(payload, str):
+                raise MultimodalContractError(
+                    "DeepSeek Tool image has an unsupported MIME type or missing data",
+                    code="PROVIDER_MODALITY_UNSUPPORTED",
+                )
+            urls.append(f"data:{mime_type};base64,{payload}")
             continue
         if kind == "image_url":
             image_url = part.get("image_url")
@@ -127,7 +131,30 @@ def _structured_tool_media(
                 url = image_url.get("url")
             else:
                 url = image_url
-            if isinstance(url, str) and url.casefold().startswith("data:image/"):
+            if not isinstance(url, str):
+                raise MultimodalContractError(
+                    "DeepSeek Tool image URL is missing", code="MEDIA_UNAVAILABLE"
+                )
+            if url.casefold().startswith("data:image/"):
+                urls.append(url)
+            else:
+                from urllib.parse import urlsplit
+
+                try:
+                    parsed = urlsplit(url)
+                    valid = (
+                        len(url) <= 8192 and parsed.scheme.casefold() in {"http", "https"}
+                        and bool(parsed.hostname) and not parsed.username
+                        and not parsed.password and parsed.port != 0
+                        and not any(c.isspace() for c in url)
+                    )
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise MultimodalContractError(
+                        "DeepSeek Tool image URL must be a valid HTTP(S) URL of at most 8192 characters",
+                        code="MEDIA_UNAVAILABLE",
+                    )
                 urls.append(url)
     return texts, urls
 
@@ -568,18 +595,18 @@ class DeepSeekAdapter(OpenRouterAdapter):
         for url in image_urls:
             if url in seen_urls:
                 continue
-            mime_type, image_bytes = validate_inline_image_data_url(
-                url,
-                max_bytes=DEEPSEEK_MAX_INLINE_IMAGE_BYTES,
-            )
-            if mime_type not in _DEEPSEEK_IMAGE_MIME_TYPES:
-                raise MultimodalContractError(
-                    f"DeepSeek does not accept inline image format {mime_type!r}",
-                    code="MEDIA_SIGNATURE_UNVERIFIED",
+            if url.casefold().startswith("data:"):
+                mime_type, image_bytes = validate_inline_image_data_url(
+                    url, max_bytes=DEEPSEEK_MAX_INLINE_IMAGE_BYTES,
                 )
+                if mime_type not in _DEEPSEEK_IMAGE_MIME_TYPES:
+                    raise MultimodalContractError(
+                        f"DeepSeek does not accept inline image format {mime_type!r}",
+                        code="MEDIA_SIGNATURE_UNVERIFIED",
+                    )
+                total_image_bytes += image_bytes
             seen_urls.add(url)
             unique_urls.append(url)
-            total_image_bytes += image_bytes
 
         if len(unique_urls) > DEEPSEEK_MAX_IMAGES_PER_REQUEST:
             raise MultimodalContractError(
@@ -607,18 +634,22 @@ class DeepSeekAdapter(OpenRouterAdapter):
                 }
             ]
 
-        if not self.resolve_input_capability().supports("image", "data_url"):
+        capability = self.resolve_input_capability()
+        supported_urls = [
+            url for url in unique_urls
+            if capability.supports(
+                "image", "data_url" if url.casefold().startswith("data:") else "remote_url"
+            )
+        ]
+        if len(supported_urls) != len(unique_urls):
             omitted = (
                 "Image omitted: the selected DeepSeek model is not verified for "
-                "native image input."
+                "the image input transport."
             )
-            return [
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": "\n\n".join(part for part in (tool_text, omitted) if part),
-                }
-            ]
+            tool_text = "\n\n".join(part for part in (tool_text, omitted) if part)
+        unique_urls = supported_urls
+        if not unique_urls:
+            return [{"role": "tool", "tool_call_id": tool_call_id, "content": tool_text}]
 
         if not tool_text:
             tool_text = f"{tool_name} returned {len(unique_urls)} image(s)."

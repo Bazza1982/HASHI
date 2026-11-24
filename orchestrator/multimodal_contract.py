@@ -110,7 +110,7 @@ _ADAPTER_INPUT_TRANSPORTS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
         "image": ("data_url",),
         "audio": ("data_url", "inline"),
     },
-    "deepseek-api": {"image": ("data_url",)},
+    "deepseek-api": {"image": ("data_url", "remote_url")},
     "openai-compatible-api": {
         "image": ("data_url",),
         "audio": ("data_url", "inline"),

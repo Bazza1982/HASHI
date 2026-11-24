@@ -2093,34 +2093,12 @@ class OpenRouterAdapter(BaseBackend):
         """
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
-        """Reject a clearly oversized text payload before an HTTP call.
+        """Defer uncertain estimates to provider admission after preparation.
 
-        Native media have provider-specific token accounting, so leave those
-        requests to the provider's typed rejection rather than guessing from
-        base64 wire bytes.
+        Provider-specific preparation and compaction remain authoritative;
+        an estimated token count cannot prove the request will not fit.
         """
-
-        from orchestrator.context_compaction import estimate_tokens, resolve_capacity_profile
-
-        runtime = getattr(self.config, "_hashi_runtime", None)
-        if runtime is None:
-            return
-        model = str(payload.get("model") or self.config.model)
-        capacity = resolve_capacity_profile(runtime, self.config.engine, model)
-        if capacity is None:
-            return
-        from orchestrator.provider_text_projection import provider_text_capacity_json
-
-        # Only typed media parts are removed from text-token estimation.
-        # User, assistant and Tool text remains in scope verbatim.
-        serialized = provider_text_capacity_json(payload)
-        estimated = estimate_tokens(serialized)
-        if estimated > capacity.usable_input_tokens:
-            raise ProviderContextCapacityPreflightError(
-                f"Prepared request estimate {estimated} tokens exceeds "
-                f"declared usable input capacity {capacity.usable_input_tokens} "
-                f"for {capacity.provider}/{capacity.model}."
-            )
+        del payload
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(

@@ -911,7 +911,7 @@ def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
 
 
 @pytest.mark.asyncio
-async def test_declared_capacity_rejects_oversized_serialized_payload_before_http(tmp_path):
+async def test_estimated_capacity_defers_to_provider_before_http(tmp_path):
     adapter = _adapter(tmp_path)
     adapter.tool_registry = None
     adapter.config._hashi_runtime = SimpleNamespace(
@@ -936,8 +936,8 @@ async def test_declared_capacity_rejects_oversized_serialized_payload_before_htt
 
     response = await adapter.generate_response("long " * 2500, "req-capacity-local")
 
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
-    assert adapter._call_api_once.await_count == 0
+    assert response.is_success is True
+    assert adapter._call_api_once.await_count == 1
 
 
 @pytest.mark.parametrize(

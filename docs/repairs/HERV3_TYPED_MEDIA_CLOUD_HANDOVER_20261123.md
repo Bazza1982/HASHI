@@ -118,3 +118,21 @@ Remain OPEN / DRAFT for technical review. No direct change to main/HASHI4.
 Only after explicit owner approval and exact-HEAD green CI, merge using the
 approved method and deploy **non-production** first. Production HASHI4 requires
 a separate explicit deployment decision and rollback readiness.
+
+## Review corrections
+
+The generic OpenRouter preflight does not reject requests solely because a
+heuristic token estimate exceeds a configured capacity; provider-specific
+preparation and compaction remain in place. Text projection still excludes
+only structured media and retains ordinary text for consumers that estimate.
+
+DeepSeek accepts verified image Tool parts using either an inline data URL or
+an HTTP(S) image URL (up to 8192 characters) when the selected model supports that transport. Invalid
+URLs and unsupported image MIME types produce explicit failures. Unsupported
+model transports are reported in the original Tool message.
+
+An old capability worker without structured screenshot content reports that
+it must be updated rather than leaking or truncating screenshot bytes as text.
+A legacy flattened mixed browser session reports the same limitation. Structured
+sessions retain surrounding text and step order when screenshot bytes are bad.
+These compatibility errors do not affect text-only sessions.

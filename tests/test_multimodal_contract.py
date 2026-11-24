@@ -204,7 +204,7 @@ def test_deepseek_v41_vision_capability_is_exact_and_size_bounded(model):
     vision = resolve_input_capability("deepseek-api", model)
 
     assert vision.supports("image", "data_url") is True
-    assert vision.supports("image", "remote_url") is False
+    assert vision.supports("image", "remote_url") is True
     assert vision.limits == {
         "item_count": 600,
         "item_bytes": 32 * 1024 * 1024,

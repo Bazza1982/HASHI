@@ -576,3 +576,16 @@ async def test_terminal_exchange_empty_allowlist_denies_every_tool(tmp_path):
 
     assert result.is_error is True
     assert "outside the current request" in result.output
+
+
+@pytest.mark.asyncio
+async def test_legacy_capability_screenshot_does_not_leak_truncated_bytes(tmp_path):
+    data = "A" * 30000
+    facade = _CapabilityFacade(result="screenshot:" + data, capabilities=[_browser_registration(actions=("screenshot",))])
+    registry = _registry(tmp_path, "browser_screenshot", facade)
+    result = await registry.execute("browser_screenshot", {"url": "https://example.com"}, "legacy-1")
+    assert result.is_error
+    assert "worker" in result.output.lower()
+    assert data not in result.output
+    assert result.content is None
+    assert len(facade.calls) == 1

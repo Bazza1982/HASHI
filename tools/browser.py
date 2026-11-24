@@ -590,6 +590,11 @@ async def execute_browser_screenshot(args: dict, *, typed_media: bool = False) -
                 return screenshot_tool_result(payload, "Browser screenshot captured")
             except (ValueError, binascii.Error) as exc:
                 return f"Error: browser screenshot returned invalid image bytes: {type(exc).__name__}"
+        if typed_media and not bridge_result.startswith("Error:"):
+            return (
+                "Error: browser screenshot unavailable: legacy worker returned "
+                "unstructured output. Update the browser worker and retry."
+            )
         return bridge_result
 
     pw = browser = context = page = None
@@ -1195,18 +1200,21 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                     label = f"[{step_no}:{step_type}]"
                     if step_type == "screenshot" and raw.get("ok") is True:
                         data_url = raw.get("output")
-                        if not isinstance(data_url, str):
-                            return "Error: browser screenshot step returned no image"
-                        header, separator, encoded = data_url.partition(",")
-                        if not separator or header.casefold() != "data:image/png;base64":
-                            return "Error: browser screenshot step has invalid media envelope"
                         try:
+                            if not isinstance(data_url, str):
+                                raise ValueError("missing screenshot image")
+                            header, separator, encoded = data_url.partition(",")
+                            if not separator or header.casefold() != "data:image/png;base64":
+                                raise ValueError("invalid screenshot envelope")
                             payload = base64.b64decode(encoded, validate=True)
                             native = screenshot_tool_result(
                                 payload, f"{label} screenshot captured"
                             )
-                        except (ValueError, binascii.Error) as exc:
-                            return f"Error: browser screenshot step returned malformed image: {type(exc).__name__}"
+                        except (ValueError, binascii.Error):
+                            line = f"{label} ERROR: screenshot returned invalid image"
+                            summary.append(line)
+                            parts.append({"type": "text", "text": line})
+                            continue
                         summary.append(f"{label} image attached")
                         parts.extend(native.content)
                         found_image = True
@@ -1225,6 +1233,14 @@ async def execute_browser_session(args: dict, *, typed_media: bool = False) -> s
                     return StructuredToolOutput(
                         output="\n".join(summary), content=parts,
                     )
+            if any(
+                isinstance(step, dict) and step.get("action") == "screenshot"
+                for step in steps
+            ):
+                return (
+                    "Error: browser session screenshot unavailable: legacy worker "
+                    "returned unstructured output. Update the browser worker and retry."
+                )
         return bridge_result
 
     pw = browser = context = page = None

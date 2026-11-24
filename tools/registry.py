@@ -1780,7 +1780,23 @@ class ToolRegistry:
             request_id=request_id,
             authorization="tool_registry",
         )
+        screenshot_requested = action == "screenshot" or (
+            action == "session"
+            and any(
+                isinstance(step, Mapping) and step.get("action") == "screenshot"
+                for step in (arguments.get("steps") or [])
+            )
+        )
         if isinstance(result, str):
+            if (
+                capability_kind in {"browser_control", "computer_control"}
+                and screenshot_requested
+                and not result.startswith("Error:")
+            ):
+                return (
+                    "Error: screenshot unavailable: capability worker returned "
+                    "unstructured output. Update the worker and retry."
+                )
             return result
         # The authenticated capability Worker can return native Tool content.
         # Trust the structured result type, never infer media from the text.
@@ -1795,6 +1811,11 @@ class ToolRegistry:
                 output=result["output"],
                 content=[dict(part) for part in result["content"]
                          if isinstance(part, Mapping)],
+            )
+        if capability_kind in {"browser_control", "computer_control"} and screenshot_requested:
+            return (
+                "Error: screenshot unavailable: capability worker returned "
+                "unstructured output. Update the worker and retry."
             )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
