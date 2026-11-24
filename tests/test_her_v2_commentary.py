@@ -262,6 +262,42 @@ def test_commentary_schema_describes_each_mode():
     assert original["commentary"] != raw["commentary"] != packaged["commentary"]
 
 
+def test_direct_prompt_renders_mode_specific_commentary_instruction():
+    from orchestrator.her_v2.prompts import render_direct_system_prompt
+
+    def render(mode):
+        return render_direct_system_prompt(
+            goal="Inspect the configured state",
+            habit_catalogue=[],
+            skills_catalogue=[],
+            tool_catalogue=[],
+            guidance="Address the user as Captain.",
+            display_name="Agent",
+            usable=True,
+            commentary_mode=mode,
+            persona_block_begin="<persona>",
+            persona_block_end="</persona>",
+        )
+
+    raw = render("raw")
+    original = render("original")
+    packaged = render("packaged")
+    off = render("off")
+
+    assert "Commentary mode (raw)" in raw
+    assert "objective" in raw
+    assert "never apply Persona styling" in raw
+
+    assert "Commentary mode (original)" in original
+    assert "Persona" in original
+
+    assert "Commentary mode (packaged)" in packaged
+    assert "neutral" in packaged
+
+    assert "Commentary mode (off)" in off
+    assert "always omit" in off
+
+
 class _LivenessRecording:
     def __init__(self):
         self.texts = []

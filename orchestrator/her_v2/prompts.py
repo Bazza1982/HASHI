@@ -174,6 +174,21 @@ def commentary_schema_for(stage: Stage, mode: str | None = None) -> Mapping[str,
     return schema
 
 
+def commentary_prompt_instruction(mode: str | None) -> str:
+    """One prompt-level interim-commentary instruction for the main model.
+
+    Reuses the same mode descriptions as the structured stage schemas so the
+    Direct/primary Execution prompt and the JSON schemas never disagree.
+    """
+
+    if mode is None:
+        return ""
+    description = _COMMENTARY_MODE_DESCRIPTIONS.get(str(mode).casefold())
+    if description is None:
+        return ""
+    return f"Commentary mode ({str(mode).casefold()}): {description}."
+
+
 def _compact_tool_catalogue(
     items: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -767,6 +782,7 @@ def render_direct_system_prompt(
     guidance: str,
     display_name: str,
     usable: bool,
+    commentary_mode: str | None = None,
     persona_block_begin: str,
     persona_block_end: str,
 ) -> str:
@@ -835,6 +851,7 @@ Complete Strategy Card Playbook:
             guidance=guidance, display_name=display_name, usable=usable
         ),
         persona_block_end=persona_block_end,
+        commentary_instruction=commentary_prompt_instruction(commentary_mode),
     )
 
 
@@ -869,6 +886,7 @@ def render_execution_system_prompt(
     guidance: str,
     display_name: str,
     usable: bool,
+    commentary_mode: str | None = None,
     persona_block_begin: str,
     persona_block_end: str,
 ) -> str:
@@ -908,6 +926,7 @@ def render_execution_system_prompt(
             guidance=guidance, display_name=display_name, usable=usable
         ),
         persona_block_end=persona_block_end,
+        commentary_instruction=commentary_prompt_instruction(commentary_mode),
         goal=goal,
     )
 

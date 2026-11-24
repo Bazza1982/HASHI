@@ -780,6 +780,7 @@ def _execution_system_prompt(
     delegated_execution: Mapping[str, Any] | None,
     strategy_handoff: Mapping[str, Any] | None,
     tool_catalogue: list[Mapping[str, Any]],
+    commentary_mode: str | None = None,
 ) -> str:
     return render_execution_system_prompt(
         goal=goal,
@@ -791,6 +792,7 @@ def _execution_system_prompt(
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
+        commentary_mode=commentary_mode,
         persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
         persona_block_end=her_persona.PERSONA_BLOCK_END,
     )
@@ -804,6 +806,7 @@ def _direct_system_prompt(
     skills_catalogue: Sequence[Mapping[str, Any]],
     tool_catalogue: Sequence[Mapping[str, Any]],
     strategy_playbook: Mapping[str, Any] | None,
+    commentary_mode: str | None = None,
 ) -> str:
     return render_direct_system_prompt(
         goal=goal,
@@ -814,6 +817,7 @@ def _direct_system_prompt(
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
+        commentary_mode=commentary_mode,
         persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
         persona_block_end=her_persona.PERSONA_BLOCK_END,
     )
@@ -5841,6 +5845,9 @@ class HashiStageProvider(StageProvider):
                                     )
                                     else None
                                 ),
+                                commentary_mode=str(
+                                    getattr(self, "_commentary_mode", "") or "off"
+                                ),
                             )
                     else:
                         raw_sub_agent_results = request.context.get(
@@ -5888,6 +5895,9 @@ class HashiStageProvider(StageProvider):
                                 else None
                             ),
                             tool_catalogue=tool_catalogue,
+                            commentary_mode=str(
+                                getattr(self, "_commentary_mode", "") or "off"
+                            ),
                         )
                 else:
                     system_prompt = _finalisation_system_prompt(

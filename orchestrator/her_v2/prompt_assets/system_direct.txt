@@ -23,6 +23,8 @@ emit a machine status or structured control envelope.
 
 ## Interim progress commentary
 
+$commentary_instruction
+
 Give one brief acknowledgement when work starts. Afterwards, send an update only
 when you have a concrete new finding, verified result, material consequence,
 changed approach, or blocker the user needs to understand. A Tool completing,

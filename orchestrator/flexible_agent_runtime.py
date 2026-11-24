@@ -342,11 +342,17 @@ class FlexibleAgentRuntime:
         # The same JSON survives sessions, runtime recreation, and host reboot.
         self._think = telegram_stream_policy.get_display_preference(self, "think")
         # Model-authored commentary is deliberately independent from
-        # provider reasoning and technical progress. The mode (off/raw/
-        # original/packaged) is the durable setting; ``_commentary`` keeps the
-        # legacy boolean for presentation consumers.
-        self._commentary_mode = telegram_stream_policy.get_commentary_mode(self)
-        self._commentary = self._commentary_mode != "off"
+        # provider reasoning and technical progress. HER v3 resolves the
+        # off/raw/original/packaged mode; other backends keep the legacy
+        # binary preference and its default.
+        if self._is_her_commentary_backend():
+            self._commentary_mode = telegram_stream_policy.get_commentary_mode(self)
+            self._commentary = self._commentary_mode != "off"
+        else:
+            self._commentary_mode = "off"
+            self._commentary = telegram_stream_policy.get_display_preference(
+                self, "commentary", default=True
+            )
         # Per-turn cost tail. Eligibility is frozen in _request_meta_by_id and
         # receipts are correlated by request ID; overlapping foreground and
         # background turns must never share a mutable "current" receipt.
@@ -8328,8 +8334,39 @@ class FlexibleAgentRuntime:
     def _set_commentary_enabled(self, enabled: bool) -> None:
         self._set_commentary_mode("raw" if enabled else "off")
 
-    def _commentary_keyboard(self) -> InlineKeyboardMarkup:
+    def _effective_commentary_mode(self) -> str:
+        """Mirror the provider-layer local-inference restriction for display.
+
+        A saved ORIGINAL or PACKAGED preference on a local provider actually
+        runs as RAW; the menu must disclose that effective behaviour.
+        """
+
         mode = getattr(self, "_commentary_mode", "off")
+        if mode in {"original", "packaged"}:
+            from orchestrator.flexible_backend_registry import canonical_model_provider
+
+            backend = getattr(
+                getattr(self, "backend_manager", None), "current_backend", None
+            )
+            engine = str(getattr(backend, "engine", "") or "").strip()
+            if canonical_model_provider(engine) in {"ollama-api", "hli-api"}:
+                return "raw"
+        return mode
+
+    def _commentary_keyboard(self) -> InlineKeyboardMarkup:
+        if not self._is_her_commentary_backend():
+            # Non-HER backends keep the existing binary ON/OFF controls.
+            return InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    selected_label(ui_language.tr("menu.toggle.on"), self._commentary),
+                    callback_data="tgl:commentary:on",
+                ),
+                InlineKeyboardButton(
+                    selected_label(ui_language.tr("menu.toggle.off"), not self._commentary),
+                    callback_data="tgl:commentary:off",
+                ),
+            ]])
+        mode = self._effective_commentary_mode()
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(
                 selected_label("OFF", mode == "off"),
@@ -8368,12 +8405,23 @@ class FlexibleAgentRuntime:
     def _commentary_menu_text(self) -> str:
         backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
         effort = str(getattr(backend, "effort", "unknown") or "unknown").upper()
-        return runtime_menu_views.commentary_text(
+        text = runtime_menu_views.commentary_text(
             enabled=self._commentary,
             backend=str(getattr(self.config, "active_backend", "unknown") or "unknown"),
             her_backend=self._is_her_commentary_backend(),
             effort=effort,
         )
+        if self._is_her_commentary_backend():
+            saved = getattr(self, "_commentary_mode", "off")
+            effective = self._effective_commentary_mode()
+            if effective != saved:
+                text += (
+                    f"\n\n💬 Saved <b>{html.escape(saved.upper())}</b> actually runs "
+                    f"as <b>{html.escape(effective.upper())}</b> on this local "
+                    f"provider (it supports only OFF/RAW); your saved preference "
+                    f"is preserved."
+                )
+        return text
 
     async def cmd_commentary(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):

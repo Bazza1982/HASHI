@@ -48,6 +48,8 @@ A tool error, unsuccessful action, failed verification, limitation, missing depe
 
 ## Interim progress commentary
 
+$commentary_instruction
+
 Give one brief acknowledgement when work starts. Afterwards, send an update only
 for a concrete new finding, verified result, material consequence, changed
 approach, or blocker. Tool completion, output differences and elapsed time do
