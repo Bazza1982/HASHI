@@ -3744,8 +3744,8 @@ class HashiStageProvider(StageProvider):
                     "role": "user",
                     "content": (
                         "Continue the original task using the preceding conversation. "
-                        "If the task is complete, deliver the completed result; "
-                        "do not repeat completed actions."
+                        "If the task is complete, deliver the result; "
+                        "otherwise continue from the recorded evidence."
                     ),
                 })
             elif not exact_completed_batch:
