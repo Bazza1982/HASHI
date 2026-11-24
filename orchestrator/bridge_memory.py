@@ -18,7 +18,7 @@ from collections.abc import Mapping
 
 from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
-from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
+from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled, project_hcc_for_request
 from orchestrator import pcm_forget_memory
 from orchestrator import pcm_profile as pcm_profile_module
 from orchestrator.config_json import (
@@ -2327,14 +2327,14 @@ class BridgeContextAssembler:
                 "local_system", protected=True,
             )
             hcc_body = hcc_text
-            if (
-                local_profile
-                and len(hcc_body) > pcm_profile_module.LOCAL_HCC_PROJECTION_CHARS
-            ):
-                hcc_body = (
-                    hcc_body[: pcm_profile_module.LOCAL_HCC_PROJECTION_CHARS].rstrip()
-                    + "\n…[truncated] The full cache remains in agent.md#hcc; "
-                    "read it with file_read when relevant to this request."
+            if local_profile:
+                # Deterministic relevance projection: keep the cache entries
+                # that lexically relate to the current request, bounded and in
+                # document order; the full cache stays readable via file_read.
+                hcc_body = project_hcc_for_request(
+                    hcc_text,
+                    user_prompt,
+                    pcm_profile_module.LOCAL_HCC_PROJECTION_CHARS,
                 )
             add_section(
                 "hcc", "HASHI CONTEXT CACHE", hcc_body,
@@ -2363,11 +2363,7 @@ class BridgeContextAssembler:
                 or (inject_memory and self.turns_injection_enabled)
             )
         )
-        history_limit = (
-            pcm_profile_module.LOCAL_MAX_RECENT_EXCHANGES
-            if local_profile
-            else self.MAX_RECENT_EXCHANGES
-        )
+        history_limit = self.MAX_RECENT_EXCHANGES
         exchanges = []
         if should_inject_history:
             if recent_exchanges is not None:
@@ -2448,19 +2444,20 @@ class BridgeContextAssembler:
 
         if document and document.memory:
             if local_profile:
-                # Local keeps a one-line bounded excerpt so long-term facts
-                # stay directly visible to small models, plus a retrieval
-                # reference. The canonical block remains in agent.md and is
-                # readable through the authorized file tools; retrieval does
-                # not assume memory_search already indexes it.
-                memory_text = str(document.memory or "")
-                excerpt = " ".join(memory_text.replace("\r\n", "\n").split())
-                if len(excerpt) > pcm_profile_module.LOCAL_MEMORY_EXCERPT_CHARS:
-                    excerpt = excerpt[: pcm_profile_module.LOCAL_MEMORY_EXCERPT_CHARS].rstrip() + "…"
+                # Local keeps the memory units that lexically relate to the
+                # current request (bounded, deterministic, no new retrieval
+                # subsystem) plus a retrieval reference. The canonical block
+                # remains in agent.md and is readable via the authorized file
+                # tools; retrieval does not assume memory_search indexes it.
+                projected_memory = pcm_profile_module.project_memory_for_request(
+                    document.memory,
+                    user_prompt,
+                    pcm_profile_module.LOCAL_MEMORY_PROJECTION_CHARS,
+                )
                 add_section(
                     "permanent_memory",
-                    "LONG-TERM MEMORY (EXCERPT + REFERENCE)",
-                    excerpt
+                    "LONG-TERM MEMORY (RELEVANT PROJECTION + REFERENCE)",
+                    (projected_memory or "")
                     + "\nFull long-term memory is in agent.md ([memory]); read it "
                     "with file_read when relevant to this request.",
                     "memory",

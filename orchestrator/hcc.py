@@ -110,6 +110,42 @@ def _entries(body: str) -> dict[str, tuple[int, int]]:
     return entries
 
 
+def project_hcc_for_request(body: str, query: object, max_chars: int) -> str:
+    """Bounded deterministic relevance projection of the HCC cache.
+
+    Named entries are scored by lexical overlap with the current request and
+    the best entries are kept in document order up to ``max_chars``. Free
+    text without named entries is treated as paragraph units. No classifier,
+    embedding or new storage is introduced; the canonical cache in agent.md
+    stays readable and explicitly requestable in full.
+    """
+    if not body or not str(body).strip():
+        return ""
+    from orchestrator.pcm_profile import lexical_unit_selection
+
+    units: list[tuple[str, str]] = []
+    try:
+        entries = _entries(body)
+    except ValueError:
+        entries = {}
+    if entries:
+        for name, span in sorted(entries.items(), key=lambda item: item[1][0]):
+            units.append((name, body[span[0]:span[1]]))
+    else:
+        for paragraph in re.split(r"\n\s*\n", body):
+            paragraph = paragraph.strip()
+            if paragraph:
+                units.append(("", paragraph))
+    if not units:
+        return body[:max_chars]
+    return lexical_unit_selection(
+        units,
+        query,
+        max_chars,
+        truncation_note="\n…[projected by relevance; the rest remains in agent.md#hcc]",
+    )
+
+
 def _digest(body: str, span: tuple[int, int] | None) -> str | None:
     if span is None:
         return None

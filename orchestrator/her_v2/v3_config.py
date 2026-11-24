@@ -417,6 +417,16 @@ def build_v3_provider_options(
             default_model = target.model
         if default_model not in models:
             default_model = next(iter(models), "")
+        # Profile-level PCM projection preference travels with the Provider
+        # option so HERV3 model/Provider switching honours per-Provider
+        # overrides without a separate configuration subsystem.
+        pcm_profile_override = profile.get("pcm_profile")
+        if pcm_profile_override in (None, ""):
+            for row in rows:
+                candidate = row.get("pcm_profile")
+                if candidate not in (None, ""):
+                    pcm_profile_override = candidate
+                    break
         options.append(
             {
                 "name": name,
@@ -431,6 +441,7 @@ def build_v3_provider_options(
                 "pro_model": default_model,
                 "available": reason is None,
                 "reason": reason,
+                "pcm_profile": pcm_profile_override,
             }
         )
     return options

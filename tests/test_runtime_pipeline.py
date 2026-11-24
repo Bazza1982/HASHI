@@ -1141,9 +1141,20 @@ class _DeltaPCMAssembler:
         }
 
 
+def _promote(runtime, item, backend=None, success=True):
+    current = backend or runtime.backend_manager.current_backend
+    runtime_pipeline.promote_pcm_baseline_after_delivery(
+        runtime,
+        item,
+        SimpleNamespace(
+            response=SimpleNamespace(is_success=success),
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_incremental_baseline_rebuilt_after_restart_recovery():
-    """A recovered persistent session records its baseline on the first turn."""
+    """A recovered persistent session records its baseline after successful delivery."""
     runtime = _runtime()
     runtime.config.active_backend = "codex-cli"
     runtime.backend_manager.agent_mode = "fixed"
@@ -1164,10 +1175,8 @@ async def test_incremental_baseline_rebuilt_after_restart_recovery():
 
     assert first.incremental is True
     assert "STATIC-V1" in first.final_prompt
-    assert runtime._last_pcm_section_digests is not None
-    assert runtime._last_pcm_section_digests["permanent_system"] == hashlib.sha256(
-        b"STATIC-V1"
-    ).hexdigest()
+    assert runtime._pending_pcm_baseline is not None
+    _promote(runtime, item)
 
     item2 = _item(source="text")
     runtime_pipeline.begin_queue_item(runtime, item2)
@@ -1180,6 +1189,86 @@ async def test_incremental_baseline_rebuilt_after_restart_recovery():
         "request_only",
         "delta",
     }
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_does_not_advance_baseline():
+    """A failed turn must not mark changed sections as delivered (A→B→A safety)."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(
+        ["STATIC-A", "STATIC-B", "STATIC-B"]
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    second = await runtime_pipeline.build_turn_prompt(
+        runtime, item2, is_bridge_request=False
+    )
+    assert "STATIC-B" in second.final_prompt
+    # Delivery fails: the baseline stays at A.
+    _promote(runtime, item2, success=False)
+
+    item3 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item3)
+    third = await runtime_pipeline.build_turn_prompt(
+        runtime, item3, is_bridge_request=False
+    )
+    # B is still treated as a change and re-sent.
+    assert "STATIC-B" in third.final_prompt
+
+
+@pytest.mark.asyncio
+async def test_a_to_b_to_a_section_reverts_are_resent():
+    """A→B→A: after B was delivered, reverting to A is a real change."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(
+        ["STATIC-A", "STATIC-B", "STATIC-A"]
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    second = await runtime_pipeline.build_turn_prompt(
+        runtime, item2, is_bridge_request=False
+    )
+    assert "STATIC-B" in second.final_prompt
+    _promote(runtime, item2)
+
+    item3 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item3)
+    third = await runtime_pipeline.build_turn_prompt(
+        runtime, item3, is_bridge_request=False
+    )
+    # Reverting to A after B was delivered must be sent, not skipped.
+    assert "STATIC-A" in third.final_prompt
+    assert "UPDATED" in third.final_prompt
 
 
 @pytest.mark.asyncio
@@ -1202,20 +1291,21 @@ async def test_isolated_turn_does_not_pollute_persistent_baseline():
     item = _item(source="text")
     runtime_pipeline.begin_queue_item(runtime, item)
     await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
-    assert runtime._last_pcm_section_digests["permanent_system"] == hashlib.sha256(
-        b"STATIC-V1"
-    ).hexdigest()
-
     runtime.backend_manager.current_backend._session_id = "persistent-session"
+    _promote(runtime, item)
+    assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
+        hashlib.sha256(b"STATIC-V1").hexdigest()
+    )
+
     isolated = _item(source="text", session_scope="isolated_per_run")
     runtime_pipeline.begin_queue_item(runtime, isolated)
     await runtime_pipeline.build_turn_prompt(
         runtime, isolated, is_bridge_request=False
     )
     # The isolated turn saw STATIC-V2 but must not refresh the baseline.
-    assert runtime._last_pcm_section_digests["permanent_system"] == hashlib.sha256(
-        b"STATIC-V1"
-    ).hexdigest()
+    assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
+        hashlib.sha256(b"STATIC-V1").hexdigest()
+    )
 
     item2 = _item(source="text")
     runtime_pipeline.begin_queue_item(runtime, item2)

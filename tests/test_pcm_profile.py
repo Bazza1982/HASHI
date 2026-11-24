@@ -16,7 +16,6 @@ from orchestrator.her_v2.v3_prompt import (
 )
 from orchestrator.pcm import render_pcm_document
 from orchestrator.pcm_profile import (
-    LOCAL_MAX_RECENT_EXCHANGES,
     LOCAL_MEMORY_SEARCH_LIMIT,
     LOCAL_PROMPT_TOKEN_BUDGET,
     resolve_pcm_profile,
@@ -75,6 +74,28 @@ def test_profile_explicit_override_wins_and_validates():
         resolve_pcm_profile("grok-cli", backend_extra={"pcm_profile": "hybrid"})
     # Never inferred from model names or endpoint addresses.
     assert resolve_pcm_profile("codex-cli") == "cloud"
+    # Per-Provider overrides win over engine defaults; backend-level explicit
+    # configuration wins over the per-Provider override.
+    assert (
+        resolve_pcm_profile(
+            "her-v2",
+            provider_extra={"pcm_profile": "local"},
+            her_v3_target_engine="deepseek-api",
+        )
+        == "local"
+    )
+    assert (
+        resolve_pcm_profile(
+            "her-v2",
+            backend_extra={"pcm_profile": "cloud"},
+            provider_extra={"pcm_profile": "local"},
+            her_v3_target_engine="deepseek-api",
+        )
+        == "cloud"
+    )
+    assert (
+        resolve_pcm_profile("her-v2", her_v3_target_engine="ollama-api") == "local"
+    )
 
 
 def test_invalid_profile_raises_consistently(tmp_path):
@@ -112,18 +133,37 @@ def test_invalid_profile_raises_consistently(tmp_path):
 # --- C/D. local tiering ------------------------------------------------------
 
 
-def test_local_omits_full_permanent_memory_but_keeps_reference(tmp_path):
-    tail = "z" * 2000
-    _store, assembler = _assembler(tmp_path, memory="alpha-fact-7 " + tail)
-    payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")
+def test_local_projects_memory_by_relevance(tmp_path):
+    memory = (
+        "alpha-project uses legacy settings\n\n"
+        + "beta-credential rotation: rotate every 90 days, store in vault\n\n"
+        + ("gamma-filler " * 60)
+    )
+    _store, assembler = _assembler(tmp_path, memory=memory)
+    payload = assembler.build_prompt_payload(
+        "check the credential rotation policy", "codex-cli", pcm_profile="local"
+    )
     memory_section = _section(payload, "permanent_memory")
     assert memory_section is not None
-    assert "alpha-fact-7" in memory_section["text"]
-    assert tail not in memory_section["text"]
+    assert "beta-credential rotation" in memory_section["text"]
+    assert "alpha-project" not in memory_section["text"]
     assert "file_read" in memory_section["text"]
-    assert len(memory_section["text"]) < 700
-    cloud = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="cloud")
-    assert tail in _section(cloud, "permanent_memory")["text"]
+    assert len(memory_section["text"]) < 800
+    cloud = assembler.build_prompt_payload(
+        "check the credential rotation policy", "codex-cli", pcm_profile="cloud"
+    )
+    assert "alpha-project" in _section(cloud, "permanent_memory")["text"]
+
+
+def test_local_memory_head_fallback_when_no_overlap(tmp_path):
+    memory = "alpha-head fact\n\nbeta-tail fact"
+    _store, assembler = _assembler(tmp_path, memory=memory)
+    payload = assembler.build_prompt_payload(
+        "ask", "codex-cli", pcm_profile="local"
+    )
+    text = _section(payload, "permanent_memory")["text"]
+    assert "alpha-head fact" in text
+    assert "file_read" in text
 
 
 def test_local_skips_skill_and_tool_catalogues(tmp_path):
@@ -135,7 +175,7 @@ def test_local_skips_skill_and_tool_catalogues(tmp_path):
     assert "skills_catalogue" in payload["transport_snapshot"]["removed_section_keys"]
 
 
-def test_local_minimal_time_and_limited_history(tmp_path, monkeypatch):
+def test_local_minimal_time_and_history_capacity_unchanged(tmp_path, monkeypatch):
     store, assembler = _assembler(tmp_path)
     monkeypatch.setattr(
         store, "get_last_user_turn_ts", lambda: "2026-09-03T10:05:00+10:00"
@@ -153,7 +193,9 @@ def test_local_minimal_time_and_limited_history(tmp_path, monkeypatch):
     payload = assembler.build_prompt_payload(
         "current", "codex-cli", pcm_profile="local", recent_exchanges=exchanges
     )
-    assert payload["audit"]["history_included"] == LOCAL_MAX_RECENT_EXCHANGES
+    # History is never hard-truncated by profile: capacity/managed history
+    # remain authoritative, and the budget prunes oldest exchanges first.
+    assert payload["audit"]["history_included"] == 10
     assert "Previous user message" not in _section(payload, "time")["text"]
     cloud = assembler.build_prompt_payload(
         "current", "codex-cli", pcm_profile="cloud", recent_exchanges=exchanges
@@ -162,16 +204,36 @@ def test_local_minimal_time_and_limited_history(tmp_path, monkeypatch):
     assert "Previous user message" in _section(cloud, "time")["text"]
 
 
-def test_local_truncates_hcc_with_retrieval_reference(tmp_path):
-    _store, assembler = _assembler(tmp_path, hcc="entry-body-" + ("x" * 3000))
+def test_local_projects_hcc_by_relevance(tmp_path):
+    hcc = "\n".join(
+        f"[entry{i}]\nobservation {i} " + ("common " * 10) + f"marker{i}\n[entry{i}_end]"
+        for i in range(6)
+    )
+    _store, assembler = _assembler(tmp_path, hcc=hcc)
+    payload = assembler.build_prompt_payload(
+        "tell me about marker4", "codex-cli", pcm_profile="local"
+    )
+    hcc_section = _section(payload, "hcc")
+    assert hcc_section is not None
+    assert "marker4" in hcc_section["text"]
+    assert "marker0" not in hcc_section["text"]
+    assert hcc_section["metadata"].get("replace_only") is True
+    cloud = assembler.build_prompt_payload(
+        "tell me about marker4", "codex-cli", pcm_profile="cloud"
+    )
+    assert "marker0" in _section(cloud, "hcc")["text"]
+
+
+def test_local_hcc_head_fill_without_overlap(tmp_path):
+    hcc = "\n".join(
+        f"[entry{i}]\nobservation {i} " + ("x" * 40) + f"\n[entry{i}_end]"
+        for i in range(4)
+    )
+    _store, assembler = _assembler(tmp_path, hcc=hcc)
     payload = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="local")
     hcc_section = _section(payload, "hcc")
+    assert "entry0" in hcc_section["text"]
     assert len(hcc_section["text"]) < 1600
-    assert "truncated" in hcc_section["text"]
-    assert "file_read" in hcc_section["text"]
-    assert hcc_section["metadata"].get("replace_only") is True
-    cloud = assembler.build_prompt_payload("ask", "codex-cli", pcm_profile="cloud")
-    assert "entry-body-" + ("x" * 3000) in _section(cloud, "hcc")["text"]
 
 
 def test_local_memory_search_limit(tmp_path, monkeypatch):

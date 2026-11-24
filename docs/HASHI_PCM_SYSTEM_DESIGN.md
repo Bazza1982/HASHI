@@ -756,8 +756,11 @@ a permission change. Resolving it never deletes memory or data.
 - Defaults: HLI → `local`; Ollama → `local`; known cloud Providers → `cloud`;
   custom/future Providers are configurable through the existing mechanism.
 - The effective profile is resolved from the **actual inference target**,
-  including HERV3 model/Provider switching. Local/cloud status is never
-  inferred from model names, parameter counts, endpoint addresses or API keys.
+  including HERV3 model/Provider switching. Explicit per-Provider
+  configuration (`pcm_profile` on the selected HERV3 Provider option) wins
+  over engine defaults; the backend-level `extra.pcm_profile` wins over both.
+  Local/cloud status is never inferred from model names, parameter counts,
+  endpoint addresses or API keys.
 - `cloud` is generous, not wasteful. It keeps richer relevant memory, HCC and
   history but applies the same removal of redundant instructions, metadata,
   catalogues and duplicate injections.
@@ -771,16 +774,17 @@ a permission change. Resolving it never deletes memory or data.
 | Content | cloud | local |
 | ------- | ----- | ----- |
 | Persona, permanent `[sys]`, global/local `/sys` | full | full (unchanged) |
-| Permanent `[memory]` | full block | retrieval reference (`file_read` on agent.md); relevant search results only |
+| Permanent `[memory]` | full block | bounded deterministic relevance projection (units sharing terms with the request, in document order) plus a `file_read` retrieval reference; relevant search results only |
 | Saved-memory search | limit 6, relevance-based | limit 3, fewer and shorter high-value results |
-| HCC | full block + usage rules | bounded projection + retrieval reference; full block remains readable and explicitly requested full HCC is still supported |
-| History | up to 10 recent completed exchanges | up to 4 most recent exchanges; oldest complete exchanges yield first |
+| HCC | full block + usage rules | bounded deterministic relevance projection of named entries plus a retrieval reference; full block remains readable and explicitly requested full HCC is still supported |
+| History | up to 10 recent completed exchanges | same injection as cloud; actual model capacity and managed history/Compact remain authoritative (no profile hard cap) |
 | Skills/tools catalogues | concise catalogues | omitted; native tool schemas are primary, HLI's compact starter tool set + `tool_find` cover discovery |
 | Time/Workzone/provenance | current facts | current facts only (no previous-message gap line) |
 
-Omitted memory and context always remain retrievable through the existing
-authorized retrieval/read mechanisms. Omission never moves, rewrites or
-deletes user-authored memories.
+Projections are lexical and deterministic (no classifier, embedding, router
+call or new storage). Omitted memory and context always remain retrievable
+through the existing authorized retrieval/read mechanisms. Omission never
+moves, rewrites or deletes user-authored memories.
 
 ### 13.3 Incremental model-facing injection
 
@@ -792,6 +796,10 @@ Persistent Engine Sessions send the necessary PCM snapshot at session start and
   explicit removal notices. Unchanged Persona, system instructions, memory,
   HCC, skills and tool catalogues are not re-transmitted to an Engine that
   already holds them.
+- The baseline is scoped **per Engine Session** and only advances after a
+  successful delivery, so a section that changes and later reverts (A→B→A)
+  is still re-sent, failed turns re-send their deltas, and sessions that
+  interleave on one backend cannot pollute each other's baseline.
 - Direct persistent CLI paths (codex-cli, claude-cli, grok-cli, dsh-cli,
   antigravity-cli) now emit the delta prompt instead of re-assembling the
   static PCM into every outgoing prompt.
@@ -810,12 +818,14 @@ Persistent Engine Sessions send the necessary PCM snapshot at session start and
 ### 13.4 Budgets
 
 The generic non-HER 64K token budget is a cloud fallback, not a universal
-operating budget. Local engines (ollama-api, hli-api) use a 16K default and
-their own capacity resolver (including HLI per-slot context and output
-headroom) remains authoritative. Budgets reduce redundant generated content
-first, then irrelevant references, catalogues and older history; existing
-Compact is the last resort and is never used to compensate for avoidable
-injection.
+operating budget. For Local engines the actual model capacity
+(`resolve_capacity_profile`, including HLI per-slot context and output
+headroom) supplies the prompt budget; the 16K table entry remains only a
+soft fallback when no capacity is known. The budget reduces redundant
+generated content first, then irrelevant references, catalogues and older
+history; existing Compact is the last resort and is never used to compensate
+for avoidable injection, and no valid user task is rejected on an estimated
+budget.
 
 ### 13.5 HASHI-generated contracts
 

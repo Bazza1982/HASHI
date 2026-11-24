@@ -1299,14 +1299,23 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     # Resolve the PCM projection profile from the actual inference target so
     # HERV3 model/provider switching and explicit per-Provider configuration
     # both take effect without a separate configuration subsystem.
-    from orchestrator.pcm_profile import resolve_pcm_profile
+    from orchestrator.pcm_profile import PCM_PROFILE_LOCAL, resolve_pcm_profile
 
     profile_backend_extra = getattr(getattr(backend, "config", None), "extra", None)
     her_v3_target_engine = None
+    her_v3_provider_extra = None
     if runtime.config.active_backend == "her-v2":
         try:
             target = runtime.backend_manager.get_her_v3_target()
             her_v3_target_engine = str(getattr(target, "provider", None) or "")
+            option = runtime.backend_manager._her_v3_provider_option(
+                her_v3_target_engine
+            )
+            if isinstance(option, Mapping) and option.get("pcm_profile") not in (
+                None,
+                "",
+            ):
+                her_v3_provider_extra = {"pcm_profile": option.get("pcm_profile")}
         except Exception as exc:
             # Never fail a request over profile resolution; surface the silent
             # fallback so a "should be local" HERV3 route is observable.
@@ -1321,9 +1330,33 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     pcm_profile = resolve_pcm_profile(
         runtime.config.active_backend,
         backend_extra=profile_backend_extra,
+        provider_extra=her_v3_provider_extra,
         her_v3_target_engine=her_v3_target_engine,
     )
     prompt_kwargs["pcm_profile"] = pcm_profile
+    if (
+        pcm_profile == PCM_PROFILE_LOCAL
+        and "prompt_budget_tokens" in inspect.signature(prompt_builder).parameters
+        and "prompt_budget_tokens" not in prompt_kwargs
+    ):
+        # The actual model capacity is authoritative for Local engines; the
+        # 16K table entry stays only as a soft fallback when no capacity
+        # profile is known. This budget only trims oldest history and never
+        # rejects a valid request.
+        try:
+            from orchestrator.context_compaction import resolve_capacity_profile
+
+            capacity = resolve_capacity_profile(
+                runtime,
+                runtime.config.active_backend,
+                str(getattr(getattr(backend, "config", None), "model", "") or ""),
+            )
+            if capacity is not None and int(capacity.usable_input_tokens or 0) > 0:
+                prompt_kwargs["prompt_budget_tokens"] = int(
+                    capacity.usable_input_tokens
+                )
+        except Exception:
+            pass
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -1541,7 +1574,15 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     # Persistent CLI Engine Sessions received the static PCM snapshot at
     # bootstrap.  Incremental turns therefore carry only the current request
     # plus sections that actually changed; removals are announced explicitly.
-    if runtime.config.active_backend != "her-v2" and supports_sessions:
+    # Baselines are scoped per Engine Session and only advanced after the
+    # delivery succeeded (see promote_pcm_baseline_after_delivery), so a
+    # changed section is never silently skipped (A→B→A), and sessions that
+    # interleave on one backend cannot pollute each other's baseline.
+    if (
+        runtime.config.active_backend != "her-v2"
+        and supports_sessions
+        and session_scope == SESSION_SCOPE_PERSISTENT
+    ):
         from orchestrator.bridge_memory import BridgeContextAssembler
 
         envelope = prompt_payload.get("envelope") or {}
@@ -1550,22 +1591,19 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             for section in envelope.get("sections") or []
             if isinstance(section, Mapping)
         }
-        previous_digests = getattr(runtime, "_last_pcm_section_digests", None)
-        if incremental:
-            if isinstance(previous_digests, dict):
-                prompt_payload = BridgeContextAssembler.render_incremental_payload(
-                    prompt_payload, previous_digests
-                )
-            else:
-                # Restart-recovered session: this turn sent the full projection,
-                # so record the baseline immediately to restore incremental
-                # behaviour from the next turn instead of falling back forever.
-                runtime._last_pcm_section_digests = current_digests
-        elif session_scope == SESSION_SCOPE_PERSISTENT:
-            # Only persistent-session bootstrap turns own the baseline. Isolated
-            # activity turns use a different provider session and must never
-            # overwrite the persistent baseline.
-            runtime._last_pcm_section_digests = current_digests
+        baselines = getattr(runtime, "_pcm_baselines", None)
+        if not isinstance(baselines, dict):
+            baselines = {}
+            runtime._pcm_baselines = baselines
+        session_key = str(provider_session_id or "")
+        previous_digests = baselines.get(session_key) if session_key else None
+        if incremental and isinstance(previous_digests, dict):
+            prompt_payload = BridgeContextAssembler.render_incremental_payload(
+                prompt_payload, previous_digests
+            )
+        # Record what this turn intends to deliver; it becomes the baseline
+        # for this Engine Session only after a successful generation.
+        runtime._pending_pcm_baseline = (session_key, current_digests)
 
     if phone_audit:
         prompt_payload.setdefault("audit", {})["phone_context_handoff"] = phone_audit
@@ -1645,6 +1683,33 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         prompt_audit=prompt_audit,
         context_warnings=tuple(context_warnings),
     )
+
+
+def promote_pcm_baseline_after_delivery(runtime, item, generation) -> None:
+    """Advance the per-Session PCM baseline only after a successful delivery.
+
+    A failed, cancelled or detached generation leaves the previous baseline
+    intact, so the changed sections are re-sent on the next turn instead of
+    being silently skipped. The baseline key is the Engine Session actually
+    used for delivery (the adapter knows it only after the first turn).
+    """
+    pending = getattr(runtime, "_pending_pcm_baseline", None)
+    if not isinstance(pending, tuple) or len(pending) != 2:
+        return
+    response = getattr(generation, "response", None)
+    if not getattr(response, "is_success", False):
+        return
+    pending_key, digests = pending
+    if not isinstance(digests, dict):
+        return
+    backend = getattr(runtime.backend_manager, "current_backend", None)
+    session_key = str(getattr(backend, "_session_id", None) or "") or str(pending_key)
+    baselines = getattr(runtime, "_pcm_baselines", None)
+    if not isinstance(baselines, dict):
+        baselines = {}
+        runtime._pcm_baselines = baselines
+    baselines[session_key] = dict(digests)
+    runtime._pending_pcm_baseline = None
 
 
 async def run_backend_generation(

@@ -639,15 +639,9 @@ class HerBackendSessionCoordinator:
             pcm_dict,
             self.store.recent_completed_turns(session_id),
         )
-        from orchestrator.pcm_profile import (
-            LOCAL_MAX_RECENT_EXCHANGES,
-            PCM_PROFILE_LOCAL,
-        )
-
-        if turn_pcm_profile.strip().casefold() == PCM_PROFILE_LOCAL:
-            # Local prioritizes the most recent relevant exchanges; the full
-            # canonical history stays durable and retrievable.
-            history = history[-LOCAL_MAX_RECENT_EXCHANGES:]
+        # History is never hard-truncated by profile: the existing managed
+        # history / Compact machinery and the actual model capacity remain
+        # authoritative for how much settled history reaches the model.
         pcm_sections = [
             dict(value)
             for value in pcm_dict.values()
