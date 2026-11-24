@@ -91,3 +91,14 @@ def test_in_process_hot_reload_vocabulary_is_not_exported():
     assert not hasattr(function_contract, "HOT_RELOAD_PREFIXES")
     assert not hasattr(function_contract, "module_reload_key")
     assert not hasattr(function_contract, "discover_loaded_project_modules")
+
+
+def test_hal_package_belongs_to_the_function_contract():
+    # workbench_api imports hal.service lazily, so the package must be claimed
+    # by the contract even though it is absent from a cold Core module set.
+    assert function_contract.is_function_module_name("hal")
+    assert function_contract.is_function_module_name("hal.service")
+    assert function_contract.is_function_module_name("hal.language")
+    assert "hal" in {
+        prefix.removesuffix(".") for prefix in function_contract.FUNCTION_MODULE_PREFIXES
+    }

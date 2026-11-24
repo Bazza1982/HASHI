@@ -13,6 +13,10 @@ FUNCTION_MODULE_PREFIXES = (
     "adapters.",
     "tools.",
     "orchestrator.",
+    # HAL is imported lazily by workbench_api; without an explicit prefix the
+    # whole hal/ package is omitted from Function generations and every
+    # /api/v1/hal/* route disappears with an ImportError at Worker start.
+    "hal.",
     "flow.",
     "nagare.",
     "remote.",
@@ -380,3 +384,4 @@ def validate_function_contract(
         raise FunctionContractError(
             "Function contract failed: WhatsApp router unavailable"
         )
+# HASHI-Fingerprint: hfp_69a02998d8b747bcaa8e696101116aba
