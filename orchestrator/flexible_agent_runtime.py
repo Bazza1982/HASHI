@@ -8335,22 +8335,25 @@ class FlexibleAgentRuntime:
         self._set_commentary_mode("raw" if enabled else "off")
 
     def _effective_commentary_mode(self) -> str:
-        """Mirror the provider-layer local-inference restriction for display.
+        """Resolve the effective mode through the HER adapter's own logic.
 
-        A saved ORIGINAL or PACKAGED preference on a local provider actually
-        runs as RAW; the menu must disclose that effective behaviour.
+        The adapter owns the actual Provider Profile, so a saved ORIGINAL or
+        PACKAGED preference on a local provider is reported exactly as the
+        adapter runs it (RAW). The saved value itself is never overwritten.
         """
 
         mode = getattr(self, "_commentary_mode", "off")
-        if mode in {"original", "packaged"}:
-            from orchestrator.flexible_backend_registry import canonical_model_provider
-
-            backend = getattr(
-                getattr(self, "backend_manager", None), "current_backend", None
-            )
-            engine = str(getattr(backend, "engine", "") or "").strip()
-            if canonical_model_provider(engine) in {"ollama-api", "hli-api"}:
-                return "raw"
+        if mode not in {"original", "packaged"}:
+            return mode
+        backend = getattr(
+            getattr(self, "backend_manager", None), "current_backend", None
+        )
+        resolver = getattr(backend, "commentary_effective_mode", None)
+        if callable(resolver):
+            try:
+                return str(resolver(mode) or mode)
+            except Exception:
+                return mode
         return mode
 
     def _commentary_keyboard(self) -> InlineKeyboardMarkup:

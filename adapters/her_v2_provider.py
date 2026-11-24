@@ -7060,6 +7060,26 @@ def _pcm_only_presentation(profile: ProviderProfile) -> bool:
     return canonical_model_provider(profile.engine) in {"ollama-api", "hli-api"}
 
 
+def effective_commentary_mode(
+    mode: str, profile: ProviderProfile | None
+) -> str:
+    """Return the mode the HERV3 adapter actually uses for one profile.
+
+    Local-inference providers present only the PCM prompt, so the Persona
+    modes degrade to objective raw. The saved preference is never overwritten;
+    callers keep it and disclose this effective value instead.
+    """
+
+    resolved = str(mode or "off").casefold()
+    if (
+        resolved in {"original", "packaged"}
+        and profile is not None
+        and _pcm_only_presentation(profile)
+    ):
+        return "raw"
+    return resolved
+
+
 class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
     """Use the auxiliary profile for one fail-open presentation-only check."""
 

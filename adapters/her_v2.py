@@ -1214,6 +1214,23 @@ class HERv2Adapter(BaseBackend):
             self._initialized = False
             return False
 
+    def commentary_effective_mode(self, mode: str) -> str:
+        """Effective commentary mode for the active HERV3 Provider Profile.
+
+        Reuses the same resolution the adapter applies when it builds the
+        commentary pipeline, so a saved ORIGINAL or PACKAGED preference on a
+        local provider is honestly reported as RAW. The saved value itself is
+        never overwritten.
+        """
+
+        from adapters.her_v2_provider import effective_commentary_mode
+
+        try:
+            profile = self._v2_config.profile_for(Stage.IMMEDIATE_RESPONSE)
+        except Exception:
+            profile = None
+        return effective_commentary_mode(mode, profile)
+
     def prepare_fixed_turn_input(
         self,
         *,
@@ -2421,18 +2438,15 @@ class HERv2Adapter(BaseBackend):
         from orchestrator import telegram_stream_policy
 
         commentary_mode = telegram_stream_policy.get_commentary_mode(self.config)
-        # Local-inference providers present only the PCM prompt; they cannot run
-        # the Persona packager, so original/packaged degrade to objective raw.
-        if commentary_mode not in {"off", "raw"}:
-            try:
-                from adapters.her_v2_provider import _pcm_only_presentation
+        # Local-inference providers present only the PCM prompt; the Persona
+        # modes degrade to objective raw for the actual Provider Profile.
+        from adapters.her_v2_provider import effective_commentary_mode
 
-                if _pcm_only_presentation(
-                    runtime_config.profile_for(Stage.IMMEDIATE_RESPONSE)
-                ):
-                    commentary_mode = "raw"
-            except Exception:
-                commentary_mode = "raw"
+        try:
+            primary_profile = runtime_config.profile_for(Stage.IMMEDIATE_RESPONSE)
+        except Exception:
+            primary_profile = None
+        commentary_mode = effective_commentary_mode(commentary_mode, primary_profile)
         if isinstance(provider, HashiStageProvider):
             provider._commentary_mode = commentary_mode
         if commentary is None and commentary_packager is not None:
