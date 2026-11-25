@@ -9,7 +9,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import ui_language
 from orchestrator.command_ui import card_title, refresh_label
-from orchestrator.reboot_ui import render_menu_status, render_status
+from orchestrator.reboot_manager import (
+    REBOOT_DELAY_DEFAULT_SECONDS,
+    REBOOT_DELAY_MAX_SECONDS,
+)
+from orchestrator.reboot_ui import render_menu_status, render_notice, render_status
 from orchestrator import runtime_session
 
 
@@ -66,7 +70,17 @@ async def latest(runtime, update):
     })
 
 
-async def submit(runtime, update, *, mode, number=None, targets=None, query=None):
+async def submit(
+    runtime,
+    update,
+    *,
+    mode=None,
+    number=None,
+    targets=None,
+    delay_seconds=None,
+    cancel=False,
+    query=None,
+):
     origin = origin_from_update(runtime, update)
     request_key = str(
         getattr(update, "update_id", None) or getattr(query, "id", None) or uuid4().hex
@@ -81,6 +95,10 @@ async def submit(runtime, update, *, mode, number=None, targets=None, query=None
     }
     if targets is not None:
         request["targets"] = list(targets)
+    if delay_seconds is not None:
+        request["delay_seconds"] = delay_seconds
+    if cancel:
+        request["cancel"] = True
     try:
         result = await runtime.orchestrator.request_reboot(**request)
     except Exception:
@@ -99,7 +117,21 @@ async def submit(runtime, update, *, mode, number=None, targets=None, query=None
                 result["record"], locale=ui_language.preferred_locale(runtime, update)
             )
         elif result["accepted"]:
-            return result  # Shared runtime sends the start and final notices.
+            if cancel:
+                text = ui_language.tr(
+                    "reboot.wait_cancelled",
+                    locale=ui_language.preferred_locale(runtime, update),
+                )
+            elif result.get("waiting"):
+                # Nothing has been fenced yet: say so now, the start and final
+                # notices still come from the shared runtime at cutover.
+                text = render_notice(
+                    result["record"],
+                    starting=True,
+                    locale=ui_language.preferred_locale(runtime, update),
+                )
+            else:
+                return result  # Shared runtime sends the start and final notices.
         else:
             text = ui_language.tr(
                 "reboot.not_accepted",
@@ -132,6 +164,8 @@ async def show_menu(runtime, update, *, status_only=False, query=None):
                 escape(ui_language.tr("reboot.effect")),
                 "",
                 escape(ui_language.tr("reboot.warning")),
+                "",
+                escape(ui_language.tr("reboot.usage")),
             ]
         )
         rows.extend(
@@ -166,15 +200,44 @@ async def show_menu(runtime, update, *, status_only=False, query=None):
         await runtime._reply_text(update, "\n".join(lines), **kwargs)
 
 
+def parse_request(value):
+    """Split `<target> [delay][=<minutes>]`; unknown modifiers are invalid.
+
+    Returning no target keeps the command from guessing: an unrecognised
+    modifier must fail loudly rather than quietly start an immediate reboot.
+    """
+    tokens = str(value or "").split()
+    if not tokens:
+        return None, {}
+    modifiers = {}
+    for token in tokens[1:]:
+        if token == "delay":
+            modifiers["delay_seconds"] = REBOOT_DELAY_DEFAULT_SECONDS
+        elif token.startswith("delay="):
+            try:
+                seconds = float(token.split("=", 1)[1]) * 60.0
+            except ValueError:
+                return None, {}
+            if not 0 < seconds <= REBOOT_DELAY_MAX_SECONDS:
+                return None, {}
+            modifiers["delay_seconds"] = seconds
+        else:
+            return None, {}
+    return tokens[0], modifiers
+
+
 async def choose(runtime, update, value, *, query=None):
     if value in {"", "help", "status"}:
         await show_menu(runtime, update, status_only=value == "status", query=query)
         return
-    if value in {"min", "same", "max"}:
-        return await submit(runtime, update, mode=value, query=query)
-    elif value.isdigit():
+    if value == "cancel":
+        return await submit(runtime, update, cancel=True, query=query)
+    target, modifiers = parse_request(value)
+    if target in {"min", "same", "max"}:
+        return await submit(runtime, update, mode=target, query=query, **modifiers)
+    elif target and target.isdigit():
         return await submit(
-            runtime, update, mode="number", number=int(value), query=query
+            runtime, update, mode="number", number=int(target), query=query, **modifiers
         )
     else:
         text = ui_language.tr("reboot.invalid_target")
@@ -198,3 +261,4 @@ async def command(runtime, update, context):
 async def callback(runtime, update, query, value):
     await query.answer()
     return await choose(runtime, update, value, query=query)
+# HASHI-Fingerprint: hfp_0d2b87ff29e34422a66bf8121f7f516f
