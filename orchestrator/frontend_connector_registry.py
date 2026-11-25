@@ -628,6 +628,7 @@ _INTERNAL_SOURCE_IDS = {
     "proactive",
     "background-job-event",
     "background_job_event",
+    "hal",
     "startup",
     "system",
     "session_reset",
