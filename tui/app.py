@@ -3402,19 +3402,33 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
 
     @staticmethod
     def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
-        """Split an opening Workzone reference without rewriting its caption."""
+        """Split an opening Workzone reference without rewriting its caption.
+
+        The first token is parsed with the original quote-aware semantics so a
+        quoted reference containing spaces stays one reference; everything after
+        that token keeps every original byte (multiline verbatim).
+        """
 
         value = str(text or "")
         if not value.startswith("@"):
             return None, text
-        reference_end = 1
-        while reference_end < len(value) and not value[reference_end].isspace():
-            reference_end += 1
-        reference = value[1:reference_end]
-        if not reference or reference.startswith("@"):
+        try:
+            parts = shlex.split(value, posix=True)
+        except ValueError:
             return None, text
-
-        caption = value[reference_end:]
+        if not parts or len(parts[0]) <= 1 or not parts[0].startswith("@"):
+            return None, text
+        first = parts[0]
+        if first[1:].startswith("@"):
+            return None, text
+        reference = first[1:]
+        token_start = value.find(reference, 1)
+        if token_start < 0:
+            return reference, ""
+        caption_start = token_start + len(reference)
+        if value[1] in {"'", '"'} and caption_start < len(value) and value[caption_start] in {"'", '"'}:
+            caption_start += 1
+        caption = value[caption_start:]
         if caption.startswith("\r\n"):
             caption = caption[2:]
         elif caption[:1].isspace():
@@ -3430,11 +3444,11 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 and stripped[0] in {"'", '"'}
             ):
                 try:
-                    parts = shlex.split(stripped, posix=True)
+                    caption_parts = shlex.split(stripped, posix=True)
                 except ValueError:
                     return reference, caption
-                if len(parts) == 1:
-                    caption = parts[0]
+                if len(caption_parts) == 1:
+                    caption = caption_parts[0]
         return reference, caption
 
     async def _stage_path_attachment(self, value: str) -> bool:

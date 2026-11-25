@@ -345,6 +345,37 @@ def test_dropped_path_classifier_keeps_code_text_and_recognizes_real_paths(value
     assert HASHITuiApp._looks_like_dropped_path(value) is expected
 
 
+def test_workzone_reference_quoted_path_with_spaces_keeps_one_reference():
+    # Regression: the raw whitespace scan truncated a quoted reference at the
+    # first space inside the path.
+    reference, caption = HASHITuiApp._parse_workzone_reference(
+        '@"reports/weekly report.pdf" summarize this'
+    )
+    assert reference == "reports/weekly report.pdf"
+    assert caption == "summarize this"
+
+
+def test_workzone_reference_multiline_caption_is_preserved_verbatim():
+    reference, caption = HASHITuiApp._parse_workzone_reference(
+        "@report.pdf\nLine one\n  indented line\n"
+    )
+    assert reference == "report.pdf"
+    assert caption == "Line one\n  indented line\n"
+
+
+def test_workzone_reference_unquoted_and_legacy_quoted_captions():
+    reference, caption = HASHITuiApp._parse_workzone_reference("@report.pdf summarize this")
+    assert (reference, caption) == ("report.pdf", "summarize this")
+    reference, caption = HASHITuiApp._parse_workzone_reference('@report.pdf "single caption"')
+    assert (reference, caption) == ("report.pdf", "single caption")
+
+
+def test_workzone_reference_non_reference_text_is_unchanged():
+    assert HASHITuiApp._parse_workzone_reference("plain message") == (None, "plain message")
+    assert HASHITuiApp._parse_workzone_reference("@@agent hi") == (None, "@@agent hi")
+    assert HASHITuiApp._parse_workzone_reference('@"unbalanced hi') == (None, '@"unbalanced hi')
+
+
 @pytest.mark.asyncio
 async def test_chat_input_runtime_bindings_keep_textual_clipboard_paste(tmp_path):
     app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")
