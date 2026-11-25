@@ -1,5 +1,104 @@
 # HERV3 upgrade: JEV experiment and simplified routing
 
+## 2026-11-23 bounded recovery views
+
+HERV3 keeps canonical Session, Tool receipt, side-effect, WIP and audit
+evidence; these limits apply only to the model-facing recovery view. Each
+complete JSON field is at most 24 KiB and the complete JSON projection is at
+most 96 KiB in UTF-8, including wrappers and truncation metadata. A bounded
+view retains the interruption identity, resume safety, recovery disposition,
+receipt and unresolved-effect counts, and references to the corresponding
+canonical records. Omitted details are evidence-linked, not represented as
+completed work. Private Provider checkpoints identify both their metadata and
+their segmented message records when available; unavailable checkpoints are
+not presented as present. Re-projecting a view preserves those counts, the
+checkpoint's availability, original digest and segmented-item evidence reference;
+an unavailable or malformed projected checkpoint never becomes present.
+
+Active recovery uses the actual Engine Session and interrupted Turn. Settled
+checkpoint references identify the stored checkpoint; the accepted user
+message remains the source for the recovery goal, even for older rows polluted
+by an assembled provider prompt. A new recovery handoff references its source
+Turn rather than recursively embedding its remaining-work object. Completed
+receipts and uncertain effects remain durable and uncertain effects are not
+automatically replayed.
+
+On a successor Turn, private Provider checkpoints carry the exact position and
+digest of the assembled user context and its original user request. The next
+compatible Provider replaces only that verified assembly, preserves the original
+request and Tool protocol, and adds the latest canonical context once. Exact
+pending execution within the same Run keeps its original conversation. A newly
+accepted user Turn, whether ordinary or /steer, closes unresolved old Tool calls
+without executing them; completed results and deferred media remain paired and
+the latest instruction reaches the model before it chooses further actions. A
+Provider/model change likewise closes pending calls and retains a warning to
+verify uncertain effects. The existing protected-Worker handoff carries
+these successor semantics only after the canonical HER owner verifies the source;
+a successor must persist its own pending boundary before Tool execution. Exact
+continuation within the same execution still requires the original route. At a
+completed Tool batch boundary, it reuses the checkpointed conversation and
+paired Tool results without appending a freshly assembled prompt or replaying
+completed Tool effects, including when the original request contained structured
+media. At a completed Provider response boundary, the original conversation and
+response remain intact; a brief continuation cue avoids another full context
+assembly. A missing or mismatched exact checkpoint fails closed. Compatible
+Provider/model changes preserve completed Tool results and supported structured
+media only when the actual source and target continuation contracts are
+compatible; vendor-specific reasoning fields are not forwarded to a different
+route. A target such as HASHI API that does not accept a private message list
+receives a canonical reconstruction with bounded, evidence-linked completed Tool
+results. Unsupported historical media is not sent as if the target supported it.
+DeepSeek, Ollama and xAI forward structured successor content through their own
+existing transport paths.
+
+Older checkpoints without verified assembly ownership remain intact; their
+successors add incremental recovery facts and the new request rather than
+appending another full PCM/history snapshot. Existing duplicated legacy
+messages cannot be removed safely without ownership evidence.
+
+Small Tool receipts retain completion and result details. Larger results keep
+bounded excerpts and a canonical reference, with unresolved effects and useful
+results prioritized when the view is full. The existing request_diagnostics tool
+can page the referenced receipt, side-effect or exact completed Tool result
+from a verified Provider checkpoint only for the canonical recovery source bound
+to the current Agent, owner, Session, instance, generation and workzone. Hidden
+reasoning and unrelated Provider messages are never returned. A page includes
+a digest and later pages must match it. On the ordinary tool path the first
+page includes the usual request diagnostics; later pages return the requested
+evidence without rebuilding the unrelated report. The protected path returns
+only the authorized evidence page. Segmented Provider evidence is still
+integrity-checked through the complete checkpoint when a page is read.
+Normal request-context refresh carries the current generation and workzone rather
+than a previous request's values.
+When this scope or the tool is unavailable, retrieval fails closed and must not
+be represented as verified. The protected execution channel exposes the same
+evidence pages only through its current Run, with the original source Tool call
+and current permission policy checked by PAO; see
+[the L2 Workzone contract](permissions/L2_HARD_WORKZONE.md). Source calls without
+verifiable checkpoint provenance or a currently authorized scope remain
+unavailable. The isolated HERV3 host and PAO tests exercise this path; installed
+native-service and live-provider adoption remain separate acceptance evidence.
+
+The WIP journal and compacted recovery memory keep their source records. Their
+model views are bounded and carry a source reference. WIP projection trims
+individual excerpts before omitting rows so the original and latest unfinished
+goals, recent progress and failure facts survive an aggregate field limit.
+Multiple compacted WIP entries share one 64 KiB model-view budget and omitted
+entries remain queryable by memory-row range. An assembled provider prompt is never used as a fallback
+request summary. A main Provider/model
+change rebuilds the provider context from the settled checkpoint. Profile
+ordering, reasoning effort, auxiliary profiles and a voice flag alone do not
+change that main identity.
+
+A generic token estimate is not proof of overflow and cannot reject a request
+that might fit. Provider-specific capacity preparation runs before final
+provider admission. Qualified native limits and provider-confirmed typed
+capacity failures retain their existing behavior and fallback semantics.
+
+Source changes, offline tests, actual provider acceptance and running-generation
+adoption are separate evidence.
+
+
 ## 2026-11-21 Compact follows the current HERV3 target
 
 Manual and automatic conversation Compact resolve the Provider and model from
@@ -122,22 +221,20 @@ The model owns reasoning, planning, adaptation and verification inside one conti
 model/tool conversation. HASHI continues to own PCM, Session continuity, tools,
 permissions, recovery, audit, user commentary and learning.
 
-Prior WIP Journal evidence remains complete, quoted context for a new turn when
-canonical recovery is absent. It no longer sends a proactive recovery card
-before that turn: the current user request is processed first, and all recovery
-facts are available to the model without claiming authority to replay effects.
+Prior WIP Journal evidence remains complete. When canonical recovery is absent,
+a bounded, referenced view is quoted as context for a new turn. It does not
+send a proactive recovery card before that turn: the current user request
+remains authoritative and recovery facts never grant authority to replay effects.
 
 Individual Tool response frames may be paged before they re-enter the model
 loop (including structured text content); native image blocks remain media.
 File reads, searches and directory listings expose offsets or cursors so the
 model can retrieve all authorised source data across as many calls as needed;
-these frame sizes are not HERV3 execution ceilings. For OpenAI-compatible
-Provider calls with a declared target capacity, a clearly oversized serialized
-text request is rejected
-before HTTP with the existing typed capacity code. Unknown capacities and
-native-media accounting still depend on Provider rejection; the preflight
-does not promise that every request will fit. A capacity rejection after tool
-activity remains non-replayable without user reconciliation.
+these frame sizes are not HERV3 execution ceilings. For OpenAI-compatible Provider calls, uncertain token estimates do not hard
+reject input. Provider-specific preparation and qualified native limits remain
+in force, and provider-confirmed overflow retains the existing typed capacity
+code. Native-media accounting follows the selected Provider. A capacity
+rejection after tool activity remains non-replayable without user reconciliation.
 
 ### Completed-tool checkpoint provider-call continuation
 

@@ -2543,7 +2543,23 @@ TOOL_SCHEMAS.extend(
                             "type": "string",
                             "minLength": 1,
                             "description": "Exact HASHI request identifier.",
-                        }
+                        },
+                        "recovery_evidence_ref": {
+                            "type": "string",
+                            "description": "Optional canonical recovery receipt, side-effect or Provider-item reference for this Session.",
+                        },
+                        "recovery_item_id": {
+                            "type": "string",
+                            "description": "Exact Tool call ID for Provider items; optional operation, call, invocation or evidence ID for receipts.",
+                        },
+                        "offset": {
+                            "type": "integer", "minimum": 0,
+                            "description": "Next character offset returned by a recovery evidence page.",
+                        },
+                        "expected_digest": {
+                            "type": "string",
+                            "description": "Digest returned by the first recovery page; required for subsequent pages.",
+                        },
                     },
                     "required": ["request_id"],
                     "additionalProperties": False,

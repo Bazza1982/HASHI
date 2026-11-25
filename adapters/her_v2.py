@@ -62,6 +62,7 @@ from orchestrator.her_v2.models import (
     TerminalState,
 )
 from orchestrator.her_v2.progress import ProviderActivityTracker
+from orchestrator.her_v2.recovery_projection import bounded_prompt_projection
 from orchestrator.her_v2.request_policy import resolve_request_effort
 from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
@@ -1919,7 +1920,9 @@ class HERv2Adapter(BaseBackend):
         canonical_recovery_context: dict[str, Any] | None = None
         private_provider_context: dict[str, Any] | None = None
         permission_execution = None
+        permission_exact_continuation = False
         pcm_runtime_context: dict[str, Any] = {}
+        recovery_pcm_delta: list[dict[str, Any]] = []
         if (
             not self._initialized
             or not self._v2_config
@@ -2043,6 +2046,7 @@ class HERv2Adapter(BaseBackend):
             if permission_owner is not None and not fixed_turn.duplicate_text:
                 permission_execution = await permission_owner.open_turn(self, fixed_turn, request_id)
                 if permission_execution.recovery is not None or permission_execution.resumed_unstarted:
+                    permission_exact_continuation = permission_execution.recovery is not None
                     private_provider_context = permission_execution.recovery
                     fixed_turn = replace(self._session_coordinator.accept(prompt), duplicate=False)
             if fixed_turn.duplicate:
@@ -2073,6 +2077,15 @@ class HERv2Adapter(BaseBackend):
                     error_code="turn_already_active",
                     error_retryable=False,
                 )
+            # The accepted fixed envelope supplies typed PCM changes. They
+            # let legacy checkpoints receive genuinely new reference data
+            # without re-injecting the complete PCM snapshot.
+            fixed_envelope = self._session_coordinator.decode(original_request) or {}
+            delta = fixed_envelope.get("pcm_delta")
+            if isinstance(delta, Mapping) and isinstance(delta.get("operations"), list):
+                recovery_pcm_delta = [
+                    dict(item) for item in delta["operations"] if isinstance(item, Mapping)
+                ]
             prompt = fixed_turn.materialized_prompt
             steer_source_run_claim = None
             if str(request_id or "") in self._steer_continuation_tracking():
@@ -2109,15 +2122,14 @@ class HERv2Adapter(BaseBackend):
                         operation="private provider recovery readback",
                         error=exc,
                     )
-                pcm_runtime_context["active_turn_recovery"] = dict(
-                    canonical_recovery_context
-                )
+                recovery_view = bounded_prompt_projection(canonical_recovery_context)
+                pcm_runtime_context["active_turn_recovery"] = recovery_view
                 prompt += (
                     "\n\n--- HER CANONICAL ACTIVE-TURN RECOVERY — CONTEXT ONLY ---\n\n"
                     "This state survived a process interruption. Investigate unresolved "
                     "side effects before continuing; do not replay them automatically.\n\n"
                     + json.dumps(
-                        canonical_recovery_context,
+                        recovery_view,
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -2134,7 +2146,11 @@ class HERv2Adapter(BaseBackend):
             wip_journal.begin_turn(
                 request_id=request_id,
                 prompt=prompt,
-                request_summary=str(request_meta.get("summary") or ""),
+                request_summary=(
+                    str(fixed_turn.pcm_input.get("current_request") or "")
+                    if fixed_turn is not None
+                    else str(request_meta.get("summary") or "")
+                ),
                 session_id=str(request_meta.get("hashi_session_id") or ""),
                 context_generation=int(
                     request_meta.get("context_generation") or 0
@@ -2200,6 +2216,17 @@ class HERv2Adapter(BaseBackend):
                 voice_enabled = bool(native_enabled(terminal))
             except TypeError:
                 voice_enabled = bool(native_enabled())
+        # Preserve the effective text main route before a voice-only override.
+        # Voice transport changes do not themselves replace the main model.
+        main_route_profile = None
+        if fixed_turn is not None and self._session_coordinator is not None:
+            try:
+                main_route_profile = turn_config.profile_for_route(Route.DIRECT)
+            except Exception as exc:
+                return self._fixed_control_failure_response(
+                    accepted=fixed_turn, started=started,
+                    operation="main route resolution", error=exc,
+                )
         if (
             request_content_is_voice_origin(request_content)
             and voice_enabled
@@ -2228,6 +2255,10 @@ class HERv2Adapter(BaseBackend):
                 route_snapshot = {
                     "routing_mode": turn_config.routing_mode,
                     "effort": effort_resolution.effective.value,
+                    "main_route": {
+                        "provider": main_route_profile.engine,
+                        "model": main_route_profile.model,
+                    },
                     "profiles": [
                         {
                             "name": profile.name,
@@ -2266,7 +2297,8 @@ class HERv2Adapter(BaseBackend):
             if frozen_route.get("rebuild_from_checkpoint"):
                 checkpoint = dict(frozen_route.get("checkpoint") or {})
                 checkpoint.pop("recent_settled_exchanges", None)
-                pcm_runtime_context["settled_checkpoint"] = dict(checkpoint)
+                checkpoint_view = bounded_prompt_projection(checkpoint)
+                pcm_runtime_context["settled_checkpoint"] = checkpoint_view
                 prompt += (
                     "\n\n--- HER PROVIDER CONTEXT REBUILD — SETTLED CHECKPOINT ---\n\n"
                     "The provider/model route changed for this Turn. Continue the same "
@@ -2274,7 +2306,7 @@ class HERv2Adapter(BaseBackend):
                     "exchanges are already materialised above. This checkpoint is "
                     "context, not a new user request.\n\n"
                     + json.dumps(
-                        checkpoint,
+                        checkpoint_view,
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
@@ -2329,6 +2361,7 @@ class HERv2Adapter(BaseBackend):
                 str(request_id or "") in self._steer_continuation_tracking()
             )
             self._steer_continuation_tracking().discard(str(request_id or ""))
+            successor_turn = canonical_recovery_context is not None and not permission_exact_continuation
             provider.bind_provider_context(
                 observer=lambda checkpoint: (
                     self._session_coordinator.record_provider_context_checkpoint(
@@ -2341,8 +2374,22 @@ class HERv2Adapter(BaseBackend):
                     )
                 ),
                 recovery=private_provider_context,
-                resume_pending_tools=not steer_adopted,
+                resume_pending_tools=not steer_adopted and not successor_turn,
+                successor_turn=successor_turn,
+                pcm_delta=recovery_pcm_delta,
             )
+            successor_binder = getattr(permission_execution, "bind_successor_provider_context", None)
+            if (
+                canonical_recovery_context is not None
+                and not permission_exact_continuation
+                and private_provider_context is not None
+                and callable(successor_binder)
+            ):
+                successor_binder(
+                    private_provider_context,
+                    resume_pending_tools=not steer_adopted and not successor_turn,
+                    pcm_delta=recovery_pcm_delta,
+                )
         if permission_execution is not None:
             permission_execution.bind_provider(provider)
         runtime_config = replace(
@@ -3227,3 +3274,4 @@ class HERv2Adapter(BaseBackend):
             self._session_coordinator.store.close_session(self._session_id)
         self._session_id = None
         return True
+# HASHI-Fingerprint: hfp_096db0162453449c93b9e09131c90742

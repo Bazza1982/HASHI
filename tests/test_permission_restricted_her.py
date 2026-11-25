@@ -190,8 +190,115 @@ async def test_service_loss_before_first_model_answer_retains_the_exact_ready_re
     assert supervisor.execute_calls == 0
 
 
+@pytest.mark.asyncio
+async def test_restricted_successor_steer_keeps_completed_result_without_replay(tmp_path):
+    import json
+
+    wire, checkpoints = [], []
+    calls = [tool("done-write", "done.txt"), tool("pending-write", "pending.txt")]
+
+    class Connection:
+        def call(self, method, arguments):
+            if method == "runtime_port":
+                assert arguments["operation"] == "manifest"
+                return pack({"operations": [], "allow_immediate_response": False,
+                             "workzone_ref": str(tmp_path)})
+            if method == "provider_checkpoint":
+                checkpoints.append(copy.deepcopy(arguments["checkpoint"]))
+                return {}
+            assert method == "audit_record"
+            return "audit"
+
+        async def call_async(self, method, arguments, *, on_event=None):
+            assert method == "provider_call", "steering must not replay either tool"
+            wire.append(copy.deepcopy(arguments["payload"]["messages"]))
+            return api_result_to_wire(_APIResult("Continued safely.", None, "stop"))
+
+    payload = command(SimpleNamespace(get_tool_definitions=lambda: []))
+    payload["prompt"] = "Stop the pending write and verify"
+    payload["pcm_input"] = {
+        "current_request": payload["prompt"], "history": [],
+        "sections": [{"key": "reference", "authority": "runtime_context",
+                      "title": "Reference", "text": "OLD_REFERENCE_MARKER", "order": 0}],
+        "runtime_context": {"active_turn_recovery": {"safe_to_resume": False}},
+    }
+    payload["recovery"] = {
+        "format": "herv3-provider-context-v1", "provider": "deepseek-api",
+        "model": "deepseek-v4-pro", "stage": "direct", "boundary": "pending_tool_batch",
+        "messages": [
+            {"role": "system", "content": "prior system"},
+            {"role": "user", "content": "Original task with OLD_REFERENCE_MARKER"},
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_call_id": "done-write", "content": "Written earlier."},
+        ],
+        "deferred_followups": [{"role": "user", "content": "Old write advisory."}],
+        "_herv3_continuation": {"successor_turn": True, "resume_pending_tools": False,
+                                "pcm_delta": []},
+    }
+
+    async def emit(_event):
+        pass
+
+    result = await run_command(payload, client=Connection(), scratch_root=tmp_path, emit=emit)
+    assert result["state"] == "completed"
+    assert unpack(result["result"]).text == "Continued safely."
+    assert len(wire) == 1
+    outgoing = wire[0]
+    assert [row["tool_call_id"] for row in outgoing if row.get("role") == "tool"] == [
+        "done-write", "pending-write",
+    ]
+    encoded = json.dumps(outgoing, ensure_ascii=False)
+    assert encoded.count("OLD_REFERENCE_MARKER") == 1
+    assert "Written earlier." in encoded
+    assert encoded.index("Old write advisory.") < encoded.index(payload["prompt"])
+    assert "verify" in next(row["content"] for row in outgoing
+                            if row.get("tool_call_id") == "pending-write").lower()
+    assert not (tmp_path / "pending.txt").exists()
+    assert checkpoints
+
+
+@pytest.mark.asyncio
+async def test_restricted_host_receives_trusted_successor_continuation(tmp_path, monkeypatch):
+    from adapters.her_v2_provider import HashiStageProvider
+
+    class Bound(Exception):
+        pass
+
+    seen = {}
+
+    def capture(_self, **kwargs):
+        seen.update(kwargs)
+        raise Bound
+
+    class Connection:
+        def call(self, method, arguments):
+            assert method == "runtime_port" and arguments["operation"] == "manifest"
+            return pack({"operations": [], "allow_immediate_response": False, "workzone_ref": str(tmp_path)})
+
+    monkeypatch.setattr(HashiStageProvider, "bind_provider_context", capture)
+    payload = command(SimpleNamespace(get_tool_definitions=lambda: []))
+    payload["recovery"] = {
+        "format": "herv3-provider-context-v1", "boundary": "pending_tool_batch",
+        "_herv3_continuation": {
+            "successor_turn": True, "resume_pending_tools": False,
+            "pcm_delta": [{"op": "remove", "key": "reference"}],
+        },
+    }
+
+    async def emit(_event):
+        pass
+
+    with pytest.raises(Bound):
+        await run_command(payload, client=Connection(), scratch_root=tmp_path, emit=emit)
+    assert seen["successor_turn"] is True
+    assert seen["resume_pending_tools"] is False
+    assert seen["pcm_delta"] == [{"op": "remove", "key": "reference"}]
+    assert "_herv3_continuation" not in seen["recovery"]
+
+
 def test_host_codec_rejects_unregistered_classes_and_changed_config_fields():
     with pytest.raises(ValueError):
         unpack(["dto", "PermissionAuthority", []])
     with pytest.raises(ValueError):
         unpack(["dto", "ProviderTarget", [["engine", ["scalar", "deepseek-api"]]]])
+# HASHI-Fingerprint: hfp_e51db88258b84978a4bd93c276486b55

@@ -50,3 +50,25 @@ def pending_tool_calls(messages: Sequence[Mapping]) -> list[dict]:
     if not pending:
         raise ValueError("the checkpoint contains no pending Tool call")
     return pending
+
+
+# A successor instruction must follow every result and tool-generated
+# follow-up in an interrupted batch. This private marker never reaches a
+# provider; the existing deferred-followup checkpoint carries it durably.
+SUCCESSOR_AFTER_TOOL_BATCH = "_hashi_successor_after_tool_batch"
+SUCCESSOR_ORIGINAL_REQUEST = "_hashi_successor_original_request"
+SUCCESSOR_CONTENT_DIGEST = "_hashi_successor_content_sha256"
+
+
+def ordered_deferred_followups(*groups: Sequence[Mapping]) -> list[dict]:
+    ordinary: list[dict] = []
+    successor: list[dict] = []
+    for group in groups:
+        for item in group:
+            row = copy.deepcopy(dict(item))
+            is_successor = row.pop(SUCCESSOR_AFTER_TOOL_BATCH, False) is True
+            row.pop(SUCCESSOR_ORIGINAL_REQUEST, None)
+            row.pop(SUCCESSOR_CONTENT_DIGEST, None)
+            (successor if is_successor else ordinary).append(row)
+    return [*ordinary, *successor]
+# HASHI-Fingerprint: hfp_29d3524926514517ba6c1c2c0a95c7f6
