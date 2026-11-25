@@ -134,7 +134,7 @@ def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) ->
     assert "<b>当前</b> · <code>2</code> 个已启用" in sys_text
     assert "<b>已配置</b> · <code>6/10</code>" in sys_text
     assert "<b>作用范围</b> · 仅限当前代理" in sys_text
-    assert "<b>槽位</b>" in sys_text
+    assert "<b>系统提示词</b>" in sys_text
     for old_label in ("Current", "Configured", "Scope", "Changes", "SLOTS"):
         assert old_label not in sys_text
 
@@ -152,7 +152,7 @@ def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) ->
     ]
 
     assert "<b>当前</b> · 核心模型" in wrapper_text
-    assert "<b>角色 / 风格槽位</b>" in wrapper_text
+    assert "<b>角色 / 风格提示词</b>" in wrapper_text
     assert "Model changes" not in wrapper_text
 
 
