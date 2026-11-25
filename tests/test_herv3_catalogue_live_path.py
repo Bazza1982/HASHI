@@ -124,6 +124,28 @@ def test_skill_index_without_paths_never_promises_a_path(assembler_factory) -> N
     assert "SKILL.md path on each line" not in skills["text"]
 
 
+def test_non_mapping_skill_items_keep_the_text_form(tmp_path: Path) -> None:
+    pcm = tmp_path / "agent.md"
+    pcm.parent.mkdir(parents=True, exist_ok=True)
+    pcm.write_text(
+        render_pcm_document(persona="Persona", system="System", memory="Facts."),
+        encoding="utf-8",
+    )
+    assembler = BridgeContextAssembler(
+        BridgeMemoryStore(tmp_path),
+        pcm,
+        tool_catalog_provider=lambda: _tools(),
+        skill_catalog_provider=lambda: [("alpha", "does alpha"), ("beta", "does beta")],
+    )
+
+    payload = assembler.build_prompt_payload("do work", "her-v2")
+
+    skills = _section(payload, "skills_catalogue")
+    assert skills is not None
+    assert "- alpha: does alpha" in skills["text"]
+    assert not skills["metadata"]
+
+
 def test_cli_engine_keeps_full_catalogues(assembler_factory) -> None:
     payload = assembler_factory().build_prompt_payload("do work", "codex-cli")
 

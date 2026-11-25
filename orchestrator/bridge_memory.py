@@ -2663,11 +2663,15 @@ class BridgeContextAssembler:
             skill_lines = self._catalogue_lines_from(skill_items)
             if skill_lines:
                 skill_count = len(skill_lines)
-                if native_schemas:
+                compact_skills = False
+                if native_schemas and all(
+                    hasattr(item, "get") for item in skill_items
+                ):
                     from orchestrator.her_v2.v3_prompt import skill_index_payload
 
                     index = skill_index_payload(skill_items)
                     if index:
+                        compact_skills = True
                         header = str(index.get("note") or "")
                         if index.get("root"):
                             header = f"{header} Root: {index['root']}".strip()
@@ -2683,7 +2687,7 @@ class BridgeContextAssembler:
                     "\n".join(skill_lines),
                     "runtime_context",
                     item_count=skill_count,
-                    metadata={"compact": True} if native_schemas else None,
+                    metadata={"compact": True} if compact_skills else None,
                 )
             tool_items = self._catalogue_items(self.tool_catalog_provider)
             tool_lines = self._catalogue_lines_from(tool_items)
@@ -2695,7 +2699,10 @@ class BridgeContextAssembler:
                         for name in (self._catalogue_name(item) for item in tool_items)
                         if name
                     ]
-                    tool_lines = [NATIVE_TOOL_INDEX_NOTE, *[f"- {name}" for name in names]]
+                    tool_lines = [
+                        NATIVE_TOOL_INDEX_NOTE,
+                        *[f"- {name}" for name in names],
+                    ]
                     tool_count = len(names)
                 add_section(
                     "tools_catalogue",
