@@ -1870,7 +1870,12 @@ class FunctionWorkerSupervisor:
                 type(exc).__name__,
             )
             return False, f"telegram_disconnect_worker_error:{type(exc).__name__}"
-        if isinstance(receipt, dict) and receipt.get("ok") and receipt.get("telegram_stopped"):
+        if (
+            isinstance(receipt, dict)
+            and receipt.get("ok")
+            and receipt.get("telegram_stopped")
+            and receipt.get("application_stopped") is True
+        ):
             return True, "telegram disconnected"
         return False, "telegram_disconnect_runtime_unconfirmed"
 
