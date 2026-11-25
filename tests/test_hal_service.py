@@ -1645,8 +1645,9 @@ def test_legacy_in_tree_store_migrates_into_state_dir(tmp_path):
     assert legacy == tmp_path / "hal" / "hal_v1.sqlite"
     _write_store(legacy, ["rule-1", "rule-2"])
 
-    _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
 
+    assert store_path == target, "the migrated copy becomes the served store"
     assert _read_store(target) == ["rule-1", "rule-2"]
     assert not legacy.exists(), "the source tree must be left clean"
     assert not list(target.parent.glob("*.tmp")), "no partial copy is left behind"
@@ -1669,7 +1670,7 @@ def test_migration_keeps_rows_committed_in_the_source_wal(tmp_path):
         wal = legacy.with_name(legacy.name + "-wal")
         assert wal.is_file() and wal.stat().st_size > 0
 
-        _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+        assert _migrate_legacy_store(legacy, target, logging.getLogger("hal.test")) == target
 
         assert _read_store(target) == ["wal-only"]
     finally:
@@ -1685,8 +1686,9 @@ def test_migration_never_overwrites_an_existing_state_db(tmp_path):
     _write_store(target, ["live-state"])
     _write_store(legacy, ["legacy-db"])
 
-    _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
 
+    assert store_path == target
     assert _read_store(target) == ["live-state"]
     assert legacy.exists(), "the legacy store is the only untouched copy left"
 
@@ -1700,9 +1702,32 @@ def test_failed_migration_keeps_the_legacy_store(tmp_path):
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(b"not-a-database")
 
-    _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
 
+    assert store_path == legacy, "a failed migration keeps serving the legacy store"
     assert legacy.read_bytes() == b"not-a-database"
     assert not target.exists(), "an unreadable legacy store must not become the state dir"
     assert not list(legacy.parent.glob("*.tmp"))
+
+
+def test_failed_publish_keeps_serving_the_legacy_store(tmp_path, monkeypatch):
+    """A publish failure must not leave an empty target that blocks migration."""
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    _write_store(legacy, ["rule-1"])
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("hal.service.os.replace", _fail)
+
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert store_path == legacy
+    assert _read_store(legacy) == ["rule-1"]
+    assert not target.exists()
+    assert not list(target.parent.glob("*.tmp"))
 # HASHI-Fingerprint: hfp_9717a97af9924e26925d98bfde62bb3d
