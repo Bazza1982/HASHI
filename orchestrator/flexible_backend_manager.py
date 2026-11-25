@@ -2590,6 +2590,8 @@ class FlexibleBackendManager:
             "hashi_run_id",
             "hashi_fencing_token",
             "owner_id",
+            "context_generation",
+            "session_workspace",
             "session_surface",
             "session_channel_key",
             "session_store_descriptor",
@@ -2600,6 +2602,8 @@ class FlexibleBackendManager:
             "hashi_run_id",
             "hashi_fencing_token",
             "owner_id",
+            "context_generation",
+            "session_workspace",
             "session_surface",
             "session_channel_key",
         ):

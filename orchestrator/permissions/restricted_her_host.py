@@ -105,9 +105,27 @@ async def run_command(command, *, client, scratch_root, emit, brokered_forensics
         from orchestrator.multimodal_contract import attachment_manifest
         if attachment_manifest(command["request_content"]):
             raise ValueError("the original accepted-media port is unavailable")
+    recovery = command["recovery"]
+    continuation = {}
+    if isinstance(recovery, dict):
+        recovery = dict(recovery)
+        continuation = recovery.pop("_herv3_continuation", {})
+        if (
+            not isinstance(continuation, dict)
+            or (continuation and (
+                continuation.get("successor_turn") is not True
+                or type(continuation.get("resume_pending_tools")) is not bool
+                or not isinstance(continuation.get("pcm_delta"), list)
+                or any(not isinstance(item, dict) for item in continuation["pcm_delta"])
+            ))
+        ):
+            raise ValueError("invalid trusted successor continuation")
     provider.bind_provider_context(
         observer=lambda checkpoint: client.call("provider_checkpoint", {"checkpoint": dict(checkpoint)}),
-        recovery=command["recovery"],
+        recovery=recovery,
+        successor_turn=continuation.get("successor_turn") is True,
+        resume_pending_tools=continuation.get("resume_pending_tools", True),
+        pcm_delta=continuation.get("pcm_delta", ()),
     )
     provider.bind_commentary_port(services or ports.port("commentary"))
     provider.bind_turn_services(services)

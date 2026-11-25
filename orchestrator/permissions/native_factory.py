@@ -65,6 +65,8 @@ class InstalledExecution:
         self._callbacks = callbacks
         self.channel._checkpoint = callbacks.checkpoint
         self.channel._runtime_port = callbacks.runtime_port
+        self.channel._evidence_callback = callbacks.recovery_evidence
+        self.channel._evidence_policy_validator = getattr(self.factory, "validate_resource", None)
         self.channel._audit = lambda record: callbacks.audit(self.binding, record)
 
     async def configure_inference(self, config):
@@ -154,7 +156,13 @@ class InstalledExecution:
         if self._callbacks is None:
             raise PermissionDenied("the actual HER continuation owner is unavailable")
         recovery = await self._callbacks.recovery(self.binding)
-        self.channel.seed_trusted_recovery(recovery)
+        continuation = recovery.get("_herv3_continuation", {}) if isinstance(recovery, dict) else {}
+        # A successor must first persist its own pending/ready boundary before
+        # this execution channel can authorize any recovered Tool effect.
+        # Same-execution permission resume keeps the existing exact boundary.
+        self.channel.seed_trusted_recovery(
+            None if continuation.get("successor_turn") is True else recovery
+        )
         result = await self.factory.runner.run_her(self, {**command, "recovery": recovery})
         evidence = self.channel._models.usage_receipts()
         return {**result, "provider_evidence": evidence,

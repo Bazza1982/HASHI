@@ -229,6 +229,12 @@ class HashiApiAdapter(OpenRouterAdapter):
     sent as an incremental suffix instead of replaying the complete prompt.
     """
 
+    # Its Gateway continuation is request-local, not a private HERV3 list.
+    HERV3_ACCEPTS_CONTEXT = False
+
+    def supports_herv3_context(self) -> bool:
+        return False
+
     def _trace(self, message: str, *args: Any) -> None:
         """Emit best-effort observability without entering the request boundary."""
 
@@ -1863,3 +1869,4 @@ class HashiApiAdapter(OpenRouterAdapter):
                 metadata["attachment_id"] = attachment_id
             failure.stream_metadata = metadata
             return failure
+# HASHI-Fingerprint: hfp_dd16a2f7625242928f9de362fdce274a

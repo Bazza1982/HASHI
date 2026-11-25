@@ -2106,6 +2106,13 @@ def _file_resource(arguments: dict) -> str:
 
 
 class OpenRouterAdapter(BaseBackend):
+    # The durable HERV3 checkpoint uses this adapter's chat-message contract.
+    HERV3_CONTEXT_FORMAT = "openai-chat-messages-v1"
+    HERV3_ACCEPTS_CONTEXT = True
+
+    def supports_herv3_context(self) -> bool:
+        return True
+
     # OpenRouter aggregates providers with different replay guarantees.  A
     # concrete compatible adapter may opt into narrowly scoped HTTP-call
     # recovery without replaying completed tool loops.
@@ -2154,43 +2161,18 @@ class OpenRouterAdapter(BaseBackend):
         """Optional provider-native check of the final, privacy-filtered payload.
 
         A subclass may return a replacement payload after proactive context
-        maintenance (for example, Compact). The caller re-protects and
-        re-estimates the rebuilt payload before submission. Returning None
-        sends the original payload unchanged.
+        maintenance (for example, Compact). The caller re-protects any
+        rebuilt payload and applies provider-specific final checks. Returning
+        None sends the original payload unchanged.
         """
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
-        """Reject a clearly oversized text payload before an HTTP call.
+        """Defer uncertain token counts to the provider's typed admission.
 
-        Native media have provider-specific token accounting, so leave those
-        requests to the provider's typed rejection rather than guessing from
-        base64 wire bytes.
+        A heuristic upper estimate cannot prove that a request will not fit.
+        Model-specific capacity preparation and compaction run separately.
         """
-
-        from orchestrator.context_compaction import estimate_tokens, resolve_capacity_profile
-
-        runtime = getattr(self.config, "_hashi_runtime", None)
-        if runtime is None:
-            return
-        model = str(payload.get("model") or self.config.model)
-        capacity = resolve_capacity_profile(runtime, self.config.engine, model)
-        if capacity is None:
-            return
-        serialized = json.dumps(
-            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        if "data:" in serialized or "base64," in serialized:
-            return
-        estimated = estimate_tokens(serialized)
-        if estimated > capacity.usable_input_tokens:
-            raise ProviderContextCapacityPreflightError(
-                f"Prepared request estimate {estimated} tokens exceeds "
-                f"declared usable input capacity {capacity.usable_input_tokens} "
-                f"for {capacity.provider}/{capacity.model}."
-            )
+        del payload
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -4161,10 +4143,12 @@ class OpenRouterAdapter(BaseBackend):
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
         # contains more than one call.
-        if self._deferred_tool_followups:
-            messages.extend(self._deferred_tool_followups)
-            self._deferred_tool_followups.clear()
-        messages.extend(deferred_tool_result_messages)
+        from orchestrator.her_v2.provider_continuation import ordered_deferred_followups
+
+        messages.extend(ordered_deferred_followups(
+            self._deferred_tool_followups, deferred_tool_result_messages,
+        ))
+        self._deferred_tool_followups.clear()
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
@@ -4755,6 +4739,7 @@ class OpenRouterAdapter(BaseBackend):
         continuation_messages: list[dict[str, Any]] | None = None,
         resume_pending_tools: bool = False,
         deferred_followups: Sequence[Mapping[str, Any]] | None = None,
+        continuation_request_content: bool = False,
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
@@ -4875,11 +4860,42 @@ class OpenRouterAdapter(BaseBackend):
                     dict(item) if isinstance(item, Mapping) else item
                     for item in continuation_messages
                 ]
-                media_routing = ()
-                self._last_media_routing = ()
-                native_attachment_ids = set()
-                native_local_refs = set()
-                all_media_native = False
+                if continuation_request_content:
+                    from orchestrator.her_v2.provider_continuation import (
+                        SUCCESSOR_AFTER_TOOL_BATCH, SUCCESSOR_CONTENT_DIGEST,
+                    )
+
+                    if provider_request_content is None:
+                        raise ProviderContextObserverError("successor request content is unavailable")
+                    if resume_pending_tools:
+                        target = next(
+                            (item for item in reversed(self._deferred_tool_followups)
+                             if item.get(SUCCESSOR_AFTER_TOOL_BATCH) is True),
+                            None,
+                        )
+                    else:
+                        target = messages[-1] if messages else None
+                    if not isinstance(target, dict) or target.get("role") != "user" or not isinstance(target.get("content"), str):
+                        raise ProviderContextObserverError("successor content has no owned user message")
+                    current_messages, media_routing = self._initial_messages(
+                        target["content"], provider_request_content,
+                        transient_images=transient_images,
+                    )
+                    target["content"] = current_messages[1]["content"]
+                    if resume_pending_tools and isinstance(target["content"], list):
+                        parts = target["content"]
+                        if not parts or not isinstance(parts[0], Mapping) or parts[0].get("type") != "text":
+                            raise ProviderContextObserverError("successor media has no owned text part")
+                        target[SUCCESSOR_CONTENT_DIGEST] = "sha256:" + hashlib.sha256(
+                            str(parts[0].get("text") or "").encode("utf-8")
+                        ).hexdigest()
+                    self._last_media_routing = media_routing
+                else:
+                    media_routing = ()
+                    self._last_media_routing = ()
+                    native_attachment_ids = set()
+                    native_local_refs = set()
+                    all_media_native = False
 
             if resume_pending_tools:
                 from orchestrator.her_v2.provider_continuation import pending_tool_calls
@@ -4927,16 +4943,11 @@ class OpenRouterAdapter(BaseBackend):
                             audio_output is None or audio_output.get("tools")
                         ),
                     )
-                    self._preflight_payload_capacity(payload)
                     payload = await self._protect_outbound_payload(
                         payload, request_id=str(request_id or ""), gate=privacy_gate
                     )
-                    # Level-2 placeholders may be longer than the sensitive
-                    # spans they replace.  The first check protects the local
-                    # privacy sidecar from an already-oversized request; this
-                    # second check governs the exact text payload that will be
-                    # audited and sent over HTTP.
-                    self._preflight_payload_capacity(payload)
+                    # Let the target's capacity preparation inspect the
+                    # privacy-filtered payload before any native admission.
                     capacity_start = len(provider_calls)
                     rebuilt_payload = await self._prepare_payload_capacity(
                         payload,
@@ -4948,7 +4959,10 @@ class OpenRouterAdapter(BaseBackend):
                         payload = await self._protect_outbound_payload(
                             payload, request_id=str(request_id or ""), gate=privacy_gate
                         )
-                        self._preflight_payload_capacity(payload)
+                    # A provider-specific exact constraint may still apply to
+                    # the final protected payload. Generic token estimates do
+                    # not reject; target preparation has already had a chance.
+                    self._preflight_payload_capacity(payload)
                     provider_call_count += len(provider_calls) - capacity_start
                     for capacity_call in provider_calls[capacity_start:]:
                         total_prompt += int(capacity_call.get("input") or 0)

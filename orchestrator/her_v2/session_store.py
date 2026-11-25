@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestrator.storage_profile import removable_storage_profile
+from orchestrator.her_v2.recovery_projection import bounded_goal
 
 
 _PROVIDER_CONTEXT_STORAGE = "segmented-json-items-v1"
@@ -1351,6 +1352,8 @@ class HerSessionStore:
         deferred_followups: Sequence[Mapping[str, Any]] = (),
         provider_request_id: str = "",
         invocation_id: str = "",
+        context_ownership: Mapping[str, Any] | None = None,
+        recovery_reconstruction: Mapping[str, Any] | None = None,
         producer_run_claim: Mapping[str, Any] | None = None,
         execution_owner_id: str = "",
     ) -> dict[str, Any]:
@@ -1414,6 +1417,15 @@ class HerSessionStore:
             "reasoning_count": len(clean_reasoning),
             "deferred_followup_count": len(clean_deferred),
         }
+        if context_ownership:
+            # This describes only a provider message owned by prompt assembly.
+            # It is private and covered by the same checkpoint digest.
+            context_metadata["context_ownership"] = dict(context_ownership)
+        if recovery_reconstruction:
+            # Durable projected Tool evidence from an incompatible-provider
+            # recovery. Kept separate from replaceable prompt assembly so a
+            # later recovery cannot drop the original completed results.
+            context_metadata["recovery_reconstruction"] = dict(recovery_reconstruction)
         encoded_metadata = _json(context_metadata)
         digest = _provider_context_digest(
             context_metadata,
@@ -2166,7 +2178,7 @@ class HerSessionStore:
                 return None
             state_turn_id = str(state.get("turn_id") or "")
             state_turn_row = connection.execute(
-                "SELECT request_id FROM her_turns "
+                "SELECT request_id, user_message FROM her_turns "
                 "WHERE session_id = ? AND turn_id = ?",
                 (session_id, state_turn_id),
             ).fetchone()
@@ -2218,17 +2230,55 @@ class HerSessionStore:
                     else ""
                 ),
             )
+            # Rebuild the model view from the accepted user request even when
+            # a historical recovery row contains an expanded provider prompt.
+            # The source recovery row and canonical audit remain untouched.
+            source_remaining = dict(state.get("remaining_work") or {})
+            origin_turn_id = str(source_remaining.get("recovery_origin_turn_id") or "")
+            if not origin_turn_id:
+                # Older chains did not record their origin. Follow the existing
+                # durable links once, with cycle protection, without rewriting
+                # any historical rows.
+                origin_turn_id = state_turn_id
+                seen_origins: set[str] = set()
+                while origin_turn_id and origin_turn_id not in seen_origins:
+                    seen_origins.add(origin_turn_id)
+                    link = connection.execute(
+                        "SELECT recovery_source_turn_id FROM her_active_turn_recovery "
+                        "WHERE session_id = ? AND turn_id = ?",
+                        (session_id, origin_turn_id),
+                    ).fetchone()
+                    parent = str(link["recovery_source_turn_id"] or "") if link else ""
+                    if not parent or parent in seen_origins:
+                        break
+                    origin_turn_id = parent
+            origin_turn_row = state_turn_row if origin_turn_id == state_turn_id else connection.execute(
+                "SELECT request_id, user_message FROM her_turns WHERE session_id = ? AND turn_id = ?",
+                (session_id, origin_turn_id),
+            ).fetchone()
+            if origin_turn_row is None:
+                origin_turn_id, origin_turn_row = state_turn_id, state_turn_row
+            for key in ("goal", "goal_truncated", "goal_chars", "goal_sha256", "inherited_recovery"):
+                source_remaining.pop(key, None)
+            if origin_turn_row is not None:
+                source_remaining.update(bounded_goal(origin_turn_row["user_message"]))
+                source_remaining["recovery_origin_turn_id"] = origin_turn_id
+                source_remaining["goal_evidence_ref"] = (
+                    f"her_turns:user_message:{session_id}:{origin_turn_id}"
+                )
             payload = {
                 "format": "her-active-turn-recovery-context-v1",
                 "authority": "quoted_recovery_context",
+                "session_id": session_id,
                 "interrupted_turn_id": str(state.get("turn_id") or ""),
+                "source_request_id": state_request_id,
                 "current_stage": str(state.get("current_stage") or ""),
                 "routing_revision": int(state.get("routing_revision") or 0),
                 "strategy": state.get("strategy") or {},
                 "plan": state.get("plan") or {},
                 "tool_receipts": state.get("tool_receipts") or [],
                 "side_effects": state.get("side_effects") or [],
-                "remaining_work": state.get("remaining_work") or {},
+                "remaining_work": source_remaining,
                 "safe_to_resume": bool(state.get("safe_to_resume")),
                 "recovery_disposition": str(
                     state.get("recovery_disposition") or ""
@@ -2346,7 +2396,7 @@ class HerSessionStore:
                             {
                                 **current_remaining,
                                 "recovery_source_turn_id": str(state.get("turn_id") or ""),
-                                "inherited_recovery": state.get("remaining_work") or {},
+                                "recovery_origin_turn_id": origin_turn_id,
                             }
                         ),
                         1
@@ -2461,6 +2511,33 @@ class HerSessionStore:
             )
         return archived
 
+    @staticmethod
+    def _main_model_context_identity(snapshot: Mapping[str, Any]) -> tuple[str, str]:
+        """Return the effective main route, independent of profile ordering."""
+        snapshot = dict(snapshot) if isinstance(snapshot, Mapping) else {}
+        main: Any = snapshot.get("main_route")
+        if not isinstance(main, Mapping):
+            routes = snapshot.get("routes")
+            direct = routes.get("direct") if isinstance(routes, Mapping) else None
+            if isinstance(direct, Mapping) and (
+                direct.get("provider") or direct.get("model")
+            ):
+                main = direct
+        if not isinstance(main, Mapping):
+            profiles = snapshot.get("profiles")
+            if isinstance(profiles, (list, tuple)):
+                candidates = [p for p in profiles if isinstance(p, Mapping)]
+                main = next(
+                    (p for p in candidates if str(p.get("name") or "").casefold() in {"main", "direct"}),
+                    candidates[0] if len(candidates) == 1 else None,
+                )
+        if not isinstance(main, Mapping):
+            return ("", "")
+        return (
+            str(main.get("provider") or "").strip(),
+            str(main.get("model") or "").strip(),
+        )
+
     def freeze_turn_routing(
         self,
         *,
@@ -2537,11 +2614,10 @@ class HerSessionStore:
                 (session_id,),
             ).fetchone()
             checkpoint_payload = _object(checkpoint["payload_json"]) if checkpoint else {}
-            previous_revision = int(checkpoint["routing_revision"] or 0) if checkpoint else 0
             previous_snapshot = dict(checkpoint_payload.get("route_snapshot") or {})
             changed = bool(checkpoint) and (
-                previous_revision != int(routing_revision)
-                or bool(previous_snapshot) and previous_snapshot != snapshot
+                self._main_model_context_identity(previous_snapshot)
+                != self._main_model_context_identity(snapshot)
             )
             generation = int(session["provider_context_generation"] or 0)
             if generation <= 0 or changed:
@@ -2659,6 +2735,7 @@ class HerSessionStore:
         event: str,
         stage: str,
         payload: Mapping[str, Any],
+        user_message: str,
     ) -> dict[str, Any]:
         strategy = _object(row["strategy_json"])
         plan = _object(row["plan_json"])
@@ -2671,7 +2748,8 @@ class HerSessionStore:
 
         if event == "request_received":
             remaining = {
-                "goal": str(payload.get("request") or remaining.get("goal") or ""),
+                **bounded_goal(user_message),
+                **{key: remaining[key] for key in ("recovery_source_turn_id", "recovery_origin_turn_id") if key in remaining},
                 "status": "in_progress",
             }
         elif event == "stage_started":
@@ -2884,7 +2962,8 @@ class HerSessionStore:
                 payload=canonical_payload,
             )
             projection = self._project_runtime_event(
-                recovery, event=event, stage=stage, payload=payload
+                recovery, event=event, stage=stage, payload=payload,
+                user_message=str(turn["user_message"] or ""),
             )
             connection.execute(
                 """
@@ -3286,6 +3365,7 @@ class HerSessionStore:
             "format": "her-settled-session-checkpoint-v1",
             "session_id": session_id,
             "settled_through_turn_id": turn_id,
+            "source_request_id": str(turn["request_id"] or ""),
             "settled_through_turn_sequence": int(turn["sequence"]),
             "state_version": int(session["state_version"]),
             "pcm_revision": int(session["pcm_revision"]),

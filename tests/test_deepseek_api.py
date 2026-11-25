@@ -912,7 +912,10 @@ def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
 
 
 @pytest.mark.asyncio
-async def test_declared_capacity_rejects_oversized_serialized_payload_before_http(tmp_path):
+@pytest.mark.parametrize("provider_accepts", [True, False])
+async def test_declared_capacity_defers_uncertain_estimate_to_provider(
+    tmp_path, provider_accepts
+):
     adapter = _adapter(tmp_path)
     adapter.tool_registry = None
     adapter.config._hashi_runtime = SimpleNamespace(
@@ -933,12 +936,27 @@ async def test_declared_capacity_rejects_oversized_serialized_payload_before_htt
         ),
         backend_manager=None,
     )
-    adapter._call_api_once = AsyncMock(return_value=_APIResult("done", None, "stop"))
+    if provider_accepts:
+        adapter._call_api_once = AsyncMock(return_value=_APIResult("done", None, "stop"))
+    else:
+        request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+        rejected = httpx.Response(
+            400, request=request,
+            json={"error": {"code": "context_length_exceeded", "message": "large"}},
+        )
+        adapter._call_api_once = AsyncMock(
+            side_effect=httpx.HTTPStatusError("HTTP 400", request=request, response=rejected)
+        )
 
     response = await adapter.generate_response("long " * 2500, "req-capacity-local")
 
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
-    assert adapter._call_api_once.await_count == 0
+    assert adapter._call_api_once.await_count == 1
+    if provider_accepts:
+        assert response.is_success is True
+        assert response.text == "done"
+    else:
+        assert response.is_success is False
+        assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
 
 
 @pytest.mark.parametrize(

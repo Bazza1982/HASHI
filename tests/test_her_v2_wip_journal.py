@@ -13,7 +13,7 @@ def test_interrupted_wip_is_injected_and_appends_across_turns(tmp_path):
     path = tmp_path / "wip.jsonl"
     journal = WIPJournal(path)
 
-    assert journal.begin_turn(request_id="req-1", prompt="first task") == ""
+    assert journal.begin_turn(request_id="req-1", prompt="first task", request_summary="first task") == ""
     journal.append_audit(
         {
             "event": "commentary_publish_result",
@@ -68,7 +68,7 @@ def test_activity_summary_reports_content_free_recovery_identity(tmp_path):
 def test_crash_torn_tail_does_not_hide_prior_durable_wip(tmp_path):
     path = tmp_path / "wip.jsonl"
     journal = WIPJournal(path)
-    journal.begin_turn(request_id="req-1", prompt="durable task")
+    journal.begin_turn(request_id="req-1", prompt="durable task", request_summary="durable task")
     with path.open("a", encoding="utf-8") as handle:
         handle.write('{"format":"her-v2-wip-journal-v1","broken"')
 
@@ -148,7 +148,7 @@ def test_full_request_audit_is_never_copied_back_or_recursively_expanded(tmp_pat
 
 def test_journal_retains_every_record_and_first_unfinished_request_boundary(tmp_path):
     journal = WIPJournal(tmp_path / "wip.jsonl")
-    journal.begin_turn(request_id="req-first", prompt="first unfinished task")
+    journal.begin_turn(request_id="req-first", prompt="first unfinished task", request_summary="first unfinished task")
 
     for index in range(300):
         journal.append_audit(
@@ -295,3 +295,4 @@ def test_broken_wip_observer_does_not_change_canonical_audit(tmp_path):
 
     assert reference.endswith(":event-1")
     assert (tmp_path / "audit.jsonl").is_file()
+# HASHI-Fingerprint: hfp_99bbd2da0dcc4edcb9e6addf711dd008
