@@ -226,6 +226,7 @@ def _require_clean_checkout(
     phase: str,
     failure_code: str = "local_changes",
     source_changed: bool = False,
+    previous_commit: str | None = None,
 ) -> str:
     if not root.is_dir():
         raise ReleaseUpdateError(
@@ -272,6 +273,7 @@ def _require_clean_checkout(
                     code,
                     source_changed=source_changed,
                     stage="pre_change" if not source_changed else "post_change",
+                    previous_commit=previous_commit,
                     **summary,
                 ),
                 "status": _bounded_output(status),
@@ -332,7 +334,11 @@ def fast_forward_checkout(
             exc, "instance_source", source_changed=False, stage="pre_change",
             remote=str(remote), branch=str(branch), root=str(root),
         ) from exc
-    old_commit = _require_clean_checkout(root, phase="source_preflight")
+    head_before = _git_text(root, "rev-parse", "HEAD", phase="source_preflight").casefold()
+    old_commit = _require_clean_checkout(
+        root, phase="source_preflight",
+        previous_commit=head_before if _HEX_COMMIT.fullmatch(head_before) else None,
+    )
     previous_branch = _git_text(
         root, "rev-parse", "--abbrev-ref", "HEAD", phase="source_preflight"
     )
