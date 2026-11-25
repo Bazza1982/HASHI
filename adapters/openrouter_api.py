@@ -48,6 +48,7 @@ from orchestrator.audio_assets import (
 )
 from orchestrator.pcm import load_pcm_document
 from orchestrator.multimodal_contract import (
+    HASHI_API_MAX_IMAGE_BYTES,
     InputCapability,
     MultimodalContractError,
     attachment_manifest,
@@ -4214,20 +4215,111 @@ class OpenRouterAdapter(BaseBackend):
         output: Any,
         content: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Translate one completed Tool result into provider messages.
+        """Preserve typed Tool media without ever classifying Tool text.
 
-        Provider adapters may override this boundary when their wire protocol
-        supports structured media returned by a Tool.  The default deliberately
-        preserves the historical text-only shape.
+        The OpenRouter-compatible Chat contract guarantees user image parts;
+        Tool-image support varies by upstream provider. DeepSeek overrides
+        this method because its Tool image parts are explicitly documented.
         """
 
-        del tool_name, content
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": output,
+        }
+        if not content:
+            return [tool_message]
+
+        texts: list[str] = []
+        images: list[str] = []
+        other_media: set[str] = set()
+        for raw_part in content:
+            if not isinstance(raw_part, Mapping):
+                continue
+            kind = str(raw_part.get("type") or "").casefold()
+            if kind == "text" and isinstance(raw_part.get("text"), str):
+                texts.append(raw_part["text"])
+            elif kind == "image":
+                mime = str(raw_part.get("mimeType") or raw_part.get("mime_type") or "")
+                encoded = raw_part.get("data")
+                if mime.startswith("image/") and isinstance(encoded, str):
+                    images.append(f"data:{mime};base64,{encoded}")
+            elif kind == "image_url":
+                data = raw_part.get("image_url")
+                url = data.get("url") if isinstance(data, Mapping) else data
+                if isinstance(url, str) and url:
+                    images.append(url)
+            elif kind in {"audio", "input_audio", "video", "input_video",
+                          "file", "input_file", "document"}:
+                other_media.add(kind)
+
+        if other_media:
+            # Do not send unsupported media bytes as ordinary Tool text.
+            # Native user audio, video and document input keep their existing
+            # separate capability-gated routing in the multimodal contract.
+            notice = (
+                "[Typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media))
+                + "; use an authorized media inspection route if available.]"
+            )
+            safe_text = "\n\n".join(t for t in texts if t.strip())
+            tool_message["content"] = "\n\n".join(
+                part for part in (safe_text, notice) if part
+            )
+
+        if not images:
+            return [tool_message]
+
+        # All media originates from a structured Tool part. Validate actual
+        # bytes but never inspect raw shell / file-read text for media patterns.
+        for url in images:
+            if url.casefold().startswith("data:"):
+                validate_inline_image_data_url(
+                    url, max_bytes=HASHI_API_MAX_IMAGE_BYTES,
+                )
+            elif not url.startswith("https://"):
+                raise MultimodalContractError(
+                    "Tool image URL requires HTTPS or encoded native image",
+                    code="INVALID_MULTIMODAL_CONTENT",
+                )
+
+        tool_text = "\n\n".join(t for t in texts if t.strip()) or (
+            f"{tool_name} returned {len(images)} image(s)."
+        )
+        if other_media:
+            tool_text += (
+                "\n[Other typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media)) + ".]"
+            )
+        capability = self.resolve_input_capability()
+        image_transports = (
+            "data_url" if url.casefold().startswith("data:")
+            else "remote_url" for url in images
+        )
+        if not all(capability.supports("image", transport)
+                   for transport in image_transports):
+            tool_message["content"] = (
+                tool_text
+                + "\n[Image unavailable natively for this selected model; "
+                "use an authorized media fallback if available.]"
+            )
+            return [tool_message]
+
+        tool_message["content"] = tool_text
         return [
+            tool_message,
             {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": output,
-            }
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        f"Image result of Tool {tool_name} (call_id={tool_call_id})."
+                    )},
+                    *(
+                        {"type": "image_url", "image_url": {"url": url}}
+                        for url in dict.fromkeys(images)
+                    ),
+                ],
+            },
         ]
 
     # ------------------------------------------------------------------

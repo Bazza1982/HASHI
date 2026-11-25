@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -570,7 +571,7 @@ async def execute_browser_open_play_verify(args: dict) -> str:
         ensure_ascii=False,
     )
 
-async def execute_browser_screenshot(args: dict) -> str:
+async def execute_browser_screenshot(args: dict, *, typed_media: bool = False) -> str:
     """
     Navigate to a URL and return a base64-encoded PNG screenshot.
     Returns:  "screenshot:<base64>" on success  or  "Error: ..."
@@ -586,6 +587,20 @@ async def execute_browser_screenshot(args: dict) -> str:
 
     bridge_result = await _maybe_execute_extension_bridge("screenshot", args)
     if bridge_result is not None:
+        if typed_media and bridge_result.startswith("screenshot:"):
+            from tools.typed_media_result import screenshot_tool_result
+            try:
+                payload = base64.b64decode(
+                    bridge_result.partition(":")[2], validate=True,
+                )
+                return screenshot_tool_result(payload, "Browser screenshot captured")
+            except (ValueError, binascii.Error) as exc:
+                return f"Error: browser screenshot returned invalid image bytes: {type(exc).__name__}"
+        if typed_media and not bridge_result.startswith("Error:"):
+            return (
+                "Error: browser screenshot unavailable: legacy worker returned "
+                "unstructured output. Update the browser worker and retry."
+            )
         return bridge_result
 
     pw = browser = context = page = None
@@ -599,6 +614,9 @@ async def execute_browser_screenshot(args: dict) -> str:
             await asyncio.sleep(wait_ms / 1000)
 
         png_bytes = await page.screenshot(full_page=full_page)
+        if typed_media:
+            from tools.typed_media_result import screenshot_tool_result
+            return screenshot_tool_result(png_bytes, "Browser screenshot captured")
         b64 = base64.b64encode(png_bytes).decode()
         return f"screenshot:{b64}"
 
@@ -1136,7 +1154,7 @@ async def execute_browser_upload(args: dict) -> str:
                 pass
 
 
-async def execute_browser_session(args: dict) -> str:
+async def execute_browser_session(args: dict, *, typed_media: bool = False) -> str:
     """
     Execute a multi-step browser session — multiple actions on the same page
     without reloading between steps.
@@ -1165,10 +1183,86 @@ async def execute_browser_session(args: dict) -> str:
 
     bridge_result = await _maybe_execute_extension_bridge("session", args)
     if bridge_result is not None:
+        if typed_media and not bridge_result.startswith("Error:"):
+            # The authenticated Chrome extension returns a structured Session
+            # step list. Use its declared action, never search the returned
+            # page/source text for image-looking strings.
+            try:
+                envelope = json.loads(bridge_result)
+            except (TypeError, ValueError):
+                envelope = None
+            if isinstance(envelope, dict) and isinstance(envelope.get("steps"), list):
+                from tools.registry import StructuredToolOutput
+                from tools.typed_media_result import screenshot_tool_result
+
+                parts: list[dict] = []
+                summary: list[str] = []
+                found_image = False
+                partial_error = False
+                requested_screenshots = {index for index, step in enumerate(steps) if isinstance(step, dict) and step.get("action") == "screenshot"}
+                observed_screenshots = set()
+                for raw in envelope["steps"]:
+                    if not isinstance(raw, dict):
+                        continue
+                    step_type = str(raw.get("action") or "")
+                    step_no = raw.get("index")
+                    label = f"[{step_no}:{step_type}]"
+                    if step_type == "screenshot" and step_no in requested_screenshots:
+                        observed_screenshots.add(step_no)
+                    if step_type == "screenshot" and raw.get("ok") is True:
+                        data_url = raw.get("output")
+                        try:
+                            if not isinstance(data_url, str):
+                                raise ValueError("missing screenshot image")
+                            header, separator, encoded = data_url.partition(",")
+                            if not separator or header.casefold() != "data:image/png;base64":
+                                raise ValueError("invalid screenshot envelope")
+                            payload = base64.b64decode(encoded, validate=True)
+                            native = screenshot_tool_result(
+                                payload, f"{label} screenshot captured"
+                            )
+                        except (ValueError, binascii.Error):
+                            partial_error = True
+                            line = f"{label} ERROR: screenshot returned invalid image"
+                            summary.append(line)
+                            parts.append({"type": "text", "text": line})
+                            continue
+                        summary.append(f"{label} image attached")
+                        parts.extend(native.content)
+                        found_image = True
+                    else:
+                        if raw.get("ok") is False:
+                            partial_error = True
+                        value = raw.get("output") if raw.get("ok") else raw.get("error")
+                        line = label + " " + (
+                            value if isinstance(value, str)
+                            else json.dumps(value, ensure_ascii=False, default=str)
+                        )
+                        summary.append(line)
+                        parts.append({"type": "text", "text": line})
+                for missing in sorted(requested_screenshots - observed_screenshots):
+                    partial_error = True
+                    line = f"[{missing}:screenshot] ERROR: requested screenshot step missing"
+                    summary.append(line)
+                    parts.append({"type": "text", "text": line})
+                if found_image or requested_screenshots:
+                    return StructuredToolOutput(
+                        output="\n".join(summary), content=parts, is_error=partial_error,
+                    )
+            if any(
+                isinstance(step, dict) and step.get("action") == "screenshot"
+                for step in steps
+            ):
+                return (
+                    "Error: browser session screenshot unavailable: legacy worker "
+                    "returned unstructured output. Update the browser worker and retry."
+                )
         return bridge_result
 
     pw = browser = context = page = None
     results: list[str] = []
+    screenshots: dict[int, dict] = {}
+    partial_error = False
 
     try:
         pw, browser, context, page = await _get_page(cdp_url=cdp_url, headed=headed)
@@ -1255,8 +1349,14 @@ async def execute_browser_session(args: dict) -> str:
                 elif action == "screenshot":
                     full_page = bool(step.get("full_page", False))
                     png = await page.screenshot(full_page=full_page)
-                    b64 = base64.b64encode(png).decode()
-                    results.append(f"[screenshot] base64:{b64}")
+                    if typed_media:
+                        from tools.typed_media_result import screenshot_tool_result
+                        native = screenshot_tool_result(png, "[screenshot] image attached")
+                        screenshots[len(results)] = native.content[-1]
+                        results.append("[screenshot] image attached")
+                    else:
+                        b64 = base64.b64encode(png).decode()
+                        results.append(f"[screenshot] base64:{b64}")
 
                 elif action == "get_text":
                     text = await page.evaluate("() => document.body.innerText")
@@ -1286,11 +1386,28 @@ async def execute_browser_session(args: dict) -> str:
                     results.append("[reload]")
 
                 else:
+                    partial_error = True
                     results.append(f"[step {i}] ERROR: unknown action '{action}'")
 
             except Exception as step_err:
+                partial_error = True
                 results.append(f"[{action}] ERROR: {step_err}")
 
+        if typed_media and any(
+            isinstance(step, dict) and step.get("action") == "screenshot"
+            for step in steps
+        ):
+            from tools.registry import StructuredToolOutput
+
+            # Preserve the original step order with typed text and image parts.
+            parts: list[dict] = []
+            for index, line in enumerate(results):
+                parts.append({"type": "text", "text": line})
+                if index in screenshots:
+                    parts.append(screenshots[index])
+            return StructuredToolOutput(
+                output="\n".join(results), content=parts, is_error=partial_error,
+            )
         return "\n".join(results)
 
     except Exception as e:

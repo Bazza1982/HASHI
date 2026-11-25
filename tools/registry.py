@@ -15,7 +15,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from urllib import request as urllib_request
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -234,6 +234,7 @@ class StructuredToolOutput:
 
     output: str
     content: list[dict[str, Any]]
+    is_error: bool = False
 
 
 class ToolRegistry:
@@ -1310,9 +1311,77 @@ class ToolRegistry:
         from tools.builtins import BuiltinExecutionResult
 
         details = None
+        structured_error = False
         if isinstance(dispatched, StructuredToolOutput):
             output = dispatched.output
             content = dispatched.content
+            structured_error = dispatched.is_error
+            screenshot_count = 1 if tool_name in _IMAGE_OUTPUT_TOOLS else (
+                sum(
+                    1 for step in (arguments.get("steps") or [])
+                    if isinstance(step, Mapping) and step.get("action") == "screenshot"
+                ) if tool_name == "browser_session" else 0
+            )
+            if screenshot_count and not output.startswith("Error:"):
+                from orchestrator.multimodal_contract import (
+                    HASHI_API_MAX_IMAGE_BYTES,
+                    validate_inline_image_data_url,
+                )
+                content_invalid = not isinstance(content, list) or not all(
+                    isinstance(part, Mapping) for part in content
+                )
+                invalid_images = 0
+                image_count = 0
+                kept_parts: list[dict[str, Any]] | None = None
+                if not content_invalid:
+                    kept_parts = []
+                    for part in content:
+                        if part.get("type") != "image":
+                            kept_parts.append(dict(part))
+                            continue
+                        image_count += 1
+                        mime, data = part.get("mimeType"), part.get("data")
+                        valid = isinstance(mime, str) and isinstance(data, str)
+                        if valid:
+                            try:
+                                validate_inline_image_data_url(
+                                    f"data:{mime};base64,{data}",
+                                    max_bytes=HASHI_API_MAX_IMAGE_BYTES,
+                                )
+                            except ValueError:
+                                valid = False
+                        if valid:
+                            kept_parts.append(dict(part))
+                        else:
+                            invalid_images += 1
+                missing_images = max(0, screenshot_count - image_count)
+                failed = (
+                    content_invalid or invalid_images > 0
+                    or (not structured_error and missing_images > 0)
+                )
+                if failed:
+                    problems = []
+                    if content_invalid:
+                        problems.append("invalid image content")
+                    else:
+                        if invalid_images:
+                            problems.append(f"{invalid_images} invalid image(s)")
+                        if missing_images and not structured_error:
+                            problems.append(f"{missing_images} missing image(s)")
+                    error = "Error: screenshot returned " + (
+                        " and ".join(problems) if problems else "missing or invalid image content"
+                    )
+                    if tool_name == "browser_session":
+                        content = kept_parts if kept_parts is not None else [
+                            dict(part) for part in (content or [])
+                            if isinstance(part, Mapping) and part.get("type") == "text"
+                        ]
+                        content.append({"type": "text", "text": error})
+                        output = "\n".join(part for part in (output, error) if part)
+                    else:
+                        output = error
+                        content = None
+                    structured_error = True
         elif isinstance(dispatched, BuiltinExecutionResult):
             output = dispatched.output
             content = None
@@ -1320,19 +1389,31 @@ class ToolRegistry:
         else:
             output = dispatched
             content = None
+        if (
+            (
+                tool_name in _IMAGE_OUTPUT_TOOLS
+                or (
+                    tool_name == "browser_session"
+                    and any(
+                        isinstance(step, Mapping) and step.get("action") == "screenshot"
+                        for step in (arguments.get("steps") or [])
+                    )
+                )
+            )
+            and not isinstance(dispatched, StructuredToolOutput)
+            and not output.startswith("Error:")
+        ):
+            output = "Error: screenshot returned missing or invalid image content"
+            content = None
+            structured_error = True
         content, content_truncated = _bound_structured_text(content)
         if resource_wait_ms >= 50:
             details = {**(details or {}), "resource_wait_ms":resource_wait_ms}
         if content_truncated:
             details = {**(details or {}), "content_text_truncated": True}
-        if (
-            tool_name not in _IMAGE_OUTPUT_TOOLS
-            and not (
-                tool_name == "browser_session"
-                and ("[screenshot] base64:" in output or "data:image/" in output)
-            )
-            and len(output) > MAX_TEXT_TOOL_OUTPUT_CHARS
-        ):
+        if len(output) > MAX_TEXT_TOOL_OUTPUT_CHARS:
+            # A screenshot never needs an unbounded Base64 text exception:
+            # image bytes are delivered only in typed ToolResult.content.
             original_chars = len(output)
             output = (
                 output[:MAX_TEXT_TOOL_OUTPUT_CHARS]
@@ -1343,7 +1424,7 @@ class ToolRegistry:
                 "output_truncated": True,
                 "output_original_chars": original_chars,
             }
-        is_error = output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
+        is_error = structured_error or output.startswith("Error:") or (details or {}).get("search_outcome") in {"failed", "unavailable"}
         if tool_name in OFFICE_TOOL_NAMES:
             is_error = (details or {}).get("office_result", {}).get("status") == "error"
         elif tool_name in TOOLKIT_TOOL_NAMES:
@@ -1785,13 +1866,50 @@ class ToolRegistry:
             request_id=request_id,
             authorization="tool_registry",
         )
+        screenshot_requested = action == "screenshot" or (
+            action == "session"
+            and any(
+                isinstance(step, Mapping) and step.get("action") == "screenshot"
+                for step in (arguments.get("steps") or [])
+            )
+        )
         if isinstance(result, str):
+            if (
+                capability_kind in {"browser_control", "computer_control"}
+                and screenshot_requested
+                and not result.startswith("Error:")
+            ):
+                return (
+                    "Error: screenshot unavailable: capability worker returned "
+                    "unstructured output. Update the worker and retry."
+                )
             return result
+        # The authenticated capability Worker can return native Tool content.
+        # Trust the structured result type, never infer media from the text.
+        if (
+            capability_kind in {"browser_control", "computer_control"}
+            and action in {"screenshot", "session"}
+            and isinstance(result, Mapping)
+            and isinstance(result.get("output"), str)
+            and isinstance(result.get("content"), list)
+        ):
+            if not all(isinstance(part, Mapping) for part in result["content"]):
+                return "Error: capability worker returned malformed structured content"
+            return StructuredToolOutput(
+                output=result["output"],
+                content=[dict(part) for part in result["content"]],
+                is_error=result.get("is_error") is True,
+            )
+        if capability_kind in {"browser_control", "computer_control"} and screenshot_requested:
+            return (
+                "Error: screenshot unavailable: capability worker returned "
+                "unstructured output. Update the worker and retry."
+            )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
     async def _dispatch_gateway_browser(
         self, tool_name: str, arguments: dict, *, tool_call_id: str
-    ) -> str:
+    ) -> str | StructuredToolOutput:
         """Relay a CLI tool call to its owning Function Worker, then Core RPC."""
         from urllib.parse import urlsplit
         from urllib.error import HTTPError
@@ -1832,7 +1950,7 @@ class ToolRegistry:
             return "Error: " + operation_failure_payload(failure,
                 error_code="browser_gateway_unavailable", effect_state="unconfirmed")["message"]
 
-        def request_proxy() -> str:
+        def request_proxy() -> str | StructuredToolOutput:
             request = urllib_request.Request(
                 url,
                 data=payload,
@@ -1849,6 +1967,15 @@ class ToolRegistry:
                     return "Error: browser capability result exceeds gateway limit"
                 result = json.loads(raw.decode("utf-8"))
                 output = str(result.get("output") or "")
+                native_parts = result.get("content")
+                if isinstance(native_parts, list) and native_parts:
+                    if not all(isinstance(part, dict) for part in native_parts):
+                        return "Error: browser gateway returned malformed structured content"
+                    return StructuredToolOutput(
+                        output=output,
+                        content=[dict(part) for part in native_parts],
+                        is_error=result.get("is_error") is True,
+                    )
                 if result.get("is_error") and not output.startswith("Error:"):
                     return "Error: " + output
                 return output
@@ -2376,6 +2503,10 @@ class ToolRegistry:
                 "browser_open_play_verify": execute_browser_open_play_verify,
             }
             if tool_name in _browser_dispatch:
+                if tool_name in {"browser_screenshot", "browser_session"}:
+                    return await _browser_dispatch[tool_name](
+                        browser_args, typed_media=True,
+                    )
                 return await _browser_dispatch[tool_name](browser_args)
             return f"Error: unknown browser tool '{tool_name}'"
 
@@ -2403,6 +2534,10 @@ class ToolRegistry:
                 "desktop_window_focus": execute_desktop_window_focus,
             }
             if tool_name in _desktop_dispatch:
+                if tool_name == "desktop_screenshot":
+                    return await execute_desktop_screenshot(
+                        arguments, typed_media=True,
+                    )
                 return await _desktop_dispatch[tool_name](arguments)
             return f"Error: unknown desktop tool '{tool_name}'"
 
@@ -2448,6 +2583,10 @@ class ToolRegistry:
                 "windows_window_close": execute_windows_window_close,
             }
             if tool_name in _windows_dispatch:
+                if tool_name == "windows_screenshot":
+                    return await execute_windows_screenshot(
+                        arguments, typed_media=True,
+                    )
                 return await _windows_dispatch[tool_name](arguments)
             return f"Error: unknown windows tool '{tool_name}'"
 

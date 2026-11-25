@@ -718,6 +718,10 @@ class DeviceWorkerState:
             # windows-mcp as a per-request child process.
             args["provider"] = "usecomputer"
             args["_persistent_worker"] = True
+            # The actual screenshot action has already been authenticated and
+            # authorized. Return typed pixels instead of a Base64 text result.
+            if action == "screenshot":
+                args["_hashi_typed_media"] = True
             from tools.windows_helper.backends import execute_action
 
             return await execute_action(action, args)
@@ -799,6 +803,13 @@ async def _execute_browser_action(action: str, args: dict[str, Any]) -> str:
     }
     extension_args = dict(args)
     extension_args["bridge_backend"] = "extension"
+    if action in {"screenshot", "session"}:
+        from tools.registry import StructuredToolOutput
+
+        result = await dispatch[action](extension_args, typed_media=True)
+        if isinstance(result, StructuredToolOutput):
+            return {"output": result.output, "content": result.content, "is_error": result.is_error}
+        return result
     return await dispatch[action](extension_args)
 
 

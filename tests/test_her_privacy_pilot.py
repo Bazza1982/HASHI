@@ -182,7 +182,7 @@ async def test_tool_result_is_masked_on_second_deepseek_call(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_privacy_expansion_is_capacity_checked_before_http(tmp_path):
+async def test_privacy_expansion_is_masked_before_provider_admission(tmp_path):
     async def expanding_detector(texts: list[str]) -> list[list[dict]]:
         return [
             [
@@ -227,8 +227,12 @@ async def test_privacy_expansion_is_capacity_checked_before_http(tmp_path):
 
     response = await adapter.generate_response("X " * 200, "req-private-capacity")
 
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
-    adapter._call_api_once.assert_not_awaited()
+    assert response.is_success is True
+    adapter._call_api_once.assert_awaited_once()
+    payload = adapter._call_api_once.await_args.args[0]
+    user_content = next(message["content"] for message in payload["messages"] if message["role"] == "user")
+    assert "X " not in user_content
+    assert "[PERSON_" in user_content
 
 
 @pytest.mark.asyncio

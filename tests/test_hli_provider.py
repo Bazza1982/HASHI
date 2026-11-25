@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -632,7 +633,12 @@ class HLICapacityDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         # The Compute side reconfigures the served context to 16K.
         tokens["value"] = 16384
         # Force the probe TTL to expire so a fresh request re-discovers.
-        backend._hli_capacity_probes[(self.URL_A, self.MODEL)] = (0.0, True)
+        # Runner monotonic time may still be below the 600s success TTL;
+        # zero is not a reliably expired timestamp on fresh GitHub VMs.
+        from adapters.hli_api import HLI_CAPACITY_PROBE_OK_TTL_S
+        backend._hli_capacity_probes[(self.URL_A, self.MODEL)] = (
+            time.monotonic() - HLI_CAPACITY_PROBE_OK_TTL_S - 1, True,
+        )
         await backend._observe_model_context()
         self.assertEqual(
             HASHI_MODEL_CAPACITY_PROFILES[f"{self.URL_A}|{self.MODEL}"]["context_window_tokens"], 16384)

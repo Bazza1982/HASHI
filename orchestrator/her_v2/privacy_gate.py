@@ -242,8 +242,8 @@ class OutboundPrivacyGate:
     @staticmethod
     def _collect(value: Any, values: dict[str, None], keys: set[str]) -> None:
         if isinstance(value, str):
-            if value.startswith("data:"):
-                raise PrivacyGateError("encoded media cannot be inspected")
+            # Text can describe media protocols; only typed media parts are
+            # unsupported by this text-only privacy detector.
             values.setdefault(value, None)
             return
         if value is None or isinstance(value, (bool, int)):

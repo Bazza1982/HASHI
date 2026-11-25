@@ -841,7 +841,7 @@ async def test_gateway_never_caches_inline_media_in_session_transcript(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_gateway_never_caches_embedded_data_url_text_in_session(tmp_path):
+async def test_gateway_preserves_data_url_code_example_in_session(tmp_path):
     adapter = _StructuredAdapter()
     server = _server(tmp_path, adapter)
 
@@ -864,13 +864,15 @@ async def test_gateway_never_caches_embedded_data_url_text_in_session(tmp_path):
     )
     payload = json.loads(response.text)
 
-    assert response.status == 400
-    assert payload["error"]["code"] == "inline_media_session_unsupported"
-    assert server._sessions.get("session-with-inline-text") is None
-    assert adapter.calls == []
+    assert response.status == 200
+    assert payload["choices"][0]["message"]["content"]
+    assert adapter.calls
+    session = server._sessions.get("session-with-inline-text")
+    assert session is not None
+    assert "data:image/png;base64," in json.dumps(session)
 
 
-def test_gateway_session_cache_rejects_backend_generated_inline_payload(tmp_path):
+def test_gateway_session_cache_preserves_backend_text_code_examples(tmp_path):
     server = _server(tmp_path, _StructuredAdapter())
 
     stored = server._sessions.set(
@@ -883,8 +885,8 @@ def test_gateway_session_cache_rejects_backend_generated_inline_payload(tmp_path
         ],
     )
 
-    assert stored is False
-    assert server._sessions.get("session-generated-inline") is None
+    assert stored is True
+    assert server._sessions.get("session-generated-inline") is not None
 
 
 @pytest.mark.asyncio
