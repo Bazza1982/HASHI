@@ -557,6 +557,10 @@ def test_prompt_retry_limit_fails_permanently(tmp_path):
     execs = service.store.list_execs("user:7")
     assert execs[0]["state"] == "failed"
     assert "retry limit" in (execs[0]["detail"] or "")
+    # The retry cap is context, not the cause: the last real error must survive.
+    assert "last error: busy" in (execs[0]["detail"] or "")
+    receipt = service.store.get_receipt(execs[0]["exec_id"], 0)
+    assert "last error: busy" in (receipt["detail"] or "")
 
 
 def test_replayed_unverified_command_never_redispatches(tmp_path):
@@ -1599,4 +1603,51 @@ def test_migration_key_create_is_idempotent_and_non_destructive(tmp_path):
         if r.get("migration_key") == key
     ]
     assert len(matches) == 1
+
+
+def _state_server(tmp_path):
+    return SimpleNamespace(global_config=SimpleNamespace(bridge_home=str(tmp_path)))
+
+
+def test_hal_store_defaults_to_runtime_state_dir_not_the_source_tree(tmp_path):
+    from hal.service import _default_store_path
+
+    path = _default_store_path(_state_server(tmp_path))
+    assert path == tmp_path / "state" / "hal" / "hal_v1.sqlite"
+    assert path.parent.parent.name == "state"
+
+
+def test_legacy_in_tree_store_migrates_into_state_dir(tmp_path):
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    assert legacy == tmp_path / "hal" / "hal_v1.sqlite"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy-db")
+    legacy.with_name("hal_v1.sqlite-wal").write_bytes(b"wal")
+
+    _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert target.read_bytes() == b"legacy-db"
+    assert target.with_name("hal_v1.sqlite-wal").read_bytes() == b"wal"
+    assert not legacy.exists(), "the source tree must be left clean"
+    assert not legacy.with_name("hal_v1.sqlite-wal").exists()
+
+
+def test_migration_never_overwrites_an_existing_state_db(tmp_path):
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"live-state")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy-db")
+
+    _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert target.read_bytes() == b"live-state"
 # HASHI-Fingerprint: hfp_9717a97af9924e26925d98bfde62bb3d

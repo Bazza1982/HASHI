@@ -9,8 +9,74 @@ prove the operation was accepted.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+# Failures that can clear up on their own and are therefore worth retrying with
+# the same idempotency key.
+_TRANSIENT_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    asyncio.TimeoutError,
+    TimeoutError,
+    ConnectionError,
+    BrokenPipeError,
+    EOFError,
+)
+
+# OSError subclasses that will never clear up by retrying.
+_PERMANENT_OS_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    PermissionError,
+    FileNotFoundError,
+    NotADirectoryError,
+    IsADirectoryError,
+)
+
+# Unexpected exception types are only retried when the message itself proves a
+# queue/transport hiccup; everything else is reported as non-retryable instead
+# of being retried five times and then swallowed.
+_TRANSIENT_MESSAGE_MARKERS: tuple[str, ...] = (
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "temporarily not available",
+    "try again",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "broken pipe",
+    "queue is full",
+    "queue full",
+    "database is locked",
+)
+
+
+def classify_dispatch_error(exc: BaseException) -> tuple[bool, str]:
+    """Return ``(transient, exception_type)`` for a dispatch failure.
+
+    Argument/type errors, unknown targets, unsupported operations and
+    permission problems are permanent: retrying them only hides the real cause
+    and delays an honest failure. Retry is reserved for transport/queue faults.
+    """
+    kind = type(exc).__name__
+    if isinstance(exc, _PERMANENT_OS_ERROR_TYPES):
+        return False, kind
+    if isinstance(exc, (_TRANSIENT_ERROR_TYPES, OSError)):
+        return True, kind
+    message = str(exc).casefold()
+    if any(marker in message for marker in _TRANSIENT_MESSAGE_MARKERS):
+        return True, kind
+    return False, kind
+
+
+def summarize_error(exc: BaseException, limit: int = 240) -> str:
+    """One-line, bounded error summary safe to persist in a receipt."""
+    message = " ".join(str(exc).split())
+    if not message:
+        return "(no message)"
+    if len(message) > limit:
+        return message[: limit - 1] + "…"
+    return message
 
 
 @dataclass(frozen=True)
@@ -84,8 +150,9 @@ def resolve_agent_target(
 class GatewayDispatchAdapter(DispatchAdapter):
     """Executes through the live Workbench API server (real runtimes only)."""
 
-    def __init__(self, server):
+    def __init__(self, server, logger: logging.Logger | None = None):
         self._server = server
+        self._logger = logger or getattr(server, "logger", None) or logging.getLogger("hal.dispatch")
 
     def _runtime_for(self, agent_name: str | None):
         runtimes = self._server._runtime_map()
@@ -136,10 +203,27 @@ class GatewayDispatchAdapter(DispatchAdapter):
                 evidence={"run_idempotency_key": idempotency_key},
             )
         except Exception as exc:  # noqa: BLE001 — adapter must never raise
+            transient, error_type = classify_dispatch_error(exc)
+            summary = summarize_error(exc)
+            self._logger.warning(
+                "HAL prompt dispatch failed exec=%s stage=%s target=@%s retryable=%s "
+                "exception_type=%s error=%s",
+                exec_id,
+                stage,
+                target_agent,
+                transient,
+                error_type,
+                summary,
+            )
             return DispatchResult(
                 accepted=False,
-                transient=True,
-                detail=f"prompt dispatch failed transiently: {exc}",
+                transient=transient,
+                detail=(
+                    "prompt dispatch failed "
+                    f"({'transient' if transient else 'non-retryable'}): "
+                    f"{error_type}: {summary}"
+                ),
+                evidence={"exception_type": error_type, "retryable": transient},
             )
 
     async def dispatch_command(

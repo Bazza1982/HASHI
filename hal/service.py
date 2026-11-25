@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -687,14 +689,29 @@ class HalService:
         # Failure: transient (prompt only) keeps the same idempotency key for
         # retry; permanent failures stop the workflow honestly.
         final_state = RECEIPT_PENDING if result.transient else RECEIPT_FAILED
+        existing_attempts = 0
+        if existing is not None:
+            existing_attempts = int(existing.get("attempts") or 0)
+        attempt_number = existing_attempts + 1
         attempts = None
         next_retry_at = None
         if result.transient:
-            existing_attempts = 0
-            if existing is not None:
-                existing_attempts = int(existing.get("attempts") or 0)
-            attempts = existing_attempts + 1
+            attempts = attempt_number
             next_retry_at = self._clock() + _retry_backoff(attempts)
+        # Every failed dispatch is logged with enough context to diagnose it
+        # later even if the persisted receipt is overwritten.
+        self.logger.warning(
+            "HAL dispatch failed exec=%s stage=%s kind=%s target=%s attempt=%s "
+            "retryable=%s exception_type=%s detail=%s",
+            exec_id,
+            stage,
+            directive.kind,
+            directive.target,
+            attempt_number,
+            result.transient,
+            (result.evidence or {}).get("exception_type"),
+            result.detail,
+        )
         await asyncio.to_thread(
             self.store.upsert_receipt,
             exec_id=exec_id,
@@ -882,6 +899,21 @@ class HalService:
             # cannot become a continuous request storm.
             attempts = int(receipt.get("attempts") or 0)
             if attempts >= MAX_RETRY_ATTEMPTS:
+                # Never destroy the last real error: the retry cap is context,
+                # not the cause. Both the receipt and the execution keep it.
+                limit_detail = "prompt retry limit exceeded"
+                last_error = " ".join(str(receipt.get("detail") or "").split())
+                if last_error and last_error != limit_detail:
+                    limit_detail = f"{limit_detail} (last error: {last_error})"
+                self.logger.error(
+                    "HAL prompt dispatch gave up exec=%s stage=%s target=%s "
+                    "attempts=%s last_error=%s",
+                    exec_row["exec_id"],
+                    stage,
+                    receipt["target"],
+                    attempts,
+                    last_error or "unknown",
+                )
                 await asyncio.to_thread(
                     self.store.upsert_receipt,
                     exec_id=exec_row["exec_id"],
@@ -891,12 +923,12 @@ class HalService:
                     target=receipt["target"],
                     payload=receipt["payload"],
                     state=RECEIPT_FAILED,
-                    detail="prompt retry limit exceeded",
+                    detail=limit_detail,
                 )
                 await asyncio.to_thread(
                     self.store.fail_exec_if_active, owner_id=owner_id,
                     exec_id=exec_row["exec_id"],
-                    detail="prompt retry limit exceeded",
+                    detail=limit_detail,
                 )
                 continue
             next_retry_at = receipt.get("next_retry_at")
@@ -1105,12 +1137,53 @@ _ALL_EVENT_AVAILABILITY = {
 }
 
 
-def _default_store_path(server) -> Path:
-    bridge_home = Path(
+def _bridge_home(server) -> Path:
+    return Path(
         getattr(getattr(server, "global_config", None), "bridge_home", None)
         or getattr(server, "config_path", Path(".")).parent
     )
-    return bridge_home / "hal" / "hal_v1.sqlite"
+
+
+def _default_store_path(server) -> Path:
+    """Runtime state belongs under <bridge_home>/state, never in the source tree.
+
+    The v0.1 default used to be ``<bridge_home>/hal/hal_v1.sqlite``, which put a
+    database of user automation rules inside the checked-out repository. That
+    risked committing private scripts and left every checkout permanently
+    dirty, which also blocks deploy's clean-checkout gate.
+    """
+    return _bridge_home(server) / "state" / "hal" / "hal_v1.sqlite"
+
+
+def _legacy_store_path(server) -> Path:
+    return _bridge_home(server) / "hal" / "hal_v1.sqlite"
+
+
+def _migrate_legacy_store(legacy: Path, target: Path, logger) -> None:
+    """Move a database created by the old in-tree default into the state dir.
+
+    WAL sidecar files travel with the database (``-wal``/``-shm``), so the
+    migrated store keeps every committed rule and execution. When the state
+    copy already exists nothing is touched: the live state dir wins.
+    """
+    if not legacy.is_file() or target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        source = legacy.with_name(legacy.name + suffix)
+        if not source.is_file():
+            continue
+        destination = target.with_name(target.name + suffix)
+        try:
+            os.replace(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+            try:
+                source.unlink()
+            except OSError:
+                pass
+    if logger is not None:
+        logger.info("HAL store migrated from %s to %s", legacy, target)
 
 
 def ensure_service(server) -> HalService | None:
@@ -1122,15 +1195,20 @@ def ensure_service(server) -> HalService | None:
         from hal.store import HalStore
         from hal.dispatch import GatewayDispatchAdapter
 
-        store = HalStore(_default_store_path(server))
+        logger = getattr(server, "logger", None) or logging.getLogger("hal.service")
+        store_path = _default_store_path(server)
+        _migrate_legacy_store(_legacy_store_path(server), store_path, logger)
+        store = HalStore(store_path)
         service = HalService(
             store=store,
             session_store=server.session_store,
-            dispatch=GatewayDispatchAdapter(server),
-            logger=getattr(server, "logger", None),
+            dispatch=GatewayDispatchAdapter(server, logger=logger),
+            logger=logger,
         )
         server._hal_service = service
-    except Exception:  # noqa: BLE001 — HAL must never break the gateway
+    except Exception as exc:  # noqa: BLE001 — HAL must never break the gateway
+        logger = getattr(server, "logger", None) or logging.getLogger("hal.service")
+        logger.warning("HAL service unavailable: %s: %s", type(exc).__name__, exc)
         server._hal_service = None
         return None
     return service
