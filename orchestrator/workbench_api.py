@@ -809,6 +809,10 @@ class WorkbenchApiServer:
             "/api/admin/agents/{agent_id}/telegram-activation",
             self.handle_admin_agent_telegram_activation,
         )
+        self.app.router.add_post(
+            "/api/admin/agents/{agent_id}/telegram-disconnect",
+            self.handle_admin_agent_telegram_disconnect,
+        )
         self.app.router.add_put(
             "/api/admin/agents/{agent_id}/telegram-mirror-policy",
             self.handle_admin_agent_telegram_mirror_policy_update,
@@ -6037,6 +6041,108 @@ class WorkbenchApiServer:
         except (OSError, ValueError):
             return self._telegram_credential_response(
                 {"ok": False, "error_code": "telegram_credential_unavailable"}, status=503)
+
+    async def handle_admin_agent_telegram_disconnect(self, request):
+        """Remove one Agent's saved Telegram Bot credential and stop its live connection."""
+        if not self._check_admin_auth(request):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "admin auth failed",
+                    "error_code": "admin_auth_failed",
+                },
+                status=403,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "invalid JSON",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        if not isinstance(payload, dict) or set(payload) != {"expected_revision"}:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram disconnect request is invalid.",
+                    "error_code": "invalid_request",
+                },
+                status=400,
+            )
+        agent_id = str(request.match_info.get("agent_id") or "").strip()
+        runtime_active = self._telegram_credential_runtime_active(agent_id)
+        try:
+            result = self.telegram_credential_service.disconnect(
+                agent_id,
+                expected_revision=payload.get("expected_revision"),
+                runtime_active=runtime_active,
+                runtime_metadata=self._telegram_credential_runtime_metadata(agent_id),
+            )
+        except TelegramCredentialError as exc:
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                },
+                status=exc.status_code,
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._telegram_credential_response(
+                {
+                    "ok": False,
+                    "error": "Telegram credential could not be removed.",
+                    "error_code": "telegram_credential_unavailable",
+                },
+                status=503,
+            )
+        workers = getattr(self.orchestrator, "function_workers", None)
+        # Kernel cleanup (ingress, diagnostics, in-memory token) plus a
+        # confirmed Worker-side connector stop. Success is only reported once
+        # the running Worker has dropped its credential and stopped retrying;
+        # otherwise the response carries an honest runtime_stop_warning.
+        canonical_id = str(result.get("agent_id") or agent_id)
+        runtime_stopped = False
+        runtime_stop_message = ""
+        disconnect = getattr(workers, "disconnect_agent_telegram", None)
+        if callable(disconnect):
+            try:
+                runtime_stopped, runtime_stop_message = await disconnect(canonical_id)
+            except Exception as exc:
+                runtime_stop_message = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "Telegram runtime disconnect failed: agent=%s error_type=%s",
+                    canonical_id,
+                    type(exc).__name__,
+                )
+        else:
+            runtime_stop_message = "telegram_disconnect_runtime_unavailable"
+        result["runtime_stopped"] = runtime_stopped
+        # The Workbench proxy reads these canonical fields: the boolean
+        # confirmation and the warning code it maps to a localized notice.
+        result["runtime_disconnect_confirmed"] = runtime_stopped
+        if not runtime_stopped:
+            result["runtime_stop_warning"] = (
+                runtime_stop_message or "telegram_disconnect_runtime_unconfirmed"
+            )
+            existing_warning = result.get("warning_code")
+            warnings = [item for item in (existing_warning, "runtime_disconnect_unconfirmed") if item]
+            if existing_warning:
+                result["warning_codes"] = warnings
+            else:
+                result["warning_code"] = "runtime_disconnect_unconfirmed"
+        await self._refresh_telegram_status_projection()
+        logger.info(
+            "telegram_credential.disconnected agent_name=%s disconnected=%s runtime_active=%s",
+            result["agent_id"],
+            result["disconnected"],
+            runtime_active,
+        )
+        return self._telegram_credential_response(result)
 
     async def handle_admin_agent_telegram_credential(self, request):
         """Return credential status without ever reading the token back."""
