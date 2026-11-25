@@ -363,13 +363,15 @@ def _exclusive_cache_lock(path: Path) -> Iterator[None]:
     descriptor: int | None = None
     while descriptor is None:
         try:
-            descriptor = os.open(
+            candidate = os.open(
                 lock_path,
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 0o600,
             )
-            os.write(descriptor, token.encode("ascii"))
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # Windows reports a lock file that is pending deletion as
+            # PermissionError (WinError 5), not FileExistsError. Both mean the
+            # lock is owned elsewhere; retry under the same deadline.
             try:
                 stale = time.time() - lock_path.stat().st_mtime > LOCK_STALE_SECONDS
             except OSError:
@@ -379,10 +381,16 @@ def _exclusive_cache_lock(path: Path) -> Iterator[None]:
                     lock_path.unlink()
                 except OSError:
                     pass
-                continue
             if time.monotonic() >= deadline:
                 raise PricingSourceError("refresh_busy")
             time.sleep(0.025)
+            continue
+        try:
+            os.write(candidate, token.encode("ascii"))
+        except OSError:
+            os.close(candidate)
+            raise
+        descriptor = candidate
     try:
         yield
     finally:
