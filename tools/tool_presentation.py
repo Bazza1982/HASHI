@@ -17,6 +17,7 @@ _STARTER_TOOLS = (
     "tool_find", "project_locate", "code_search", "git_inspect",
     "file_manage", "text_replace", "data_inspect", "file_read", "file_write",
     "shell", "ask_user", "get_user_answer",
+    "memory_search", "file_search", "log_query",
 )
 
 # Bounded request-local presentation: later tool_find discoveries accumulate
@@ -38,16 +39,17 @@ class OnDemandToolView:
         # alphabetically evicting names like 'windows_*' / 'z*' above 48.
         self._discovered: OrderedDict[str, bool] = OrderedDict()
         self._in_use: OrderedDict[str, bool] = OrderedDict()
-        # Relevance hints are advisory, not new immutable capability state.
+        # `goal` is accepted for caller compatibility only. Goal-seeded starters
+        # were removed: they guessed four tools from the prompt text, which both
+        # duplicated what tool_find already does and changed the exposed schema
+        # prefix on every new turn (defeating prefix reuse and costing a round
+        # trip before the model could act).
+        del goal
         available = tuple(
             str((schema.get("function") or {}).get("name") or "")
             for schema in base.get_tool_definitions(tiers=None)
         )
         self._starter = set(_STARTER_TOOLS).intersection(available)
-        if goal:
-            self._starter.update(
-                _tool_find_selections({"query": goal, "limit": 4}, available)
-            )
 
     @property
     def base(self) -> Any:
@@ -173,3 +175,4 @@ def developer_toolkit_guidance_enabled(
     from tools.developer_toolkit_schemas import TOOLKIT_TOOL_NAMES
 
     return bool(set(tool_names) & set(TOOLKIT_TOOL_NAMES))
+# HASHI-Fingerprint: hfp_97da8252cb9641fa91550d458a5b193f

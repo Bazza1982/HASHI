@@ -195,7 +195,7 @@ async def test_tool_result_changes_never_author_user_progress_or_block_a_finding
 
 
 @pytest.mark.asyncio
-async def test_model_findings_are_merged_at_the_next_window_without_repetition():
+async def test_model_findings_newest_supersedes_at_the_next_window_without_repetition():
     now = [1_000.0]
     sleeping = asyncio.Event()
     release = asyncio.Event()
@@ -235,13 +235,129 @@ async def test_model_findings_are_merged_at_the_next_window_without_repetition()
     now[0] = 1_151
     release.set()
     await asyncio.wait_for(delivered.wait(), 2)
-    assert downstream.records[1].text == second.text + "\n\n" + third.text
+    # De-stitched: only the newest pending finding is delivered; older interim
+    # text is never concatenated into one contradictory message.
+    assert downstream.records[1].text == third.text
     now[0] = 1_400
     assert await services.publish(NeutralCommentary(
         event_id="turn:repeated", turn_id="turn", stage=Stage.DIRECT, attempt=1,
         text=second.text,
     )) is False
     assert len(downstream.records) == 2
+    await services.close()
+
+
+def test_commentary_schema_describes_each_mode():
+    from orchestrator.her_v2.prompts import commentary_schema_for
+
+    original = commentary_schema_for(Stage.PLANNING, "original")
+    raw = commentary_schema_for(Stage.PLANNING, "raw")
+    packaged = commentary_schema_for(Stage.PLANNING, "packaged")
+    off = commentary_schema_for(Stage.PLANNING, "off")
+
+    assert "Persona" in original["commentary"]
+    assert "objective" in raw["commentary"]
+    assert "neutral" in packaged["commentary"]
+    assert "omit" in off["commentary"]
+    assert original["commentary"] != raw["commentary"] != packaged["commentary"]
+
+
+def test_direct_prompt_renders_mode_specific_commentary_instruction():
+    from orchestrator.her_v2.prompts import render_direct_system_prompt
+
+    def render(mode):
+        return render_direct_system_prompt(
+            goal="Inspect the configured state",
+            habit_catalogue=[],
+            skills_catalogue=[],
+            tool_catalogue=[],
+            guidance="Address the user as Captain.",
+            display_name="Agent",
+            usable=True,
+            commentary_mode=mode,
+            persona_block_begin="<persona>",
+            persona_block_end="</persona>",
+        )
+
+    raw = render("raw")
+    original = render("original")
+    packaged = render("packaged")
+    off = render("off")
+
+    assert "Commentary mode (raw)" in raw
+    assert "objective" in raw
+    assert "never apply Persona styling" in raw
+
+    assert "Commentary mode (original)" in original
+    assert "Persona" in original
+
+    assert "Commentary mode (packaged)" in packaged
+    assert "neutral" in packaged
+
+    assert "Commentary mode (off)" in off
+    assert "always omit" in off
+
+    # The old unconditional acknowledgement and Persona instructions are gone;
+    # the mode description alone decides generation and styling.
+    assert "brief acknowledgement" not in raw
+    assert "exact same persona voice" not in raw
+    assert "exact same persona voice" not in packaged
+
+
+class _LivenessRecording:
+    def __init__(self):
+        self.texts = []
+
+    async def deliver_packaged_commentary(self, commentary):
+        self.texts.append(commentary.text)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_long_tool_emits_one_keepalive_pulse():
+    downstream = RecordingCommentaryPort()
+    liveness = _LivenessRecording()
+    release = asyncio.Event()
+
+    async def sleep(delay):
+        assert delay == 180.0
+        await release.wait()
+
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, sleep=sleep,
+        keepalive_threshold_s=180.0, liveness_delivery=liveness,
+    )
+    services.tool_started("shell", {}, "call-1")
+    await asyncio.sleep(0)
+    keepalive = services._keepalive_tasks["call-1"]
+    release.set()
+    await asyncio.gather(keepalive, *tuple(services._tasks), return_exceptions=True)
+
+    assert any("shell is still running" in text for text in liveness.texts)
+    await services.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_tool_cancels_keepalive_pulse():
+    downstream = RecordingCommentaryPort()
+    liveness = _LivenessRecording()
+    release = asyncio.Event()
+
+    async def sleep(delay):
+        await release.wait()
+
+    services = TurnServices(
+        turn_id="turn", downstream=downstream, sleep=sleep,
+        keepalive_threshold_s=180.0, liveness_delivery=liveness,
+    )
+    services.tool_started("shell", {}, "call-1")
+    await asyncio.sleep(0)
+    keepalive = services._keepalive_tasks["call-1"]
+    services.tool_completed("shell", tool_call_id="call-1", output="done")
+    release.set()
+    await asyncio.gather(keepalive, *tuple(services._tasks), return_exceptions=True)
+
+    assert not any("still running" in text for text in liveness.texts)
     await services.close()
 
 

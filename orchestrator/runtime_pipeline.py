@@ -1295,6 +1295,106 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
             configured_budget = backend_extra.get("pcm_prompt_token_budget")
             if configured_budget is not None:
                 prompt_kwargs["prompt_budget_tokens"] = configured_budget
+
+    # Resolve the PCM projection profile from the actual inference target so
+    # HERV3 model/provider switching and explicit per-Provider configuration
+    # both take effect without a separate configuration subsystem.
+    from orchestrator.pcm_profile import PCM_PROFILE_LOCAL, resolve_pcm_profile
+
+    profile_backend_extra = getattr(getattr(backend, "config", None), "extra", None)
+    her_v3_target_engine = None
+    her_v3_target_model = None
+    her_v3_provider_extra = None
+    if runtime.config.active_backend == "her-v2":
+        try:
+            target = runtime.backend_manager.get_her_v3_target()
+            her_v3_target_engine = str(getattr(target, "provider", None) or "")
+            her_v3_target_model = str(getattr(target, "model", None) or "")
+            option = runtime.backend_manager._her_v3_provider_option(
+                her_v3_target_engine
+            )
+            if isinstance(option, Mapping) and option.get("pcm_profile") not in (
+                None,
+                "",
+            ):
+                her_v3_provider_extra = {"pcm_profile": option.get("pcm_profile")}
+        except Exception as exc:
+            # Never fail a request over profile resolution; surface the silent
+            # fallback so a "should be local" HERV3 route is observable.
+            import logging as _logging
+
+            _logging.getLogger("BridgeU.PCMProfile").warning(
+                "pcm_profile: HERV3 inference target unavailable, falling back "
+                "to cloud projection: %s",
+                type(exc).__name__,
+            )
+            her_v3_target_engine = None
+            her_v3_target_model = None
+    pcm_profile = resolve_pcm_profile(
+        runtime.config.active_backend,
+        backend_extra=profile_backend_extra,
+        provider_extra=her_v3_provider_extra,
+        her_v3_target_engine=her_v3_target_engine,
+    )
+    prompt_kwargs["pcm_profile"] = pcm_profile
+    if (
+        runtime.config.active_backend == "her-v2"
+        and her_v3_target_engine
+        and her_v3_target_model
+        and "retrieval_capable" in inspect.signature(prompt_builder).parameters
+    ):
+        # HERV3 advertises the outer HASHI tool catalogue even when the
+        # selected model's model_tool_support configuration disables tools for
+        # that model. Read the same Provider/model configuration the provider
+        # consumes so neither projection profile claims native function
+        # schemas the Provider will not send: a chat-only model keeps the full
+        # text catalogue and inline [memory]/HCC instead.
+        try:
+            row = runtime.backend_manager._select_backend_cfg(
+                her_v3_target_engine,
+                target_model=her_v3_target_model,
+            )
+            support = None
+            if isinstance(row, Mapping):
+                # Backend rows keep model_tool_support at the top level; the
+                # Provider sees it after _build_adapter_config merges the row
+                # into backend.config.extra. Accept a nested extra mapping as
+                # well for configurations that store it there.
+                support = row.get("model_tool_support")
+                if support is None:
+                    row_extra = row.get("extra")
+                    if isinstance(row_extra, Mapping):
+                        support = row_extra.get("model_tool_support")
+            if (
+                isinstance(support, Mapping)
+                and support.get(her_v3_target_model) is False
+            ):
+                prompt_kwargs["retrieval_capable"] = False
+        except Exception:
+            pass
+    if (
+        pcm_profile == PCM_PROFILE_LOCAL
+        and "prompt_budget_tokens" in inspect.signature(prompt_builder).parameters
+        and "prompt_budget_tokens" not in prompt_kwargs
+    ):
+        # The actual model capacity is authoritative for Local engines; the
+        # 16K table entry stays only as a soft fallback when no capacity
+        # profile is known. This budget only trims oldest history and never
+        # rejects a valid request.
+        try:
+            from orchestrator.context_compaction import resolve_capacity_profile
+
+            capacity = resolve_capacity_profile(
+                runtime,
+                runtime.config.active_backend,
+                str(getattr(getattr(backend, "config", None), "model", "") or ""),
+            )
+            if capacity is not None and int(capacity.usable_input_tokens or 0) > 0:
+                prompt_kwargs["prompt_budget_tokens"] = int(
+                    capacity.usable_input_tokens
+                )
+        except Exception:
+            pass
     compaction_snapshot = None
     history_compaction_enabled = False
     cross_session_timeline_entries: list[dict[str, Any]] = []
@@ -1465,6 +1565,7 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 user_message=effective_prompt,
                 request_id=item.request_id,
                 request_meta=request_meta,
+                pcm_profile=pcm_profile,
             )
             if preparation_isolation.active:
                 isolated_provider_session_id = getattr(
@@ -1507,6 +1608,50 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
                 runtime,
                 request_id=item.request_id,
             )
+
+    # Persistent CLI Engine Sessions received the static PCM snapshot at
+    # bootstrap.  Incremental turns therefore carry only the current request
+    # plus sections that actually changed; removals are announced explicitly.
+    # Baselines are scoped per Engine Session and only advanced after the
+    # delivery succeeded (see promote_pcm_baseline_after_delivery), so a
+    # changed section is never silently skipped (A→B→A), and sessions that
+    # interleave on one backend cannot pollute each other's baseline.
+    if (
+        runtime.config.active_backend != "her-v2"
+        and supports_sessions
+        and session_scope == SESSION_SCOPE_PERSISTENT
+    ):
+        from orchestrator.bridge_memory import BridgeContextAssembler
+
+        envelope = prompt_payload.get("envelope") or {}
+        current_digests = {
+            str(section.get("key") or ""): str(section.get("content_sha256") or "")
+            for section in envelope.get("sections") or []
+            if isinstance(section, Mapping)
+        }
+        baselines = getattr(runtime, "_pcm_baselines", None)
+        if not isinstance(baselines, dict):
+            baselines = {}
+            runtime._pcm_baselines = baselines
+        session_key = str(provider_session_id or "")
+        previous_digests = baselines.get(session_key) if session_key else None
+        if incremental and isinstance(previous_digests, dict):
+            prompt_payload = BridgeContextAssembler.render_incremental_payload(
+                prompt_payload, previous_digests
+            )
+        # Record what this turn intends to deliver on the request-scoped item,
+        # not a shared Agent-level slot: concurrent Engine Sessions must not
+        # overwrite each other's pending snapshot. It becomes the baseline for
+        # this Session only after a successful generation.
+        setattr(
+            item,
+            "_pending_pcm_baseline",
+            (
+                str(getattr(item, "request_id", "") or ""),
+                session_key,
+                current_digests,
+            ),
+        )
 
     if phone_audit:
         prompt_payload.setdefault("audit", {})["phone_context_handoff"] = phone_audit
@@ -1586,6 +1731,55 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         prompt_audit=prompt_audit,
         context_warnings=tuple(context_warnings),
     )
+
+
+def promote_pcm_baseline_after_delivery(runtime, item, generation) -> None:
+    """Advance the per-Session PCM baseline only after a successful delivery.
+
+    A failed, cancelled or detached generation leaves the previous baseline
+    intact, so the changed sections are re-sent on the next turn instead of
+    being silently skipped. The baseline key is the Engine Session actually
+    used for delivery (the adapter knows it only after the first turn).
+    """
+    # Pending state is request-scoped (attached to this turn's item), so
+    # concurrent Sessions cannot overwrite each other's snapshot.
+    pending = getattr(item, "_pending_pcm_baseline", None)
+    if pending is None:
+        pending = getattr(runtime, "_pending_pcm_baseline", None)
+    if not isinstance(pending, tuple) or len(pending) != 3:
+        return
+    pending_request_id, pending_key, digests = pending
+    if str(getattr(item, "request_id", "") or "") != str(pending_request_id):
+        # A different turn (possibly a different backend) must never promote
+        # the pending snapshot recorded by an earlier request.
+        return
+    response = getattr(generation, "response", None)
+    if not getattr(response, "is_success", False):
+        return
+    if not isinstance(digests, dict):
+        return
+    backend = getattr(runtime.backend_manager, "current_backend", None)
+    supports_sessions = bool(
+        getattr(getattr(backend, "capabilities", None), "supports_sessions", False)
+    )
+    if not supports_sessions:
+        return
+    # Prefer the session captured when the turn was built; the adapter only
+    # learns its real session id during the first (bootstrap) turn, where the
+    # captured key is empty and the current backend session id is used.
+    session_key = str(pending_key or "") or str(
+        getattr(backend, "_session_id", None) or ""
+    )
+    baselines = getattr(runtime, "_pcm_baselines", None)
+    if not isinstance(baselines, dict):
+        baselines = {}
+        runtime._pcm_baselines = baselines
+    baselines[session_key] = dict(digests)
+    runtime._pending_pcm_baseline = None
+    try:
+        setattr(item, "_pending_pcm_baseline", None)
+    except Exception:
+        pass
 
 
 async def run_backend_generation(
@@ -3070,8 +3264,13 @@ async def setup_interactive_feedback(
             # begins.  Later menu changes are woken by ``preference_event``.
             await asyncio.sleep(0)
 
-    if stream_callback is None and audit_active and not is_her_backend:
-        stream_callback = runtime._make_stream_callback(audit_collector=audit_collector)
+    if stream_callback is None and not is_her_backend:
+        # Reasoning volume must still be accounted for token estimation when
+        # the request has no Telegram delivery and no active audit; the
+        # callback without an event queue or buffers only accumulates it.
+        stream_callback = runtime._make_stream_callback(
+            audit_collector=audit_collector if audit_active else None,
+        )
 
     activity_store = getattr(runtime, "request_activity", None)
 

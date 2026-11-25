@@ -33,11 +33,11 @@ python -m pip install -e ".[media,remote]"
 
 | Extra | Purpose |
 |---|---|
-| `standard` | Media, Hashi Remote, and TUI together |
+| `standard` | Media, Hashi Remote, TUI, and the Playwright browser tool together |
 | `media` | Image normalization and PDF/media inspection |
 | `remote` | Remote API, TLS, and LAN discovery |
 | `tui` | Rich terminal interface |
-| `browser` | Playwright browser automation; Chromium still needs `playwright install chromium` |
+| `browser` | Playwright browser automation (already included in `standard`); Chromium still needs `playwright install chromium` |
 | `whatsapp` | WhatsApp transport and QR linking |
 | `voice` | Edge and Piper text-to-speech providers |
 | `transcription` | Dependency metadata for an explicitly isolated local faster-whisper helper; never install it into Core |

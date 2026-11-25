@@ -152,7 +152,97 @@ async def _mirror_command(runtime: Any, update: Any, context: Any, connector_id:
     await _send(runtime, update, ui_language.tr(f"menu.{connector_id}.usage"))
 
 
+async def _disconnect_command(runtime: Any, update: Any, args: list[str]) -> None:
+    """Remove the target Agent's saved Bot token locally and stop its connection.
+
+    The removal is a local deletion: Telegram is never contacted, so an
+    invalid or rejected token disconnects exactly like a valid one. The token
+    key in the configuration stays, so the Agent can be reconfigured later.
+    """
+    from orchestrator.telegram_credential import (
+        TelegramCredentialError,
+        TelegramCredentialService,
+    )
+
+    global_config = getattr(runtime, "global_config", None)
+    config_path = getattr(global_config, "config_path", None)
+    secrets_path = getattr(global_config, "secrets_path", None)
+    if not config_path or not secrets_path:
+        await _send(
+            runtime, update, ui_language.tr("menu.telegram.disconnect.invalid_agent")
+        )
+        return
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+        state_root=getattr(global_config, "bridge_home", None),
+    )
+    target = (
+        str(args[1]).strip().lower()
+        if len(args) > 1
+        else str(getattr(runtime, "name", "") or "").strip().lower()
+    )
+    if not target:
+        await _send(
+            runtime, update, ui_language.tr("menu.telegram.disconnect.invalid_agent")
+        )
+        return
+    try:
+        context = service.context(target)
+    except TelegramCredentialError as exc:
+        if exc.error_code in {
+            "agent_not_found",
+            "telegram_credential_config_invalid",
+            "invalid_agent_id",
+        }:
+            await _send(
+                runtime, update, ui_language.tr("menu.telegram.disconnect.invalid_agent")
+            )
+        else:
+            await _send(runtime, update, ui_language.tr("menu.telegram.disconnect.failed"))
+        return
+    if not context.configured:
+        await _send(
+            runtime, update, ui_language.tr("menu.telegram.disconnect.not_configured")
+        )
+        return
+    canonical = context.agent_id
+    try:
+        service.disconnect(canonical, expected_revision=context.credential_revision)
+    except TelegramCredentialError as exc:
+        if exc.error_code == "telegram_credential_shared":
+            await _send(runtime, update, ui_language.tr("menu.telegram.disconnect.shared"))
+        else:
+            await _send(runtime, update, ui_language.tr("menu.telegram.disconnect.failed"))
+        return
+    kernel_notice = ""
+    try:
+        orchestrator = getattr(runtime, "orchestrator", None)
+        request = getattr(orchestrator, "request_telegram_disconnect", None)
+        if callable(request):
+            ok, _message = await request(canonical, owner_id=_owner_id(runtime, update))
+            if not ok:
+                kernel_notice = ui_language.tr("menu.telegram.disconnect.kernel_notice")
+    except Exception:
+        kernel_notice = ui_language.tr("menu.telegram.disconnect.kernel_notice")
+    lines = [f"✅ {ui_language.tr('menu.telegram.disconnect.notice')}"]
+    if kernel_notice:
+        lines.append(f"⚠️ {kernel_notice}")
+    lines.append(ui_language.tr("menu.telegram.disconnect.platform_note"))
+    await _send(runtime, update, "\n\n".join(lines))
+
+
 async def telegram_command(runtime: Any, update: Any, context: Any) -> None:
+    if not _is_authorized(runtime, update):
+        return
+    args = [
+        str(arg).strip().lower()
+        for arg in (getattr(context, "args", None) or [])
+        if str(arg).strip()
+    ]
+    if args and args[0] == "disconnect":
+        await _disconnect_command(runtime, update, args)
+        return
     await _mirror_command(runtime, update, context, "telegram")
 
 
@@ -201,7 +291,7 @@ async def _mirror_callback(runtime: Any, update: Any, context: Any, connector_id
 COMMANDS = [
     RuntimeCommand(
         name="telegram",
-        description="Toggle Telegram mirror for other connectors [on|off]",
+        description="Toggle Telegram mirror or disconnect a Bot token [on|off|disconnect [agent_id]]",
         callback=telegram_command,
     ),
     RuntimeCommand(

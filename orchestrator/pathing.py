@@ -201,6 +201,107 @@ def resolve_agy_executable(value: str | None) -> str:
     return raw or "agy"
 
 
+def resolve_dsh_invocation(
+    value: str | None = None,
+    *,
+    profile: str = "acp",
+    patches: tuple[str, ...] = (),
+) -> tuple[list[str], Path | None, str]:
+    """Resolve the DeepSeek Harness (``dsh``) command into ``(argv, cwd, label)``.
+
+    Candidates, in order:
+
+    1. An explicitly configured command or script path (or ``HASHI_DSH_CMD``),
+    2. ``dsh`` on ``PATH``,
+    3. Local source/built installation under ``~/projects/deepseek-harness``
+       (preferring precompiled ``apps/cli/lib/bin.js``, falling back to
+       ``apps/cli/src/bin.ts`` via ``tsx/esm``).
+    """
+
+    raw = str(value or os.environ.get("HASHI_DSH_CMD") or "").strip()
+    node_exe = shutil.which("node") or "node"
+    extra_args: list[str] = ["--profile", str(profile or "acp").strip() or "acp"]
+    for patch in patches:
+        patch_str = str(patch or "").strip()
+        if patch_str:
+            extra_args.extend(["--patch", patch_str])
+
+    def _from_script(script: Path) -> tuple[list[str], Path | None, str]:
+        resolved = script.resolve()
+        # apps/cli/{lib|src}/bin.{js|ts} -> repo root is 3 parents up
+        repo_root = (
+            resolved.parents[3]
+            if len(resolved.parents) >= 4
+            and resolved.parent.name in {"lib", "src"}
+            and resolved.parents[1].name == "cli"
+            and resolved.parents[2].name == "apps"
+            else resolved.parent
+        )
+        suffix = resolved.suffix.lower()
+        if suffix in {".ts", ".mts"}:
+            argv = [node_exe, "--import", "tsx/esm", str(resolved), *extra_args]
+        else:
+            argv = [node_exe, str(resolved), *extra_args]
+        return argv, repo_root, str(resolved)
+
+    def _check_candidate(candidate: str) -> tuple[list[str], Path | None, str] | None:
+        if not candidate:
+            return None
+        path_obj = Path(candidate)
+        if ("/" in candidate or "\\" in candidate or path_obj.is_absolute()) and path_obj.is_file():
+            if path_obj.suffix.lower() in {".js", ".mjs", ".cjs", ".ts", ".mts"}:
+                return _from_script(path_obj)
+            return [str(path_obj.resolve()), *extra_args], None, str(path_obj.resolve())
+        found = shutil.which(candidate)
+        if found:
+            return [found, *extra_args], None, found
+        return None
+
+    # 1. Explicit configured value (ignore bare default "dsh" if we also want local fallback)
+    if raw and raw.lower() != "dsh":
+        resolved = _check_candidate(raw)
+        if resolved is not None:
+            return resolved
+        # Allow multi-token command strings such as "node /path/to/bin.js"
+        import shlex
+
+        tokens = [
+            tok[1:-1] if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in {'"', "'"} else tok
+            for tok in shlex.split(raw, posix=(os.name != "nt"))
+        ]
+        if len(tokens) > 1:
+            exe = shutil.which(tokens[0]) or tokens[0]
+            return [exe, *tokens[1:], *extra_args], None, raw
+
+    # 2. Bare "dsh" on PATH
+    found_dsh = shutil.which("dsh")
+    if found_dsh:
+        return [found_dsh, *extra_args], None, found_dsh
+
+    # 3. Local DeepSeek Harness checkout under home/projects
+    home_repo = Path.home() / "projects" / "deepseek-harness"
+    for rel in (
+        Path("apps") / "cli" / "lib" / "bin.js",
+        Path("apps") / "cli" / "src" / "bin.ts",
+    ):
+        script = home_repo / rel
+        if script.is_file():
+            return _from_script(script)
+
+    return [raw or "dsh", *extra_args], None, raw or "dsh"
+
+
+def resolve_dsh_executable(value: str | None = None) -> str:
+    """Return a display/preflight path for ``dsh`` when installed locally."""
+
+    argv, _cwd, label = resolve_dsh_invocation(value)
+    if label and Path(label).is_file():
+        return label
+    if argv and shutil.which(argv[0]):
+        return label or argv[0]
+    return str(value or "dsh").strip() or "dsh"
+
+
 def to_home_relative(path: str | Path, *, bridge_home: Path) -> str:
     candidate = Path(path).resolve()
     try:

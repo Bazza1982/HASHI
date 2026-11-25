@@ -796,3 +796,48 @@ def test_async_refresh_updates_only_the_still_selected_exact_model(
     )
 
     assert refreshes == ["refreshed"]
+
+def test_capability_cache_lock_retries_windows_delete_pending_permission_error(
+    monkeypatch, tmp_path
+):
+    import os
+
+    target = tmp_path / "model-capabilities.json"
+    lock_path = target.with_name(target.name + ".lock")
+    real_open = os.open
+    attempts = {"count": 0}
+
+    def flaky_open(path, flags, mode=0o777):
+        if str(path) == str(lock_path) and attempts["count"] == 0:
+            attempts["count"] += 1
+            raise PermissionError(13, "Access is denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", flaky_open)
+    with model_capability_sources._exclusive_cache_lock(target):
+        assert lock_path.exists()
+    assert attempts["count"] == 1
+    assert not lock_path.exists()
+
+
+def test_capability_cache_lock_reports_busy_when_permission_error_persists(
+    monkeypatch, tmp_path
+):
+    import os
+
+    target = tmp_path / "model-capabilities.json"
+    lock_path = target.with_name(target.name + ".lock")
+    real_open = os.open
+
+    def denied_open(path, flags, mode=0o777):
+        if str(path) == str(lock_path):
+            raise PermissionError(13, "Access is denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", denied_open)
+    monkeypatch.setattr(model_capability_sources, "LOCK_WAIT_SECONDS", 0.05)
+    with pytest.raises(
+        model_capability_sources.CapabilitySourceError, match="refresh_busy"
+    ):
+        with model_capability_sources._exclusive_cache_lock(target):
+            pass

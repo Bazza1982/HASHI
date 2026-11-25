@@ -299,6 +299,27 @@ Design record:
 
 ## Deferred Research Items
 
+### Standby Native Presence
+
+Status: **deferred / future development**.
+
+Standby is HASHI's native ambient-presence mode: under an explicitly confirmed
+profile it would observe permitted audio and visual input, use one shared Judge
+to decide whether an event deserves action, and then record, notify, wake an
+existing agent, or perform a bounded authorized action.
+
+Current state: the repository contains the control plane, profile and
+configuration, authenticated operation routes, and shared media-lease storage
+delivered by PR #127. Live media wiring, the shared Judge, temporary execution,
+observation records and notes, and real-device/8-hour qualification are not
+implemented.
+
+Decision (2026-11-25): defer Standby development. Keep the existing
+control/lease code and its tests; do not start, ARM, or run Standby acceptance
+tests. Standby will be developed in the future as a separate roadmap item, and
+must complete the staged S2-S5 work plus real-device and 8-hour acceptance
+before it can be enabled.
+
 ### Telegram Bot API 10.1 Rich Messages
 
 Status: **deferred / wait for stable client-library support**.

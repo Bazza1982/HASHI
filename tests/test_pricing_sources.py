@@ -714,3 +714,52 @@ def test_pricing_prewarm_failure_never_rolls_back_model_configuration(
 
     assert runtime_model_selection.apply_her_v2_configuration(runtime, selected) is None
     assert applied == [selected]
+
+
+def test_dsh_cli_shares_deepseek_pricing_namespace_and_exact_aliases():
+    assert pricing_sources.ENGINE_VENDOR_NAMESPACES.get("dsh-cli") == "deepseek"
+    assert pricing_sources.EXACT_OPENROUTER_MODEL_MAPPINGS.get(
+        ("dsh-cli", "deepseek-flash")
+    ) == ("~deepseek/deepseek-flash-latest",)
+    assert pricing_sources.EXACT_OPENROUTER_MODEL_MAPPINGS.get(
+        ("dsh-cli", "deepseek-v4-pro")
+    ) == ("~deepseek/deepseek-pro-latest",)
+
+def test_cache_lock_retries_windows_delete_pending_permission_error(monkeypatch, tmp_path):
+    import os
+
+    target = tmp_path / "pricing-facts.json"
+    lock_path = target.with_name(target.name + ".lock")
+    real_open = os.open
+    attempts = {"count": 0}
+
+    def flaky_open(path, flags, mode=0o777):
+        if str(path) == str(lock_path) and attempts["count"] == 0:
+            attempts["count"] += 1
+            raise PermissionError(13, "Access is denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", flaky_open)
+    with pricing_sources._exclusive_cache_lock(target):
+        assert lock_path.exists()
+    assert attempts["count"] == 1
+    assert not lock_path.exists()
+
+
+def test_cache_lock_reports_busy_when_permission_error_persists(monkeypatch, tmp_path):
+    import os
+
+    target = tmp_path / "pricing-facts.json"
+    lock_path = target.with_name(target.name + ".lock")
+    real_open = os.open
+
+    def denied_open(path, flags, mode=0o777):
+        if str(path) == str(lock_path):
+            raise PermissionError(13, "Access is denied")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", denied_open)
+    monkeypatch.setattr(pricing_sources, "LOCK_WAIT_SECONDS", 0.05)
+    with pytest.raises(pricing_sources.PricingSourceError, match="refresh_busy"):
+        with pricing_sources._exclusive_cache_lock(target):
+            pass

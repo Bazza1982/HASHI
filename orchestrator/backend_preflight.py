@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import shutil
 
 from adapters.xai_oauth_credentials import (
     find_hermes_auth_path,
     xai_api_credentials_available,
 )
-from orchestrator.pathing import resolve_agy_executable
+from orchestrator.pathing import resolve_agy_executable, resolve_dsh_executable, resolve_dsh_invocation
 from orchestrator.flexible_backend_registry import (
     get_secret_lookup_order,
     removed_backend_reason,
@@ -59,6 +60,7 @@ class BackendPreflight:
                 getattr(global_cfg, "agy_cmd", "agy")
             ),
             "grok-cli": getattr(global_cfg, "grok_cmd", "grok"),
+            "dsh-cli": resolve_dsh_executable(getattr(global_cfg, "dsh_cmd", "dsh")),
         }
         agy_launch_mode = str(
             getattr(global_cfg, "agy_launch_mode", "direct") or "direct"
@@ -68,7 +70,20 @@ class BackendPreflight:
                 result[engine] = (False, reason)
             elif engine in cli_map:
                 cmd = cli_map[engine]
-                found = shutil.which(cmd)
+                if engine == "dsh-cli":
+                    argv, _cwd, label = resolve_dsh_invocation(cmd)
+                    exe_found = shutil.which(argv[0]) if argv else None
+                    script_ok = (
+                        len(argv) >= 2
+                        and Path(label).is_file()
+                        and exe_found is not None
+                    )
+                    if script_ok or (exe_found and not Path(label).suffix.lower() in {".js", ".ts", ".mjs", ".cjs", ".mts"}):
+                        found = label or exe_found
+                    else:
+                        found = None
+                else:
+                    found = shutil.which(cmd)
                 if not found:
                     result[engine] = (False, f"'{cmd}' not found on PATH")
                 elif engine == "antigravity-cli" and agy_launch_mode == "user-session":
