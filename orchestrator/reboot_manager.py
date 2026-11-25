@@ -49,6 +49,26 @@ TARGETED_REBOOT_MODES = frozenset({"min", "same", "number"})
 BROAD_REBOOT_MODES = frozenset({"max"})
 
 
+def cutover_source_commit(
+    evidence: Mapping[str, Any] | None,
+    workers: Mapping[str, Any] | None = None,
+) -> str:
+    """Return the source commit the new Workers actually run.
+
+    ``record['workers']`` still holds the pre-cutover baseline while Remote is
+    restarted, so the freshly observed replacement evidence must win. Without
+    this the Remote verification has nothing to compare against and silently
+    reports an unverified restart.
+    """
+
+    for source in (evidence, workers):
+        for worker in (source or {}).values():
+            value = str((worker or {}).get("source_commit") or "").strip()
+            if value:
+                return value
+    return ""
+
+
 def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, ...]:
     """Resolve an immutable target set; invalid input never widens scope."""
 
@@ -966,7 +986,12 @@ class RebootManager:
             )
             online_count = sum(online.values())
             if shared_ready and online_count == len(record["targets"]):
-                remote_restart = await self._restart_remote_after_cutover(record)
+                remote_restart = await self._restart_remote_after_cutover(
+                    record,
+                    expected_commit=cutover_source_commit(
+                        evidence, record.get("workers")
+                    ),
+                )
                 warnings = list(connector_warnings)
                 outcome = "succeeded_with_warning" if warnings else "succeeded"
                 if remote_restart and remote_restart.get("status") not in {
@@ -1008,6 +1033,8 @@ class RebootManager:
     async def _restart_remote_after_cutover(
         self,
         record: Mapping[str, Any],
+        *,
+        expected_commit: str = "",
     ) -> dict[str, Any] | None:
         """Restart the independently supervised Remote after a broad cutover.
 
@@ -1018,12 +1045,14 @@ class RebootManager:
 
         if str(record.get("mode") or "") not in BROAD_REBOOT_MODES:
             return None
-        expected = ""
-        for worker in (record.get("workers") or {}).values():
-            value = str((worker or {}).get("source_commit") or "").strip()
-            if value:
-                expected = value
-                break
+        expected = str(expected_commit or "").strip() or cutover_source_commit(
+            record.get("workers")
+        )
+        if not expected:
+            bridge_logger.warning(
+                "Remote restart has no expected source commit: operation=%s",
+                record.get("id"),
+            )
         try:
             self.receipts.update(
                 record["id"],

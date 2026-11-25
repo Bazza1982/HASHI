@@ -225,4 +225,50 @@ def test_restart_remote_falls_back_and_reports_failure(tmp_path, monkeypatch):
     assert result["status"] == "failed"
     assert result["reason"] == "remote_restart_failed"
     assert result["fallback"]["start"]["ok"] is False
+
+
+def test_cutover_source_commit_prefers_fresh_evidence():
+    from orchestrator import reboot_manager
+
+    baseline = {"hashiko": {"source_commit": OLD}}
+    evidence = {"hashiko": {"source_commit": TARGET}}
+
+    assert reboot_manager.cutover_source_commit(evidence, baseline) == TARGET
+    assert reboot_manager.cutover_source_commit(None, baseline) == OLD
+    assert reboot_manager.cutover_source_commit({"hashiko": {}}, None) == ""
+    assert reboot_manager.cutover_source_commit(None, None) == ""
+
+
+def test_restart_after_cutover_passes_confirmed_commit(monkeypatch):
+    from types import SimpleNamespace
+
+    from orchestrator import reboot_manager
+
+    captured: dict[str, object] = {}
+
+    async def fake_restart(*, root=None, code_root=None, expected_commit=None):
+        captured["expected_commit"] = expected_commit
+        return {"ok": True, "status": "restarted", "pid": 200}
+
+    monkeypatch.setattr(remote_lifecycle, "restart_remote_after_cutover", fake_restart)
+
+    manager = object.__new__(reboot_manager.RebootManager)
+    manager.receipts = SimpleNamespace(update=lambda *args, **kwargs: None)
+    manager.kernel = SimpleNamespace(
+        paths=SimpleNamespace(bridge_home=Path("bridge"), code_root=Path("code"))
+    )
+
+    record = {
+        "id": "op-test",
+        "mode": "max",
+        "workers": {"hashiko": {"source_commit": OLD}},
+    }
+
+    result = asyncio.run(
+        manager._restart_remote_after_cutover(record, expected_commit=TARGET)
+    )
+
+    assert result["status"] == "restarted"
+    # The baseline worker commit must never be used once the replacement is known.
+    assert captured["expected_commit"] == TARGET
 # HASHI-Fingerprint: hfp_236650cd2c994da0a23e7522a1e3208f
