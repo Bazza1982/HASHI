@@ -152,7 +152,7 @@ def test_forget_preview_has_readable_line_breaks(locale):
     assert "\\n" not in text
     assert "HCC" in text
     assert ("可能仍" if locale == "zh-CN" else "may still") in text
-    assert ("跨界通话" if locale == "zh-CN" else "Calls crossing the boundary") in text
+    assert ("跨越此时段的通话" if locale == "zh-CN" else "Calls crossing the boundary") in text
 
 
 @pytest.mark.parametrize("duration", ["0h", "1w", "-1h", "9999d", "3", "1.5d"])

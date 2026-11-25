@@ -9346,7 +9346,7 @@ class FlexibleAgentRuntime:
         )
 
     async def cmd_ticket(self, update: Update, context: Any):
-        """Submit an IT support ticket to Arale. Usage: /ticket <description>"""
+        """Submit an IT support ticket. Usage: /ticket <description>"""
         if not self._is_authorized_user(update.effective_user.id):
             return
         from orchestrator.ticket_manager import (
