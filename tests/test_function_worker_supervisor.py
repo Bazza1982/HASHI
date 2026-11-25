@@ -492,8 +492,11 @@ async def test_core_telegram_disconnect_reports_missing_worker():
     ok, message = await supervisor.handle_worker_request(
         client, "core.telegram.disconnect", {"agent_name": "sunny", "owner_id": "user:42"}
     )
-    assert ok is False
-    assert message == "telegram_disconnect_worker_unavailable"
+    # No live Worker means no live connector; the runtime side is complete by
+    # construction and the kernel-side cleanup still happened.
+    assert ok is True
+    assert "runtime not active" in message
+    assert "sunny" not in kernel.secrets
 
 
 @pytest.mark.asyncio

@@ -1853,10 +1853,14 @@ class FunctionWorkerSupervisor:
             projection.refresh_configuration()
         # The kernel runtime map is keyed by the canonical Agent name.
         handle = self.kernel._runtime_map().get(name)
+        if handle is None:
+            handle = self.kernel._runtime_map().get(name.casefold())
         client = getattr(handle, "client", None) if handle is not None else None
         call = getattr(client, "call", None)
         if not callable(call):
-            return False, "telegram_disconnect_worker_unavailable"
+            # No live Worker means no live connector: nothing left to stop, so
+            # the runtime side of the disconnect is complete by construction.
+            return True, "telegram disconnected; runtime not active"
         try:
             receipt = await call("worker.telegram_disconnect", {})
         except Exception as exc:

@@ -6122,10 +6122,19 @@ class WorkbenchApiServer:
         else:
             runtime_stop_message = "telegram_disconnect_runtime_unavailable"
         result["runtime_stopped"] = runtime_stopped
+        # The Workbench proxy reads these canonical fields: the boolean
+        # confirmation and the warning code it maps to a localized notice.
+        result["runtime_disconnect_confirmed"] = runtime_stopped
         if not runtime_stopped:
             result["runtime_stop_warning"] = (
                 runtime_stop_message or "telegram_disconnect_runtime_unconfirmed"
             )
+            existing_warning = result.get("warning_code")
+            warnings = [item for item in (existing_warning, "runtime_disconnect_unconfirmed") if item]
+            if existing_warning:
+                result["warning_codes"] = warnings
+            else:
+                result["warning_code"] = "runtime_disconnect_unconfirmed"
         await self._refresh_telegram_status_projection()
         logger.info(
             "telegram_credential.disconnected agent_name=%s disconnected=%s runtime_active=%s",
