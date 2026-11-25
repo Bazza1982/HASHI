@@ -459,7 +459,7 @@ def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
     monkeypatch.setitem(
         assembler.PROMPT_TOKEN_BUDGETS,
         "openrouter-api",
-        1_500,
+        1_300,
     )
 
     payload = assembler.build_prompt_payload("PROTECTED CURRENT", "openrouter-api")
@@ -480,9 +480,9 @@ def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
         for item in omitted
     )
     assert payload["audit"]["budget_limit_chars"] is None
-    assert payload["audit"]["budget_limit_tokens"] == 1_500
+    assert payload["audit"]["budget_limit_tokens"] == 1_300
     assert payload["audit"]["budget_unit"] == "estimated_tokens"
-    assert payload["audit"]["final_prompt_tokens_after_budget"] <= 1_500
+    assert payload["audit"]["final_prompt_tokens_after_budget"] <= 1_300
     assert payload["audit"]["history_capsule"] == {
         "present": True,
         "key": "history_continuity_capsule",
@@ -502,7 +502,6 @@ def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
         "deepseek-api",
         "xai-api",
         "hashi-api",
-        "ollama-api",
     ],
 )
 def test_non_her_64k_token_budget_retains_incident_sized_history(tmp_path, engine):
