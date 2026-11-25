@@ -20,6 +20,7 @@ PROMPT_ASSET_ROOT = Path(__file__).with_name("prompt_assets")
 PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "system_direct": frozenset(
         {
+            "commentary_instruction",
             "goal",
             "habit_catalogue",
             "direct_strategy_block",
@@ -35,6 +36,7 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "system_execution": frozenset(
         {
             "active_plan",
+            "commentary_instruction",
             "delegated_execution",
             "goal",
             "persona_block_begin",

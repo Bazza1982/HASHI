@@ -79,7 +79,7 @@ def test_working_mode_product_surface_is_exact() -> None:
     assert SUPPORTED_AGENT_MODES == frozenset({"fixed", "flex"})
     assert RETIRED_AGENT_MODES == frozenset({"wrapper", "audit", "dual-brain"})
     assert SESSION_MODE_BACKENDS == frozenset(
-        {"claude-cli", "codex-cli", "grok-cli", "her-v2", "antigravity-cli"}
+        {"claude-cli", "codex-cli", "dsh-cli", "grok-cli", "her-v2", "antigravity-cli"}
     )
 
     keyboard = runtime_mode.mode_keyboard("fixed")

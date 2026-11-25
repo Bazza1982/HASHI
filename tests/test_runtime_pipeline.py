@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -71,7 +72,8 @@ class _Logger:
 
 class _ContextAssembler:
     def build_prompt_payload(
-        self, prompt, backend, *, extra_sections, inject_memory, incremental
+        self, prompt, backend, *, extra_sections, inject_memory, incremental,
+        pcm_profile="cloud",
     ):
         section_text = "\n".join(
             f"{section[0]}: {section[1]}" for section in extra_sections
@@ -1006,6 +1008,7 @@ async def test_scheduled_job_prompt_excludes_prior_turn_context():
             inject_memory,
             incremental,
             recent_exchanges=None,
+            pcm_profile="cloud",
         ):
             observed["inject_memory"] = inject_memory
             observed["recent_exchanges"] = recent_exchanges
@@ -1068,6 +1071,454 @@ async def test_fixed_session_backend_uses_incremental_prompt():
     assert prompt.incremental is True
 
 
+class _DeltaPCMAssembler:
+    """Deterministic assembler double for incremental-baseline pipeline tests."""
+
+    MAX_RECENT_EXCHANGES = 10
+
+    def __init__(self, static_texts):
+        self._static_texts = list(static_texts)
+        self.calls = 0
+
+    def build_prompt_payload(
+        self,
+        prompt,
+        backend,
+        *,
+        extra_sections,
+        inject_memory,
+        incremental,
+        pcm_profile="cloud",
+    ):
+        index = min(self.calls, len(self._static_texts) - 1)
+        self.calls += 1
+        static = self._static_texts[index]
+        static_section = {
+            "key": "permanent_system",
+            "title": "PERMANENT SYSTEM INSTRUCTIONS",
+            "text": static,
+            "authority": "permanent_system",
+            "rank": 900,
+            "protected": True,
+            "metadata": {},
+            "order": 1,
+        }
+        current_section = {
+            "key": "current_user_request",
+            "title": "CURRENT USER REQUEST",
+            "text": prompt,
+            "authority": "current_user",
+            "rank": 600,
+            "protected": True,
+            "metadata": {},
+            "order": 2,
+        }
+        return {
+            "final_prompt": f"{static}\n\n{prompt}",
+            "envelope": {
+                "version": 1,
+                "sections": [
+                    {
+                        "key": "permanent_system",
+                        "content_sha256": hashlib.sha256(
+                            static.encode("utf-8")
+                        ).hexdigest(),
+                    },
+                    {
+                        "key": "current_user_request",
+                        "content_sha256": hashlib.sha256(
+                            prompt.encode("utf-8")
+                        ).hexdigest(),
+                    },
+                ],
+            },
+            "transport_snapshot": {
+                "version": 1,
+                "sections": [static_section, current_section],
+                "removed_section_keys": [],
+            },
+            "audit": {},
+        }
+
+
+def _promote(runtime, item, success=True):
+    runtime_pipeline.promote_pcm_baseline_after_delivery(
+        runtime,
+        item,
+        SimpleNamespace(
+            response=SimpleNamespace(is_success=success),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_incremental_baseline_rebuilt_after_restart_recovery():
+    """A recovered persistent session records its baseline after successful delivery."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="recovered-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(["STATIC-V1", "STATIC-V1"])
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    first = await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
+
+    assert first.incremental is True
+    assert "STATIC-V1" in first.final_prompt
+    assert getattr(item, "_pending_pcm_baseline", None) is not None
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    second = await runtime_pipeline.build_turn_prompt(
+        runtime, item2, is_bridge_request=False
+    )
+    # The unchanged static section is not re-sent on the next turn.
+    assert "STATIC-V1" not in second.final_prompt
+    assert second.prompt_audit.get("pcm_incremental", {}).get("mode") in {
+        "request_only",
+        "delta",
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_does_not_advance_baseline():
+    """A failed turn must not mark changed sections as delivered (A→B→A safety)."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(
+        ["STATIC-A", "STATIC-B", "STATIC-B"]
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    second = await runtime_pipeline.build_turn_prompt(
+        runtime, item2, is_bridge_request=False
+    )
+    assert "STATIC-B" in second.final_prompt
+    # Delivery fails: the baseline stays at A.
+    _promote(runtime, item2, success=False)
+
+    item3 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item3)
+    third = await runtime_pipeline.build_turn_prompt(
+        runtime, item3, is_bridge_request=False
+    )
+    # B is still treated as a change and re-sent.
+    assert "STATIC-B" in third.final_prompt
+
+
+@pytest.mark.asyncio
+async def test_a_to_b_to_a_section_reverts_are_resent():
+    """A→B→A: after B was delivered, reverting to A is a real change."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(
+        ["STATIC-A", "STATIC-B", "STATIC-A"]
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    second = await runtime_pipeline.build_turn_prompt(
+        runtime, item2, is_bridge_request=False
+    )
+    assert "STATIC-B" in second.final_prompt
+    _promote(runtime, item2)
+
+    item3 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item3)
+    third = await runtime_pipeline.build_turn_prompt(
+        runtime, item3, is_bridge_request=False
+    )
+    # Reverting to A after B was delivered must be sent, not skipped.
+    assert "STATIC-A" in third.final_prompt
+    assert "UPDATED" in third.final_prompt
+
+
+@pytest.mark.asyncio
+async def test_isolated_turn_does_not_pollute_persistent_baseline():
+    """An isolated activity run must not overwrite the persistent baseline."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(
+        ["STATIC-V1", "STATIC-V2", "STATIC-V2"]
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    runtime.backend_manager.current_backend._session_id = "persistent-session"
+    _promote(runtime, item)
+    assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
+        hashlib.sha256(b"STATIC-V1").hexdigest()
+    )
+
+    isolated = _item(source="text", session_scope="isolated_per_run")
+    runtime_pipeline.begin_queue_item(runtime, isolated)
+    await runtime_pipeline.build_turn_prompt(
+        runtime, isolated, is_bridge_request=False
+    )
+    # The isolated turn saw STATIC-V2 but must not refresh the baseline.
+    assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
+        hashlib.sha256(b"STATIC-V1").hexdigest()
+    )
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    second = await runtime_pipeline.build_turn_prompt(
+        runtime, item2, is_bridge_request=False
+    )
+    # The persistent session still receives the changed section.
+    assert "STATIC-V2" in second.final_prompt
+    assert "UPDATED" in second.final_prompt
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_baseline_is_not_promoted_by_another_backend():
+    """A pending snapshot from an earlier turn must never be promoted later."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="persistent-session",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(["STATIC-A", "STATIC-B"])
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(runtime, item, is_bridge_request=False)
+    _promote(runtime, item)
+
+    item2 = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item2)
+    await runtime_pipeline.build_turn_prompt(runtime, item2, is_bridge_request=False)
+    _promote(runtime, item2, success=False)  # B was not delivered
+
+    runtime.config.active_backend = "openrouter-api"
+    runtime.backend_manager.agent_mode = "flex"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+        config=SimpleNamespace(model="m", extra=None),
+    )
+    other = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, other)
+    await runtime_pipeline.build_turn_prompt(runtime, other, is_bridge_request=False)
+    _promote(runtime, other, success=True)
+
+    assert runtime._pcm_baselines["persistent-session"]["permanent_system"] == (
+        hashlib.sha256(b"STATIC-A").hexdigest()
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_baseline_is_request_scoped_for_concurrent_sessions():
+    """Two Sessions building concurrently must not overwrite each other's pending."""
+    runtime = _runtime()
+    runtime.config.active_backend = "codex-cli"
+    runtime.backend_manager.agent_mode = "fixed"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id="session-a",
+        persistent_session_busy=True,
+        capabilities=SimpleNamespace(
+            supports_sessions=True,
+            supports_thinking_stream=True,
+        ),
+    )
+    runtime.context_assembler = _DeltaPCMAssembler(["STATIC-A", "STATIC-B"])
+    item_a = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item_a)
+    await runtime_pipeline.build_turn_prompt(runtime, item_a, is_bridge_request=False)
+
+    runtime.backend_manager.current_backend._session_id = "session-b"
+    item_b = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item_b)
+    await runtime_pipeline.build_turn_prompt(runtime, item_b, is_bridge_request=False)
+
+    # Both pending snapshots survive independently on their own request items.
+    assert getattr(item_a, "_pending_pcm_baseline", None) is not None
+    assert getattr(item_b, "_pending_pcm_baseline", None) is not None
+    assert item_a._pending_pcm_baseline[1] == "session-a"
+    assert item_b._pending_pcm_baseline[1] == "session-b"
+
+    _promote(runtime, item_a)
+    assert runtime._pcm_baselines["session-a"]["permanent_system"] == hashlib.sha256(
+        b"STATIC-A"
+    ).hexdigest()
+    assert "session-b" not in runtime._pcm_baselines
+
+    _promote(runtime, item_b)
+    assert runtime._pcm_baselines["session-b"]["permanent_system"] == hashlib.sha256(
+        b"STATIC-B"
+    ).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_local_profile_uses_capacity_derived_prompt_budget(monkeypatch):
+    """Local engines take the prompt budget from the actual model capacity."""
+    runtime = _runtime()
+    runtime.config.active_backend = "ollama-api"
+    runtime.backend_manager.agent_mode = "flex"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+        config=SimpleNamespace(model="small", extra=None),
+    )
+    observed = {}
+
+    class _BudgetAssembler:
+        MAX_RECENT_EXCHANGES = 10
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+            prompt_budget_tokens=None,
+            pcm_profile="cloud",
+        ):
+            observed["budget"] = prompt_budget_tokens
+            observed["profile"] = pcm_profile
+            return {"final_prompt": prompt, "audit": {"sections": []}}
+
+    runtime.context_assembler = _BudgetAssembler()
+    from orchestrator import context_compaction
+
+    monkeypatch.setattr(
+        context_compaction,
+        "resolve_capacity_profile",
+        lambda *args, **kwargs: SimpleNamespace(usable_input_tokens=4321),
+    )
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
+
+    assert observed == {"budget": 4321, "profile": "local"}
+
+
+@pytest.mark.asyncio
+async def test_local_herv3_model_tool_support_disables_retrieval_reference():
+    """A chat-only HERV3 model keeps memory/HCC inline: the pipeline resolves
+    the selected model's model_tool_support configuration and passes
+    retrieval_capable=False to the PCM assembler."""
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.agent_mode = "flex"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+        config=SimpleNamespace(model="qwen-local", extra=None),
+    )
+    runtime.backend_manager.get_her_v3_target = lambda: SimpleNamespace(
+        provider="ollama-api", model="qwen-local"
+    )
+    runtime.backend_manager._her_v3_provider_option = lambda engine: {
+        "pcm_profile": "local",
+    }
+    runtime.backend_manager._select_backend_cfg = (
+        lambda engine, target_model: {
+            "extra": {"model_tool_support": {"qwen-local": False}}
+        }
+    )
+    observed = {}
+
+    class _RetrievalAssembler:
+        MAX_RECENT_EXCHANGES = 10
+        turns_injection_enabled = False
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+            prompt_budget_tokens=None,
+            pcm_profile="cloud",
+            retrieval_capable=None,
+        ):
+            observed["profile"] = pcm_profile
+            observed["retrieval_capable"] = retrieval_capable
+            return {"final_prompt": prompt, "audit": {"sections": []}}
+
+    runtime.context_assembler = _RetrievalAssembler()
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
+
+    assert observed["profile"] == "local"
+    assert observed["retrieval_capable"] is False
+
+
 @pytest.mark.asyncio
 async def test_build_turn_prompt_passes_backend_pcm_token_budget():
     runtime = _runtime()
@@ -1095,9 +1546,11 @@ async def test_build_turn_prompt_passes_backend_pcm_token_budget():
             incremental,
             recent_exchanges=None,
             prompt_budget_tokens,
+            pcm_profile="cloud",
         ):
             observed["backend"] = backend
             observed["prompt_budget_tokens"] = prompt_budget_tokens
+            observed["pcm_profile"] = pcm_profile
             return {"final_prompt": prompt, "audit": {"sections": []}}
 
     runtime.context_assembler = _BudgetAssembler()
@@ -1113,6 +1566,7 @@ async def test_build_turn_prompt_passes_backend_pcm_token_budget():
     assert observed == {
         "backend": "openrouter-api",
         "prompt_budget_tokens": 32_000,
+        "pcm_profile": "cloud",
     }
 
 
@@ -1131,7 +1585,10 @@ async def test_direct_small_ollama_projects_discovery_without_losing_pcm(tmp_pat
     backend = OllamaAdapter(SimpleNamespace(
         name="small", engine="ollama-api", model="small-qwen",
         workspace_dir=tmp_path, system_md=pcm,
-        extra={"model_capabilities": {"small-qwen": {
+        # This test exercises the Ollama reference projection machinery, so it
+        # pins the cloud PCM profile explicitly; ollama-api otherwise defaults
+        # to the local profile, which omits the text tool catalogue entirely.
+        extra={"pcm_profile": "cloud", "model_capabilities": {"small-qwen": {
             "ollama_native_context": True, "context_window_tokens": 8192,
             "response_headroom_tokens": 2048, "ollama_max_input_chars": 25000,
         }}},
@@ -1539,6 +1996,7 @@ async def test_build_turn_prompt_routes_memory_plus_by_backend_capability(
             inject_memory,
             incremental,
             context_profile,
+            pcm_profile="cloud",
         ):
             observed["profile"] = context_profile
             observed["incremental"] = incremental

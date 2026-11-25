@@ -70,6 +70,7 @@ ENGINE_VENDOR_NAMESPACES: dict[str, str] = {
     "gemini-cli": "google",  # Retained for historical usage receipts only.
     "google-api": "google",
     "deepseek-api": "deepseek",
+    "dsh-cli": "deepseek",  # DeepSeek Harness ACP worker: DeepSeek-native models.
     "xai-api": "x-ai",
     "grok-cli": "x-ai",
 }
@@ -84,6 +85,15 @@ EXACT_OPENROUTER_MODEL_MAPPINGS: dict[
         "~deepseek/deepseek-flash-latest",
     ),
     ("deepseek-api", "deepseek-v4-pro"): (
+        "~deepseek/deepseek-pro-latest",
+    ),
+    # The DSH ACP worker runs the same DeepSeek-native model aliases through the
+    # harness, so it shares the DeepSeek price references instead of falling
+    # through to an unqualified (unpriceable) row.
+    ("dsh-cli", "deepseek-flash"): (
+        "~deepseek/deepseek-flash-latest",
+    ),
+    ("dsh-cli", "deepseek-v4-pro"): (
         "~deepseek/deepseek-pro-latest",
     ),
     # Antigravity CLI (agy) models mapped to OpenRouter price references.
