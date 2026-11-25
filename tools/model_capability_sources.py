@@ -226,7 +226,6 @@ def _exclusive_cache_lock(path: Path) -> Iterator[None]:
                     lock_path.unlink()
                 except OSError:
                     pass
-                continue
             if time.monotonic() >= deadline:
                 raise CapabilitySourceError("refresh_busy")
             time.sleep(0.025)
