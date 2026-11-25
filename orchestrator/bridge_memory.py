@@ -2662,6 +2662,7 @@ class BridgeContextAssembler:
             skill_items = self._catalogue_items(self.skill_catalog_provider)
             skill_lines = self._catalogue_lines_from(skill_items)
             if skill_lines:
+                skill_count = len(skill_lines)
                 if native_schemas:
                     from orchestrator.her_v2.v3_prompt import skill_index_payload
 
@@ -2675,34 +2676,33 @@ class BridgeContextAssembler:
                             if header
                             else list(index["skills"])
                         )
+                        skill_count = len(index["skills"])
                 add_section(
                     "skills_catalogue",
                     "AVAILABLE HASHI SKILLS",
                     "\n".join(skill_lines),
                     "runtime_context",
-                    item_count=len(skill_lines),
+                    item_count=skill_count,
                     metadata={"compact": True} if native_schemas else None,
                 )
             tool_items = self._catalogue_items(self.tool_catalog_provider)
             tool_lines = self._catalogue_lines_from(tool_items)
             if tool_lines:
+                tool_count = len(tool_lines)
                 if native_schemas:
-                    tool_lines = [
-                        NATIVE_TOOL_INDEX_NOTE,
-                        *[
-                            f"- {name}"
-                            for name in (
-                                self._catalogue_name(item) for item in tool_items
-                            )
-                            if name
-                        ],
+                    names = [
+                        name
+                        for name in (self._catalogue_name(item) for item in tool_items)
+                        if name
                     ]
+                    tool_lines = [NATIVE_TOOL_INDEX_NOTE, *[f"- {name}" for name in names]]
+                    tool_count = len(names)
                 add_section(
                     "tools_catalogue",
                     "AVAILABLE HASHI TOOLS",
                     "\n".join(tool_lines),
                     "runtime_context",
-                    item_count=len(tool_lines),
+                    item_count=tool_count,
                     metadata={"compact": True} if native_schemas else None,
                 )
         else:
