@@ -1519,6 +1519,81 @@ async def test_local_herv3_model_tool_support_disables_retrieval_reference():
     assert observed["retrieval_capable"] is False
 
 
+@pytest.mark.parametrize(
+    ("model_tool_support", "expected"),
+    [
+        ({"deepseek-v4-pro": False}, False),
+        ({"deepseek-v4-pro": True}, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_cloud_herv3_model_tool_support_sets_retrieval_capability(
+    model_tool_support, expected
+):
+    """Cloud projection must honour the selected model's tool support too.
+
+    HERV3 only attaches native function schemas when the Provider enables
+    tools for the selected model. A Cloud-profile chat-only model therefore
+    keeps the full text catalogue (retrieval_capable=False), while a
+    tool-capable model leaves the assembler default untouched.
+    """
+    runtime = _runtime()
+    runtime.config.active_backend = "her-v2"
+    runtime.backend_manager.agent_mode = "flex"
+    runtime.backend_manager.current_backend = SimpleNamespace(
+        _session_id=None,
+        persistent_session_busy=False,
+        capabilities=SimpleNamespace(
+            supports_sessions=False,
+            supports_thinking_stream=True,
+        ),
+        config=SimpleNamespace(model="deepseek-v4-pro", extra=None),
+    )
+    runtime.backend_manager.get_her_v3_target = lambda: SimpleNamespace(
+        provider="deepseek-api", model="deepseek-v4-pro"
+    )
+    runtime.backend_manager._her_v3_provider_option = lambda engine: {}
+    runtime.backend_manager._select_backend_cfg = (
+        lambda engine, target_model: {
+            "engine": "deepseek-api",
+            "model": "deepseek-v4-pro",
+            "model_tool_support": model_tool_support,
+        }
+    )
+    observed = {}
+
+    class _RetrievalAssembler:
+        MAX_RECENT_EXCHANGES = 10
+        turns_injection_enabled = False
+
+        def build_prompt_payload(
+            self,
+            prompt,
+            backend,
+            *,
+            extra_sections,
+            inject_memory,
+            incremental,
+            recent_exchanges=None,
+            prompt_budget_tokens=None,
+            pcm_profile="cloud",
+            retrieval_capable=None,
+        ):
+            observed["profile"] = pcm_profile
+            observed["retrieval_capable"] = retrieval_capable
+            return {"final_prompt": prompt, "audit": {"sections": []}}
+
+    runtime.context_assembler = _RetrievalAssembler()
+    item = _item(source="text")
+    runtime_pipeline.begin_queue_item(runtime, item)
+    await runtime_pipeline.build_turn_prompt(
+        runtime, item, is_bridge_request=False
+    )
+
+    assert observed["profile"] == "cloud"
+    assert observed["retrieval_capable"] is expected
+
+
 @pytest.mark.asyncio
 async def test_build_turn_prompt_passes_backend_pcm_token_budget():
     runtime = _runtime()

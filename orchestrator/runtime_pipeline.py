@@ -1339,7 +1339,6 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
     prompt_kwargs["pcm_profile"] = pcm_profile
     if (
         runtime.config.active_backend == "her-v2"
-        and pcm_profile == PCM_PROFILE_LOCAL
         and her_v3_target_engine
         and her_v3_target_model
         and "retrieval_capable" in inspect.signature(prompt_builder).parameters
@@ -1347,19 +1346,25 @@ async def build_turn_prompt(runtime, item, *, is_bridge_request: bool) -> TurnPr
         # HERV3 advertises the outer HASHI tool catalogue even when the
         # selected model's model_tool_support configuration disables tools for
         # that model. Read the same Provider/model configuration the provider
-        # consumes (allowed_backends extra) so a chat-only local model keeps
-        # [memory] and HCC inline instead of pointing at unreadable files.
+        # consumes so neither projection profile claims native function
+        # schemas the Provider will not send: a chat-only model keeps the full
+        # text catalogue and inline [memory]/HCC instead.
         try:
             row = runtime.backend_manager._select_backend_cfg(
                 her_v3_target_engine,
                 target_model=her_v3_target_model,
             )
-            row_extra = row.get("extra") if isinstance(row, Mapping) else None
-            support = (
-                row_extra.get("model_tool_support")
-                if isinstance(row_extra, Mapping)
-                else None
-            )
+            support = None
+            if isinstance(row, Mapping):
+                # Backend rows keep model_tool_support at the top level; the
+                # Provider sees it after _build_adapter_config merges the row
+                # into backend.config.extra. Accept a nested extra mapping as
+                # well for configurations that store it there.
+                support = row.get("model_tool_support")
+                if support is None:
+                    row_extra = row.get("extra")
+                    if isinstance(row_extra, Mapping):
+                        support = row_extra.get("model_tool_support")
             if (
                 isinstance(support, Mapping)
                 and support.get(her_v3_target_model) is False
