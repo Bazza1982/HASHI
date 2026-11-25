@@ -376,6 +376,28 @@ def test_workzone_reference_non_reference_text_is_unchanged():
     assert HASHITuiApp._parse_workzone_reference('@"unbalanced hi') == (None, '@"unbalanced hi')
 
 
+def test_workzone_reference_caption_is_never_parsed_as_shell_syntax():
+    # An apostrophe inside the caption must not abort reference parsing.
+    reference, caption = HASHITuiApp._parse_workzone_reference(
+        "@report.pdf Don't change the file"
+    )
+    assert (reference, caption) == ("report.pdf", "Don't change the file")
+    # Unmatched quotes in a multiline caption stay verbatim.
+    reference, caption = HASHITuiApp._parse_workzone_reference(
+        '@report.pdf\nif x:\n    print("unmatched\n'
+    )
+    assert reference == "report.pdf"
+    assert caption == 'if x:\n    print("unmatched\n'
+
+
+def test_workzone_reference_backslash_escaped_space_keeps_caption():
+    reference, caption = HASHITuiApp._parse_workzone_reference(
+        r"@reports/weekly\ report.pdf summarize this"
+    )
+    assert reference == "reports/weekly report.pdf"
+    assert caption == "summarize this"
+
+
 @pytest.mark.asyncio
 async def test_chat_input_runtime_bindings_keep_textual_clipboard_paste(tmp_path):
     app = _QuietTui(bridge_home=tmp_path, launch_instance_id="HASHI1")

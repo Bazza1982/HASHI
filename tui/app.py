@@ -3404,31 +3404,48 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     def _parse_workzone_reference(text: str) -> tuple[str | None, str]:
         """Split an opening Workzone reference without rewriting its caption.
 
-        The first token is parsed with the original quote-aware semantics so a
-        quoted reference containing spaces stays one reference; everything after
-        that token keeps every original byte (multiline verbatim).
+        Only the FIRST token is scanned, with quote and backslash-escape
+        awareness, so its exact raw end position is known.  The remaining
+        caption is preserved verbatim and is never parsed as shell syntax.
         """
 
         value = str(text or "")
         if not value.startswith("@"):
             return None, text
-        try:
-            parts = shlex.split(value, posix=True)
-        except ValueError:
+
+        def scan(index: int) -> tuple[str | None, int]:
+            chars: list[str] = []
+            if index < len(value) and value[index] in {"'", '"'}:
+                quote = value[index]
+                index += 1
+                while index < len(value):
+                    char = value[index]
+                    if char == "\\" and index + 1 < len(value):
+                        chars.append(value[index + 1])
+                        index += 2
+                        continue
+                    if char == quote:
+                        return "".join(chars), index + 1
+                    chars.append(char)
+                    index += 1
+                return None, len(value)
+            while index < len(value):
+                char = value[index]
+                if char == "\\" and index + 1 < len(value):
+                    chars.append(value[index + 1])
+                    index += 2
+                    continue
+                if char.isspace():
+                    break
+                chars.append(char)
+                index += 1
+            return "".join(chars), index
+
+        reference, token_end = scan(1)
+        if not reference or reference.startswith("@"):
             return None, text
-        if not parts or len(parts[0]) <= 1 or not parts[0].startswith("@"):
-            return None, text
-        first = parts[0]
-        if first[1:].startswith("@"):
-            return None, text
-        reference = first[1:]
-        token_start = value.find(reference, 1)
-        if token_start < 0:
-            return reference, ""
-        caption_start = token_start + len(reference)
-        if value[1] in {"'", '"'} and caption_start < len(value) and value[caption_start] in {"'", '"'}:
-            caption_start += 1
-        caption = value[caption_start:]
+
+        caption = value[token_end:]
         if caption.startswith("\r\n"):
             caption = caption[2:]
         elif caption[:1].isspace():
