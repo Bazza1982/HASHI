@@ -114,6 +114,12 @@ SKILL_INDEX_NOTE = "Index only: read <root>/<id>/SKILL.md before following a ski
 SKILL_INDEX_NOTE_EXPLICIT = (
     "Index only: read the SKILL.md path on each line before following a skill."
 )
+# Some skill providers only expose id and description. Never promise a path
+# that the payload does not carry.
+SKILL_INDEX_NOTE_NO_PATHS = (
+    "Index only: one line per installed skill; read its SKILL.md when the "
+    "skill's instructions are needed."
+)
 
 
 def _skill_root(entries: list[tuple[str, str]]) -> str:
@@ -161,7 +167,9 @@ def skill_index_payload(skills: object) -> dict[str, object] | None:
         skills_lines.append(line)
     if root:
         return {"note": SKILL_INDEX_NOTE, "root": root, "skills": skills_lines}
-    return {"note": SKILL_INDEX_NOTE_EXPLICIT, "skills": skills_lines}
+    if any(path for _, _, path in entries):
+        return {"note": SKILL_INDEX_NOTE_EXPLICIT, "skills": skills_lines}
+    return {"note": SKILL_INDEX_NOTE_NO_PATHS, "skills": skills_lines}
 
 
 def compact_skill_index(skills: object) -> list[str]:

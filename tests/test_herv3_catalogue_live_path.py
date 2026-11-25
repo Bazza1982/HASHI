@@ -52,7 +52,7 @@ def _skills(root: Path) -> list[dict[str, str]]:
 
 @pytest.fixture()
 def assembler_factory(tmp_path: Path):
-    def build() -> BridgeContextAssembler:
+    def build(*, with_skill_paths: bool = True) -> BridgeContextAssembler:
         pcm = tmp_path / "agent.md"
         pcm.parent.mkdir(parents=True, exist_ok=True)
         pcm.write_text(
@@ -61,6 +61,11 @@ def assembler_factory(tmp_path: Path):
         )
         store = BridgeMemoryStore(tmp_path)
         skills = _skills(tmp_path / "skills")
+        if not with_skill_paths:
+            skills = [
+                {"id": item["id"], "description": item["description"]}
+                for item in skills
+            ]
         return BridgeContextAssembler(
             store,
             pcm,
@@ -105,6 +110,18 @@ def test_herv3_cloud_projects_skill_index_with_real_paths(assembler_factory) -> 
     assert "root" in skills["text"].casefold()
     assert LONG_SKILL_DESCRIPTION not in skills["text"]
     assert skills["metadata"] == {"compact": True}
+
+
+def test_skill_index_without_paths_never_promises_a_path(assembler_factory) -> None:
+    payload = assembler_factory(with_skill_paths=False).build_prompt_payload(
+        "do work", "her-v2"
+    )
+
+    skills = _section(payload, "skills_catalogue")
+    assert skills is not None
+    assert "one line per installed skill" in skills["text"]
+    assert "[read " not in skills["text"]
+    assert "SKILL.md path on each line" not in skills["text"]
 
 
 def test_cli_engine_keeps_full_catalogues(assembler_factory) -> None:
