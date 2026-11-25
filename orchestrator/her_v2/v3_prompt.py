@@ -1,6 +1,7 @@
 """Deterministic PCM-to-model projection for HERV3."""
 from __future__ import annotations
 import json
+import os
 from collections.abc import Callable, Mapping
 
 MAIN_CONTRACT = """You are the configured HASHI agent. Accomplish the user's request;
@@ -104,14 +105,41 @@ rather than bash syntax.
 # Tool and skill catalogues are therefore projected in one compact form only.
 CATALOGUE_SECTION_KEYS = frozenset({"tools_catalogue", "skills_catalogue"})
 SKILL_INDEX_DESCRIPTION_CHARS = 140
-SKILL_INDEX_NOTE = (
-    "Index only: read skills/<id>/SKILL.md when a skill is relevant to the task."
+# The index replaces the full catalogue, so it must still say where the real
+# instructions live. `skills/<id>/SKILL.md` is ambiguous: it resolves against
+# the Agent workspace, while the files sit under the HASHI project root. When
+# every skill follows `<root>/<id>/SKILL.md` the shared root is sent once;
+# otherwise each line carries its own absolute path.
+SKILL_INDEX_NOTE = "Index only: read <root>/<id>/SKILL.md before following a skill."
+SKILL_INDEX_NOTE_EXPLICIT = (
+    "Index only: read the SKILL.md path on each line before following a skill."
 )
 
 
-def compact_skill_index(skills: object) -> list[str]:
-    """One line per skill: id plus a single-line, bounded description."""
-    lines: list[str] = []
+def _skill_root(entries: list[tuple[str, str]]) -> str:
+    """Return the shared skills directory only when it explains every path."""
+
+    paths = [path for _, path in entries]
+    if not paths or not all(paths):
+        return ""
+    try:
+        root = os.path.commonpath([os.path.dirname(path) for path in paths])
+    except (TypeError, ValueError):
+        return ""
+    if not root:
+        return ""
+    for name, path in entries:
+        if os.path.normcase(os.path.dirname(path)) != os.path.normcase(
+            os.path.join(root, name)
+        ):
+            return ""
+    return root
+
+
+def skill_index_payload(skills: object) -> dict[str, object] | None:
+    """Compact index: one bounded line per skill plus its real file location."""
+
+    entries: list[tuple[str, str, str]] = []
     for item in skills or ():
         if not isinstance(item, Mapping):
             continue
@@ -121,8 +149,26 @@ def compact_skill_index(skills: object) -> list[str]:
         description = " ".join(str(item.get("description") or "").split())
         if len(description) > SKILL_INDEX_DESCRIPTION_CHARS:
             description = description[: SKILL_INDEX_DESCRIPTION_CHARS - 1].rstrip() + "…"
-        lines.append(f"- {name}: {description}" if description else f"- {name}")
-    return lines
+        entries.append((name, description, str(item.get("skill_md") or "").strip()))
+    if not entries:
+        return None
+    root = _skill_root([(name, path) for name, _, path in entries])
+    skills_lines: list[str] = []
+    for name, description, path in entries:
+        line = f"- {name}: {description}" if description else f"- {name}"
+        if path and not root:
+            line = f"{line} [read {path}]"
+        skills_lines.append(line)
+    if root:
+        return {"note": SKILL_INDEX_NOTE, "root": root, "skills": skills_lines}
+    return {"note": SKILL_INDEX_NOTE_EXPLICIT, "skills": skills_lines}
+
+
+def compact_skill_index(skills: object) -> list[str]:
+    """One line per skill: id, a bounded description and its real location."""
+
+    payload = skill_index_payload(skills)
+    return list(payload["skills"]) if payload else []
 
 
 def compile_main_prompt(
@@ -207,12 +253,9 @@ def compile_main_prompt(
         # Local keeps advisory catalogues out by default; they are read on
         # demand instead of being re-sent as fixed context.
         refs["advisory_habits"] = context.get("habit_catalogue") or []
-        skill_lines = compact_skill_index(context.get("skills_catalogue"))
-        if skill_lines:
-            refs["available_skills"] = {
-                "note": SKILL_INDEX_NOTE,
-                "skills": skill_lines,
-            }
+        skill_index = skill_index_payload(context.get("skills_catalogue"))
+        if skill_index:
+            refs["available_skills"] = skill_index
         cards = context.get("strategy_playbook")
         if cards:
             refs["optional_strategy_cards"] = cards

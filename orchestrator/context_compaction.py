@@ -36,6 +36,10 @@ from orchestrator.flexible_backend_registry import (
     canonical_backend_engine,
 )
 from orchestrator.process_resources import path_lock as process_path_lock
+from orchestrator.runtime_cross_session import (
+    MAX_CONTEXT_PROMPT_CHARS_COMPACT,
+    MAX_CONTEXT_RESPONSE_CHARS_COMPACT,
+)
 from orchestrator.timezone_policy import (
     UTC_TIMEZONE_NAME,
     canonical_timezone_name,
@@ -1487,6 +1491,22 @@ def _merge_timeline_entries(
     return combined
 
 
+# An ended cross-session receipt is a continuity cue, not work in progress, so
+# it is trimmed to the Phase 1 budget here — at the final render, after timeline
+# merging and de-duplication have already compared the untrimmed text. A receipt
+# that still awaits the user keeps the full budget because the reply may depend
+# on its exact wording.
+_RECEIPT_TRUNCATION_MARKER = "\n…[cross-session text truncated]…\n"
+
+
+def _bounded_receipt_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    head = max(1, limit // 2)
+    tail = max(1, limit - head - 38)
+    return text[:head].rstrip() + _RECEIPT_TRUNCATION_MARKER + text[-tail:].lstrip()
+
+
 def _render_timeline_entry(
     entry: Mapping[str, Any],
     *,
@@ -1576,6 +1596,13 @@ def _render_timeline_entry(
         )
         user_text = str(entry.get("user_text") or "").strip()
         assistant_text = str(entry.get("assistant_text") or "").strip()
+        if not entry.get("active"):
+            user_text = _bounded_receipt_text(
+                user_text, MAX_CONTEXT_PROMPT_CHARS_COMPACT
+            )
+            assistant_text = _bounded_receipt_text(
+                assistant_text, MAX_CONTEXT_RESPONSE_CHARS_COMPACT
+            )
         user_provenance = str(
             entry.get("user_transcript_provenance") or ""
         ).strip()
@@ -3860,3 +3887,4 @@ __all__ = [
     "schedule_execution_stage",
     "schedule_post_turn",
 ]
+# HASHI-Fingerprint: hfp_f210f75bfe79473bb56a9ce3434a4059
