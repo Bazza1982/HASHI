@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import textwrap
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +42,7 @@ from orchestrator.pathing import resolve_dsh_invocation
 
 _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
     """
-    import json, sys, time, uuid
+    import json, os, sys, time, uuid
 
     if "--help" in sys.argv:
         print("Usage: dsh --profile acp [options]")
@@ -56,6 +57,48 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
     def send(obj):
         sys.stdout.write(json.dumps(obj) + "\\n")
         sys.stdout.flush()
+
+    def record_usage(sid, turn):
+        # Mirror DSH's own per-session projection so the adapter's delta read
+        # can be exercised end to end. Only active when the test sets DSH_HOME.
+        home = os.environ.get("DSH_HOME")
+        if not home:
+            return
+        folder = os.path.join(home, "storages", "session_projcache", "sessions")
+        os.makedirs(folder, exist_ok=True)
+        totals = {
+            "uncachedInputTokens": 1000 * turn,
+            "cacheReadTokens": 500 * turn,
+            "cacheWriteTokens": 0,
+            "outputTokens": 200 * turn,
+        }
+        path = os.path.join(folder, sid + ".json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": 1,
+                    "record": {
+                        "rows": {
+                            "tokenUsage": {
+                                "ver": 2,
+                                "seq": turn,
+                                "val": {"totals": totals},
+                            },
+                            "turnBoundary": {
+                                "ver": 2,
+                                "seq": turn,
+                                "val": {
+                                    "openTurnStartSeq": None,
+                                    "lastStepStartSeq": turn,
+                                    "lastStepBoundary": {"kind": "end", "seq": turn},
+                                    "lastTurn": turn,
+                                },
+                            },
+                        }
+                    },
+                },
+                fh,
+            )
 
     def config_options(sess):
         return [
@@ -181,6 +224,7 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
             sess = state["sessions"][sid]
             text = " ".join(b.get("text", "") for b in params.get("prompt", []) if b.get("type") == "text")
             sess["turns"].append(text)
+            record_usage(sid, len(sess["turns"]))
 
             if "HANG_FOR_STOP" in text:
                 state["active_prompt"] = {"sid": sid, "rpc_id": rpc_id}
@@ -475,6 +519,395 @@ async def test_dsh_acp_pcm_fixed_mode_tools_streaming_model_effort_and_stop(tmp_
         assert f"sid={first_sid}" not in res6.text
         assert "resumed=False" in res6.text
         assert "turns=1" in res6.text
+    finally:
+        await adapter.shutdown()
+
+
+def test_dsh_session_projcache_usage_helpers(tmp_path: Path, monkeypatch):
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path))
+    sessions = tmp_path / "storages" / "session_projcache" / "sessions"
+    assert dsh._read_dsh_session_snapshot("missing-session") is None
+
+    sessions.mkdir(parents=True)
+    (sessions / "broken.json").write_text("{not json", encoding="utf-8")
+    assert dsh._read_dsh_session_snapshot("broken") is None
+
+    totals = {
+        "uncachedInputTokens": 1_200,
+        "cacheReadTokens": 3_400,
+        "cacheWriteTokens": 0,
+        "outputTokens": 560,
+    }
+
+    def write(sid: str, *, turn: int, open_turn: int | None) -> None:
+        (sessions / f"{sid}.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "record": {
+                        "rows": {
+                            "tokenUsage": {"seq": 9, "val": {"totals": totals}},
+                            "turnBoundary": {
+                                "val": {
+                                    "openTurnStartSeq": open_turn,
+                                    "lastStepBoundary": {"kind": "end", "seq": 8},
+                                    "lastTurn": turn,
+                                }
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write("sid-a", turn=3, open_turn=None)
+    snapshot = dsh._read_dsh_session_snapshot("sid-a")
+    assert snapshot is not None
+    assert snapshot.totals == totals
+    assert snapshot.seq == 9
+    assert snapshot.turn == 3
+    assert snapshot.settled is True
+
+    # An open or unreadable turn boundary is never an attributable boundary.
+    write("sid-open", turn=3, open_turn=12)
+    open_snapshot = dsh._read_dsh_session_snapshot("sid-open")
+    assert open_snapshot is not None and open_snapshot.settled is False
+
+    # A brand-new session has no prior snapshot; the whole total is this turn.
+    assert dsh._dsh_turn_usage(None, totals, fresh_session=True) == totals
+    # An existing session without a baseline holds cumulative history, so a
+    # missing snapshot must never be priced as this turn's provider usage.
+    assert dsh._dsh_turn_usage(None, totals) is None
+    # Re-reading an unchanged snapshot is not a turn.
+    assert dsh._dsh_turn_usage(totals, totals) is None
+    grown = {**totals, "outputTokens": totals["outputTokens"] + 10}
+    assert dsh._dsh_turn_usage(totals, grown) == {
+        "uncachedInputTokens": 0,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "outputTokens": 10,
+    }
+    # Compaction or session reset must never fabricate a negative turn.
+    shrunk = dict(totals)
+    shrunk["cacheReadTokens"] = 0
+    assert dsh._dsh_turn_usage(totals, shrunk) is None
+    # Unreadable store keeps the estimate path.
+    assert dsh._dsh_turn_usage(totals, None) is None
+
+
+@pytest.mark.asyncio
+async def test_dsh_usage_wait_is_bounded_when_the_store_never_updates(
+    tmp_path: Path, monkeypatch
+):
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path))
+    started = time.monotonic()
+    assert await dsh._await_dsh_usage_snapshot("no-such-session", None) is None
+    assert time.monotonic() - started < 2.0
+
+    sessions = tmp_path / "storages" / "session_projcache" / "sessions"
+    sessions.mkdir(parents=True)
+    totals = {
+        "uncachedInputTokens": 10,
+        "cacheReadTokens": 20,
+        "cacheWriteTokens": 0,
+        "outputTokens": 30,
+    }
+    (sessions / "sid-stale.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "record": {
+                    "rows": {
+                        "tokenUsage": {
+                            "ver": 2,
+                            "seq": 7,
+                            "val": {"totals": totals},
+                        },
+                        "turnBoundary": {
+                            "val": {
+                                "openTurnStartSeq": None,
+                                "lastStepBoundary": {"kind": "end", "seq": 7},
+                                "lastTurn": 2,
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline = dsh._read_dsh_session_snapshot("sid-stale")
+    assert baseline is not None
+    assert baseline.seq == 7 and baseline.turn == 2 and baseline.settled is True
+    started = time.monotonic()
+    # The turn this prompt opened never closes in the store, so the bounded
+    # wait returns the unchanged boundary instead of inventing a newer one.
+    stale = await dsh._await_dsh_usage_snapshot("sid-stale", 3)
+    assert stale == baseline
+    assert time.monotonic() - started < 2.0
+    # An unclosed turn must never be reported as this turn's provider usage.
+    assert dsh._dsh_turn_usage(baseline.totals, stale.totals) is None
+
+
+@pytest.mark.asyncio
+async def test_dsh_acp_turn_usage_comes_from_session_projcache(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+
+    try:
+        res1 = await adapter.generate_response("usage turn one", "req-u1")
+        assert res1.is_success is True
+        assert res1.usage is not None
+        assert res1.usage.input_tokens == 1_500
+        assert res1.usage.output_tokens == 200
+        assert res1.usage.prompt_cache_hit_tokens == 500
+        assert res1.usage.prompt_cache_miss_tokens == 1_000
+        assert res1.usage.thinking_tokens == 0
+        assert (res1.stream_metadata or {}).get("token_usage_source") == (
+            "dsh_session_projcache"
+        )
+
+        # Turn 2 reports only the increment over the cumulative session totals.
+        res2 = await adapter.generate_response("usage turn two", "req-u2")
+        assert res2.usage is not None
+        assert res2.usage.input_tokens == 1_500
+        assert res2.usage.output_tokens == 200
+        assert res2.usage.prompt_cache_hit_tokens == 500
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_resumed_session_without_baseline_keeps_estimate(
+    tmp_path: Path, monkeypatch
+):
+    """CRC-225-01: an existing session must not price its whole history as one turn."""
+
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+
+    try:
+        res1 = await adapter.generate_response("usage turn one", "req-crc-u1")
+        assert res1.is_success is True
+        assert res1.usage is not None
+
+        real_read = dsh._read_dsh_session_snapshot
+        calls = {"count": 0}
+
+        def flaky_read(session_id):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                # Existing session, but the pre-turn snapshot is unreadable.
+                return None
+            return real_read(session_id)
+
+        monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", flaky_read)
+
+        started = time.monotonic()
+        res2 = await adapter.generate_response("usage turn two", "req-crc-u2")
+        # No baseline means no wait and no provider usage claim.
+        assert time.monotonic() - started < 5.0
+        assert res2.is_success is True
+        assert res2.usage is None
+        assert (res2.stream_metadata or {}).get("token_usage_source") == "estimated"
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_late_usage_flush_is_not_billed_to_the_next_turn(
+    tmp_path: Path, monkeypatch
+):
+    """CRC-225-01 follow-up: a late flush from an estimated turn stays out of
+    the following turn's provider usage."""
+
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+
+    def totals(uncached: int, output: int) -> dict[str, int]:
+        return {
+            "uncachedInputTokens": uncached,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "outputTokens": output,
+        }
+
+    turn_usage = {
+        1: totals(1_000, 40),
+        2: totals(3_000, 100),
+        3: totals(1_000, 40),
+        4: totals(1_000, 40),
+        5: totals(1_000, 40),
+    }
+
+    def settled(turn: int):
+        cumulative = {name: 0 for name in turn_usage[1]}
+        for number in range(1, turn + 1):
+            for name, value in turn_usage[number].items():
+                cumulative[name] += value
+        return dsh._DshUsageSnapshot(turn, cumulative, turn, True)
+
+    after_turn1 = settled(1)
+    # Turns 2 and 3 both flush late: turn 2 lands during turn 3, and the rest
+    # of the batch (turn 3) lands only after turn 4 starts.
+    after_turn2 = settled(2)
+    after_turn4 = settled(4)
+    after_turn5 = settled(5)
+
+    # Scripted store: each phase is one prompt, and the first read of a phase
+    # is the pre-turn snapshot. Later reads are whatever DSH has folded by then.
+    state = {"phase": "turn1", "reads": 0}
+
+    def fake_read(session_id: str):
+        state["reads"] += 1
+        reads = state["reads"]
+        phase = state["phase"]
+        if phase == "turn1":
+            return None if reads == 1 else after_turn1
+        if phase == "turn2":
+            return after_turn1
+        if phase == "turn3":
+            return after_turn1 if reads == 1 else after_turn2
+        if phase == "turn4":
+            return after_turn2 if reads == 1 else after_turn4
+        return after_turn4 if reads == 1 else after_turn5
+
+    def begin(phase: str) -> None:
+        state["phase"] = phase
+        state["reads"] = 0
+
+    monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", fake_read)
+
+    def assert_estimated(result) -> None:
+        assert result.usage is None
+        assert (result.stream_metadata or {}).get("token_usage_source") == "estimated"
+
+    try:
+        begin("turn1")
+        res1 = await adapter.generate_response("late usage one", "req-late-1")
+        assert res1.usage is not None
+        assert res1.usage.input_tokens == 1_000
+        assert res1.usage.output_tokens == 40
+
+        # Single late write: turn 2's counters are not folded before the wait
+        # expires, so the turn keeps the estimate.
+        begin("turn2")
+        assert_estimated(await adapter.generate_response("late usage two", "req-late-2"))
+
+        # Turn 2's flush lands here. A counter bump alone must not clear the
+        # unconfirmed boundary, or this turn would be billed 4000/140.
+        begin("turn3")
+        assert_estimated(await adapter.generate_response("late usage three", "req-late-3"))
+
+        # Turns 3 and 4 land as one batch, so this turn cannot be separated
+        # from the merged flush and stays estimated too.
+        begin("turn4")
+        assert_estimated(await adapter.generate_response("late usage four", "req-late-4"))
+
+        # DSH has now closed every unaccounted turn, so the boundary is
+        # trustworthy again and this turn resumes real incremental usage.
+        begin("turn5")
+        res5 = await adapter.generate_response("late usage five", "req-late-5")
+        assert res5.usage is not None
+        assert res5.usage.input_tokens == 1_000
+        assert res5.usage.output_tokens == 40
+        assert (res5.stream_metadata or {}).get("token_usage_source") == (
+            "dsh_session_projcache"
+        )
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_recovered_snapshot_after_estimated_turn_stays_estimated(
+    tmp_path: Path, monkeypatch
+):
+    """A readable snapshot alone must not re-anchor a session that already
+    billed an estimated turn: its late flush would be billed twice."""
+
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+    # Resumed session: history exists, so this is not a fresh session.
+    adapter._session_id = "resumed-existing-sid"
+    adapter._session_in_current_worker = False
+
+    def totals(uncached: int, output: int) -> dict[str, int]:
+        return {
+            "uncachedInputTokens": uncached,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "outputTokens": output,
+        }
+
+    history = totals(4_000, 100)
+    late_turn = totals(1_000, 40)
+    flushed = {name: history[name] + late_turn[name] for name in history}
+    history_snapshot = dsh._DshUsageSnapshot(11, history, 7, True)
+    flushed_snapshot = dsh._DshUsageSnapshot(14, flushed, 8, True)
+
+    # Phase one: the store is unreadable, so the turn is estimated.
+    # Phase two: it is readable again and the estimated turn's counters land.
+    state = {"phase": "first", "reads": 0}
+
+    def fake_read(session_id: str):
+        state["reads"] += 1
+        if state["phase"] == "first":
+            return None
+        return history_snapshot if state["reads"] == 1 else flushed_snapshot
+
+    def begin(phase: str) -> None:
+        state["phase"] = phase
+        state["reads"] = 0
+
+    monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", fake_read)
+
+    def assert_estimated(result) -> None:
+        assert result.is_success is True
+        assert result.usage is None
+        assert (result.stream_metadata or {}).get("token_usage_source") == "estimated"
+
+    try:
+        begin("first")
+        assert_estimated(await adapter.generate_response("recovered one", "req-rec-1"))
+
+        # The late flush of the estimated turn arrives inside this prompt; it
+        # must not be reported as this turn's provider usage.
+        begin("second")
+        assert_estimated(await adapter.generate_response("recovered two", "req-rec-2"))
+        assert adapter._usage_settled_turn is None
     finally:
         await adapter.shutdown()
 
@@ -788,3 +1221,4 @@ def test_dsh_cli_reports_images_not_transmitted_for_legacy_and_canonical_content
     assert "did not transmit" not in caplog.text
     adapter._build_prompt_blocks("hello", canonical)
     assert "did not transmit 1 image attachment(s) (canonical=1, legacy=0" in caplog.text
+# HASHI-Fingerprint: hfp_1ae9b92de86a47c898f9d4c4833d4020

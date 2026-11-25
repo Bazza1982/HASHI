@@ -753,6 +753,24 @@ def test_meditation_formatter_label_and_approx():
     assert "价目表" not in tail
 
 
+def test_dsh_cli_provider_display_name_is_human_readable():
+    receipt = UsageReceipt(
+        line_items=[
+            PerCallUsageLineItem(
+                engine="dsh-cli",
+                model="deepseek-flash",
+                input_tokens=100,
+                output_tokens=10,
+                cost_usd=0.001,
+                cost_source="openrouter_reference",
+            )
+        ]
+    )
+    tail = format_cost_tail(receipt, locale="zh-CN")
+    assert "DSH CLI" in tail
+    assert "DSH CLI" in format_cost_tail(receipt, locale="en")
+
+
 def test_meditation_formatter_task_total():
     receipt = UsageReceipt(line_items=[
         PerCallUsageLineItem(cost_usd=0.001240, cost_source="provider"),
@@ -769,3 +787,4 @@ def test_meditation_formatter_unknown_cost():
         PerCallUsageLineItem(cost_usd=None, cost_source="unknown"),
     ])
     assert "成本未知" in format_meditation_cost_tail(receipt, locale="zh-CN")
+# HASHI-Fingerprint: hfp_b5d5210e5ac140e3a2f57a5fc82102c5
