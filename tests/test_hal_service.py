@@ -557,6 +557,10 @@ def test_prompt_retry_limit_fails_permanently(tmp_path):
     execs = service.store.list_execs("user:7")
     assert execs[0]["state"] == "failed"
     assert "retry limit" in (execs[0]["detail"] or "")
+    # The retry cap is context, not the cause: the last real error must survive.
+    assert "last error: busy" in (execs[0]["detail"] or "")
+    receipt = service.store.get_receipt(execs[0]["exec_id"], 0)
+    assert "last error: busy" in (receipt["detail"] or "")
 
 
 def test_replayed_unverified_command_never_redispatches(tmp_path):
@@ -1599,4 +1603,131 @@ def test_migration_key_create_is_idempotent_and_non_destructive(tmp_path):
         if r.get("migration_key") == key
     ]
     assert len(matches) == 1
+
+
+def _state_server(tmp_path):
+    return SimpleNamespace(global_config=SimpleNamespace(bridge_home=str(tmp_path)))
+
+
+def test_hal_store_defaults_to_runtime_state_dir_not_the_source_tree(tmp_path):
+    from hal.service import _default_store_path
+
+    path = _default_store_path(_state_server(tmp_path))
+    assert path == tmp_path / "state" / "hal" / "hal_v1.sqlite"
+    assert path.parent.parent.name == "state"
+
+
+def _write_store(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE t (v TEXT)")
+        conn.executemany("INSERT INTO t (v) VALUES (?)", [(row,) for row in rows])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _read_store(path):
+    conn = sqlite3.connect(str(path))
+    try:
+        return [row[0] for row in conn.execute("SELECT v FROM t ORDER BY v")]
+    finally:
+        conn.close()
+
+
+def test_legacy_in_tree_store_migrates_into_state_dir(tmp_path):
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    assert legacy == tmp_path / "hal" / "hal_v1.sqlite"
+    _write_store(legacy, ["rule-1", "rule-2"])
+
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert store_path == target, "the migrated copy becomes the served store"
+    assert _read_store(target) == ["rule-1", "rule-2"]
+    assert not legacy.exists(), "the source tree must be left clean"
+    assert not list(target.parent.glob("*.tmp")), "no partial copy is left behind"
+
+
+def test_migration_keeps_rows_committed_in_the_source_wal(tmp_path):
+    """Committed frames still sitting in the old -wal must reach the new store."""
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    legacy.parent.mkdir(parents=True)
+    writer = sqlite3.connect(str(legacy))
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE t (v TEXT)")
+        writer.execute("INSERT INTO t (v) VALUES ('wal-only')")
+        writer.commit()
+        wal = legacy.with_name(legacy.name + "-wal")
+        assert wal.is_file() and wal.stat().st_size > 0
+
+        assert _migrate_legacy_store(legacy, target, logging.getLogger("hal.test")) == target
+
+        assert _read_store(target) == ["wal-only"]
+    finally:
+        writer.close()
+
+
+def test_migration_never_overwrites_an_existing_state_db(tmp_path):
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    _write_store(target, ["live-state"])
+    _write_store(legacy, ["legacy-db"])
+
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert store_path == target
+    assert _read_store(target) == ["live-state"]
+    assert legacy.exists(), "the legacy store is the only untouched copy left"
+
+
+def test_failed_migration_keeps_the_legacy_store(tmp_path):
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"not-a-database")
+
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert store_path == legacy, "a failed migration keeps serving the legacy store"
+    assert legacy.read_bytes() == b"not-a-database"
+    assert not target.exists(), "an unreadable legacy store must not become the state dir"
+    assert not list(legacy.parent.glob("*.tmp"))
+
+
+def test_failed_publish_keeps_serving_the_legacy_store(tmp_path, monkeypatch):
+    """A publish failure must not leave an empty target that blocks migration."""
+    from hal.service import _default_store_path, _legacy_store_path, _migrate_legacy_store
+
+    server = _state_server(tmp_path)
+    target = _default_store_path(server)
+    legacy = _legacy_store_path(server)
+    _write_store(legacy, ["rule-1"])
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("hal.service.os.replace", _fail)
+
+    store_path = _migrate_legacy_store(legacy, target, logging.getLogger("hal.test"))
+
+    assert store_path == legacy
+    assert _read_store(legacy) == ["rule-1"]
+    assert not target.exists()
+    assert not list(target.parent.glob("*.tmp"))
 # HASHI-Fingerprint: hfp_9717a97af9924e26925d98bfde62bb3d

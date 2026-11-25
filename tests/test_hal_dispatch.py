@@ -71,4 +71,100 @@ def test_command_ok_true_marks_accepted_not_completed(monkeypatch):
     result = _run(adapter.dispatch_command(command_text="/reboot max", trigger_agent="lily"))
     assert result.accepted is True
     assert "accepted != completed" in result.detail
+
+
+class _RaisingRuntime:
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def enqueue_api_text(self, *args, **kwargs):
+        raise self._exc
+
+
+def _raising_server(exc):
+    server = _FakeServer()
+    server._map = {"lily": _RaisingRuntime(exc)}
+    return server
+
+
+def _dispatch_prompt(adapter):
+    return _run(
+        adapter.dispatch_prompt(
+            target_agent="lily",
+            text="hi",
+            idempotency_key="hal:exec:0",
+            exec_id="exec-1",
+            stage=0,
+        )
+    )
+
+
+def test_prompt_argument_error_is_not_retried_and_keeps_the_real_error():
+    adapter = GatewayDispatchAdapter(_raising_server(TypeError("text must be str")))
+    result = _dispatch_prompt(adapter)
+    assert result.accepted is False
+    assert result.transient is False, "a type error will never clear up on retry"
+    assert "non-retryable" in result.detail
+    assert "TypeError" in result.detail
+    assert "text must be str" in result.detail
+    assert result.evidence == {"exception_type": "TypeError", "retryable": False}
+
+
+def test_prompt_transport_error_stays_retryable():
+    adapter = GatewayDispatchAdapter(_raising_server(ConnectionResetError("peer reset")))
+    result = _dispatch_prompt(adapter)
+    assert result.accepted is False
+    assert result.transient is True
+    assert "ConnectionResetError" in result.detail
+    assert result.evidence == {"exception_type": "ConnectionResetError", "retryable": True}
+
+
+def test_prompt_permission_error_is_not_retried():
+    adapter = GatewayDispatchAdapter(_raising_server(PermissionError("denied")))
+    result = _dispatch_prompt(adapter)
+    assert result.transient is False
+    assert "PermissionError" in result.detail
+
+
+def test_prompt_worker_restart_stays_retryable():
+    from orchestrator.function_worker_protocol import FunctionWorkerDisconnected
+
+    adapter = GatewayDispatchAdapter(
+        _raising_server(FunctionWorkerDisconnected("lily worker is disconnected"))
+    )
+    result = _dispatch_prompt(adapter)
+    assert result.accepted is False
+    assert result.transient is True, "a restarting Worker must keep the retry budget"
+    assert "FunctionWorkerDisconnected" in result.detail
+
+
+def test_remote_worker_error_is_classified_by_its_reported_type():
+    from hal.dispatch import classify_dispatch_error
+    from orchestrator.function_worker_protocol import (
+        FunctionWorkerDisconnected,
+        FunctionWorkerRemoteError,
+    )
+
+    assert classify_dispatch_error(
+        FunctionWorkerDisconnected("worker exited")
+    ) == (True, "FunctionWorkerDisconnected")
+    assert classify_dispatch_error(
+        FunctionWorkerRemoteError(
+            "prompt", {"type": "TimeoutError", "message": "worker still busy"}
+        )
+    ) == (True, "FunctionWorkerRemoteError:TimeoutError")
+    assert classify_dispatch_error(
+        FunctionWorkerRemoteError(
+            "prompt", {"type": "ValueError", "message": "text must be str"}
+        )
+    ) == (False, "FunctionWorkerRemoteError:ValueError")
+
+
+def test_classify_dispatch_error_defaults_to_permanent():
+    from hal.dispatch import classify_dispatch_error, summarize_error
+
+    assert classify_dispatch_error(ValueError("bad payload")) == (False, "ValueError")
+    assert classify_dispatch_error(RuntimeError("queue is full")) == (True, "RuntimeError")
+    assert classify_dispatch_error(asyncio.TimeoutError()) == (True, "TimeoutError")
+    assert summarize_error(ValueError("a" * 400)).endswith("…")
 # HASHI-Fingerprint: hfp_41e29b3efc0945b29b6e0130f9ce12f3

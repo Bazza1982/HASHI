@@ -9,8 +9,106 @@ prove the operation was accepted.
 """
 from __future__ import annotations
 
+import asyncio
+import builtins
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+from orchestrator.function_worker_protocol import (
+    FunctionWorkerDisconnected,
+    FunctionWorkerRemoteError,
+)
+
+# Failures that can clear up on their own and are therefore worth retrying with
+# the same idempotency key.
+_TRANSIENT_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    asyncio.TimeoutError,
+    TimeoutError,
+    ConnectionError,
+    BrokenPipeError,
+    EOFError,
+)
+
+# OSError subclasses that will never clear up by retrying.
+_PERMANENT_OS_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    PermissionError,
+    FileNotFoundError,
+    NotADirectoryError,
+    IsADirectoryError,
+)
+
+# Unexpected exception types are only retried when the message itself proves a
+# queue/transport hiccup; everything else is reported as non-retryable instead
+# of being retried five times and then swallowed.
+_TRANSIENT_MESSAGE_MARKERS: tuple[str, ...] = (
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "temporarily not available",
+    "try again",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "broken pipe",
+    "queue is full",
+    "queue full",
+    "database is locked",
+)
+
+
+def _is_transient_type_name(name: str) -> bool:
+    """Classify an exception type name reported by a Worker process."""
+    if not name:
+        return False
+    if name == "FunctionWorkerDisconnected":
+        return True
+    cls = getattr(builtins, name.strip(), None)
+    if not isinstance(cls, type):
+        return False
+    if issubclass(cls, _PERMANENT_OS_ERROR_TYPES):
+        return False
+    return issubclass(cls, _TRANSIENT_ERROR_TYPES + (OSError,))
+
+
+def classify_dispatch_error(exc: BaseException) -> tuple[bool, str]:
+    """Return ``(transient, exception_type)`` for a dispatch failure.
+
+    Argument/type errors, unknown targets, unsupported operations and
+    permission problems are permanent: retrying them only hides the real cause
+    and delays an honest failure. Retry is reserved for transport/queue faults
+    and for a Worker that is restarting (``FunctionWorkerDisconnected`` is a
+    RuntimeError, not a ConnectionError, so it needs an explicit case).
+    """
+    kind = type(exc).__name__
+    if isinstance(exc, FunctionWorkerDisconnected):
+        # The Worker exits/restarts routinely; the prompt was never delivered.
+        return True, kind
+    if isinstance(exc, FunctionWorkerRemoteError):
+        remote_kind = str(exc.error.get("type") or "").strip()
+        message = str(exc.error.get("message") or "").casefold()
+        transient = _is_transient_type_name(remote_kind) or any(
+            marker in message for marker in _TRANSIENT_MESSAGE_MARKERS
+        )
+        return transient, f"{kind}:{remote_kind}" if remote_kind else kind
+    if isinstance(exc, _PERMANENT_OS_ERROR_TYPES):
+        return False, kind
+    if isinstance(exc, _TRANSIENT_ERROR_TYPES + (OSError,)):
+        return True, kind
+    message = str(exc).casefold()
+    if any(marker in message for marker in _TRANSIENT_MESSAGE_MARKERS):
+        return True, kind
+    return False, kind
+
+
+def summarize_error(exc: BaseException, limit: int = 240) -> str:
+    """One-line, bounded error summary safe to persist in a receipt."""
+    message = " ".join(str(exc).split())
+    if not message:
+        return "(no message)"
+    if len(message) > limit:
+        return message[: limit - 1] + "…"
+    return message
 
 
 @dataclass(frozen=True)
@@ -84,8 +182,9 @@ def resolve_agent_target(
 class GatewayDispatchAdapter(DispatchAdapter):
     """Executes through the live Workbench API server (real runtimes only)."""
 
-    def __init__(self, server):
+    def __init__(self, server, logger: logging.Logger | None = None):
         self._server = server
+        self._logger = logger or getattr(server, "logger", None) or logging.getLogger("hal.dispatch")
 
     def _runtime_for(self, agent_name: str | None):
         runtimes = self._server._runtime_map()
@@ -136,10 +235,17 @@ class GatewayDispatchAdapter(DispatchAdapter):
                 evidence={"run_idempotency_key": idempotency_key},
             )
         except Exception as exc:  # noqa: BLE001 — adapter must never raise
+            transient, error_type = classify_dispatch_error(exc)
+            summary = summarize_error(exc)
             return DispatchResult(
                 accepted=False,
-                transient=True,
-                detail=f"prompt dispatch failed transiently: {exc}",
+                transient=transient,
+                detail=(
+                    "prompt dispatch failed "
+                    f"({'transient' if transient else 'non-retryable'}): "
+                    f"{error_type}: {summary}"
+                ),
+                evidence={"exception_type": error_type, "retryable": transient},
             )
 
     async def dispatch_command(
