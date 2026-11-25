@@ -174,7 +174,7 @@ async def _hashideploy_scenario(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0]["code_root"] == tmp_path / "source"
     assert calls[0]["runtime_command"] == [sys.executable, "-B"]
-    assert "ready to reboot" in messages[-1].casefold()
+    assert "functions update is ready" in messages[-1].casefold()
     context.args = ["--restart"]
     await hashideploy.hashideploy_command(runtime, update, context)
     assert len(calls) == 1
@@ -316,4 +316,4 @@ async def test_hashideploy_cancellation_keeps_preparation_busy_until_receipt(tmp
     await hashideploy.hashideploy_command(runtime, update, context)
     assert len(calls) == 2
     messages.get_nowait()  # New preparation notice.
-    assert "ready to reboot" in messages.get_nowait().casefold()
+    assert "functions update is ready" in messages.get_nowait().casefold()
