@@ -196,7 +196,7 @@ async def test_saved_language_command_menu_is_restored_as_chat_scope(tmp_path) -
     assert len(scoped) == 1
     assert scoped[0][1]["scope"].chat_id == 42
     descriptions = {item.command: item.description for item in scoped[0][0]}
-    assert descriptions["reboot"] == "热重启代理"
+    assert descriptions["reboot"] == "重启当前代理"
 
 
 @pytest.mark.asyncio
