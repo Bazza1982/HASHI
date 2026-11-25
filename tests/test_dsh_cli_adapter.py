@@ -539,11 +539,25 @@ def test_dsh_session_projcache_usage_helpers(tmp_path: Path, monkeypatch):
     assert dsh._read_dsh_session_totals("sid-a") == totals
 
     # A brand-new session has no prior snapshot; the whole total is this turn.
-    assert dsh._dsh_turn_usage(None, totals) == totals
+    assert dsh._dsh_turn_usage(None, totals, fresh_session=True) == totals
+    # An existing session without a baseline holds cumulative history, so a
+    # missing snapshot must never be priced as this turn's provider usage.
+    assert dsh._dsh_turn_usage(None, totals) is None
     # Re-reading an unchanged snapshot is not a turn.
-    assert dsh._dsh_turn_usage(totals, totals) is None
+    assert dsh._dsh_turn_usage(totals, totals, revision_advanced=False) is None
+    # A revision bump is required before an existing session's delta is trusted.
+    grown = {**totals, "outputTokens": totals["outputTokens"] + 10}
+    assert dsh._dsh_turn_usage(totals, grown) is None
+    assert dsh._dsh_turn_usage(totals, grown, revision_advanced=True) == {
+        "uncachedInputTokens": 0,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "outputTokens": 10,
+    }
     # Compaction or session reset must never fabricate a negative turn.
-    assert dsh._dsh_turn_usage(totals, {**totals, "outputTokens": 10}) is None
+    shrunk = dict(totals)
+    shrunk["cacheReadTokens"] = 0
+    assert dsh._dsh_turn_usage(totals, shrunk, revision_advanced=True) is None
     # Unreadable store keeps the estimate path.
     assert dsh._dsh_turn_usage(totals, None) is None
 
@@ -590,7 +604,9 @@ async def test_dsh_usage_wait_is_bounded_when_the_store_never_updates(
     stale = await dsh._await_dsh_usage_snapshot("sid-stale", baseline)
     assert stale == baseline
     assert time.monotonic() - started < 2.0
-    assert dsh._dsh_turn_usage(baseline[1], stale[1]) is None
+    # No new revision means no new turn: a late flush of the previous turn must
+    # not be reported as this turn's provider usage.
+    assert dsh._dsh_turn_usage(baseline[1], stale[1], revision_advanced=False) is None
 
 
 @pytest.mark.asyncio
@@ -624,6 +640,50 @@ async def test_dsh_acp_turn_usage_comes_from_session_projcache(
         assert res2.usage.input_tokens == 1_500
         assert res2.usage.output_tokens == 200
         assert res2.usage.prompt_cache_hit_tokens == 500
+    finally:
+        await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_resumed_session_without_baseline_keeps_estimate(
+    tmp_path: Path, monkeypatch
+):
+    """CRC-225-01: an existing session must not price its whole history as one turn."""
+
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+
+    try:
+        res1 = await adapter.generate_response("usage turn one", "req-crc-u1")
+        assert res1.is_success is True
+        assert res1.usage is not None
+
+        real_read = dsh._read_dsh_session_snapshot
+        calls = {"count": 0}
+
+        def flaky_read(session_id):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                # Existing session, but the pre-turn snapshot is unreadable.
+                return None
+            return real_read(session_id)
+
+        monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", flaky_read)
+
+        started = time.monotonic()
+        res2 = await adapter.generate_response("usage turn two", "req-crc-u2")
+        # No baseline means no wait and no provider usage claim.
+        assert time.monotonic() - started < 5.0
+        assert res2.is_success is True
+        assert res2.usage is None
+        assert (res2.stream_metadata or {}).get("token_usage_source") == "estimated"
     finally:
         await adapter.shutdown()
 

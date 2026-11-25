@@ -280,6 +280,8 @@ _DSH_USAGE_FLUSH_POLL_SEC = 0.025
 async def _await_dsh_usage_snapshot(
     session_id: str,
     baseline: tuple[int, dict[str, int]] | None,
+    *,
+    fresh_session: bool = False,
 ) -> tuple[int, dict[str, int]] | None:
     """Wait briefly for DSH to persist the counters for the turn just finished.
 
@@ -287,8 +289,14 @@ async def _await_dsh_usage_snapshot(
     so the first read can still show the previous turn.  The wait is keyed on
     the projection revision and tightly bounded, so a missing or stalled store
     falls back to the local estimate instead of delaying the turn.
+
+    An existing session without a usable baseline gets no wait at all: its
+    counters are cumulative, so whatever the store holds now (including a
+    previous turn flushed late) is history, not this turn's usage.
     """
 
+    if baseline is None and not fresh_session:
+        return None
     baseline_seq = baseline[0] if baseline is not None else None
     baseline_totals = baseline[1] if baseline is not None else None
     deadline = time.monotonic() + _DSH_USAGE_FLUSH_BUDGET_SEC
@@ -310,18 +318,32 @@ async def _await_dsh_usage_snapshot(
 def _dsh_turn_usage(
     before: Mapping[str, int] | None,
     after: Mapping[str, int] | None,
+    *,
+    fresh_session: bool = False,
+    revision_advanced: bool = False,
 ) -> dict[str, int] | None:
     """Return one turn's counter delta, or ``None`` when it is not usable.
 
-    A fresh session legitimately starts with an empty snapshot, so a missing
-    ``before`` counts as all zeros.  Negative deltas mean the store was reset
-    or compacted mid-turn; keeping the estimate is safer than reporting a
+    Only a genuinely new session may read a missing ``before`` as all zeros;
+    for an existing session the same snapshot is the whole session history, so
+    an unreadable baseline keeps the local estimate instead of reporting history
+    as one turn.  For the same reason an existing session must also show a new
+    projection revision: without one the delta would either be empty or replay
+    a previous turn that DSH flushed late.  Negative deltas mean the store was
+    reset or compacted mid-turn; keeping the estimate is safer than reporting a
     fabricated negative turn.
     """
 
     if after is None:
         return None
-    baseline = before or {}
+    if before is None:
+        if not fresh_session:
+            return None
+        baseline: Mapping[str, int] = {}
+    elif not revision_advanced:
+        return None
+    else:
+        baseline = before
     delta: dict[str, int] = {}
     for name in _DSH_USAGE_COUNTERS:
         previous = int(baseline.get(name, 0) or 0)
@@ -1551,10 +1573,18 @@ class DshCLIAdapter(BaseBackend):
                 self._update_handler = None
                 await self._drain_stream_event_tasks()
 
-            usage_after = await _await_dsh_usage_snapshot(session_id, usage_before)
+            usage_after = await _await_dsh_usage_snapshot(
+                session_id, usage_before, fresh_session=created_fresh_session
+            )
             turn_usage_delta = _dsh_turn_usage(
                 usage_before[1] if usage_before is not None else None,
                 usage_after[1] if usage_after is not None else None,
+                fresh_session=created_fresh_session,
+                revision_advanced=(
+                    usage_before is not None
+                    and usage_after is not None
+                    and usage_after[0] > usage_before[0]
+                ),
             )
             token_usage = (
                 TokenUsage(
