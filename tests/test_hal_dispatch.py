@@ -126,6 +126,40 @@ def test_prompt_permission_error_is_not_retried():
     assert "PermissionError" in result.detail
 
 
+def test_prompt_worker_restart_stays_retryable():
+    from orchestrator.function_worker_protocol import FunctionWorkerDisconnected
+
+    adapter = GatewayDispatchAdapter(
+        _raising_server(FunctionWorkerDisconnected("lily worker is disconnected"))
+    )
+    result = _dispatch_prompt(adapter)
+    assert result.accepted is False
+    assert result.transient is True, "a restarting Worker must keep the retry budget"
+    assert "FunctionWorkerDisconnected" in result.detail
+
+
+def test_remote_worker_error_is_classified_by_its_reported_type():
+    from hal.dispatch import classify_dispatch_error
+    from orchestrator.function_worker_protocol import (
+        FunctionWorkerDisconnected,
+        FunctionWorkerRemoteError,
+    )
+
+    assert classify_dispatch_error(
+        FunctionWorkerDisconnected("worker exited")
+    ) == (True, "FunctionWorkerDisconnected")
+    assert classify_dispatch_error(
+        FunctionWorkerRemoteError(
+            "prompt", {"type": "TimeoutError", "message": "worker still busy"}
+        )
+    ) == (True, "FunctionWorkerRemoteError:TimeoutError")
+    assert classify_dispatch_error(
+        FunctionWorkerRemoteError(
+            "prompt", {"type": "ValueError", "message": "text must be str"}
+        )
+    ) == (False, "FunctionWorkerRemoteError:ValueError")
+
+
 def test_classify_dispatch_error_defaults_to_permanent():
     from hal.dispatch import classify_dispatch_error, summarize_error
 

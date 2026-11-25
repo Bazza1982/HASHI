@@ -17,7 +17,8 @@ import asyncio
 import json
 import logging
 import os
-import shutil
+import sqlite3
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -1159,29 +1160,95 @@ def _legacy_store_path(server) -> Path:
     return _bridge_home(server) / "hal" / "hal_v1.sqlite"
 
 
-def _migrate_legacy_store(legacy: Path, target: Path, logger) -> None:
-    """Move a database created by the old in-tree default into the state dir.
+def _publish_migrated_store(temp: Path, target: Path) -> bool:
+    """Publish a finished migration copy as ``target`` without overwriting it.
 
-    WAL sidecar files travel with the database (``-wal``/``-shm``), so the
-    migrated store keeps every committed rule and execution. When the state
-    copy already exists nothing is touched: the live state dir wins.
+    Hard-linking is atomic and fails when ``target`` already exists, so a live
+    state database can never be replaced by a migrated copy. Filesystems
+    without hard links fall back to an exclusive create followed by a rename.
+    """
+    try:
+        os.link(temp, target)
+    except FileExistsError:
+        return False
+    except OSError:
+        if target.exists():
+            return False
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.close(fd)
+        os.replace(temp, target)
+        return True
+    temp.unlink(missing_ok=True)
+    return True
+
+
+def _migrate_legacy_store(legacy: Path, target: Path, logger) -> None:
+    """Copy a database created by the old in-tree default into the state dir.
+
+    The copy is taken with ``sqlite3.Connection.backup()``, which produces one
+    consistent database file with every committed frame (including frames that
+    only exist in the source ``-wal``). Moving ``db``/``-wal``/``-shm`` one file
+    at a time could be interrupted after the database had already moved, and the
+    next startup would then skip the migration because the target existed —
+    stranding committed rows in the leftover WAL.
+
+    The copy is published atomically and an existing state database is never
+    overwritten; the legacy file is removed only after the new one is in place,
+    and any failure leaves it untouched.
     """
     if not legacy.is_file() or target.exists():
         return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in ("", "-wal", "-shm"):
-        source = legacy.with_name(legacy.name + suffix)
-        if not source.is_file():
-            continue
-        destination = target.with_name(target.name + suffix)
+    temp: Path | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=target.name + ".migrating-", suffix=".tmp", dir=target.parent
+        )
+        os.close(fd)
+        temp = Path(temp_name)
+        temp.unlink()  # sqlite3.connect must create the file itself
+        source = sqlite3.connect(str(legacy))
         try:
-            os.replace(source, destination)
-        except OSError:
-            shutil.copy2(source, destination)
+            destination = sqlite3.connect(str(temp))
             try:
-                source.unlink()
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
+        finally:
+            source.close()
+        if not _publish_migrated_store(temp, target):
+            if logger is not None:
+                logger.info("HAL store migration skipped: %s already exists", target)
+            return
+        temp = None  # published (or removed by the helper); nothing to clean up
+    except Exception as exc:  # noqa: BLE001 — migration must never disable HAL
+        if logger is not None:
+            logger.warning(
+                "HAL store migration failed (%s: %s); keeping legacy store at %s",
+                type(exc).__name__,
+                exc,
+                legacy,
+            )
+        return
+    finally:
+        if temp is not None:
+            try:
+                temp.unlink()
             except OSError:
                 pass
+    for suffix in ("", "-wal", "-shm"):
+        leftover = legacy.with_name(legacy.name + suffix)
+        try:
+            leftover.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # e.g. still open in another process
+            if logger is not None:
+                logger.info("HAL store legacy file kept: %s (%s)", leftover, exc)
     if logger is not None:
         logger.info("HAL store migrated from %s to %s", legacy, target)
 

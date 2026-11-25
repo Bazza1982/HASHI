@@ -10,9 +10,15 @@ prove the operation was accepted.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import logging
 from dataclasses import dataclass
 from typing import Any
+
+from orchestrator.function_worker_protocol import (
+    FunctionWorkerDisconnected,
+    FunctionWorkerRemoteError,
+)
 
 # Failures that can clear up on their own and are therefore worth retrying with
 # the same idempotency key.
@@ -51,17 +57,43 @@ _TRANSIENT_MESSAGE_MARKERS: tuple[str, ...] = (
 )
 
 
+def _is_transient_type_name(name: str) -> bool:
+    """Classify an exception type name reported by a Worker process."""
+    if not name:
+        return False
+    if name == "FunctionWorkerDisconnected":
+        return True
+    cls = getattr(builtins, name.strip(), None)
+    if not isinstance(cls, type):
+        return False
+    if issubclass(cls, _PERMANENT_OS_ERROR_TYPES):
+        return False
+    return issubclass(cls, _TRANSIENT_ERROR_TYPES + (OSError,))
+
+
 def classify_dispatch_error(exc: BaseException) -> tuple[bool, str]:
     """Return ``(transient, exception_type)`` for a dispatch failure.
 
     Argument/type errors, unknown targets, unsupported operations and
     permission problems are permanent: retrying them only hides the real cause
-    and delays an honest failure. Retry is reserved for transport/queue faults.
+    and delays an honest failure. Retry is reserved for transport/queue faults
+    and for a Worker that is restarting (``FunctionWorkerDisconnected`` is a
+    RuntimeError, not a ConnectionError, so it needs an explicit case).
     """
     kind = type(exc).__name__
+    if isinstance(exc, FunctionWorkerDisconnected):
+        # The Worker exits/restarts routinely; the prompt was never delivered.
+        return True, kind
+    if isinstance(exc, FunctionWorkerRemoteError):
+        remote_kind = str(exc.error.get("type") or "").strip()
+        message = str(exc.error.get("message") or "").casefold()
+        transient = _is_transient_type_name(remote_kind) or any(
+            marker in message for marker in _TRANSIENT_MESSAGE_MARKERS
+        )
+        return transient, f"{kind}:{remote_kind}" if remote_kind else kind
     if isinstance(exc, _PERMANENT_OS_ERROR_TYPES):
         return False, kind
-    if isinstance(exc, (_TRANSIENT_ERROR_TYPES, OSError)):
+    if isinstance(exc, _TRANSIENT_ERROR_TYPES + (OSError,)):
         return True, kind
     message = str(exc).casefold()
     if any(marker in message for marker in _TRANSIENT_MESSAGE_MARKERS):
@@ -205,16 +237,6 @@ class GatewayDispatchAdapter(DispatchAdapter):
         except Exception as exc:  # noqa: BLE001 — adapter must never raise
             transient, error_type = classify_dispatch_error(exc)
             summary = summarize_error(exc)
-            self._logger.warning(
-                "HAL prompt dispatch failed exec=%s stage=%s target=@%s retryable=%s "
-                "exception_type=%s error=%s",
-                exec_id,
-                stage,
-                target_agent,
-                transient,
-                error_type,
-                summary,
-            )
             return DispatchResult(
                 accepted=False,
                 transient=transient,
