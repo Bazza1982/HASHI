@@ -489,6 +489,13 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
             on_stream_event=feedback.on_stream_event,
             audit_active=audit_active,
         )
+        # Advance the PCM incremental baseline only when this delivery
+        # actually succeeded; failed turns re-send changed sections next time.
+        runtime_pipeline.promote_pcm_baseline_after_delivery(
+            runtime,
+            item,
+            generation,
+        )
         await _publish_worker_metadata(
             runtime,
             transition="generation end",

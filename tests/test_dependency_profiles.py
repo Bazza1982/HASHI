@@ -52,7 +52,7 @@ def test_standard_and_all_profiles_are_exact_unions():
     extras = project["optional-dependencies"]
 
     assert _keys(extras["standard"]) == _keys(
-        extras["media"] + extras["remote"] + extras["tui"]
+        extras["media"] + extras["remote"] + extras["tui"] + extras["browser"]
     )
 
     declared_feature_groups = (

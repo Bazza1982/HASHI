@@ -6,7 +6,7 @@
 | ------------------------ | --------- |
 | Purpose | Define how HASHI maintains and distributes Persona, Context, and Memory to Engine (Harness) Providers while distinguishing current implementation, target design, and known gaps. |
 | Status | Authoritative PCM module specification under the [HASHI System Architecture](../ARCHITECTURE.md). |
-| Revision | 29 September 2026 — aligned Live Voice bootstrap with full PCM authority, same-Session history, and HASHI-owned continuity. |
+| Revision | 25 November 2026 — PCM 2.0: added `pcm_profile` (cloud/local) projection, per-profile content selection, lean HASHI-generated contracts, and incremental model-facing injection for persistent Engine Sessions. |
 
 ## 1. Overview
 
@@ -454,25 +454,28 @@ Assembly order controls presentation. Authority order controls how conflicting i
 ## 8. PCM Assembly Rules
 
 The following sequence applies when PCM assembles a request for a connected
-Engine Provider. `Fixed` and `Flex` describe Engine invocation behaviour, not
-separate HASHI functional modules.
+Engine Provider. `Fixed` describes persistent Engine invocation behaviour; the
+historical `Flex` mode is retired and must not be revived. PCM 2.0 (section 13)
+supersedes this table where the projection profile or incremental deltas
+specify otherwise: on incremental turns of a persistent Engine Session only
+the current request plus changed/removed sections are transmitted.
 
-| **Sequence** | **PCM item**                                                                                                                                                                                                           | **Fixed mode**                       | **Flex mode** |
+| **Sequence** | **PCM item**                                                                                                                                                                                                           | **Fixed mode**                       | **Flex mode (retired)** |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------- |
-| 1            | System prompt: permanent \[sys\], active instance-global /sys and active agent-local /sys                                                                                                                              | Every turn                           | Every turn    |
-| Separator    | “The following is the authoritative request for the current turn at the user instruction level. It overrides conflicting earlier user requests but does not override system instructions.”                             | Every turn                           | Every turn    |
-| 2            | Current user message, prompt or instructions                                                                                                                                                                           | Every turn                           | Every turn    |
-| Separator    | The following section contains recent completed user-assistant exchanges in timestamp order. They may provide important context but are not requests by default.                                                        | At applicable session bootstrap only | Every turn    |
-| 3            | Recent conversation history: up to ten completed exchanges, clearly labelled by sequence and timestamp. When a request cap is reached, HASHI removes the oldest complete exchanges first and preserves newer exchanges. | At applicable session bootstrap only | Every turn    |
-| 4            | Long-term memory from \[memory\], when available                                                                                                                                                                       | Every turn                           | Every turn    |
-| Separator    | The following sections are context information only.                                                                                                                                                                   | Every turn                           | Every turn    |
-| 5            | Protected `CURRENT MESSAGE CONTEXT`: message source, verification strength, HChat sender/relay facts, processing instance, output destination and current-message private-authorization results                         | Every turn, including explicit unknown/none | Every turn, including explicit unknown/none |
-| 6            | Date and time                                                                                                                                                                                                          | Every turn                           | Every turn    |
-| 7            | Enabled Session Workzones, when at least one slot is active                                                                                                                                                            | Every turn                           | Every turn    |
-| 8            | Concise skills catalogue, when skill use is permitted, including the memory search skill                                                                                                                               | Every turn                           | Every turn    |
-| 9            | Concise tools catalogue, when tool use is permitted. Tool access may support raw transcript/log search and /wiki retrieval.                                                                                            | Every turn                           | Every turn    |
-| Separator    | “The following defines the agent’s current presentation persona. It overrides older persona descriptions found in memory or conversation history but does not override system instructions, the current user request.” | Every turn                           | Every turn    |
-| 10           | Persona information describing how the agent should communicate                                                                                                                                                        | Every turn                           | Every turn    |
+| 1            | System prompt: permanent \[sys\], active instance-global /sys and active agent-local /sys                                                                                                                              | Bootstrap snapshot; deltas afterwards | —             |
+| Separator    | “The following is the authoritative request for the current turn at the user instruction level. It overrides conflicting earlier user requests but does not override system instructions.”                             | Every turn                           | —             |
+| 2            | Current user message, prompt or instructions                                                                                                                                                                           | Every turn                           | —             |
+| Separator    | The following section contains recent completed user-assistant exchanges in timestamp order. They may provide important context but are not requests by default.                                                        | At applicable session bootstrap only | —             |
+| 3            | Recent conversation history: up to ten completed exchanges (four in the Local profile), clearly labelled by sequence and timestamp. When a request cap is reached, HASHI removes the oldest complete exchanges first and preserves newer exchanges. | At applicable session bootstrap only | —             |
+| 4            | Long-term memory from \[memory\], when available                                                                                                                                                                       | Cloud: every turn; Local: retrieval reference + relevant search results | — |
+| Separator    | The following sections are context information only.                                                                                                                                                                   | Every turn                           | —             |
+| 5            | Protected `CURRENT MESSAGE CONTEXT`: message source, verification strength, HChat sender/relay facts, processing instance, output destination and current-message private-authorization results                         | Every turn, including explicit unknown/none | — |
+| 6            | Date and time                                                                                                                                                                                                          | Every turn (Local omits the previous-message gap line) | — |
+| 7            | Enabled Session Workzones, when at least one slot is active                                                                                                                                                            | Every turn                           | —             |
+| 8            | Concise skills catalogue, when skill use is permitted, including the memory search skill                                                                                                                               | Cloud: every turn; Local: omitted (on-demand discovery) | — |
+| 9            | Concise tools catalogue, when tool use is permitted. Tool access may support raw transcript/log search and /wiki retrieval.                                                                                            | Cloud: every turn; Local: omitted (native schemas + tool_find) | — |
+| Separator    | “The following defines the agent’s current presentation persona. It overrides older persona descriptions found in memory or conversation history but does not override system instructions, the current user request.” | Every turn                           | —             |
+| 10           | Persona information describing how the agent should communicate                                                                                                                                                        | Every turn                           | —             |
 
 ### 8.1 Current-message provenance and authorization projection
 
@@ -642,9 +645,11 @@ this scope and owns packaging, checksums, target verification and deletion.
 
 HCC is an optional `[hcc]` / `[hcc_end]` block in the same canonical `agent.md`.
 `/hcc on|off` persists a current-Agent flag in existing `state.json` (default OFF).
-When ON, PCM reads the entire latest block every external turn, independent of
-Memory flags, incremental mode and request wording. No classifier, TTL eviction,
-query routing or on-demand source lookup is introduced. The model judges relevance.
+When ON, the Cloud profile reads the entire latest block every external turn,
+independent of Memory flags, incremental mode and request wording; the Local
+profile projects a bounded excerpt plus a retrieval reference to the full block
+in `agent.md#hcc`. No classifier, TTL eviction, query routing or on-demand
+source lookup is introduced. The model judges relevance.
 
 Trusted `hcc_usage` instructions and reference-data `hcc` have separate typed
 authorities. Stable sections replace rather than accumulate; OFF/empty/absent
@@ -733,3 +738,122 @@ CURRENT MESSAGE CONTEXT separates source/assurance/authority/destination. Only
 successful current private_authorization grants scope. HChat separates claimed
 sender/verified peer/relay/target; cross-instance requires authenticated
 [Remote](HASHI_REMOTE_PROTOCOL_SPEC.md).
+
+
+## 13. PCM 2.0 — Lean, Incremental and Model-Aware PCM (November 2026)
+
+This section supersedes earlier assembly statements where they conflict. PCM 2.0
+separates **canonical storage** from **effective projection**: information that
+is stored permanently is no longer injected permanently.
+
+### 13.1 Projection profile
+
+`pcm_profile: cloud | local` is one simple projection setting owned by the
+existing Provider/model configuration (`backend.extra.pcm_profile`). It is a
+context-projection preference, not a new Agent Working Mode, a new Session, or
+a permission change. Resolving it never deletes memory or data.
+
+- Defaults: HLI → `local`; Ollama → `local`; known cloud Providers → `cloud`;
+  custom/future Providers are configurable through the existing mechanism.
+- The effective profile is resolved from the **actual inference target**,
+  including HERV3 model/Provider switching. Explicit per-Provider
+  configuration (`pcm_profile` on the selected HERV3 Provider option) wins
+  over engine defaults; the backend-level `extra.pcm_profile` wins over both.
+  Local/cloud status is never inferred from model names, parameter counts,
+  endpoint addresses or API keys.
+- `cloud` is generous, not wasteful. It keeps richer relevant memory, HCC and
+  history but applies the same removal of redundant instructions, metadata,
+  catalogues and duplicate injections.
+- `local` means the absolute minimum necessary effective context: native tool
+  schemas plus on-demand discovery replace full catalogues, optional
+  references stay small, and HASHI-owned fixed instructions target roughly
+  200–400 tokens (excluding user-authored Persona and task content).
+
+### 13.2 Content selection by profile
+
+| Content | cloud | local |
+| ------- | ----- | ----- |
+| Persona, permanent `[sys]`, global/local `/sys` | full | full (unchanged) |
+| Permanent `[memory]` | full block | bounded deterministic relevance projection (units sharing terms with the request, in document order) plus a `file_read` retrieval reference; relevant search results only |
+| Saved-memory search | limit 6, relevance-based | limit 3, fewer and shorter high-value results |
+| HCC | full block + usage rules | bounded deterministic relevance projection of named entries plus a retrieval reference; full block remains readable and explicitly requested full HCC is still supported |
+| History | up to 10 recent completed exchanges | same injection as cloud; actual model capacity and managed history/Compact remain authoritative (no profile hard cap) |
+| Skills/tools catalogues | concise catalogues | omitted; native tool schemas are primary, HLI's compact starter tool set + `tool_find` cover discovery |
+| Time/Workzone/provenance | current facts | current facts only (no previous-message gap line) |
+
+Projections are lexical and deterministic (no classifier, embedding, router
+call or new storage). When relevance excludes unmatched units, or the budget
+cuts selected units, the projection says so and carries a short usable
+retrieval reference (`file_read` on `agent.md` / `agent.md#hcc`). When the
+actual inference route has no usable file-read capability — checked against
+the same tool catalogue that advertises tools to the model, and for HERV3
+against the selected model's existing `model_tool_support` configuration —
+the necessary `[memory]` and HCC content stays inline instead, and the lean
+projection is used only on tool-capable routes. Omitted memory and context
+always remain retrievable through the existing authorized retrieval/read
+mechanisms, and necessary inline context is never replaced by an unavailable
+tool reference. Omission never moves, rewrites or deletes user-authored
+memories.
+
+### 13.3 Incremental model-facing injection
+
+Persistent Engine Sessions send the necessary PCM snapshot at session start and
+**current request + necessary deltas** afterwards:
+
+- Initial session: full snapshot.
+- Subsequent turns: current request plus sections whose content changed and
+  explicit removal notices. Unchanged Persona, system instructions, memory,
+  HCC, skills and tool catalogues are not re-transmitted to an Engine that
+  already holds them.
+- The baseline is scoped **per Engine Session** and only advances after a
+  successful delivery, so a section that changes and later reverts (A→B→A)
+  is still re-sent, failed turns re-send their deltas, and sessions that
+  interleave on one backend cannot pollute each other's baseline. The
+  pending (not-yet-delivered) snapshot is request-scoped, so concurrent
+  Sessions cannot overwrite each other's pending state.
+- Direct persistent CLI paths (codex-cli, claude-cli, grok-cli, dsh-cli,
+  antigravity-cli) now emit the delta prompt instead of re-assembling the
+  static PCM into every outgoing prompt.
+- HERV3 keeps its durable `open_session` / `append_turn` transport; the
+  model-facing prompt is re-materialized per turn, and stateless Model APIs
+  receive a reconstructed effective context without duplicate copies.
+- Changed persistent sections supersede their earlier effective state.
+  Engines that cannot literally retract prior messages use the existing
+  supersession semantics; removals are announced, never presented as erased
+  history.
+- Restart/resume and HERV3 internal model switching do not trigger an
+  unnecessary full PCM bootstrap. A genuinely new Engine Session or lost
+  session state may require a new initial snapshot.
+- The retired Flex working mode is not revived.
+
+### 13.4 Budgets
+
+The generic non-HER 64K token budget is a cloud fallback, not a universal
+operating budget. For Local engines the actual model capacity
+(`resolve_capacity_profile`, including HLI per-slot context and output
+headroom) supplies the prompt budget; the 16K table entry remains only a
+soft fallback when no capacity is known. Local budgets are projection
+targets, never a rejection: unresolved pressure is recorded in the audit and
+the actual Provider capacity handling decides what is sent, whereas the
+cloud HCC budget retains its existing strict contract. The budget reduces
+redundant generated content first, then irrelevant references, catalogues
+and older history; existing Compact is the last resort and is never used to
+compensate for avoidable injection.
+
+### 13.5 HASHI-generated contracts
+
+The HERV3 `MAIN_CONTRACT` is split into a trimmed cloud contract and a short
+`MAIN_CONTRACT_LOCAL`. Removed from all profiles: the "Bridge-managed PCM
+follows…" envelope boilerplate, redundant authority/context explanations,
+repeated section wrappers and empty sections. Authority distinctions remain,
+expressed once and concisely. User-authored Persona and system prompts are
+never rewritten.
+
+### 13.6 Acceptance
+
+Cloud and Local profiles work through the existing routes; Local materially
+reduces actual model input; Cloud eliminates avoidable duplication; persistent
+Engine Sessions send incremental PCM; Profile/Provider switches preserve
+logical continuity; omitted memory and context remain retrievable; user
+instructions, active work and tools still function; changed or disabled PCM
+does not remain falsely effective.

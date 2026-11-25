@@ -1294,6 +1294,7 @@ class FakeContextAssembler:
         extra_sections=None,
         inject_memory=True,
         incremental=False,
+        pcm_profile="cloud",
     ):
         return {
             "final_prompt": f"system\n\n{prompt}",

@@ -336,8 +336,13 @@ class ExchangeInbox:
 
     @contextmanager
     def _connection(self):
-        connection = sqlite3.connect(str(self.path), timeout=0.2)
+        # The inbox shares state/sessions.sqlite3 with every Function Worker and
+        # the Core, so a 200ms busy timeout lost normal write races (observed
+        # 547-1391ms) and surfaced SQLITE_BUSY as "inbox recovery failed". Wait
+        # a bounded 5s; the recovery loop still retries any genuine failure.
+        connection = sqlite3.connect(str(self.path), timeout=5.0)
         try:
+            connection.execute("PRAGMA busy_timeout = 5000")
             connection.row_factory = sqlite3.Row
             with connection:
                 yield connection

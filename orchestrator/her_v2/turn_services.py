@@ -19,6 +19,7 @@ from .commentary import (
     CommentaryPort,
     DraftResponseCommentary,
     NeutralCommentary,
+    PackagedCommentary,
 )
 from .models import Stage
 
@@ -81,6 +82,8 @@ class TurnServices(CommentaryPort):
         turn_id: str,
         downstream: CommentaryPort | None,
         commentary_interval_s: float = 150.0,
+        keepalive_threshold_s: float = 180.0,
+        liveness_delivery: Any | None = None,
         companion_enabled: bool = False,
         companion_interval_s: float = 300.0,
         companion_judge: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
@@ -90,6 +93,8 @@ class TurnServices(CommentaryPort):
         self.turn_id = str(turn_id)
         self.downstream = downstream
         self.commentary_interval_s = max(120.0, min(180.0, float(commentary_interval_s)))
+        self.keepalive_threshold_s = max(60.0, min(3600.0, float(keepalive_threshold_s)))
+        self.liveness_delivery = liveness_delivery
         self.companion_enabled = bool(companion_enabled)
         self.companion_interval_s = max(1.0, float(companion_interval_s))
         self.companion_judge = companion_judge
@@ -107,6 +112,7 @@ class TurnServices(CommentaryPort):
         self._pending_intervention = ""
         self._intervention_progress_revision = -1
         self._tasks: set[asyncio.Task] = set()
+        self._keepalive_tasks: dict[str, asyncio.Task] = {}
         self._companion_task: asyncio.Task | None = None
         self._forward_lock = asyncio.Lock()
         self._pending_commentary: deque[NeutralCommentary] = deque()
@@ -132,10 +138,22 @@ class TurnServices(CommentaryPort):
             self._companion_task.cancel()
         for task in tuple(self._tasks):
             task.cancel()
-        pending = [task for task in (self._companion_task, *tuple(self._tasks)) if task]
+        for task in tuple(self._keepalive_tasks.values()):
+            if not task.done():
+                task.cancel()
+        pending = [
+            task
+            for task in (
+                self._companion_task,
+                *tuple(self._tasks),
+                *tuple(self._keepalive_tasks.values()),
+            )
+            if task
+        ]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
+        self._keepalive_tasks.clear()
         self._companion_task = None
         self._pending_commentary.clear()
         self._pending_commentary_task = None
@@ -166,6 +184,12 @@ class TurnServices(CommentaryPort):
             "arguments_sha256": _digest(dict(arguments or {})),
             "started_at": self.clock(),
         }
+        if not self._closed and self.liveness_delivery is not None:
+            keepalive = asyncio.create_task(self._keepalive_liveness(call_id, name))
+            self._keepalive_tasks[call_id] = keepalive
+            keepalive.add_done_callback(
+                lambda _task, cid=call_id: self._keepalive_tasks.pop(cid, None)
+            )
         self._record("tool_started", tool=name, call_id=call_id)
         if not self._initial_ack_sent:
             self._initial_ack_sent = True
@@ -189,6 +213,9 @@ class TurnServices(CommentaryPort):
     ) -> None:
         call_id = str(tool_call_id or "")
         self._active_tools.pop(call_id, None)
+        keepalive = self._keepalive_tasks.pop(call_id, None)
+        if isinstance(keepalive, asyncio.Task) and not keepalive.done():
+            keepalive.cancel()
         fingerprint = _digest(
             {
                 "tool": str(tool_name or "tool"),
@@ -236,6 +263,33 @@ class TurnServices(CommentaryPort):
         tool["activity"]["root_count"] = len(facts.get("selected_roots") or [])
         tool["activity"]["matches"] = counters.get("matches")
         self.last_activity_at = self.clock()
+
+    async def _keepalive_liveness(self, call_id: str, name: str) -> None:
+        """Emit one deterministic, model-free liveness line after the budget.
+
+        The line is delivered directly as a pre-packaged ``PackagedCommentary``
+        through the transport boundary, so it never enters the Persona pipeline
+        and can never invoke the packager. A single ``sleep`` (no polling, no
+        model call) is the whole mechanism; the task is cancelled the moment the
+        tool completes.
+        """
+
+        try:
+            await self.sleep(self.keepalive_threshold_s)
+        except asyncio.CancelledError:
+            raise
+        if self._closed or call_id not in self._active_tools:
+            return
+        delivery = self.liveness_delivery
+        if delivery is None:
+            return
+        packaged = PackagedCommentary(
+            source_event_id=f"{self.turn_id}:keepalive:{call_id}",
+            stage=Stage.DIRECT,
+            text=f"{name} is still running.",
+            provenance="deterministic_keepalive",
+        )
+        await delivery.deliver_packaged_commentary(packaged)
 
     def snapshot(self) -> dict[str, Any]:
         now = self.clock()
@@ -341,19 +395,9 @@ class TurnServices(CommentaryPort):
     def _take_pending_commentary(self) -> NeutralCommentary:
         items = tuple(self._pending_commentary)
         self._pending_commentary.clear()
-        if len(items) == 1:
-            return items[0]
-        latest = items[-1]
-        return NeutralCommentary(
-            event_id=latest.event_id,
-            turn_id=latest.turn_id,
-            stage=latest.stage,
-            attempt=latest.attempt,
-            text="\n\n".join(item.text for item in items),
-            required_facts=tuple(dict.fromkeys(
-                fact for item in items for fact in item.required_facts
-            )),
-        )
+        # Only the newest pending update is meaningful. Older interim text can
+        # contradict it, so never stitch several updates into one message.
+        return items[-1]
 
     async def _deliver_commentary(self, commentary: NeutralCommentary) -> bool:
         # Called under the forward lock. Reserve before packaging/transport;

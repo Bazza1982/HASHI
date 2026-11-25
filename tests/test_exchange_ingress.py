@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
@@ -916,3 +918,29 @@ def test_inbound_reply_cannot_swap_the_original_conversation(tmp_path):
     with pytest.raises(ExchangeIngressPermissionError):
         service.accept(evidence=evidence, prompt=prompt)
 # HASHI-Fingerprint: hfp_b1b36e7e40734f018f7114ae40c237e9
+
+def test_exchange_inbox_waits_out_a_short_concurrent_writer(tmp_path):
+    inbox = ExchangeInbox(tmp_path / "sessions.sqlite3")
+    with inbox._connection() as connection:
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+    ready = threading.Event()
+    released = threading.Event()
+
+    def hold() -> None:
+        holder = sqlite3.connect(str(inbox.path), timeout=1.0)
+        holder.execute("BEGIN IMMEDIATE")
+        ready.set()
+        time.sleep(0.5)
+        holder.commit()
+        holder.close()
+        released.set()
+
+    worker = threading.Thread(target=hold)
+    worker.start()
+    assert ready.wait(5)
+    try:
+        assert inbox.purge() == 0
+    finally:
+        worker.join(timeout=5)
+    assert released.is_set()

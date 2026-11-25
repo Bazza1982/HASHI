@@ -65,6 +65,13 @@ from orchestrator.multimodal_contract import (
 
 
 INVALID_TOOL_CALL_REPAIR_LIMIT = 3
+# A Provider may end a long Tool loop with a technically complete but
+# unusable response (no text, no Tool call, finish_reason="stop"). That step
+# has no new Tool call, so resending exactly that step cannot replay an
+# already executed Tool. It is recovered in place, bounded by this limit and
+# by the shared local-recovery budget. Kept below the shared limit so one
+# interruption cannot consume the whole repair budget.
+EMPTY_RESPONSE_RECOVERY_LIMIT = 2
 _PROVIDER_FORENSIC_WRITE_LOCK = threading.Lock()
 
 
@@ -4789,6 +4796,7 @@ class OpenRouterAdapter(BaseBackend):
         repair_attempt_for_incident = 0
         repair_incident = 0
         recovery_attempts_used = 0
+        empty_response_recovery_attempts = 0
         active_forensic_path: Path | None = None
         last_forensic_path: Path | None = None
         total_tool_repair_requests = 0
@@ -5550,6 +5558,57 @@ class OpenRouterAdapter(BaseBackend):
                     active_forensic_path = None
                 recovery_attempts_used = 0
 
+                # Safe in-place recovery for an unusable Provider completion.
+                # By this point `messages` already contains every completed
+                # Tool result of the previous steps and this response added no
+                # Tool call, so resending the same step replays no Tool side
+                # effect. The outer stage retry cannot do this once an earlier
+                # step had side effects, which is exactly why long tasks used
+                # to die on their final step.
+                if str(decision.get("decision") or "") == "reject_empty_response":
+                    if (
+                        empty_response_recovery_attempts
+                        < EMPTY_RESPONSE_RECOVERY_LIMIT
+                        and not visible_partial_answer
+                        and not provider_call_emitted_text
+                        and bool(decision.get("error_retryable"))
+                        and (
+                            provider_call_limit is None
+                            or provider_attempt_serial < int(provider_call_limit)
+                        )
+                    ):
+                        empty_response_recovery_attempts += 1
+                        recovery_attempts_used = empty_response_recovery_attempts
+                        total_local_recovery_requests += 1
+                        initial_provider_recovery_kind = "empty_response_retry"
+                        last_text = ""
+                        last_structured_data = None
+                        continue
+                    terminal_decision = {
+                        **dict(decision),
+                        "empty_response_recovery_attempts": (
+                            empty_response_recovery_attempts
+                        ),
+                        "empty_response_recovery_limit": (
+                            EMPTY_RESPONSE_RECOVERY_LIMIT
+                        ),
+                        "provider_request_id": str(
+                            result.provider_response_id
+                            or result.transport_request_id
+                            or ""
+                        ),
+                    }
+                    last_text = ""
+                    break
+
+                if empty_response_recovery_attempts and (
+                    bool(decision.get("success"))
+                    or bool(decision.get("execute_tools"))
+                ):
+                    # A usable response ends this interruption; the next one
+                    # gets its own bounded recovery budget.
+                    empty_response_recovery_attempts = 0
+
                 # The protocol decision is persisted synchronously above. No
                 # tool side effect may occur before that durable boundary.
                 if not bool(decision.get("execute_tools")):
@@ -5902,6 +5961,18 @@ class OpenRouterAdapter(BaseBackend):
                     ),
                     "provider_local_recovery_limit": (
                         INVALID_TOOL_CALL_REPAIR_LIMIT
+                    ),
+                    **(
+                        {
+                            "provider_empty_response_recovery_count": (
+                                empty_response_recovery_attempts
+                            ),
+                            "provider_local_recovery_exhausted": True,
+                        }
+                        if not protocol_success
+                        and protocol_error_code == "PROVIDER_EMPTY_RESPONSE"
+                        and empty_response_recovery_attempts
+                        else {}
                     ),
                     "provider_protocol_forensic_path": (
                         str(last_forensic_path) if last_forensic_path else None

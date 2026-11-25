@@ -83,6 +83,16 @@ workspaces/*/skill_state.json
 
 state/
 
+# HAL rules/executions database must never live in the source tree.
+# Default path is <bridge_home>/state/hal/hal_v1.sqlite; this is a backstop
+# so an old in-tree database can never be committed to GitHub.
+/hal/*.sqlite
+/hal/*.sqlite-shm
+/hal/*.sqlite-wal
+hal/*.sqlite
+hal/*.sqlite-shm
+hal/*.sqlite-wal
+
 # Retired embedded Workbench. The supported successor frontend is external.
 /workbench/
 

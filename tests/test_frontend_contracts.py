@@ -118,6 +118,9 @@ def test_registry_maps_legacy_names_to_connector_neutral_ids():
     assert canonical_connector_id("api", ingress_transport="api_chat") == "backend_api"
     assert canonical_connector_id("api", ingress_transport="session-api") == "session_api"
     assert canonical_connector_id("workbench", ingress_transport="api_chat") == "backend_api"
+    # HAL automation dispatches through the internal connector, never a frontend.
+    assert canonical_connector_id("hal") == "internal"
+    assert canonical_connector_id("background-job-event") == "internal"
     assert (
         canonical_connector_id(
             "agentpresence",

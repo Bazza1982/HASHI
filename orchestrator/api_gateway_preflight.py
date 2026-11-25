@@ -10,7 +10,8 @@ from adapters.xai_oauth_credentials import (
     secrets_oauth_refresh_available,
     xai_api_credentials_available,
 )
-from orchestrator.pathing import resolve_agy_executable
+from pathlib import Path
+from orchestrator.pathing import resolve_agy_executable, resolve_dsh_invocation
 from orchestrator.flexible_backend_registry import CLI_ENGINES, removed_backend_reason
 
 
@@ -20,6 +21,7 @@ def _cli_command(global_config: Any, engine: str) -> str:
         "codex-cli": getattr(global_config, "codex_cmd", "codex"),
         "antigravity-cli": getattr(global_config, "agy_cmd", "agy"),
         "grok-cli": getattr(global_config, "grok_cmd", "grok"),
+        "dsh-cli": getattr(global_config, "dsh_cmd", "dsh"),
     }
     return str(mapping.get(engine, "") or "").strip()
 
@@ -35,6 +37,12 @@ def check_gateway_engine(global_config: Any, secrets: dict, engine: str) -> dict
         cmd = _cli_command(global_config, engine)
         if engine == "antigravity-cli":
             cmd = resolve_agy_executable(cmd)
+        if engine == "dsh-cli":
+            argv, _cwd, label = resolve_dsh_invocation(cmd)
+            exe_found = shutil.which(argv[0]) if argv else None
+            if exe_found and (Path(label).is_file() or label == exe_found):
+                return {"available": True, "reason": label or exe_found}
+            return {"available": False, "reason": f"'{cmd or engine}' not found"}
         found = shutil.which(cmd) if cmd else None
         if found:
             return {"available": True, "reason": found}

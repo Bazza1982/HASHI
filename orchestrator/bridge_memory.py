@@ -14,11 +14,19 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
+from collections.abc import Mapping
 
 from orchestrator.path_presentation import path_presentation_policy
 from orchestrator.pcm import PCMDocument, PCMValidationError, load_pcm_document
-from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled
+from orchestrator.hcc import HCC_USAGE_PROMPT, is_hcc_enabled, project_hcc_for_request
 from orchestrator import pcm_forget_memory
+from orchestrator import pcm_profile as pcm_profile_module
+from orchestrator.pcm_profile import (
+    CJK_RUN_RE as _CJK_RUN_RE,
+    LATIN_TOKEN_RE as _LATIN_TOKEN_RE,
+    cjk_query_substrings as _cjk_query_substrings,
+    tokenize_multilingual as _tokenize_multilingual,
+)
 from orchestrator.config_json import (
     ConfigConflictError,
     new_config_json,
@@ -29,6 +37,14 @@ from orchestrator.process_resources import path_lock as process_path_lock
 from tools.token_tracker import estimate_tokens as _estimate_tokens
 
 CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
+
+# HERV3 attaches the selected model's native function schemas to the same
+# request, so the PCM text catalogue only repeats names it already has. The
+# index keeps discovery cheap without duplicating descriptions or arguments.
+NATIVE_TOOL_INDEX_NOTE = (
+    "Index only: native function schemas carry each tool's description and "
+    "arguments. Call the tools directly."
+)
 
 sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
 memory_logger = logging.getLogger("BridgeU.Memory")
@@ -64,10 +80,6 @@ def global_sys_prompt_state_path(global_config: Any) -> Path:
     return Path(bridge_home) / "state" / "global_sys_prompts.json"
 
 
-_CJK_RUN_RE = re.compile(
-    r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
-)
-_LATIN_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _BGE_CACHE_LOCK = threading.Lock()
 _BGE_ENCODER_CACHE: dict[tuple[str, str], "BgeM3Encoder"] = {}
 
@@ -96,40 +108,6 @@ def _memory_topic_query(query: str) -> str:
         return text
     # A broad request such as "我喜欢什么" still asks for preferences.
     return next((word for word in ("喜欢", "偏爱", "偏好") if word in query), "")
-
-
-def _tokenize_multilingual(text: str) -> list[str]:
-    """Extract ASCII/alphanumeric words plus CJK/Kana/Hangul n-grams.
-
-    Ensures pure Chinese, Japanese, Korean, and mixed-script texts produce
-    meaningful non-zero hash vectors and lexical overlap without external
-    segmentation dependencies.
-    """
-    lowered = (text or "").lower()
-    tokens: list[str] = _LATIN_TOKEN_RE.findall(lowered)
-    for run in _CJK_RUN_RE.findall(lowered):
-        n = len(run)
-        if n == 1:
-            tokens.append(run)
-            continue
-        for i in range(n - 1):
-            tokens.append(run[i : i + 2])
-        if 2 < n <= 6:
-            tokens.append(run)
-    return tokens
-
-
-def _cjk_query_substrings(text: str) -> list[str]:
-    """Return compact CJK/Kana/Hangul query terms for substring candidate lookup."""
-    terms: list[str] = []
-    seen: set[str] = set()
-    for run in _CJK_RUN_RE.findall(text or ""):
-        candidates = [run] if len(run) <= 4 else [run[i : i + 2] for i in range(len(run) - 1)]
-        for term in candidates:
-            if term not in seen:
-                seen.add(term)
-                terms.append(term)
-    return terms[:12]
 
 
 class LocalEmbeddingEncoder:
@@ -274,6 +252,12 @@ class BgeM3Encoder:
             from transformers import AutoTokenizer
         except Exception as exc:
             self._error = f"dependencies unavailable: {exc}"
+            logging.getLogger("hashi.bridge_memory").warning(
+                "Semantic vector memory encoder unavailable (%s); using the "
+                "local-hash fallback encoder instead. Install the vector profile "
+                "for semantic embeddings: python -m pip install -e '.[vector]'",
+                exc,
+            )
             return
 
         tokenizer_candidates: list[str] = []
@@ -1765,11 +1749,15 @@ class BridgeContextAssembler:
         "codex-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "claude-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "grok-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
+        "dsh-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "openrouter-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "deepseek-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "xai-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "hashi-api": DEFAULT_PROMPT_TOKEN_BUDGET,
-        "ollama-api": DEFAULT_PROMPT_TOKEN_BUDGET,
+        # Local inference never uses the generic 64K budget as an operating
+        # budget; its own capacity resolver remains authoritative.
+        "ollama-api": pcm_profile_module.LOCAL_PROMPT_TOKEN_BUDGET,
+        "hli-api": pcm_profile_module.LOCAL_PROMPT_TOKEN_BUDGET,
     }
     # Compatibility alias for extensions that previously adjusted this class
     # variable. Values are token counts now; the old character-cap semantics
@@ -1893,14 +1881,54 @@ class BridgeContextAssembler:
         )
         return (3 * stride) + (identity % stride)
 
+    def _retrieval_capable(self) -> bool:
+        """Whether this route exposes an existing file-read capability.
+
+        Reuses the same tool catalogue that advertises tools to the model.
+        A missing provider means "unknown" (keep the lean projection); an
+        empty advertised catalogue means the route has no usable retrieval,
+        so local projections must keep necessary inline content instead of
+        pointing at an unreadable file.
+        """
+        provider = self.tool_catalog_provider
+        if not callable(provider):
+            return True
+        try:
+            items = list(provider() or [])
+        except Exception:
+            return True
+        names: set[str] = set()
+        for item in items:
+            if isinstance(item, Mapping):
+                names.add(str(item.get("name") or item.get("id") or "").strip().casefold())
+            elif isinstance(item, (tuple, list)) and item:
+                names.add(str(item[0] or "").strip().casefold())
+            else:
+                names.add(str(item or "").strip().casefold())
+        names.discard("")
+        if not names:
+            return False
+        return "file_read" in names
+
     @staticmethod
-    def _catalogue_lines(provider) -> list[str]:
+    def _catalogue_items(provider) -> list:
         if not callable(provider):
             return []
         try:
-            raw_items = list(provider() or [])
+            return list(provider() or [])
         except Exception:
             return []
+
+    @staticmethod
+    def _catalogue_name(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("name") or item.get("id") or "").strip()
+        if isinstance(item, (tuple, list)) and item:
+            return str(item[0] or "").strip()
+        return str(item or "").strip()
+
+    @staticmethod
+    def _catalogue_lines_from(raw_items: list) -> list[str]:
         lines: list[str] = []
         for item in raw_items:
             if isinstance(item, dict):
@@ -1917,7 +1945,32 @@ class BridgeContextAssembler:
                 lines.append(f"- {name}" + (f": {description}" if description else ""))
         return lines
 
-    def _build_time_fyi(self) -> str:
+    @classmethod
+    def _catalogue_lines(cls, provider) -> list[str]:
+        return cls._catalogue_lines_from(cls._catalogue_items(provider))
+
+    @staticmethod
+    def _delivers_native_tool_schemas(
+        engine: str, pcm_profile: str, retrieval_capable: bool
+    ) -> bool:
+        """True when the model request also carries native function schemas.
+
+        HERV3 always ships the selected model's tool definitions with the
+        main-model request. CLI Engines do not, so they keep the text form.
+        A model with tools disabled keeps the text form as a harmless fallback
+        because nothing else tells it what exists.
+        """
+
+        if (
+            str(pcm_profile or "").strip().casefold()
+            == pcm_profile_module.PCM_PROFILE_LOCAL
+        ):
+            return False
+        if not retrieval_capable:
+            return False
+        return str(engine or "").strip().casefold() in {"her", "her-v2", "her-v3"}
+
+    def _build_time_fyi(self, *, minimal: bool = False) -> str:
         """Build accurate local date/time information for one external turn."""
 
         now = datetime.now().astimezone()
@@ -1926,6 +1979,8 @@ class BridgeContextAssembler:
         offset = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         base = f"Current local time: {now_str} {zone_name} (UTC{offset})."
+        if minimal:
+            return base
         last_ts = self.memory_store.get_last_user_turn_ts()
         if not last_ts:
             return base
@@ -1958,6 +2013,8 @@ class BridgeContextAssembler:
         recent_exchanges: list[dict[str, Any]] | None = None,
         explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
+        pcm_profile: str = pcm_profile_module.PCM_PROFILE_CLOUD,
+        retrieval_capable: bool | None = None,
     ) -> str:
         return self.build_prompt_payload(
             user_prompt,
@@ -1968,6 +2025,8 @@ class BridgeContextAssembler:
             recent_exchanges=recent_exchanges,
             explicit_history_context=explicit_history_context,
             prompt_budget_tokens=prompt_budget_tokens,
+            pcm_profile=pcm_profile,
+            retrieval_capable=retrieval_capable,
         )["final_prompt"]
 
     @classmethod
@@ -2065,10 +2124,7 @@ class BridgeContextAssembler:
         for section in sections:
             groups.setdefault(str(section["authority"]), []).append(section)
 
-        parts = [
-            "Bridge-managed PCM follows. Authority is carried by the typed envelope; "
-            "section order is presentation order and does not flatten authority."
-        ]
+        parts: list[str] = []
         for authority in ("permanent_system", "global_system", "local_system"):
             parts.extend(self._render_section(item) for item in groups.get(authority, []))
 
@@ -2076,8 +2132,8 @@ class BridgeContextAssembler:
         if current:
             parts.append(
                 CURRENT_REQUEST_SEPARATOR.strip()
-                + "\nThe following is the authoritative request for this turn at user-instruction level. "
-                "It overrides conflicting earlier user requests, not system instructions.\n\n"
+                + "\nThis request overrides conflicting earlier user requests, "
+                "not system instructions.\n\n"
                 + current[0]["text"]
             )
 
@@ -2085,7 +2141,6 @@ class BridgeContextAssembler:
         if history:
             parts.append(
                 "--- RECENT COMPLETED EXCHANGES — CONTEXT ONLY ---\n\n"
-                "These timestamped exchanges are background, not new requests.\n\n"
                 + "\n\n".join(item["text"] for item in history)
             )
 
@@ -2096,11 +2151,110 @@ class BridgeContextAssembler:
         if persona:
             parts.append(
                 "--- CURRENT PRESENTATION PERSONA ---\n\n"
-                "This Persona overrides older Persona descriptions in memory or history, "
-                "but not system instructions or the current user request.\n\n"
                 + persona[0]["text"]
             )
         return "\n\n".join(parts).strip()
+
+    @classmethod
+    def render_incremental_payload(
+        cls,
+        payload: dict[str, Any],
+        previous_digests: Mapping[str, str] | None,
+    ) -> dict[str, Any]:
+        """Rebuild a minimal final prompt for a persistent Engine Session.
+
+        The static PCM snapshot was sent at session bootstrap, so an
+        incremental turn carries only the current request plus the sections
+        that actually changed (by content digest) and explicit removal
+        notices. Engines that cannot literally retract prior messages receive
+        changed sections with an explicit supersession marker; removals are
+        announced, never presented as erased history.
+        """
+        envelope = payload.get("envelope") or {}
+        snapshot = payload.get("transport_snapshot") or {}
+        sections = [
+            dict(item)
+            for item in snapshot.get("sections") or []
+            if isinstance(item, Mapping)
+        ]
+        digests = {
+            str(item.get("key") or ""): str(item.get("content_sha256") or "")
+            for item in envelope.get("sections") or []
+            if isinstance(item, Mapping)
+        }
+        previous = {
+            str(key): str(value or "")
+            for key, value in (previous_digests or {}).items()
+        }
+        removed_keys = [
+            str(key)
+            for key in snapshot.get("removed_section_keys") or []
+            if str(key) and str(key) in previous
+        ]
+        changed: list[dict[str, Any]] = []
+        for section in sections:
+            key = str(section.get("key") or "")
+            if key == "current_user_request":
+                continue
+            if digests.get(key) != previous.get(key):
+                changed.append(section)
+        current = next(
+            (
+                item
+                for item in sections
+                if item.get("key") == "current_user_request"
+            ),
+            None,
+        )
+        if not changed and not removed_keys:
+            projected = (
+                str(current.get("text") or "")
+                if isinstance(current, Mapping)
+                else ""
+            )
+            payload["final_prompt"] = projected
+            audit = payload.setdefault("audit", {})
+            audit["pcm_incremental"] = {
+                "mode": "request_only",
+                "changed_sections": 0,
+                "removed_sections": 0,
+                "sent_chars": len(projected),
+                "sent_tokens_est": _estimate_tokens(projected),
+            }
+            # The incremental projection replaces the full assembled prompt;
+            # keep the size audit consistent with what is actually sent.
+            audit["final_prompt_chars_after_budget"] = len(projected)
+            audit["final_prompt_tokens_after_budget"] = _estimate_tokens(projected)
+            return payload
+        parts: list[str] = []
+        for section in changed:
+            parts.append(
+                f"--- {section.get('title') or section.get('key')} — UPDATED; "
+                "supersedes the earlier version ---\n\n"
+                + str(section.get("text") or "")
+            )
+        for key in removed_keys:
+            parts.append(
+                f"--- {key} — REMOVED ---\n\n"
+                "This section is no longer effective; disregard its earlier content."
+            )
+        if isinstance(current, Mapping) and str(current.get("text") or ""):
+            parts.append(
+                CURRENT_REQUEST_SEPARATOR.strip() + "\n\n" + str(current["text"])
+            )
+        projected = "\n\n".join(parts).strip()
+        payload["final_prompt"] = projected
+        audit = payload.setdefault("audit", {})
+        audit["pcm_incremental"] = {
+            "mode": "delta",
+            "changed_sections": len(changed),
+            "removed_sections": len(removed_keys),
+            "sent_chars": len(projected),
+            "sent_tokens_est": _estimate_tokens(projected),
+        }
+        audit["final_prompt_chars_after_budget"] = len(projected)
+        audit["final_prompt_tokens_after_budget"] = _estimate_tokens(projected)
+        return payload
 
     def build_prompt_payload(
         self,
@@ -2113,9 +2267,25 @@ class BridgeContextAssembler:
         recent_exchanges: list[dict[str, Any]] | None = None,
         explicit_history_context: bool = False,
         prompt_budget_tokens: int | None = None,
+        pcm_profile: str = pcm_profile_module.PCM_PROFILE_CLOUD,
+        retrieval_capable: bool | None = None,
     ) -> dict[str, Any]:
         """Build PCM with token-aware, traceable non-HER history fallback."""
 
+        pcm_profile = pcm_profile_module.normalize_pcm_profile(pcm_profile)
+        local_profile = (
+            str(pcm_profile).strip().casefold() == pcm_profile_module.PCM_PROFILE_LOCAL
+        )
+        # Local relevance projections point at agent.md for omitted content.
+        # That is only usable when the actual route exposes a file-read tool;
+        # otherwise necessary content stays inline. An explicit caller-supplied
+        # capability (e.g. HERV3 resolving the selected model's
+        # model_tool_support configuration) is authoritative over the
+        # advertised-catalogue heuristic.
+        if retrieval_capable is None:
+            retrieval_capable = self._retrieval_capable()
+        else:
+            retrieval_capable = bool(retrieval_capable)
         document = self._load_pcm()
         sections: list[dict[str, Any]] = []
         hcc_enabled = bool(
@@ -2216,8 +2386,18 @@ class BridgeContextAssembler:
                 "hcc_usage", "HCC USAGE INSTRUCTIONS", HCC_USAGE_PROMPT,
                 "local_system", protected=True,
             )
+            hcc_body = hcc_text
+            if local_profile and retrieval_capable:
+                # Deterministic relevance projection: keep the cache entries
+                # that lexically relate to the current request, bounded and in
+                # document order; the full cache stays readable via file_read.
+                hcc_body = project_hcc_for_request(
+                    hcc_text,
+                    user_prompt,
+                    pcm_profile_module.LOCAL_HCC_PROJECTION_CHARS,
+                )
             add_section(
-                "hcc", "HASHI CONTEXT CACHE", hcc_text,
+                "hcc", "HASHI CONTEXT CACHE", hcc_body,
                 "runtime_context", protected=True,
                 metadata={"source": "agent.md#hcc", "replace_only": True},
             )
@@ -2243,15 +2423,16 @@ class BridgeContextAssembler:
                 or (inject_memory and self.turns_injection_enabled)
             )
         )
+        history_limit = self.MAX_RECENT_EXCHANGES
         exchanges = []
         if should_inject_history:
             if recent_exchanges is not None:
-                exchanges = list(recent_exchanges)[-self.MAX_RECENT_EXCHANGES :]
+                exchanges = list(recent_exchanges)[-history_limit:]
             else:
                 # Compatibility for legacy callers and migration tooling. The
                 # live runtime always supplies a Session-scoped timeline.
                 getter = self.memory_store.get_completed_exchanges
-                kwargs: dict[str, Any] = {"limit": self.MAX_RECENT_EXCHANGES}
+                kwargs: dict[str, Any] = {"limit": history_limit}
                 try:
                     if "after_epoch" in inspect.signature(getter).parameters:
                         from orchestrator.fresh_context import workspace_cutoff_epoch
@@ -2322,21 +2503,48 @@ class BridgeContextAssembler:
             )
 
         if document and document.memory:
-            add_section(
-                "permanent_memory",
-                "LONG-TERM MEMORY FROM agent.md",
-                document.memory,
-                "memory",
-                protected=True,
-            )
+            if local_profile and retrieval_capable:
+                # Local keeps the memory units that lexically relate to the
+                # current request (bounded, deterministic, no new retrieval
+                # subsystem) plus a retrieval reference. The canonical block
+                # remains in agent.md and is readable via the authorized file
+                # tools; retrieval does not assume memory_search indexes it.
+                projected_memory = pcm_profile_module.project_memory_for_request(
+                    document.memory,
+                    user_prompt,
+                    pcm_profile_module.LOCAL_MEMORY_PROJECTION_CHARS,
+                )
+                add_section(
+                    "permanent_memory",
+                    "LONG-TERM MEMORY (RELEVANT PROJECTION + REFERENCE)",
+                    (projected_memory or "")
+                    + "\nFull long-term memory is in agent.md ([memory]); read it "
+                    "with file_read when relevant to this request.",
+                    "memory",
+                    protected=True,
+                )
+            else:
+                # Cloud, or a local route without usable file-read retrieval:
+                # necessary memory stays inline rather than pointing at a file
+                # the route cannot read.
+                add_section(
+                    "permanent_memory",
+                    "LONG-TERM MEMORY FROM agent.md",
+                    document.memory,
+                    "memory",
+                    protected=True,
+                )
         elif document is not None:
             removed_section_keys.append("permanent_memory")
 
         inject_search = (
             not incremental and inject_memory and self.saved_memory_injection_enabled
         )
+        search_limit = (
+            pcm_profile_module.LOCAL_MEMORY_SEARCH_LIMIT if local_profile else 6
+        )
         retrieved = (
-            self.memory_store.retrieve_memories(user_prompt, limit=6)
+            self.memory_store.retrieve_memories(user_prompt, limit=search_limit)
             if inject_search
             else []
         )
@@ -2352,7 +2560,12 @@ class BridgeContextAssembler:
                 item_count=len(retrieved),
             )
 
-        time_fyi = self._build_time_fyi()
+        time_fyi = (
+            self._build_time_fyi(minimal=True)
+            if local_profile
+            and "minimal" in inspect.signature(self._build_time_fyi).parameters
+            else self._build_time_fyi()
+        )
         add_section(
             "time",
             "DATE AND TIME",
@@ -2440,24 +2653,67 @@ class BridgeContextAssembler:
                     metadata={"schema": "hashi.call-interaction-policy", "version": 1},
                 )
 
-        skill_lines = self._catalogue_lines(self.skill_catalog_provider)
-        if skill_lines:
-            add_section(
-                "skills_catalogue",
-                "AVAILABLE HASHI SKILLS",
-                "\n".join(skill_lines),
-                "runtime_context",
-                item_count=len(skill_lines),
-            )
-        tool_lines = self._catalogue_lines(self.tool_catalog_provider)
-        if tool_lines:
-            add_section(
-                "tools_catalogue",
-                "AVAILABLE HASHI TOOLS",
-                "\n".join(tool_lines),
-                "runtime_context",
-                item_count=len(tool_lines),
-            )
+        native_schemas = self._delivers_native_tool_schemas(
+            engine, pcm_profile, retrieval_capable
+        )
+        if not local_profile:
+            # Native tool schemas make the full text catalogue redundant. Keep
+            # a bounded index instead of repeating descriptions and arguments.
+            skill_items = self._catalogue_items(self.skill_catalog_provider)
+            skill_lines = self._catalogue_lines_from(skill_items)
+            if skill_lines:
+                skill_count = len(skill_lines)
+                compact_skills = False
+                if native_schemas and all(
+                    hasattr(item, "get") for item in skill_items
+                ):
+                    from orchestrator.her_v2.v3_prompt import skill_index_payload
+
+                    index = skill_index_payload(skill_items)
+                    if index:
+                        compact_skills = True
+                        header = str(index.get("note") or "")
+                        if index.get("root"):
+                            header = f"{header} Root: {index['root']}".strip()
+                        skill_lines = (
+                            [header, *index["skills"]]
+                            if header
+                            else list(index["skills"])
+                        )
+                        skill_count = len(index["skills"])
+                add_section(
+                    "skills_catalogue",
+                    "AVAILABLE HASHI SKILLS",
+                    "\n".join(skill_lines),
+                    "runtime_context",
+                    item_count=skill_count,
+                    metadata={"compact": True} if compact_skills else None,
+                )
+            tool_items = self._catalogue_items(self.tool_catalog_provider)
+            tool_lines = self._catalogue_lines_from(tool_items)
+            if tool_lines:
+                tool_count = len(tool_lines)
+                if native_schemas:
+                    names = [
+                        name
+                        for name in (self._catalogue_name(item) for item in tool_items)
+                        if name
+                    ]
+                    tool_lines = [
+                        NATIVE_TOOL_INDEX_NOTE,
+                        *[f"- {name}" for name in names],
+                    ]
+                    tool_count = len(names)
+                add_section(
+                    "tools_catalogue",
+                    "AVAILABLE HASHI TOOLS",
+                    "\n".join(tool_lines),
+                    "runtime_context",
+                    item_count=tool_count,
+                    metadata={"compact": True} if native_schemas else None,
+                )
+        else:
+            removed_section_keys.extend(("skills_catalogue", "tools_catalogue"))
 
         if document:
             add_section(
@@ -2568,11 +2824,25 @@ class BridgeContextAssembler:
                 install_capsule()
         final_prompt = self._render_pcm_prompt(sections)
         final_prompt_tokens = _estimate_tokens(final_prompt)
-        if hcc_included and limit is not None and final_prompt_tokens > limit:
+        over_budget = (
+            hcc_included and limit is not None and final_prompt_tokens > limit
+        )
+        if over_budget and not local_profile:
             raise PCMValidationError(
                 "pcm_hcc_capacity_exceeded",
                 f"PCM with HCC exceeds the input budget ({final_prompt_tokens} > {limit} "
                 "estimated tokens). Reduce the configured cache; it was not truncated.",
+            )
+        if over_budget and local_profile:
+            # Local projection budgets are soft targets, never a rejection:
+            # retain the content, record the unresolved pressure in the audit,
+            # and leave the real limit to the Provider capacity handling.
+            memory_logger.warning(
+                "PCM local projection exceeds the soft budget: engine=%s "
+                "estimated=%s soft_limit=%s; content retained for Provider capacity",
+                engine,
+                final_prompt_tokens,
+                limit,
             )
         if omitted:
             memory_logger.warning(
@@ -2653,6 +2923,7 @@ class BridgeContextAssembler:
                 },
                 "incremental": incremental,
                 "context_profile": context_profile,
+                "pcm_profile": str(pcm_profile),
                 # Kept as a nullable compatibility field so older audit readers
                 # do not mistake a token budget for a character count.
                 "budget_limit_chars": None,
