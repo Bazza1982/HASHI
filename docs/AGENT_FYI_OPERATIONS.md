@@ -73,6 +73,10 @@ checkout to `main`; `/hashideploy force` is human-owner-only, preserves local
 work in a stash and a backup ref, and still runs every gate. See
 [source preparation and adoption](HASHI_SOURCE_RELEASE_CLOSURE.md).
 
+Owner-only `/remote token [status|verify|set|clear]` manages the HASHI Remote
+shared token without exposing it; the value never appears in a reply or a log.
+See [shared token](HASHI_REMOTE_SHARED_TOKEN.md).
+
 ## Configuration, identity, and persistence
 
 Prove isolated speech locks/runtimes/releases separately:

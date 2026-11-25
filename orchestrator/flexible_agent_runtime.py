@@ -12509,6 +12509,9 @@ class FlexibleAgentRuntime:
             return
         if await runtime_workzone.handle_pending_path_reply(self, update):
             return
+        from orchestrator.commands.remote import handle_pending_reply as handle_remote_token_reply
+        if await handle_remote_token_reply(self, update):
+            return
         # /long is scoped to the chat that started it.
         if runtime_long.collect_text(self, update.effective_chat.id, text):
             return
