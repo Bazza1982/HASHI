@@ -414,6 +414,64 @@ async def test_saved_token_is_not_polled_by_worker_with_previous_bot_identity(
     assert not supervisor.telegram_ingress_running("alpha")
 
 
+@pytest.mark.asyncio
+async def test_core_telegram_disconnect_stops_ingress_and_clears_state():
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    client = _Client("zelda", 101)
+    handle = _handle(kernel, client)
+    kernel.runtimes = [handle]
+    kernel.secrets = {"zelda": "123456:disconnect-token"}
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    stopped = []
+
+    class FakeIngress:
+        token = "123456:disconnect-token"
+
+        async def stop(self, notify_status=False):
+            stopped.append(notify_status)
+
+    supervisor._telegram_ingress["zelda"] = FakeIngress()
+    supervisor._telegram_ingress_diagnostics["zelda"] = SimpleNamespace()
+    supervisor._telegram_status_failures["zelda"] = ("timeout", "poll")
+
+    ok, message = await supervisor.handle_worker_request(
+        client, "core.telegram.disconnect", {"agent_name": "zelda", "owner_id": "user:42"}
+    )
+
+    assert ok is True
+    assert message == "telegram disconnected"
+    assert stopped == [False]
+    assert "zelda" not in supervisor._telegram_ingress
+    assert "zelda" not in supervisor._telegram_ingress_diagnostics
+    assert "zelda" not in supervisor._telegram_status_failures
+    assert "zelda" not in kernel.secrets
+    assert supervisor.telegram_ingress_snapshot("zelda")["configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_core_telegram_disconnect_rejects_inactive_worker_and_bad_target():
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    client = _Client("zelda", 101)
+    kernel.runtimes = [_handle(kernel, client)]
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    stranger = _Client("sunny", 202)
+    from orchestrator.function_worker_protocol import FunctionWorkerProtocolError
+
+    with pytest.raises(FunctionWorkerProtocolError):
+        await supervisor.handle_worker_request(
+            stranger, "core.telegram.disconnect", {"agent_name": "zelda", "owner_id": "user:42"}
+        )
+
+    with pytest.raises(ValueError):
+        await supervisor.handle_worker_request(
+            client, "core.telegram.disconnect", {"agent_name": "  ", "owner_id": "user:42"}
+        )
+
+
 def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
     kernel = _Kernel()
     state_path = tmp_path / "scheduler_state.json"

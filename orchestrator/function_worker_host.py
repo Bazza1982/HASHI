@@ -714,6 +714,18 @@ class WorkerKernelFacade:
         )
         return bool(result[0]), str(result[1])
 
+    async def request_telegram_disconnect(
+        self,
+        agent_name: str,
+        *,
+        owner_id: str,
+    ) -> tuple[bool, str]:
+        result = await self.peer.request(
+            "core.telegram.disconnect",
+            {"agent_name": str(agent_name), "owner_id": str(owner_id)},
+        )
+        return bool(result[0]), str(result[1])
+
     def request_restart(
         self,
         mode: str = "same",
