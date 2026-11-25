@@ -90,11 +90,39 @@ project_locate to locate repositories, git_inspect for read-only Git inspection,
 text_replace for targeted edits to existing UTF-8 files (instead of hand-written
 unified diffs or shell edit scripts), and tool_find when on-demand tool packs
 are enabled. Batch genuinely independent read-only inspections (such as reading
-multiple known files or running separate scoped searches) in one assistant turn
-when practical. On Windows, PowerShell 5.1 does not support bash `&&` chaining
+multiple known files or running separate scoped searches) as several tool calls
+in one response; independent read-only calls in the same response run
+concurrently. Do not repeat an unchanged inspection to confirm it. On Windows,
+PowerShell 5.1 does not support bash `&&` chaining
 unless PowerShell 7 (`pwsh`) is installed; use `;` or `$LASTEXITCODE` checks
 rather than bash syntax.
 """
+
+
+# Native function schemas already transport the tool contract; the PCM text
+# catalogue repeats it at ~16k characters and pushes real work out of context.
+# Tool and skill catalogues are therefore projected in one compact form only.
+CATALOGUE_SECTION_KEYS = frozenset({"tools_catalogue", "skills_catalogue"})
+SKILL_INDEX_DESCRIPTION_CHARS = 140
+SKILL_INDEX_NOTE = (
+    "Index only: read skills/<id>/SKILL.md when a skill is relevant to the task."
+)
+
+
+def compact_skill_index(skills: object) -> list[str]:
+    """One line per skill: id plus a single-line, bounded description."""
+    lines: list[str] = []
+    for item in skills or ():
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("id") or item.get("name") or "").strip()
+        if not name:
+            continue
+        description = " ".join(str(item.get("description") or "").split())
+        if len(description) > SKILL_INDEX_DESCRIPTION_CHARS:
+            description = description[: SKILL_INDEX_DESCRIPTION_CHARS - 1].rstrip() + "…"
+        lines.append(f"- {name}: {description}" if description else f"- {name}")
+    return lines
 
 
 def compile_main_prompt(
@@ -142,7 +170,13 @@ def compile_main_prompt(
     for section in sections:
         authority = str(section.get("authority") or "runtime_context")
         text = str(section.get("text") or "")
-        if not text or section.get("key") == "current_user_request":
+        key = str(section.get("key") or "")
+        if not text or key == "current_user_request":
+            continue
+        # Skip the PCM text catalogues: native schemas cover the tool contract
+        # (when tools are available) and available_skills below carries the
+        # compact skill index, so both full-text copies are pure duplication.
+        if key in CATALOGUE_SECTION_KEYS:
             continue
         item = {
             "source": str(section.get("key") or ""),
@@ -173,7 +207,12 @@ def compile_main_prompt(
         # Local keeps advisory catalogues out by default; they are read on
         # demand instead of being re-sent as fixed context.
         refs["advisory_habits"] = context.get("habit_catalogue") or []
-        refs["available_skills"] = context.get("skills_catalogue") or []
+        skill_lines = compact_skill_index(context.get("skills_catalogue"))
+        if skill_lines:
+            refs["available_skills"] = {
+                "note": SKILL_INDEX_NOTE,
+                "skills": skill_lines,
+            }
         cards = context.get("strategy_playbook")
         if cards:
             refs["optional_strategy_cards"] = cards
@@ -195,3 +234,4 @@ def compile_main_prompt(
         + str(pcm_input.get("current_request") or fallback_request)
     )
     return "\n\n".join(system), user
+# HASHI-Fingerprint: hfp_b6b4fa054ed3473894ec321253f2e551
