@@ -83,7 +83,17 @@ _MOCK_ACP_SERVER_SCRIPT = textwrap.dedent(
                                 "ver": 2,
                                 "seq": turn,
                                 "val": {"totals": totals},
-                            }
+                            },
+                            "turnBoundary": {
+                                "ver": 2,
+                                "seq": turn,
+                                "val": {
+                                    "openTurnStartSeq": None,
+                                    "lastStepStartSeq": turn,
+                                    "lastStepBoundary": {"kind": "end", "seq": turn},
+                                    "lastTurn": turn,
+                                },
+                            },
                         }
                     },
                 },
@@ -518,11 +528,11 @@ def test_dsh_session_projcache_usage_helpers(tmp_path: Path, monkeypatch):
 
     monkeypatch.setenv("DSH_HOME", str(tmp_path))
     sessions = tmp_path / "storages" / "session_projcache" / "sessions"
-    assert dsh._read_dsh_session_totals("missing-session") is None
+    assert dsh._read_dsh_session_snapshot("missing-session") is None
 
     sessions.mkdir(parents=True)
     (sessions / "broken.json").write_text("{not json", encoding="utf-8")
-    assert dsh._read_dsh_session_totals("broken") is None
+    assert dsh._read_dsh_session_snapshot("broken") is None
 
     totals = {
         "uncachedInputTokens": 1_200,
@@ -530,13 +540,41 @@ def test_dsh_session_projcache_usage_helpers(tmp_path: Path, monkeypatch):
         "cacheWriteTokens": 0,
         "outputTokens": 560,
     }
-    (sessions / "sid-a.json").write_text(
-        json.dumps(
-            {"version": 1, "record": {"rows": {"tokenUsage": {"val": {"totals": totals}}}}}
-        ),
-        encoding="utf-8",
-    )
-    assert dsh._read_dsh_session_totals("sid-a") == totals
+
+    def write(sid: str, *, turn: int, open_turn: int | None) -> None:
+        (sessions / f"{sid}.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "record": {
+                        "rows": {
+                            "tokenUsage": {"seq": 9, "val": {"totals": totals}},
+                            "turnBoundary": {
+                                "val": {
+                                    "openTurnStartSeq": open_turn,
+                                    "lastStepBoundary": {"kind": "end", "seq": 8},
+                                    "lastTurn": turn,
+                                }
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write("sid-a", turn=3, open_turn=None)
+    snapshot = dsh._read_dsh_session_snapshot("sid-a")
+    assert snapshot is not None
+    assert snapshot.totals == totals
+    assert snapshot.seq == 9
+    assert snapshot.turn == 3
+    assert snapshot.settled is True
+
+    # An open or unreadable turn boundary is never an attributable boundary.
+    write("sid-open", turn=3, open_turn=12)
+    open_snapshot = dsh._read_dsh_session_snapshot("sid-open")
+    assert open_snapshot is not None and open_snapshot.settled is False
 
     # A brand-new session has no prior snapshot; the whole total is this turn.
     assert dsh._dsh_turn_usage(None, totals, fresh_session=True) == totals
@@ -544,11 +582,9 @@ def test_dsh_session_projcache_usage_helpers(tmp_path: Path, monkeypatch):
     # missing snapshot must never be priced as this turn's provider usage.
     assert dsh._dsh_turn_usage(None, totals) is None
     # Re-reading an unchanged snapshot is not a turn.
-    assert dsh._dsh_turn_usage(totals, totals, revision_advanced=False) is None
-    # A revision bump is required before an existing session's delta is trusted.
+    assert dsh._dsh_turn_usage(totals, totals) is None
     grown = {**totals, "outputTokens": totals["outputTokens"] + 10}
-    assert dsh._dsh_turn_usage(totals, grown) is None
-    assert dsh._dsh_turn_usage(totals, grown, revision_advanced=True) == {
+    assert dsh._dsh_turn_usage(totals, grown) == {
         "uncachedInputTokens": 0,
         "cacheReadTokens": 0,
         "cacheWriteTokens": 0,
@@ -557,7 +593,7 @@ def test_dsh_session_projcache_usage_helpers(tmp_path: Path, monkeypatch):
     # Compaction or session reset must never fabricate a negative turn.
     shrunk = dict(totals)
     shrunk["cacheReadTokens"] = 0
-    assert dsh._dsh_turn_usage(totals, shrunk, revision_advanced=True) is None
+    assert dsh._dsh_turn_usage(totals, shrunk) is None
     # Unreadable store keeps the estimate path.
     assert dsh._dsh_turn_usage(totals, None) is None
 
@@ -591,7 +627,14 @@ async def test_dsh_usage_wait_is_bounded_when_the_store_never_updates(
                             "ver": 2,
                             "seq": 7,
                             "val": {"totals": totals},
-                        }
+                        },
+                        "turnBoundary": {
+                            "val": {
+                                "openTurnStartSeq": None,
+                                "lastStepBoundary": {"kind": "end", "seq": 7},
+                                "lastTurn": 2,
+                            }
+                        },
                     }
                 },
             }
@@ -599,14 +642,16 @@ async def test_dsh_usage_wait_is_bounded_when_the_store_never_updates(
         encoding="utf-8",
     )
     baseline = dsh._read_dsh_session_snapshot("sid-stale")
-    assert baseline == (7, totals)
+    assert baseline is not None
+    assert baseline.seq == 7 and baseline.turn == 2 and baseline.settled is True
     started = time.monotonic()
-    stale = await dsh._await_dsh_usage_snapshot("sid-stale", baseline)
+    # The turn this prompt opened never closes in the store, so the bounded
+    # wait returns the unchanged boundary instead of inventing a newer one.
+    stale = await dsh._await_dsh_usage_snapshot("sid-stale", 3)
     assert stale == baseline
     assert time.monotonic() - started < 2.0
-    # No new revision means no new turn: a late flush of the previous turn must
-    # not be reported as this turn's provider usage.
-    assert dsh._dsh_turn_usage(baseline[1], stale[1], revision_advanced=False) is None
+    # An unclosed turn must never be reported as this turn's provider usage.
+    assert dsh._dsh_turn_usage(baseline.totals, stale.totals) is None
 
 
 @pytest.mark.asyncio
@@ -713,20 +758,30 @@ async def test_dsh_late_usage_flush_is_not_billed_to_the_next_turn(
             "outputTokens": output,
         }
 
-    turn1 = totals(1_000, 40)
-    turn2 = totals(3_000, 100)
-    turn3 = totals(1_000, 40)
-    turn4 = totals(1_000, 40)
-    combined = {name: turn1[name] + turn2[name] + turn3[name] for name in turn1}
-    after_turn4 = {name: combined[name] + turn4[name] for name in combined}
+    turn_usage = {
+        1: totals(1_000, 40),
+        2: totals(3_000, 100),
+        3: totals(1_000, 40),
+        4: totals(1_000, 40),
+        5: totals(1_000, 40),
+    }
 
-    after_turn1 = (1, turn1)
-    # Turn 2's counters flushed late and landed together with turn 3's.
-    late_flush = (3, combined)
-    after_turn4_snapshot = (4, after_turn4)
+    def settled(turn: int):
+        cumulative = {name: 0 for name in turn_usage[1]}
+        for number in range(1, turn + 1):
+            for name, value in turn_usage[number].items():
+                cumulative[name] += value
+        return dsh._DshUsageSnapshot(turn, cumulative, turn, True)
 
-    # Scripted store: the late flush appears only after the following turn's
-    # pre-turn snapshot, which is exactly the boundary the old code missed.
+    after_turn1 = settled(1)
+    # Turns 2 and 3 both flush late: turn 2 lands during turn 3, and the rest
+    # of the batch (turn 3) lands only after turn 4 starts.
+    after_turn2 = settled(2)
+    after_turn4 = settled(4)
+    after_turn5 = settled(5)
+
+    # Scripted store: each phase is one prompt, and the first read of a phase
+    # is the pre-turn snapshot. Later reads are whatever DSH has folded by then.
     state = {"phase": "turn1", "reads": 0}
 
     def fake_read(session_id: str):
@@ -738,14 +793,20 @@ async def test_dsh_late_usage_flush_is_not_billed_to_the_next_turn(
         if phase == "turn2":
             return after_turn1
         if phase == "turn3":
-            return after_turn1 if reads == 1 else late_flush
-        return late_flush if reads == 1 else after_turn4_snapshot
+            return after_turn1 if reads == 1 else after_turn2
+        if phase == "turn4":
+            return after_turn2 if reads == 1 else after_turn4
+        return after_turn4 if reads == 1 else after_turn5
 
     def begin(phase: str) -> None:
         state["phase"] = phase
         state["reads"] = 0
 
     monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", fake_read)
+
+    def assert_estimated(result) -> None:
+        assert result.usage is None
+        assert (result.stream_metadata or {}).get("token_usage_source") == "estimated"
 
     try:
         begin("turn1")
@@ -754,24 +815,29 @@ async def test_dsh_late_usage_flush_is_not_billed_to_the_next_turn(
         assert res1.usage.input_tokens == 1_000
         assert res1.usage.output_tokens == 40
 
+        # Single late write: turn 2's counters are not folded before the wait
+        # expires, so the turn keeps the estimate.
         begin("turn2")
-        res2 = await adapter.generate_response("late usage two", "req-late-2")
-        assert res2.usage is None
-        assert (res2.stream_metadata or {}).get("token_usage_source") == "estimated"
+        assert_estimated(await adapter.generate_response("late usage two", "req-late-2"))
 
+        # Turn 2's flush lands here. A counter bump alone must not clear the
+        # unconfirmed boundary, or this turn would be billed 4000/140.
         begin("turn3")
-        res3 = await adapter.generate_response("late usage three", "req-late-3")
-        # The late flush of turn 2 must not be billed as turn 3's usage; the
-        # old delta reported 4000 input / 140 output here.
-        assert res3.usage is None
-        assert (res3.stream_metadata or {}).get("token_usage_source") == "estimated"
+        assert_estimated(await adapter.generate_response("late usage three", "req-late-3"))
 
+        # Turns 3 and 4 land as one batch, so this turn cannot be separated
+        # from the merged flush and stays estimated too.
         begin("turn4")
-        res4 = await adapter.generate_response("late usage four", "req-late-4")
-        assert res4.usage is not None
-        assert res4.usage.input_tokens == 1_000
-        assert res4.usage.output_tokens == 40
-        assert (res4.stream_metadata or {}).get("token_usage_source") == (
+        assert_estimated(await adapter.generate_response("late usage four", "req-late-4"))
+
+        # DSH has now closed every unaccounted turn, so the boundary is
+        # trustworthy again and this turn resumes real incremental usage.
+        begin("turn5")
+        res5 = await adapter.generate_response("late usage five", "req-late-5")
+        assert res5.usage is not None
+        assert res5.usage.input_tokens == 1_000
+        assert res5.usage.output_tokens == 40
+        assert (res5.stream_metadata or {}).get("token_usage_source") == (
             "dsh_session_projcache"
         )
     finally:

@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 
 from adapters.base import (
     BackendCapabilities,
@@ -218,15 +218,32 @@ def _dsh_home_dir() -> Path:
     return Path.home() / ".dsh"
 
 
-def _read_dsh_session_snapshot(
-    session_id: str,
-) -> tuple[int, dict[str, int]] | None:
-    """Read DSH's projection revision and cumulative token totals for a session.
+class _DshUsageSnapshot(NamedTuple):
+    """One read of DSH's own per-session usage projection.
+
+    ``totals`` are DSH's cumulative provider counters.  ``turn``/``settled``
+    come from DSH's turn-boundary projection: ``settled`` marks the newest turn
+    that DSH has closed, and DSH folds its session log in order, so a settled
+    snapshot at turn *N* proves every turn up to *N* is already inside
+    ``totals``.  A newer ``seq`` on its own proves nothing about which turns
+    landed, which is why deltas are only trusted between two consecutive
+    settled turn boundaries.
+    """
+
+    seq: int
+    totals: dict[str, int]
+    turn: int | None
+    settled: bool
+
+
+def _read_dsh_session_snapshot(session_id: str) -> _DshUsageSnapshot | None:
+    """Read DSH's cumulative token totals plus its completed-turn marker.
 
     DSH keeps an uncompressed per-session projection in
-    ``<dsh_home>/storages/session_projcache/sessions/<id>.json``; its
+    ``<dsh_home>/storages/session_projcache/sessions/<id>.json``.  Its
     ``record.rows.tokenUsage.val`` carries the real provider counters
-    (including prompt-cache reads) plus a monotonically increasing ``seq``.
+    (including prompt-cache reads), and ``record.rows.turnBoundary.val`` marks
+    which turn was opened/closed, which is DSH's own per-turn attribution.
     Anything unreadable or malformed returns ``None`` so the caller keeps the
     existing local estimate instead of inventing usage numbers.
     """
@@ -263,14 +280,33 @@ def _read_dsh_session_snapshot(
     seq = token_usage.get("seq")
     if isinstance(seq, bool) or not isinstance(seq, (int, float)):
         seq = 0
-    return max(0, int(seq)), counters
+    turn, settled = _read_dsh_turn_marker(rows)
+    return _DshUsageSnapshot(max(0, int(seq)), counters, turn, settled)
 
 
-def _read_dsh_session_totals(session_id: str) -> dict[str, int] | None:
-    """Return only the cumulative counters from the session projection."""
+def _read_dsh_turn_marker(rows: Any) -> tuple[int | None, bool]:
+    """Return DSH's newest turn number and whether that turn has closed.
 
-    snapshot = _read_dsh_session_snapshot(session_id)
-    return snapshot[1] if snapshot is not None else None
+    A turn only counts as closed when DSH reports no open turn and the last
+    step boundary is an ``end``; without those facts the caller must not treat
+    cumulative counters as attributable to any single turn.
+    """
+
+    boundary = rows.get("turnBoundary") if isinstance(rows, Mapping) else None
+    value = boundary.get("val") if isinstance(boundary, Mapping) else None
+    if not isinstance(value, Mapping):
+        return None, False
+    raw_turn = value.get("lastTurn")
+    if isinstance(raw_turn, bool) or not isinstance(raw_turn, (int, float)):
+        return None, False
+    turn = max(0, int(raw_turn))
+    last_step = value.get("lastStepBoundary")
+    settled = (
+        value.get("openTurnStartSeq") is None
+        and isinstance(last_step, Mapping)
+        and str(last_step.get("kind") or "") == "end"
+    )
+    return turn, settled
 
 
 _DSH_USAGE_FLUSH_BUDGET_SEC = 0.75
@@ -279,36 +315,30 @@ _DSH_USAGE_FLUSH_POLL_SEC = 0.025
 
 async def _await_dsh_usage_snapshot(
     session_id: str,
-    baseline: tuple[int, dict[str, int]] | None,
-    *,
-    fresh_session: bool = False,
-) -> tuple[int, dict[str, int]] | None:
-    """Wait briefly for DSH to persist the counters for the turn just finished.
+    expected_turn: int | None,
+) -> _DshUsageSnapshot | None:
+    """Wait briefly for DSH to close the turn that just finished.
 
-    DSH writes the session projection a moment after the ACP prompt response,
-    so the first read can still show the previous turn.  The wait is keyed on
-    the projection revision and tightly bounded, so a missing or stalled store
-    falls back to the local estimate instead of delaying the turn.
-
-    An existing session without a usable baseline gets no wait at all: its
-    counters are cumulative, so whatever the store holds now (including a
-    previous turn flushed late) is history, not this turn's usage.
+    DSH writes the session projection moments after the ACP prompt response,
+    so the first read can still show the previous turn.  The wait keys on
+    DSH's own completed-turn marker (never on a counter bump) and is tightly
+    bounded, so a missing or stalled store falls back to the local estimate
+    instead of delaying the turn.  ``expected_turn is None`` means the
+    boundary is unconfirmed, so there is nothing worth waiting for.
     """
 
-    if baseline is None and not fresh_session:
-        return None
-    baseline_seq = baseline[0] if baseline is not None else None
-    baseline_totals = baseline[1] if baseline is not None else None
+    if expected_turn is None:
+        return _read_dsh_session_snapshot(session_id)
     deadline = time.monotonic() + _DSH_USAGE_FLUSH_BUDGET_SEC
     snapshot = _read_dsh_session_snapshot(session_id)
     while True:
-        if snapshot is not None:
-            seq, totals = snapshot
-            if baseline_seq is None:
-                if any(totals.values()):
-                    return snapshot
-            elif seq > baseline_seq and totals != baseline_totals:
-                return snapshot
+        if (
+            snapshot is not None
+            and snapshot.settled
+            and snapshot.turn is not None
+            and snapshot.turn >= expected_turn
+        ):
+            return snapshot
         if time.monotonic() >= deadline:
             return snapshot
         await asyncio.sleep(_DSH_USAGE_FLUSH_POLL_SEC)
@@ -320,18 +350,16 @@ def _dsh_turn_usage(
     after: Mapping[str, int] | None,
     *,
     fresh_session: bool = False,
-    revision_advanced: bool = False,
 ) -> dict[str, int] | None:
     """Return one turn's counter delta, or ``None`` when it is not usable.
 
-    Only a genuinely new session may read a missing ``before`` as all zeros;
-    for an existing session the same snapshot is the whole session history, so
-    an unreadable baseline keeps the local estimate instead of reporting history
-    as one turn.  For the same reason an existing session must also show a new
-    projection revision: without one the delta would either be empty or replay
-    a previous turn that DSH flushed late.  Negative deltas mean the store was
-    reset or compacted mid-turn; keeping the estimate is safer than reporting a
-    fabricated negative turn.
+    Callers only reach this with two consecutive settled turn boundaries, so
+    the delta covers exactly one turn.  Only a genuinely new session may read a
+    missing ``before`` as all zeros; for an existing session the same snapshot
+    is the whole session history, so an unreadable baseline keeps the local
+    estimate instead of reporting history as one turn.  Negative deltas mean the
+    store was reset or compacted mid-turn; keeping the estimate is safer than
+    reporting a fabricated negative turn.
     """
 
     if after is None:
@@ -340,8 +368,6 @@ def _dsh_turn_usage(
         if not fresh_session:
             return None
         baseline: Mapping[str, int] = {}
-    elif not revision_advanced:
-        return None
     else:
         baseline = before
     delta: dict[str, int] = {}
@@ -574,12 +600,15 @@ class DshCLIAdapter(BaseBackend):
         )
         self._session_id: str | None = None
         self._session_in_current_worker: bool = False
-        # A turn whose counters DSH flushed after the bounded wait leaves the
-        # next turn unable to separate its own increment from that late write.
-        # Remember the last trustworthy boundary so the late flush is never
-        # billed to a later turn. Holds at most the active session.
-        self._pending_usage_session_id: str | None = None
-        self._pending_usage_boundary: tuple[int, dict[str, int]] | None = None
+        # Usage attribution for the active session. DSH reports cumulative
+        # counters plus its own completed-turn marker; a turn is only billed
+        # when both neighbouring boundaries are settled turns, so a batch of
+        # late flushes can never be mistaken for a later turn's usage.
+        # ``_usage_settled_turn`` is the newest turn proven folded with a known
+        # baseline, and ``_usage_unaccounted`` counts prompts issued since then.
+        self._usage_session_id: str | None = None
+        self._usage_settled_turn: int | None = None
+        self._usage_unaccounted: int = 0
         self._config_options: list[dict[str, Any]] = []
         self._effective_model: str | None = None
         self._effective_effort: str | None = None
@@ -618,6 +647,52 @@ class DshCLIAdapter(BaseBackend):
         extra = getattr(self.config, "extra", {}) or {}
         value = extra.get(key, default)
         return str(value or "").strip()
+
+    def _begin_usage_accounting(
+        self,
+        session_id: str,
+        snapshot: _DshUsageSnapshot | None,
+        *,
+        fresh_session: bool,
+    ) -> bool:
+        """Anchor this turn's usage baseline and report whether it is trusted.
+
+        The baseline is DSH's own completed-turn marker: a settled snapshot
+        proves every turn up to ``turn`` is already folded, so a delta from it
+        covers exactly the turn this prompt opens.  Anything else - unreadable
+        store, an open turn, or turns issued since the last anchor that DSH has
+        not closed yet - keeps the estimate path.  Re-anchoring never bills
+        anything, so it can safely happen as soon as the evidence is there.
+        """
+
+        if fresh_session or self._usage_session_id != session_id:
+            self._usage_session_id = session_id
+            self._usage_settled_turn = None
+            self._usage_unaccounted = 0
+            if fresh_session:
+                # A brand-new session has no prior turns to wait for.
+                self._usage_settled_turn = 0
+                return True
+        if snapshot is None or not snapshot.settled or snapshot.turn is None:
+            return False
+        if self._usage_settled_turn is None:
+            self._usage_settled_turn = snapshot.turn
+            self._usage_unaccounted = 0
+            return True
+        if snapshot.turn - self._usage_settled_turn >= self._usage_unaccounted:
+            self._usage_settled_turn = snapshot.turn
+            self._usage_unaccounted = 0
+            return True
+        return False
+
+    def _usage_boundary_caught_up(self, snapshot: _DshUsageSnapshot | None) -> bool:
+        """Report whether DSH closed every unaccounted turn since the anchor."""
+
+        if snapshot is None or not snapshot.settled or snapshot.turn is None:
+            return False
+        if self._usage_settled_turn is None:
+            return False
+        return snapshot.turn - self._usage_settled_turn >= self._usage_unaccounted
 
     def _resolve_launch(self) -> tuple[list[str], Path | None, str]:
         return resolve_dsh_invocation(
@@ -1395,20 +1470,23 @@ class DshCLIAdapter(BaseBackend):
                 session_id,
                 desired_effort=reasoning_effort,
             )
-            # ACP ``usage_update`` only carries context size, so snapshot DSH's
-            # own cumulative counters here and price this turn's delta below.
+            # ACP ``usage_update`` only carries context size, so read DSH's own
+            # cumulative counters and completed-turn marker here, then price
+            # this turn's delta below. A newer snapshot alone never proves the
+            # earlier turns were written; only DSH's settled turn marker does.
             usage_before = _read_dsh_session_snapshot(session_id)
-            # A previous turn that fell back to the estimate may still have its
-            # counters pending in DSH. Only once that write lands does this
-            # snapshot become a clean boundary; until then the turn keeps the
-            # estimate instead of claiming the late delta as its own.
-            usage_boundary_unconfirmed = False
-            if self._pending_usage_session_id == session_id:
-                if usage_before is not None and usage_before != self._pending_usage_boundary:
-                    self._pending_usage_session_id = None
-                    self._pending_usage_boundary = None
-                else:
-                    usage_boundary_unconfirmed = True
+            boundary_confirmed = self._begin_usage_accounting(
+                session_id, usage_before, fresh_session=created_fresh_session
+            )
+            expected_turn = (
+                self._usage_settled_turn + 1
+                if boundary_confirmed and self._usage_settled_turn is not None
+                else None
+            )
+            # Each prompt issues exactly one DSH turn; while the boundary is
+            # unconfirmed every such turn stays unaccounted, and that count is
+            # what later proves the whole batch has finally been folded.
+            self._usage_unaccounted += 1
 
             # Turn-level streaming state
             held_message_id: str | None = None
@@ -1590,33 +1668,37 @@ class DshCLIAdapter(BaseBackend):
                 self._update_handler = None
                 await self._drain_stream_event_tasks()
 
-            usage_after = await _await_dsh_usage_snapshot(
-                session_id, usage_before, fresh_session=created_fresh_session
-            )
-            # While an earlier turn's write is still outstanding, any revision
-            # bump seen here may carry both turns' counters, so this turn keeps
-            # the estimate until a clean boundary is observed again.
+            usage_after = await _await_dsh_usage_snapshot(session_id, expected_turn)
+            # The delta is only billed when DSH closed exactly the turn this
+            # prompt opened. A larger jump means earlier turns landed in the
+            # same window, so this turn keeps the estimate: reporting the mixed
+            # increment as provider usage would bill them twice.
             turn_usage_delta = None
-            if not usage_boundary_unconfirmed:
+            if (
+                expected_turn is not None
+                and usage_after is not None
+                and usage_after.settled
+                and usage_after.turn == expected_turn
+            ):
                 turn_usage_delta = _dsh_turn_usage(
-                    usage_before[1] if usage_before is not None else None,
-                    usage_after[1] if usage_after is not None else None,
+                    usage_before.totals if usage_before is not None else None,
+                    usage_after.totals,
                     fresh_session=created_fresh_session,
-                    revision_advanced=(
-                        usage_before is not None
-                        and usage_after is not None
-                        and usage_after[0] > usage_before[0]
-                    ),
                 )
-            if turn_usage_delta is not None:
-                self._pending_usage_session_id = None
-                self._pending_usage_boundary = None
-            elif not usage_boundary_unconfirmed:
-                # This turn's usage could not be confirmed. Keep the boundary
-                # it started from so a late flush is recognised next turn
-                # instead of being billed as fresh provider usage.
-                self._pending_usage_session_id = session_id
-                self._pending_usage_boundary = usage_before
+            if turn_usage_delta is not None and expected_turn is not None:
+                self._usage_settled_turn = expected_turn
+                self._usage_unaccounted = 0
+            elif (
+                usage_after is not None
+                and usage_after.turn is not None
+                and self._usage_boundary_caught_up(usage_after)
+            ):
+                # DSH has closed every turn issued since the last known
+                # boundary, so the next turn starts from a trustworthy baseline
+                # again. This turn itself stays on the estimate because its
+                # share of the batched flush cannot be separated.
+                self._usage_settled_turn = usage_after.turn
+                self._usage_unaccounted = 0
             token_usage = (
                 TokenUsage(
                     input_tokens=(
