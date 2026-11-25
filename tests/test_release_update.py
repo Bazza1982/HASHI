@@ -378,6 +378,9 @@ def test_force_align_checkout_stashes_local_work_and_backs_up_main(tmp_path: Pat
 def test_force_align_checkout_keeps_a_feature_branch_pointer(tmp_path: Path):
     source, deployed = _source_repository(tmp_path)
     _git(deployed, "checkout", "-b", "wip/experiment")
+    (deployed / "experiment.txt").write_text("unmerged work\n", encoding="utf-8")
+    _git(deployed, "add", "experiment.txt")
+    _git(deployed, "commit", "-m", "unmerged experiment")
     old = _git(deployed, "rev-parse", "HEAD")
     (deployed / "scratch.txt").write_text("untracked\n", encoding="utf-8")
     (source / "version.txt").write_text("two\n", encoding="utf-8")
@@ -388,7 +391,7 @@ def test_force_align_checkout_keeps_a_feature_branch_pointer(tmp_path: Path):
     result = force_align_checkout(deployed, remote="origin", branch="main")
 
     assert result["previous_branch"] == "wip/experiment"
-    assert result["backup_ref"] is None
+    assert _git(deployed, "rev-parse", result["backup_ref"]) == old
     assert _git(deployed, "rev-parse", "wip/experiment") == old
     assert _git(deployed, "rev-parse", "HEAD") == target
 

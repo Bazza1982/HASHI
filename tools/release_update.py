@@ -672,10 +672,10 @@ def force_align_checkout(
                 "status": _bounded_output(ancestry.stderr),
             },
         )
-    # A named feature branch keeps its pointer; main or a detached HEAD only
-    # needs a backup ref when the old commit would become unreachable.
+    # Any commit that is not part of the target history gets an explicit
+    # backup ref; a named branch also keeps its own pointer untouched.
     backup_ref: str | None = None
-    if previous_branch in {"", "HEAD", selected_branch} and ancestry.returncode == 1:
+    if ancestry.returncode == 1:
         backup_ref = f"refs/hashideploy-backups/{stamp}-{previous_commit[:12]}"
         _progress(f"recording pre-force HEAD at {backup_ref}")
         try:

@@ -42,7 +42,8 @@ independently supervised Remote to report the target commit.
     network failure changes nothing), stashes tracked and untracked changes
     with `git stash push --include-untracked` (never ignored files), refuses
     to continue if anything remains, records a `refs/hashideploy-backups/...`
-    ref when the old HEAD is `main` or detached, and only then checks out
+    ref whenever the old HEAD is not part of the target history, and only then
+    checks out
     `main` at the fetched commit. Local commits are never reset away and
     nothing is force-pushed. The readiness receipt records the stash commit,
     the backup ref and the previous branch/commit. All source, protected-Core,
