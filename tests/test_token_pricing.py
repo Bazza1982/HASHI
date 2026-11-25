@@ -185,6 +185,39 @@ def test_direct_deepseek_usage_uses_cached_openrouter_reference(
     assert receipt.pricing_revisions == (fact.source_revision,)
 
 
+def test_dsh_cli_estimated_reasoning_is_costed_at_output_rate(
+    tmp_path,
+    monkeypatch,
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    fact = pricing_sources.refresh_pricing_fact(
+        "dsh-cli",
+        "deepseek-flash",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence("~deepseek/deepseek-flash-latest"),
+    )
+    assert fact.status == "known"
+    assert fact.thinking_per_unit is None
+
+    receipt = record_usage(
+        tmp_path,
+        model="deepseek-flash",
+        backend="dsh-cli",
+        engine="dsh-cli",
+        input_tokens=533,
+        output_tokens=270,
+        thinking_tokens=1_700,
+        token_source="estimated",
+    )
+
+    expected = 533 * 0.000002 + (270 + 1_700) * 0.000006
+    assert receipt.cost_usd == pytest.approx(expected)
+    assert receipt.no_cache_cost_usd == pytest.approx(expected)
+    assert receipt.dominant_cost_source() == "openrouter_reference"
+    assert receipt.pricing_revisions == (fact.source_revision,)
+
+
 def test_unavailable_exact_price_mapping_remains_unknown(
     tmp_path,
     monkeypatch,
@@ -420,3 +453,4 @@ def test_antigravity_cli_exact_mapping_and_cost_estimation(tmp_path, monkeypatch
     assert receipt.dominant_cost_source() == "openrouter_reference"
     assert receipt.cost_usd > 0
     assert receipt.pricing_revisions == (fact.source_revision,)
+# HASHI-Fingerprint: hfp_ff8854d8566f4431b1299c997522cea9

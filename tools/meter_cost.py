@@ -556,6 +556,7 @@ _PROVIDER_DISPLAY_NAMES = {
     "claude-cli": "Claude CLI",
     "gemini-cli": "Gemini CLI",  # Historical usage is not rewritten.
     "antigravity-cli": "Antigravity CLI",
+    "dsh-cli": "DSH CLI",
     "grok-cli": "Grok CLI",
     "ollama-api": "Ollama",
     "xai-api": "xAI API",
@@ -1011,3 +1012,4 @@ def format_meditation_cost_tail(
         stage_timings_s=None,
         include_model_roles=False,
     )
+# HASHI-Fingerprint: hfp_c0b8b062b73f41ffbef8dac050880456

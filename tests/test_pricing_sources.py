@@ -545,6 +545,44 @@ def test_incomplete_dimensions_only_block_usage_that_needs_them(tmp_path):
     )
 
 
+def test_reasoning_without_separate_price_uses_output_rate(tmp_path):
+    fact = pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/reasoning-model",
+        cache_path=tmp_path / "pricing.json",
+        fetcher=lambda _url: _openrouter_response("vendor/reasoning-model"),
+        now=NOW,
+    )
+
+    assert fact.status == "known"
+    assert fact.thinking_per_unit is None
+    # 1k prompt @2e-6 + (100 output + 1700 reasoning) @6e-6
+    assert pricing_sources.calculate_cost(
+        fact,
+        input_tokens=1_000,
+        output_tokens=100,
+        thinking_tokens=1_700,
+    ) == pytest.approx(0.002 + 0.0006 + 0.0102)
+
+
+def test_reasoning_already_inside_output_is_not_charged_twice(tmp_path):
+    fact = pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/reasoning-in-output",
+        cache_path=tmp_path / "pricing.json",
+        fetcher=lambda _url: _openrouter_response("vendor/reasoning-in-output"),
+        now=NOW,
+    )
+
+    assert pricing_sources.calculate_cost(
+        fact,
+        input_tokens=1_000,
+        output_tokens=100,
+        thinking_tokens=1_700,
+        thinking_in_output=True,
+    ) == pytest.approx(0.0026)
+
+
 def test_known_zero_is_not_confused_with_unknown(tmp_path):
     fact = pricing_sources.refresh_pricing_fact(
         "openrouter-api",
@@ -763,3 +801,4 @@ def test_cache_lock_reports_busy_when_permission_error_persists(monkeypatch, tmp
     with pytest.raises(pricing_sources.PricingSourceError, match="refresh_busy"):
         with pricing_sources._exclusive_cache_lock(target):
             pass
+# HASHI-Fingerprint: hfp_9358b426e94244e1a25abc6b970900d6

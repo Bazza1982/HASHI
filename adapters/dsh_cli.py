@@ -14,7 +14,12 @@ import shutil
 import time
 from typing import Any, Callable, Mapping
 
-from adapters.base import BackendCapabilities, BackendResponse, BaseBackend
+from adapters.base import (
+    BackendCapabilities,
+    BackendResponse,
+    BaseBackend,
+    TokenUsage,
+)
 from adapters.hashi_mcp import HashiMcpInvocation, prepare_hashi_mcp
 from adapters.stream_events import (
     DELIVERY_REASONING,
@@ -194,6 +199,138 @@ def _format_tool_result_preview(content: Any, limit: int = 400) -> str:
     if len(joined) > limit:
         return joined[: limit - 1] + "…"
     return joined
+
+
+_DSH_USAGE_COUNTERS = (
+    "uncachedInputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "outputTokens",
+)
+
+
+def _dsh_home_dir() -> Path:
+    """Return the DSH data root, honouring DSH_HOME when the worker has one."""
+
+    override = str(os.environ.get("DSH_HOME") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".dsh"
+
+
+def _read_dsh_session_snapshot(
+    session_id: str,
+) -> tuple[int, dict[str, int]] | None:
+    """Read DSH's projection revision and cumulative token totals for a session.
+
+    DSH keeps an uncompressed per-session projection in
+    ``<dsh_home>/storages/session_projcache/sessions/<id>.json``; its
+    ``record.rows.tokenUsage.val`` carries the real provider counters
+    (including prompt-cache reads) plus a monotonically increasing ``seq``.
+    Anything unreadable or malformed returns ``None`` so the caller keeps the
+    existing local estimate instead of inventing usage numbers.
+    """
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    path = (
+        _dsh_home_dir()
+        / "storages"
+        / "session_projcache"
+        / "sessions"
+        / f"{sid}.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    record = payload.get("record") if isinstance(payload, Mapping) else None
+    rows = record.get("rows") if isinstance(record, Mapping) else None
+    token_usage = rows.get("tokenUsage") if isinstance(rows, Mapping) else None
+    if not isinstance(token_usage, Mapping):
+        return None
+    value = token_usage.get("val")
+    totals = value.get("totals") if isinstance(value, Mapping) else None
+    if not isinstance(totals, Mapping):
+        return None
+    counters: dict[str, int] = {}
+    for name in _DSH_USAGE_COUNTERS:
+        counter = totals.get(name, 0)
+        if isinstance(counter, bool) or not isinstance(counter, (int, float)):
+            return None
+        counters[name] = max(0, int(counter))
+    seq = token_usage.get("seq")
+    if isinstance(seq, bool) or not isinstance(seq, (int, float)):
+        seq = 0
+    return max(0, int(seq)), counters
+
+
+def _read_dsh_session_totals(session_id: str) -> dict[str, int] | None:
+    """Return only the cumulative counters from the session projection."""
+
+    snapshot = _read_dsh_session_snapshot(session_id)
+    return snapshot[1] if snapshot is not None else None
+
+
+_DSH_USAGE_FLUSH_BUDGET_SEC = 0.75
+_DSH_USAGE_FLUSH_POLL_SEC = 0.025
+
+
+async def _await_dsh_usage_snapshot(
+    session_id: str,
+    baseline: tuple[int, dict[str, int]] | None,
+) -> tuple[int, dict[str, int]] | None:
+    """Wait briefly for DSH to persist the counters for the turn just finished.
+
+    DSH writes the session projection a moment after the ACP prompt response,
+    so the first read can still show the previous turn.  The wait is keyed on
+    the projection revision and tightly bounded, so a missing or stalled store
+    falls back to the local estimate instead of delaying the turn.
+    """
+
+    baseline_seq = baseline[0] if baseline is not None else None
+    baseline_totals = baseline[1] if baseline is not None else None
+    deadline = time.monotonic() + _DSH_USAGE_FLUSH_BUDGET_SEC
+    snapshot = _read_dsh_session_snapshot(session_id)
+    while True:
+        if snapshot is not None:
+            seq, totals = snapshot
+            if baseline_seq is None:
+                if any(totals.values()):
+                    return snapshot
+            elif seq > baseline_seq and totals != baseline_totals:
+                return snapshot
+        if time.monotonic() >= deadline:
+            return snapshot
+        await asyncio.sleep(_DSH_USAGE_FLUSH_POLL_SEC)
+        snapshot = _read_dsh_session_snapshot(session_id)
+
+
+def _dsh_turn_usage(
+    before: Mapping[str, int] | None,
+    after: Mapping[str, int] | None,
+) -> dict[str, int] | None:
+    """Return one turn's counter delta, or ``None`` when it is not usable.
+
+    A fresh session legitimately starts with an empty snapshot, so a missing
+    ``before`` counts as all zeros.  Negative deltas mean the store was reset
+    or compacted mid-turn; keeping the estimate is safer than reporting a
+    fabricated negative turn.
+    """
+
+    if after is None:
+        return None
+    baseline = before or {}
+    delta: dict[str, int] = {}
+    for name in _DSH_USAGE_COUNTERS:
+        previous = int(baseline.get(name, 0) or 0)
+        delta[name] = int(after.get(name, 0) or 0) - previous
+    if any(value < 0 for value in delta.values()):
+        return None
+    if not delta["uncachedInputTokens"] and not delta["cacheReadTokens"] and not delta["outputTokens"]:
+        return None
+    return delta
 
 
 def _select_permission_option(options: Any) -> str:
@@ -1230,6 +1367,9 @@ class DshCLIAdapter(BaseBackend):
                 session_id,
                 desired_effort=reasoning_effort,
             )
+            # ACP ``usage_update`` only carries context size, so snapshot DSH's
+            # own cumulative counters here and price this turn's delta below.
+            usage_before = _read_dsh_session_snapshot(session_id)
 
             # Turn-level streaming state
             held_message_id: str | None = None
@@ -1411,6 +1551,27 @@ class DshCLIAdapter(BaseBackend):
                 self._update_handler = None
                 await self._drain_stream_event_tasks()
 
+            usage_after = await _await_dsh_usage_snapshot(session_id, usage_before)
+            turn_usage_delta = _dsh_turn_usage(
+                usage_before[1] if usage_before is not None else None,
+                usage_after[1] if usage_after is not None else None,
+            )
+            token_usage = (
+                TokenUsage(
+                    input_tokens=(
+                        turn_usage_delta["uncachedInputTokens"]
+                        + turn_usage_delta["cacheReadTokens"]
+                    ),
+                    output_tokens=turn_usage_delta["outputTokens"],
+                    # DSH output counters already include reasoning tokens.
+                    thinking_tokens=0,
+                    prompt_cache_hit_tokens=turn_usage_delta["cacheReadTokens"],
+                    prompt_cache_miss_tokens=turn_usage_delta["uncachedInputTokens"],
+                )
+                if turn_usage_delta is not None
+                else None
+            )
+
             final_text = "".join(held_text_parts).strip()
             stop_reason = (
                 str(result.get("stopReason") or "").strip()
@@ -1424,6 +1585,7 @@ class DshCLIAdapter(BaseBackend):
                     text=final_text,
                     duration_ms=duration_ms,
                     is_success=False,
+                    usage=token_usage,
                     error="Request cancelled.",
                 )
 
@@ -1444,6 +1606,7 @@ class DshCLIAdapter(BaseBackend):
                     text="",
                     duration_ms=duration_ms,
                     is_success=False,
+                    usage=token_usage,
                     error=f"DSH returned empty response (stopReason={stop_reason or 'unknown'})",
                 )
 
@@ -1464,6 +1627,9 @@ class DshCLIAdapter(BaseBackend):
                 "thinking_redacted_count": 0,
                 "thinking_sources": ["dsh-cli"],
             }
+            stream_metadata["token_usage_source"] = (
+                "dsh_session_projcache" if token_usage is not None else "estimated"
+            )
 
             session_committed = True
             return BackendResponse(
@@ -1471,6 +1637,7 @@ class DshCLIAdapter(BaseBackend):
                 duration_ms=duration_ms,
                 is_success=True,
                 stop_reason=stop_reason or "end_turn",
+                usage=token_usage,
                 tool_call_count=tool_call_count,
                 stream_metadata=stream_metadata,
             )
@@ -1568,3 +1735,4 @@ class DshCLIAdapter(BaseBackend):
                 _ACP_CANCEL_GRACE_SEC,
             )
             await self._stop_worker(reason=reason)
+# HASHI-Fingerprint: hfp_904901c620f942819ec7462a55edb36b
