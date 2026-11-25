@@ -67,8 +67,10 @@ def _clean_status(value: Any) -> str:
         line = raw.rstrip()
         if not line:
             continue
-        if len(line) > 3 and line[2] == " ":
+        if len(line) >= 3 and line[2] == " ":
             line = line[3:]
+        elif len(line) >= 2 and line[1] == " ":
+            line = line[2:]
         lines.append(line)
     return _clip(" / ".join(lines[:3]))
 

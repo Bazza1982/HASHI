@@ -503,3 +503,16 @@ def test_force_align_checkout_aborts_when_a_locked_file_survives_the_stash(
     assert failure["stash_commit"]
     assert _git(deployed, "rev-parse", "HEAD") == old
     assert _git(deployed, "stash", "list") != ""
+
+
+def test_dirty_summary_keeps_the_first_path_intact_after_strip():
+    summary = release_update._dirty_summary("M README.md\n?? scratch.txt")
+    assert summary["modified_paths"] == ["README.md"]
+    assert summary["untracked_paths"] == ["scratch.txt"]
+
+    summary = release_update._dirty_summary(" M README.md\n?? scratch.txt")
+    assert summary["modified_paths"] == ["README.md"]
+    assert summary["untracked_paths"] == ["scratch.txt"]
+
+    summary = release_update._dirty_summary("MM docs/a b.md")
+    assert summary["modified_paths"] == ["docs/a b.md"]

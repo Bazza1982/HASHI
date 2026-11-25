@@ -90,7 +90,14 @@ def _dirty_summary(status: str) -> dict[str, Any]:
     modified: list[str] = []
     untracked: list[str] = []
     for line in str(status or "").splitlines():
-        path = line[3:].strip() if len(line) > 3 else ""
+        if not line.strip():
+            continue
+        if len(line) >= 3 and line[2] == " ":
+            path = line[3:].strip()
+        elif len(line) >= 2 and line[1] == " ":
+            path = line[2:].strip()
+        else:
+            path = line.strip()
         if not path:
             continue
         path = path.replace("\\", "/")
