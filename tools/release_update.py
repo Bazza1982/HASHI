@@ -503,7 +503,7 @@ def force_align_checkout(
 
     Order is deliberate: fetch first (a network failure changes nothing), then
     stash tracked and untracked changes (never ignored files), record a backup
-    ref when the old HEAD is not a surviving named branch, and only then move
+    ref when the old HEAD is not part of the target history, and only then move
     the checkout.  Local commits are never reset away or force-pushed.
     """
 
