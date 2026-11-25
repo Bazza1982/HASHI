@@ -16,6 +16,11 @@ MAX_STORED_PROMPT_CHARS = 20_000
 MAX_STORED_RESPONSE_CHARS = 24_000
 MAX_CONTEXT_PROMPT_CHARS = 5_000
 MAX_CONTEXT_RESPONSE_CHARS = 8_000
+# Receipts that already ended are continuity cues, not work in progress. Keep
+# only a bounded glimpse of them; a receipt that still awaits the user keeps the
+# full budget because the reply may depend on its exact wording.
+MAX_CONTEXT_PROMPT_CHARS_COMPACT = 600
+MAX_CONTEXT_RESPONSE_CHARS_COMPACT = 1_100
 
 _SKIP_CONTEXT_SOURCES = frozenset(
     {
@@ -434,20 +439,26 @@ def context_section(runtime: Any, item: Any) -> list[tuple[str, str]]:
         "and must not rewrite or override the current user request."
     ]
     for receipt in selected:
+        pending = bool(receipt.get("active"))
+        prompt_limit = (
+            MAX_CONTEXT_PROMPT_CHARS if pending else MAX_CONTEXT_PROMPT_CHARS_COMPACT
+        )
+        response_limit = (
+            MAX_CONTEXT_RESPONSE_CHARS
+            if pending
+            else MAX_CONTEXT_RESPONSE_CHARS_COMPACT
+        )
         parts.append(
             "\n".join(
                 (
                     f"## Exchange {receipt.get('receipt_id')}",
                     f"source={receipt.get('source') or 'unknown'}; "
+                    f"status={receipt.get('status') or 'completed'}; "
                     f"completed_at={receipt.get('updated_at') or receipt.get('created_at') or 0}",
                     "USER:\n"
-                    + _bounded_text(
-                        receipt.get("task_prompt"), MAX_CONTEXT_PROMPT_CHARS
-                    ),
+                    + _bounded_text(receipt.get("task_prompt"), prompt_limit),
                     "ASSISTANT:\n"
-                    + _bounded_text(
-                        receipt.get("assistant_text"), MAX_CONTEXT_RESPONSE_CHARS
-                    ),
+                    + _bounded_text(receipt.get("assistant_text"), response_limit),
                 )
             )
         )
@@ -522,3 +533,4 @@ def timeline_entries(runtime: Any, item: Any) -> list[dict[str, Any]]:
 def load_receipts(runtime: Any) -> list[dict[str, Any]]:
     """Return a defensive copy for diagnostics and tests."""
     return [dict(receipt) for receipt in _read_state(runtime)["receipts"]]
+# HASHI-Fingerprint: hfp_10e0c29f8c374eb199558b46950434b9

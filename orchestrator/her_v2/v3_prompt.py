@@ -1,6 +1,7 @@
 """Deterministic PCM-to-model projection for HERV3."""
 from __future__ import annotations
 import json
+import os
 from collections.abc import Callable, Mapping
 
 MAIN_CONTRACT = """You are the configured HASHI agent. Accomplish the user's request;
@@ -90,11 +91,84 @@ project_locate to locate repositories, git_inspect for read-only Git inspection,
 text_replace for targeted edits to existing UTF-8 files (instead of hand-written
 unified diffs or shell edit scripts), and tool_find when on-demand tool packs
 are enabled. Batch genuinely independent read-only inspections (such as reading
-multiple known files or running separate scoped searches) in one assistant turn
-when practical. On Windows, PowerShell 5.1 does not support bash `&&` chaining
+multiple known files or running separate scoped searches) as several tool calls
+in one response; independent read-only calls in the same response run
+concurrently. Do not repeat an unchanged inspection to confirm it. On Windows,
+PowerShell 5.1 does not support bash `&&` chaining
 unless PowerShell 7 (`pwsh`) is installed; use `;` or `$LASTEXITCODE` checks
 rather than bash syntax.
 """
+
+
+# Native function schemas already transport the tool contract; the PCM text
+# catalogue repeats it at ~16k characters and pushes real work out of context.
+# Tool and skill catalogues are therefore projected in one compact form only.
+CATALOGUE_SECTION_KEYS = frozenset({"tools_catalogue", "skills_catalogue"})
+SKILL_INDEX_DESCRIPTION_CHARS = 140
+# The index replaces the full catalogue, so it must still say where the real
+# instructions live. `skills/<id>/SKILL.md` is ambiguous: it resolves against
+# the Agent workspace, while the files sit under the HASHI project root. When
+# every skill follows `<root>/<id>/SKILL.md` the shared root is sent once;
+# otherwise each line carries its own absolute path.
+SKILL_INDEX_NOTE = "Index only: read <root>/<id>/SKILL.md before following a skill."
+SKILL_INDEX_NOTE_EXPLICIT = (
+    "Index only: read the SKILL.md path on each line before following a skill."
+)
+
+
+def _skill_root(entries: list[tuple[str, str]]) -> str:
+    """Return the shared skills directory only when it explains every path."""
+
+    paths = [path for _, path in entries]
+    if not paths or not all(paths):
+        return ""
+    try:
+        root = os.path.commonpath([os.path.dirname(path) for path in paths])
+    except (TypeError, ValueError):
+        return ""
+    if not root:
+        return ""
+    for name, path in entries:
+        if os.path.normcase(os.path.dirname(path)) != os.path.normcase(
+            os.path.join(root, name)
+        ):
+            return ""
+    return root
+
+
+def skill_index_payload(skills: object) -> dict[str, object] | None:
+    """Compact index: one bounded line per skill plus its real file location."""
+
+    entries: list[tuple[str, str, str]] = []
+    for item in skills or ():
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("id") or item.get("name") or "").strip()
+        if not name:
+            continue
+        description = " ".join(str(item.get("description") or "").split())
+        if len(description) > SKILL_INDEX_DESCRIPTION_CHARS:
+            description = description[: SKILL_INDEX_DESCRIPTION_CHARS - 1].rstrip() + "…"
+        entries.append((name, description, str(item.get("skill_md") or "").strip()))
+    if not entries:
+        return None
+    root = _skill_root([(name, path) for name, _, path in entries])
+    skills_lines: list[str] = []
+    for name, description, path in entries:
+        line = f"- {name}: {description}" if description else f"- {name}"
+        if path and not root:
+            line = f"{line} [read {path}]"
+        skills_lines.append(line)
+    if root:
+        return {"note": SKILL_INDEX_NOTE, "root": root, "skills": skills_lines}
+    return {"note": SKILL_INDEX_NOTE_EXPLICIT, "skills": skills_lines}
+
+
+def compact_skill_index(skills: object) -> list[str]:
+    """One line per skill: id, a bounded description and its real location."""
+
+    payload = skill_index_payload(skills)
+    return list(payload["skills"]) if payload else []
 
 
 def compile_main_prompt(
@@ -142,7 +216,13 @@ def compile_main_prompt(
     for section in sections:
         authority = str(section.get("authority") or "runtime_context")
         text = str(section.get("text") or "")
-        if not text or section.get("key") == "current_user_request":
+        key = str(section.get("key") or "")
+        if not text or key == "current_user_request":
+            continue
+        # Skip the PCM text catalogues: native schemas cover the tool contract
+        # (when tools are available) and available_skills below carries the
+        # compact skill index, so both full-text copies are pure duplication.
+        if key in CATALOGUE_SECTION_KEYS:
             continue
         item = {
             "source": str(section.get("key") or ""),
@@ -173,7 +253,9 @@ def compile_main_prompt(
         # Local keeps advisory catalogues out by default; they are read on
         # demand instead of being re-sent as fixed context.
         refs["advisory_habits"] = context.get("habit_catalogue") or []
-        refs["available_skills"] = context.get("skills_catalogue") or []
+        skill_index = skill_index_payload(context.get("skills_catalogue"))
+        if skill_index:
+            refs["available_skills"] = skill_index
         cards = context.get("strategy_playbook")
         if cards:
             refs["optional_strategy_cards"] = cards
@@ -195,3 +277,4 @@ def compile_main_prompt(
         + str(pcm_input.get("current_request") or fallback_request)
     )
     return "\n\n".join(system), user
+# HASHI-Fingerprint: hfp_b6b4fa054ed3473894ec321253f2e551
