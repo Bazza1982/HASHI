@@ -844,6 +844,74 @@ async def test_dsh_late_usage_flush_is_not_billed_to_the_next_turn(
         await adapter.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_dsh_recovered_snapshot_after_estimated_turn_stays_estimated(
+    tmp_path: Path, monkeypatch
+):
+    """A readable snapshot alone must not re-anchor a session that already
+    billed an estimated turn: its late flush would be billed twice."""
+
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+    # Resumed session: history exists, so this is not a fresh session.
+    adapter._session_id = "resumed-existing-sid"
+    adapter._session_in_current_worker = False
+
+    def totals(uncached: int, output: int) -> dict[str, int]:
+        return {
+            "uncachedInputTokens": uncached,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "outputTokens": output,
+        }
+
+    history = totals(4_000, 100)
+    late_turn = totals(1_000, 40)
+    flushed = {name: history[name] + late_turn[name] for name in history}
+    history_snapshot = dsh._DshUsageSnapshot(11, history, 7, True)
+    flushed_snapshot = dsh._DshUsageSnapshot(14, flushed, 8, True)
+
+    # Phase one: the store is unreadable, so the turn is estimated.
+    # Phase two: it is readable again and the estimated turn's counters land.
+    state = {"phase": "first", "reads": 0}
+
+    def fake_read(session_id: str):
+        state["reads"] += 1
+        if state["phase"] == "first":
+            return None
+        return history_snapshot if state["reads"] == 1 else flushed_snapshot
+
+    def begin(phase: str) -> None:
+        state["phase"] = phase
+        state["reads"] = 0
+
+    monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", fake_read)
+
+    def assert_estimated(result) -> None:
+        assert result.is_success is True
+        assert result.usage is None
+        assert (result.stream_metadata or {}).get("token_usage_source") == "estimated"
+
+    try:
+        begin("first")
+        assert_estimated(await adapter.generate_response("recovered one", "req-rec-1"))
+
+        # The late flush of the estimated turn arrives inside this prompt; it
+        # must not be reported as this turn's provider usage.
+        begin("second")
+        assert_estimated(await adapter.generate_response("recovered two", "req-rec-2"))
+        assert adapter._usage_settled_turn is None
+    finally:
+        await adapter.shutdown()
+
+
 def test_dsh_preflight_and_local_invocation_resolution():
     argv, cwd, label = resolve_dsh_invocation("dsh")
     assert "--profile" in argv

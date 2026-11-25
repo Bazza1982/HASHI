@@ -661,8 +661,10 @@ class DshCLIAdapter(BaseBackend):
         proves every turn up to ``turn`` is already folded, so a delta from it
         covers exactly the turn this prompt opens.  Anything else - unreadable
         store, an open turn, or turns issued since the last anchor that DSH has
-        not closed yet - keeps the estimate path.  Re-anchoring never bills
-        anything, so it can safely happen as soon as the evidence is there.
+        not closed yet - keeps the estimate path.  Once prompts have been
+        billed by estimate with no anchor, a snapshot becoming readable again
+        proves nothing about their late flushes, so only a brand-new session
+        restores real usage.
         """
 
         if fresh_session or self._usage_session_id != session_id:
@@ -676,6 +678,11 @@ class DshCLIAdapter(BaseBackend):
         if snapshot is None or not snapshot.settled or snapshot.turn is None:
             return False
         if self._usage_settled_turn is None:
+            if self._usage_unaccounted > 0:
+                # Turns were already billed by estimate, so a snapshot that
+                # merely became readable again may still carry their late
+                # flush.  Without a proven boundary it cannot anchor usage.
+                return False
             self._usage_settled_turn = snapshot.turn
             self._usage_unaccounted = 0
             return True
