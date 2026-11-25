@@ -16,6 +16,16 @@ from tools.release_update import ReleaseUpdateError, run_staged_source_release
 
 _LOG = logging.getLogger(__name__)
 
+_PHASE_COPY = {
+    "preflight": "源码检查未通过",
+    "fetch": "拉取最新源码失败",
+    "build": "构建失败",
+    "test": "验证未通过",
+    "record": "保存更新记录失败",
+    "prepare": "准备更新失败",
+    "adopt": "启用新版本失败",
+}
+
 
 def _preparation_done(runtime: Any, task: asyncio.Task[dict[str, Any]]) -> None:
     if getattr(runtime, "_hashideploy_inflight", None) is task:
@@ -81,14 +91,15 @@ async def hashideploy_command(runtime: Any, update: Any, context: Any) -> None:
     except ReleaseUpdateError as exc:
         details = exc.details if isinstance(exc.details, dict) else {}
         source = details.get("source") or {}
-        reason = html.escape(redact_log_text(str(exc)))
-        cause = details.get("cause")
-        if cause:
-            reason += "\n" + html.escape(redact_log_text(str(cause))[:1200])
+        phase = str(getattr(exc, "phase", "") or "").strip()
+        reason = _PHASE_COPY.get(phase, "更新准备失败")
+        # Raw provider/build text stays in the log; the chat surface gets one
+        # actionable Chinese sentence and the target version.
+        _LOG.warning("Source preparation failed (%s): %s", phase or "unknown", redact_log_text(str(exc)))
         await runtime._reply_text(
             update,
             ui_language.tr(
-                "hashideploy.failed", phase=html.escape(exc.phase), reason=reason,
+                "hashideploy.failed", reason=html.escape(reason),
                 commit=html.escape(str(source.get("target_commit") or "?")[:12]),
             ),
             parse_mode="HTML",

@@ -6,12 +6,10 @@ from orchestrator.command_registry import RuntimeCommand
 
 
 RETIRED_NOTICE = (
-    "ℹ️ <b>/rebuild is retired</b>\n\n"
-    "HER v1's native Rust runtime has been removed. HERV3 is Python-based "
-    "and has no native runtime to build.\n\n"
-    "No build, reload, or restart was performed. Use <code>/reboot</code> to "
-    "adopt HASHI Python updates. This compatibility notice will be removed "
-    "after one release."
+    "ℹ️ <b>/rebuild 已停用</b>\n\n"
+    "HER v1 的本地 Rust 运行时已经移除。HERV3 使用 Python，没有需要构建的本地运行时。\n\n"
+    "本次没有构建、重载或重启。要启用 HASHI Python 更新，请使用 <code>/reboot</code>。"
+    "这个兼容提示会在下个版本移除。"
 )
 
 
@@ -51,7 +49,7 @@ async def command_rebuild(runtime: Any, update: Any, context: Any) -> None:
     del context
     if not _authorized(runtime, update):
         await _send(
-            runtime, update, "⛔ This command is restricted to the authorized owner."
+            runtime, update, "⛔ 此命令仅限已授权的所有者使用。"
         )
         return
     await _send(runtime, update, RETIRED_NOTICE)
@@ -60,7 +58,7 @@ async def command_rebuild(runtime: Any, update: Any, context: Any) -> None:
 COMMANDS = [
     RuntimeCommand(
         name="rebuild",
-        description="Retired HER rebuild notice",
+        description="已停用的 /rebuild 提示",
         callback=command_rebuild,
     )
 ]
