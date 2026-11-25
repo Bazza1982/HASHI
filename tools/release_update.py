@@ -319,6 +319,26 @@ def _with_failure(
     return ReleaseUpdateError(exc.phase, str(exc), details=details)
 
 
+def _local_branch_tip(
+    root: Path, branch: str, *, phase: str
+) -> str | None:
+    """Return a local branch's exact commit, or None when it does not exist."""
+
+    completed = _git(
+        root,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        f"refs/heads/{branch}^{{commit}}",
+        phase=phase,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    text = str(completed.stdout or "").strip().casefold()
+    return text if _HEX_COMMIT.fullmatch(text) else None
+
+
 def fast_forward_checkout(
     code_root: Path | str,
     *,
@@ -435,6 +455,41 @@ def fast_forward_checkout(
 
     changed = target_commit != old_commit
     switched = switch_to_branch and previous_branch != selected_branch
+    target_branch_commit: str | None = None
+    if switched:
+        # ``checkout -B`` also resets an existing local target branch.  Refuse
+        # when that branch carries commits outside the fetched history instead
+        # of silently dropping them.
+        target_branch_commit = _local_branch_tip(
+            root, selected_branch, phase="source_fast_forward"
+        )
+        if target_branch_commit and target_branch_commit != old_commit:
+            target_ancestry = _git(
+                root,
+                "merge-base",
+                "--is-ancestor",
+                target_branch_commit,
+                target_commit,
+                phase="source_fast_forward",
+                check=False,
+            )
+            if target_ancestry.returncode != 0:
+                details: dict[str, Any] = {
+                    "target_branch_commit": target_branch_commit,
+                    "failure": _release_failure(
+                        "not_fast_forward", source_changed=False, stage="pre_change",
+                        previous_branch=selected_branch, previous_commit=old_commit,
+                        target_commit=target_commit, branch=selected_branch,
+                        target_branch_commit=target_branch_commit,
+                    ),
+                }
+                if target_ancestry.returncode != 1:
+                    details["status"] = _bounded_output(target_ancestry.stderr)
+                raise ReleaseUpdateError(
+                    "source_fast_forward",
+                    "existing target branch has commits outside the fetched history",
+                    details=details,
+                )
     try:
         if switched:
             _progress(
@@ -444,6 +499,7 @@ def fast_forward_checkout(
             _git(
                 root,
                 "checkout",
+                "--no-overwrite-ignore",
                 "-B",
                 selected_branch,
                 target_commit,
@@ -455,6 +511,7 @@ def fast_forward_checkout(
                 root,
                 "merge",
                 "--ff-only",
+                "--no-overwrite-ignore",
                 target_commit,
                 phase="source_fast_forward",
             )
@@ -463,6 +520,7 @@ def fast_forward_checkout(
             exc, "checkout_failed", source_changed=False, stage="pre_change",
             previous_branch=previous_branch, previous_commit=old_commit,
             target_commit=target_commit, branch=selected_branch,
+            target_branch_commit=target_branch_commit,
         ) from exc
     adopted = _require_clean_checkout(
         root, phase="source_verify", failure_code="commit_mismatch", source_changed=True
@@ -478,6 +536,7 @@ def fast_forward_checkout(
                     "commit_mismatch", source_changed=True, stage="post_change",
                     previous_branch=previous_branch, previous_commit=old_commit,
                     target_commit=target_commit, actual_commit=adopted,
+                    target_branch_commit=target_branch_commit,
                 ),
             },
         )
@@ -490,6 +549,7 @@ def fast_forward_checkout(
         "previous_branch": previous_branch,
         "switched_to_branch": switched,
         "forced": False,
+        "target_branch_commit": target_branch_commit,
     }
 
 
@@ -588,6 +648,9 @@ def force_align_checkout(
             )},
         )
 
+    target_branch_commit = _local_branch_tip(
+        root, selected_branch, phase="source_preflight"
+    )
     stash_commit: str | None = None
     stash_message: str | None = None
     if status_before:
@@ -668,6 +731,7 @@ def force_align_checkout(
                     previous_branch=previous_branch, previous_commit=previous_commit,
                     target_commit=target_commit, stash_commit=stash_commit,
                     stash_message=stash_message,
+                    target_branch_commit=target_branch_commit,
                 ),
                 "status": _bounded_output(ancestry.stderr),
             },
@@ -689,17 +753,71 @@ def force_align_checkout(
                 previous_branch=previous_branch, previous_commit=previous_commit,
                 target_commit=target_commit, stash_commit=stash_commit,
                 stash_message=stash_message,
+                target_branch_commit=target_branch_commit,
             ) from exc
+
+    # ``checkout -B`` also resets the local target branch.  If that branch has
+    # its own commits outside the target history, keep its tip through the same
+    # backup-ref mechanism as the previous HEAD.
+    target_branch_backup_ref: str | None = None
+    if target_branch_commit and target_branch_commit != target_commit:
+        if target_branch_commit == previous_commit:
+            target_branch_backup_ref = backup_ref
+        else:
+            target_ancestry = _git(
+                root, "merge-base", "--is-ancestor", target_branch_commit,
+                target_commit, phase="source_force_backup", check=False,
+            )
+            if target_ancestry.returncode not in (0, 1):
+                raise ReleaseUpdateError(
+                    "source_force_backup",
+                    "could not verify whether the target branch was already merged",
+                    details={
+                        "failure": _release_failure(
+                            "backup_failed", source_changed=False, stage="pre_change",
+                            previous_branch=previous_branch,
+                            previous_commit=previous_commit,
+                            target_commit=target_commit,
+                            target_branch_commit=target_branch_commit,
+                            stash_commit=stash_commit, stash_message=stash_message,
+                            backup_ref=backup_ref,
+                        ),
+                        "status": _bounded_output(target_ancestry.stderr),
+                    },
+                )
+            if target_ancestry.returncode == 1:
+                target_branch_backup_ref = (
+                    f"refs/hashideploy-backups/{stamp}-target-"
+                    f"{target_branch_commit[:12]}"
+                )
+                _progress(
+                    f"recording pre-force {selected_branch} at "
+                    f"{target_branch_backup_ref}"
+                )
+                try:
+                    _git(
+                        root, "update-ref", target_branch_backup_ref,
+                        target_branch_commit, phase="source_force_backup",
+                    )
+                except ReleaseUpdateError as exc:
+                    raise _with_failure(
+                        exc, "backup_failed", source_changed=False, stage="pre_change",
+                        previous_branch=previous_branch, previous_commit=previous_commit,
+                        target_commit=target_commit,
+                        target_branch_commit=target_branch_commit,
+                        stash_commit=stash_commit, stash_message=stash_message,
+                        backup_ref=backup_ref,
+                    ) from exc
 
     _progress(f"checking out {selected_branch} at {target_commit[:12]}")
     checked_out = _git(
-        root, "checkout", "-B", selected_branch, target_commit,
-        phase="source_force_checkout", check=False,
+        root, "checkout", "--no-overwrite-ignore", "-B", selected_branch,
+        target_commit, phase="source_force_checkout", check=False,
     )
     if checked_out.returncode != 0:
         if previous_branch not in {"", "HEAD"}:
             _git(
-                root, "checkout", previous_branch,
+                root, "checkout", "--no-overwrite-ignore", previous_branch,
                 phase="source_force_checkout", check=False,
             )
         raise ReleaseUpdateError(
@@ -711,6 +829,8 @@ def force_align_checkout(
                     previous_branch=previous_branch, previous_commit=previous_commit,
                     target_commit=target_commit, stash_commit=stash_commit,
                     stash_message=stash_message, backup_ref=backup_ref,
+                    target_branch_commit=target_branch_commit,
+                    target_branch_backup_ref=target_branch_backup_ref,
                 ),
                 "status": _bounded_output(checked_out.stderr)
                 or _bounded_output(checked_out.stdout),
@@ -730,7 +850,10 @@ def force_align_checkout(
                     previous_branch=previous_branch, previous_commit=previous_commit,
                     target_commit=target_commit, actual_commit=adopted,
                     stash_commit=stash_commit, stash_message=stash_message,
-                    backup_ref=backup_ref, **_dirty_summary(remaining),
+                    backup_ref=backup_ref,
+                    target_branch_commit=target_branch_commit,
+                    target_branch_backup_ref=target_branch_backup_ref,
+                    **_dirty_summary(remaining),
                 ),
             },
         )
@@ -749,6 +872,8 @@ def force_align_checkout(
         "stashed_paths": dirty["dirty_paths"],
         "stashed_truncated": dirty["dirty_truncated"],
         "backup_ref": backup_ref,
+        "target_branch_commit": target_branch_commit,
+        "target_branch_backup_ref": target_branch_backup_ref,
     }
 
 
@@ -1321,7 +1446,10 @@ def _normalize_source_meta(value: Any) -> dict[str, Any]:
     if not forced:
         return {}
     meta: dict[str, Any] = {"forced": True}
-    for key in ("previous_branch", "previous_commit", "stash_commit", "backup_ref"):
+    for key in (
+        "previous_branch", "previous_commit", "stash_commit", "backup_ref",
+        "target_branch_commit", "target_branch_backup_ref",
+    ):
         item = value.get(key)
         if item is None:
             continue
@@ -1457,6 +1585,8 @@ def run_staged_source_release(
                     "stash_commit": source.get("stash_commit"),
                     "stash_message": source.get("stash_message"),
                     "backup_ref": source.get("backup_ref"),
+                    "target_branch_commit": source.get("target_branch_commit"),
+                    "target_branch_backup_ref": source.get("target_branch_backup_ref"),
                     "stashed_dirty_count": source.get("stashed_dirty_count"),
                     "stashed_paths": source.get("stashed_paths"),
                 }, ensure_ascii=False, sort_keys=True)]

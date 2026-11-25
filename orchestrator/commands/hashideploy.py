@@ -194,6 +194,17 @@ def render_failure(exc: ReleaseUpdateError) -> str:
         lines.append(ui_language.tr(
             "hashideploy.force.backup_line", ref=_escape(backup_ref),
         ))
+    target_backup_ref = str(
+        failure.get("target_branch_backup_ref")
+        or source.get("target_branch_backup_ref")
+        or ""
+    )
+    if target_backup_ref:
+        lines.append(ui_language.tr(
+            "hashideploy.force.target_branch_backup_line",
+            branch=_escape(failure.get("branch") or source.get("branch") or "main"),
+            ref=_escape(target_backup_ref),
+        ))
     lines.append(ui_language.tr("hashideploy.failed.footer"))
     return re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line is not None)).strip()
 
@@ -232,7 +243,7 @@ def _success_text(result: dict[str, Any]) -> str:
         previous_commit = str(
             force.get("previous_commit") or source.get("old_commit") or ""
         )
-        return ui_language.tr(
+        text = ui_language.tr(
             "hashideploy.force.prepared", instance=instance, commit=commit,
             previous_branch=_escape(previous_branch),
             previous_commit=_escape(previous_commit[:12] or "—"),
@@ -240,6 +251,18 @@ def _success_text(result: dict[str, Any]) -> str:
             count=_escape(count if count is not None else "0"),
             backup=_escape(backup or "—"),
         )
+        target_backup = str(
+            force.get("target_branch_backup_ref")
+            or source.get("target_branch_backup_ref")
+            or ""
+        )
+        if target_backup:
+            text += "\n" + ui_language.tr(
+                "hashideploy.force.target_branch_backup_line",
+                branch=_escape(source.get("branch") or "main"),
+                ref=_escape(target_backup),
+            )
+        return text
     if source.get("switched_to_branch") is True:
         return ui_language.tr(
             "hashideploy.prepared_switched", instance=instance, commit=commit,

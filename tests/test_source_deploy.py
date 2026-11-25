@@ -423,7 +423,7 @@ FAILURE_CLASSES = [
     ("receipt_failed", "stage_receipt", True,
      {"failure": {"code": "receipt_failed", "source_changed": True,
                   "stage": "post_change", "target_commit": "b" * 40}},
-     "就绪回执未写入"),
+     "就绪记录未写入"),
     ("stash_failed", "source_force_stash", False,
      {"failure": {"code": "stash_failed", "source_changed": False,
                   "stage": "pre_change", "previous_commit": "a" * 40,
@@ -472,6 +472,28 @@ def test_hashideploy_prepared_mentions_the_branch_it_left(tmp_path):
 
     assert "fix/cleanup" in text
     assert "自动切回 main" in text
+
+
+def test_hashideploy_force_success_names_the_preserved_target_branch(tmp_path):
+    from orchestrator import ui_language
+    from orchestrator.commands import hashideploy
+
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        text = hashideploy._success_text({
+            "instance_id": "HASHI3",
+            "target_commit": "b" * 40,
+            "forced": True,
+            "source": {"forced": True, "branch": "main"},
+            "force": {
+                "previous_branch": "fix/cleanup",
+                "previous_commit": "a" * 40,
+                "target_branch_backup_ref":
+                    "refs/hashideploy-backups/x-target-aaaaaaaaaaaa",
+            },
+        })
+
+    assert "原 <code>main</code> 分支的独有提交已保留" in text
+    assert "refs/hashideploy-backups/x-target-aaaaaaaaaaaa" in text
 # HASHI-Fingerprint: hfp_f8e7636eba1e4afdad419dc0741295ca
 
 
@@ -491,6 +513,8 @@ def test_staged_receipt_records_force_evidence(tmp_path, monkeypatch):
             "forced": True, "previous_branch": "main",
             "previous_commit": "c" * 40, "stash_commit": "d" * 40,
             "backup_ref": "refs/hashideploy-backups/x",
+            "target_branch_commit": "e" * 40,
+            "target_branch_backup_ref": "refs/hashideploy-backups/x-target-eeeeeeeeeeee",
             "stashed_dirty_count": 2, "stashed_paths": ["a.py"],
         },
     )
@@ -502,3 +526,8 @@ def test_staged_receipt_records_force_evidence(tmp_path, monkeypatch):
     assert receipt["force"]["previous_branch"] == "main"
     assert receipt["force"]["previous_commit"] == "c" * 40
     assert receipt["force"]["stashed_dirty_count"] == 2
+    assert receipt["force"]["target_branch_commit"] == "e" * 40
+    assert (
+        receipt["force"]["target_branch_backup_ref"]
+        == "refs/hashideploy-backups/x-target-eeeeeeeeeeee"
+    )
