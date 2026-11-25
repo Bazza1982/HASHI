@@ -10,6 +10,7 @@ from adapters.xai_oauth_credentials import (
 )
 from orchestrator.pathing import resolve_agy_executable, resolve_dsh_executable, resolve_dsh_invocation
 from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
     get_secret_lookup_order,
     removed_backend_reason,
 )
@@ -45,6 +46,16 @@ class BackendPreflight:
                 if value:
                     return str(value)
         return ""
+
+    @staticmethod
+    def _engine_declares_no_secret(engine: str) -> bool:
+        """Whether the registry deliberately declares no secret for ``engine``.
+
+        An empty ``secret_keys`` list means the engine authenticates elsewhere
+        (local runtime, CLI keyring, per-agent provider row). It must not be
+        read as "missing API key", which would disable the engine forever.
+        """
+        return not get_secret_lookup_order(engine, "")
 
     @staticmethod
     def _probe_http(url: str, timeout: float = 1.0) -> tuple[bool, str]:
@@ -148,8 +159,12 @@ class BackendPreflight:
                 else:
                     result[engine] = (False, "no API key in secrets.json")
             elif engine in {"deepseek-api", "hashi-api", "openai-compatible-api", "hli-api"}:
-                key = self._find_secret(engine, agent_configs, secrets)
-                if key:
+                if self._engine_declares_no_secret(engine):
+                    result[engine] = (
+                        True,
+                        "no API key required by this engine",
+                    )
+                elif key := self._find_secret(engine, agent_configs, secrets):
                     result[engine] = (True, "API key present")
                 else:
                     result[engine] = (
@@ -166,10 +181,15 @@ class BackendPreflight:
                     (True, f"Ollama reachable at {base_url}") if alive
                     else (False, f"Ollama not reachable at {base_url}: {detail}")
                 )
-            elif engine == "her-v2":
-                # Legacy storage/adapter identifier: availability is decided by
-                # the configured Agent rows, never assumed.
-                result[engine] = (False, "her-v2 is a legacy identifier; no standalone runtime")
+            elif canonical_backend_engine(engine) == "her-v2":
+                # ``her-v2`` is the stored identifier of the live HER runtime,
+                # not a removable engine. Every Agent row resolves its own
+                # provider and credentials, so availability is decided per row;
+                # a blanket False here would stop every HER Agent from starting.
+                result[engine] = (
+                    True,
+                    "HER runtime: availability is decided by the Agent's configured provider row",
+                )
             else:
                 result[engine] = (
                     False,

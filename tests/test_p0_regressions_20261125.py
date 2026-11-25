@@ -60,6 +60,40 @@ def test_preflight_never_assumes_a_missing_api_key_is_available():
     assert "no API key" in reason
 
 
+def _preflight_global_config():
+    return SimpleNamespace(
+        claude_cmd="claude",
+        codex_cmd="codex",
+        agy_cmd="agy",
+        grok_cmd="grok",
+        dsh_cmd="dsh",
+        agy_launch_mode="direct",
+    )
+
+
+@pytest.mark.parametrize("engine", ["her-v2", "her-v3"])
+def test_preflight_never_blanket_disables_the_live_her_runtime(engine):
+    preflight = BackendPreflight()
+    config = SimpleNamespace(engine=engine, name="her-agent")
+    result = preflight.check_backend_availability(_preflight_global_config(), [config], {})
+    available, reason = result[engine]
+    assert available is True
+    assert "Agent" in reason
+
+    startable, skipped = preflight.partition_agents_by_availability([config], result)
+    assert [cfg.name for cfg in startable] == ["her-agent"]
+    assert skipped == []
+
+
+def test_preflight_treats_a_registry_engine_without_secrets_as_available():
+    preflight = BackendPreflight()
+    config = SimpleNamespace(engine="hashi-api", name="hashi-agent")
+    result = preflight.check_backend_availability(_preflight_global_config(), [config], {})
+    available, reason = result["hashi-api"]
+    assert available is True
+    assert "no API key required" in reason
+
+
 def _pricing_fact(*, thinking_per_unit):
     return PricingFact(
         status="known",
