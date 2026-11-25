@@ -327,7 +327,10 @@ async def hashideploy_command(runtime: Any, update: Any, context: Any) -> None:
             parse_mode="HTML",
         )
     except ReleaseUpdateError as exc:
-        _LOG.warning("Source preparation failed: %s", redact_log_text(str(exc.to_payload())))
+        phase = str(getattr(exc, "phase", "") or "unknown").strip() or "unknown"
+        # Raw provider/build text stays in the log; the chat surface gets one
+        # readable failure class, the exact source state and any recovery refs.
+        _LOG.warning("Source preparation failed (%s): %s", phase, redact_log_text(str(exc)))
         await runtime._reply_text(
             update, render_failure(exc), parse_mode="HTML",
         )

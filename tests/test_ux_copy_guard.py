@@ -5,16 +5,12 @@ from pathlib import Path
 
 LOCALE = Path(__file__).resolve().parents[1] / "locales" / "runtime" / "zh-CN.json"
 
-# User-facing jargon that the P1 glossary bans. Add a term only when the
-# replacement is safe everywhere in the runtime copy.
-BANNED = (
-    "采用", "回执", "投影", "运行代", "努力档位", "母机", "画布卫生", "滞回控制",
-    "跨界通话", "智能工", "本地主权", "后果性操作", "安全失败", "启用中的指针",
-    "交办", "开始办理", "系统没有重试", "槽位", "权威", "代际", "原子", "幂等", "副作用",
-)
+# Only old branding and private names are absolute bans. Contextual terms such
+# as 槽位/权威/回执 remain legal where they are the accurate user-facing word.
+BANNED = ("小能", "Aptenra", "爸爸", "Lily", "Arale", "阿拉蕾", "zhaojun")
 
 
-def test_chinese_runtime_copy_has_no_banned_jargon():
+def test_chinese_runtime_copy_has_no_old_branding_or_private_names():
     data = json.loads(LOCALE.read_text(encoding="utf-8"))
     values = list(data["strings"].items())
     values += [(f"commands.{key}", value) for key, value in data["commands"].items()]
@@ -25,4 +21,4 @@ def test_chinese_runtime_copy_has_no_banned_jargon():
         for term in BANNED
         if term in value
     ]
-    assert not hits, f"{len(hits)} jargon hits: {hits[:8]}"
+    assert not hits, f"{len(hits)} branding/name hits: {hits[:8]}"
