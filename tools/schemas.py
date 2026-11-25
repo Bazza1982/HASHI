@@ -244,7 +244,9 @@ TOOL_SCHEMAS = [
             "name": "file_read",
             "description": (
                 "Read a file from disk and return its contents. "
-                "Supports optional offset (start line) and limit (max lines)."
+                "Supports optional offset (start line) and limit (max lines). "
+                "When the output is truncated, continue with the returned "
+                "char_offset to reconstruct long lines exactly."
             ),
             "parameters": {
                 "type": "object",
@@ -260,6 +262,13 @@ TOOL_SCHEMAS = [
                     "limit": {
                         "type": "integer",
                         "description": "Maximum lines to return (default 500).",
+                    },
+                    "char_offset": {
+                        "type": "integer",
+                        "description": (
+                            "Continue from an absolute 0-based character offset, "
+                            "as returned by a previous truncated read."
+                        ),
                     },
                 },
                 "required": ["path"],

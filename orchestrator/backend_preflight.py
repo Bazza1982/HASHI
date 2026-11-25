@@ -37,6 +37,30 @@ class BackendPreflight:
                     return True
         return False
 
+    def _find_secret(self, engine: str, agent_configs, secrets) -> str:
+        """Return the first configured secret value for ``engine``, if any."""
+        for cfg in agent_configs:
+            for secret_key in get_secret_lookup_order(engine, getattr(cfg, "name", "")):
+                value = secrets.get(secret_key)
+                if value:
+                    return str(value)
+        return ""
+
+    @staticmethod
+    def _probe_http(url: str, timeout: float = 1.0) -> tuple[bool, str]:
+        """Best-effort reachability probe with a hard, short timeout."""
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return 200 <= int(response.status) < 500, f"HTTP {response.status}"
+        except urllib.error.HTTPError as exc:
+            # An HTTP error still proves the endpoint is reachable.
+            return True, f"HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001 - report the real reason
+            return False, f"{type(exc).__name__}: {exc}"
+
     def check_backend_availability(self, global_cfg, agent_configs, secrets) -> dict[str, tuple[bool, str]]:
         """
         Check which backend engines are available. Returns {engine: (available, reason)}.
@@ -123,8 +147,34 @@ class BackendPreflight:
                     result[engine] = (True, "API key present")
                 else:
                     result[engine] = (False, "no API key in secrets.json")
+            elif engine in {"deepseek-api", "hashi-api", "openai-compatible-api", "hli-api"}:
+                key = self._find_secret(engine, agent_configs, secrets)
+                if key:
+                    result[engine] = (True, "API key present")
+                else:
+                    result[engine] = (
+                        False,
+                        f"no API key in secrets.json for {engine}",
+                    )
+            elif engine == "ollama-api":
+                base_url = str(
+                    getattr(global_cfg, "ollama_base_url", "")
+                    or "http://127.0.0.1:11434"
+                ).strip()
+                alive, detail = self._probe_http(f"{base_url.rstrip('/')}/api/tags")
+                result[engine] = (
+                    (True, f"Ollama reachable at {base_url}") if alive
+                    else (False, f"Ollama not reachable at {base_url}: {detail}")
+                )
+            elif engine == "her-v2":
+                # Legacy storage/adapter identifier: availability is decided by
+                # the configured Agent rows, never assumed.
+                result[engine] = (False, "her-v2 is a legacy identifier; no standalone runtime")
             else:
-                result[engine] = (True, "unknown engine, assuming available")
+                result[engine] = (
+                    False,
+                    f"unknown engine '{engine}': no availability check implemented",
+                )
         return result
 
     def partition_agents_by_availability(
@@ -175,3 +225,4 @@ class BackendPreflight:
                 else:
                     skipped.append((cfg.name, f"{engine}: {reason}"))
         return startable, skipped
+# HASHI-Fingerprint: hfp_f67303142f2e4bf989d56bcfa4c688b2

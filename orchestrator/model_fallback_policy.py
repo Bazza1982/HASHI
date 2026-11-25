@@ -991,9 +991,12 @@ def resolve_fallback_decision(
                 # The bound interactive confirmation is the user's explicit
                 # cost decision for an unknown cumulative price.
                 pass
-            else:
+            elif policy.max_extra_cost_usd is not None:
+                # A hard budget can never be proven safe when the price is
+                # unknown, so fail closed only when the user set a ceiling.
                 first_reason = first_reason or REASON_UNKNOWN_COST
                 continue
+            # No explicit ceiling: unknown price is advisory, not a blocker.
         if (
             cumulative_cost_usd is not None
             and policy.max_extra_cost_usd is not None
@@ -1160,3 +1163,4 @@ __all__ = [
     "resolve_fallback_decision",
     "write_policy",
 ]
+# HASHI-Fingerprint: hfp_fb25444bba8044e8837f374533f573c8

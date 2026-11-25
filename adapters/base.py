@@ -467,7 +467,7 @@ class BaseBackend(ABC):
     ) -> str | None:
         """Wait for a task using meaningful output idleness only."""
         while not task.done():
-            idle_for = self._last_activity_age()
+            idle_for = self._last_activity_age(started_monotonic=started_monotonic)
             if idle_for >= self.IDLE_TIMEOUT_SEC:
                 return "idle"
             wait_slice = min(
@@ -480,12 +480,17 @@ class BaseBackend(ABC):
                 continue
         return None
 
-    def _last_activity_age(self) -> float:
+    def _last_activity_age(self, started_monotonic: float | None = None) -> float:
         activity_monotonic = float(
             getattr(self, "last_activity_monotonic", 0.0) or 0.0
         )
         if activity_monotonic > 0:
             return max(0.0, time.monotonic() - activity_monotonic)
+        # A backend that has not produced output yet is still cold-starting.
+        # Without this fallback the idleness clock never advances, so a hung
+        # CLI process or HTTP socket would wait forever.
+        if started_monotonic is not None:
+            return max(0.0, time.monotonic() - float(started_monotonic))
         # Compatibility with persisted diagnostics from older releases.
         activity_wall = float(getattr(self, "last_activity_at", 0.0) or 0.0)
         if activity_wall > 0:
@@ -800,3 +805,4 @@ class BaseBackend(ABC):
             if logger and not self._console_write_warned:
                 logger.warning(f"Console output disabled for this session: {exc}")
                 self._console_write_warned = True
+# HASHI-Fingerprint: hfp_40e4d4db4aa34e3384ec2e4d46703bea
