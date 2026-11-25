@@ -7,18 +7,33 @@ set for the process.
 
 ## Owner command
 
-`/remote token` (owner only) manages the credential without ever echoing it.
+`/remote token` is a subcommand of the existing `/remote` command (owner only).
+It manages the credential without ever echoing it.
 
 | Command | Effect |
 | --- | --- |
-| `/remote token` or `/remote token status` | Source, mask, fingerprint, file revision and the Remote service's loaded credential generation |
-| `/remote token verify` | Same report, used after a change to confirm Remote has reloaded |
-| `/remote token set <value>` | Validate, atomically write `secrets.json`, report the mask and the new revision |
-| `/remote token set` | Same, but asks for the value in a reply prompt (5 minute expiry, `/cancel` aborts, the plaintext message is deleted when the client allows it) |
-| `/remote token clear` | Remove the token and persist a disabled marker |
+| `/remote token` or `/remote token status` | Source, mask, fingerprint and file revision. No network request, no reload claim |
+| `/remote token verify` | Signs one request with the credential in force and reports whether the running Remote service **accepted**, **rejected** or did not answer |
+| `/remote token set` | Asks for the value in a reply prompt (5 minute expiry) |
+| `/remote token clear` | Removes the token and persists a disabled marker |
+| `/remote token cancel` | Abandons a pending prompt |
 
 Validation: 16-512 characters, no whitespace or control characters. Surrounding
 whitespace from a paste is trimmed before saving.
+
+### Why the value is never typed inline
+
+A token written into the command line is copied into command auditing, the
+session projection and the chat history. `/remote token set <value>` is therefore
+refused with a pointer to the reply prompt. The prompt reply is consumed by the
+message handler before history, queue or agent dispatch, the user's message is
+deleted when the client allows it, and the value is handed straight to the
+signer and the secrets writer.
+
+### Cancelling
+
+Reply `cancel` (or `取消`) to the prompt, or send `/remote token cancel`. Both
+reach the same state and leave the stored credential untouched.
 
 ## Resolution order
 
@@ -36,21 +51,37 @@ Startup provisioning creates a token when none exists. `clear` writes
 so a cleared credential is not silently recreated on the next start. Setting a
 token removes the marker.
 
-## Reload evidence
+## Verification evidence
 
-Remote reloads the credential on its discovery maintenance cycle. `status` and
-`verify` read `GET http://127.0.0.1:<remote-port>/health`, which needs no
-credential, and report `credential.generation`, `last_reload_at` and whether the
-loaded credential presence matches the file. A mismatched report means the
-reload is pending, not that the save failed.
+`verify` (and the report at the end of `set` and `clear`) sends one HMAC-signed
+`GET /workbench/v1/status` to the Remote service on its loopback port, signed
+with the credential that is in force. This is the same endpoint and the same
+signature the service already enforces for Workbench, so the result is evidence
+about the running process, not about configuration:
+
+| Result | Meaning |
+| --- | --- |
+| `verified` | The running service accepted this credential (2xx) |
+| `rejected` | The service answered but refused this credential (401/403); it is still using another value and picks up the new one on its next reload |
+| `unavailable` | No answer on either scheme; there is no evidence either way |
+| `missing` | No credential is in force, so no request was sent |
+
+Remote reloads the credential on its discovery maintenance cycle. A `rejected`
+result right after `set` therefore means "saved, reload pending", never "save
+failed".
 
 ## Workbench side
 
-Workbench System Settings stores its own copy in the instance-private state
-directory and resolves `HASHI_REMOTE_SHARED_TOKEN` first, then that private
-value, then inherited HASHI `secrets.json` files. Saving triggers a real probe of
-every enabled connection and distinguishes "authenticated", "reached but
-rejected the token" and "unreachable".
+Workbench System Settings stores its own copy in a dedicated private
+`shared-token` subdirectory of the Workbench state directory; the ACL hardening
+is scoped to that subdirectory and never touches the rest of the state
+directory. It resolves `HASHI_REMOTE_SHARED_TOKEN` first, then that private
+value, then inherited HASHI `secrets.json` files.
+
+Saving triggers a real probe of every enabled connection and distinguishes
+"authenticated", "reached but rejected the token", "could not be reached" and
+"no credential, so no request was attempted". Clearing the private copy reports
+whether an inherited credential is still in force.
 
 One Workbench value applies to every HASHI connection it manages; per-connection
 overrides are not part of this change.

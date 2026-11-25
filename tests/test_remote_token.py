@@ -9,6 +9,7 @@ import pytest
 
 from orchestrator import remote_token
 from orchestrator.config_json import read_config_json, write_config_json
+from remote.security.shared_token import NonceStore, verify_auth_headers
 from orchestrator.workbench_auth import (
     REMOTE_SHARED_TOKEN_DISABLED_KEY,
     ensure_local_api_credential,
@@ -117,15 +118,23 @@ def test_invalid_input_writes_nothing(tmp_path: Path) -> None:
     assert read_config_json(tmp_path / "secrets.json").revision == before
 
 
-def test_remote_generation_is_read_from_the_loopback_health_endpoint() -> None:
+def _signed_endpoint(expected_token: str):
+    """A loopback stand-in for Remote's protected Workbench endpoint."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - http.server contract
-            payload = {"credential": {
-                "configured": True, "generation": 7,
-                "last_reload_at": 1_700_000_000, "configuration_state": "ready",
-            }}
-            body = json.dumps(payload).encode()
-            self.send_response(200)
+            headers = {key: value for key, value in self.headers.items()}
+            ok, _reason, _sender = verify_auth_headers(
+                headers=headers,
+                shared_token=expected_token,
+                method="GET",
+                path=self.path,
+                body_bytes=b"",
+                nonce_store=NonceStore(),
+            )
+            status = 200 if ok else 401
+            body = b'{"ok":true}' if ok else b'{"detail":"unauthorized"}'
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -137,23 +146,69 @@ def test_remote_generation_is_read_from_the_loopback_health_endpoint() -> None:
     server = HTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    return server
+
+
+def test_verify_proves_the_credential_with_a_real_signed_request() -> None:
+    server = _signed_endpoint(TOKEN)
+    port = server.server_address[1]
     try:
-        credential = remote_token.fetch_remote_credential(server.server_address[1], timeout=2)
+        accepted = remote_token.verify_credential(TOKEN, port=port)
+        rejected = remote_token.verify_credential(TOKEN + "-wrong", port=port)
     finally:
         server.shutdown()
         server.server_close()
-    assert credential["reachable"] is True
-    assert credential["configured"] is True
-    assert credential["generation"] == 7
+
+    assert accepted["outcome"] == "verified"
+    assert accepted["status"] == 200
+    assert accepted["path"] == "/workbench/v1/status"
+    assert rejected["outcome"] == "rejected"
+    assert rejected["status"] == 401
 
 
-def test_status_reports_an_unreachable_remote_instead_of_guessing(tmp_path: Path) -> None:
+def test_verify_reports_unavailable_and_missing_without_inventing_evidence() -> None:
+    missing = remote_token.verify_credential("", port=1)
+    assert missing["outcome"] == "missing"
+    assert missing["status"] == 0
+
+    # Nothing listens on port 1: the result must be "no evidence", not "wrong token".
+    unavailable = remote_token.verify_credential(TOKEN, port=1, timeout=0.5)
+    assert unavailable["outcome"] == "unavailable"
+    assert unavailable["status"] == 0
+
+
+def test_rotation_from_one_token_to_the_next_takes_effect_immediately(tmp_path: Path) -> None:
+    first = TOKEN
+    second = "ZzYyXx9876543210-ZzYyXx9876543210-ZzYyXx9876543210-ZzYyXx9876"
+    seed(tmp_path, {})
+
+    remote_token.replace_token(tmp_path, first, private_sids=())
+    assert remote_token.effective_token(tmp_path, env={}) == ("secrets", first)
+
+    server = _signed_endpoint(second)
+    port = server.server_address[1]
+    try:
+        before = remote_token.verify_credential(
+            remote_token.effective_token(tmp_path, env={})[1], port=port
+        )
+        remote_token.replace_token(tmp_path, second, private_sids=())
+        after_source, after_value = remote_token.effective_token(tmp_path, env={})
+        after = remote_token.verify_credential(after_value, port=port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert before["outcome"] == "rejected"
+    assert after_source == "secrets"
+    assert after_value == second
+    assert after["outcome"] == "verified"
+    stored = read_config_json(tmp_path / "secrets.json")
+    assert stored["hashi_remote_shared_token"] == second
+
+
+def test_status_reports_no_verification_instead_of_guessing(tmp_path: Path) -> None:
     seed(tmp_path, {"hashi_remote_shared_token": TOKEN})
-    status = remote_token.load_status(
-        tmp_path,
-        env={},
-        remote_credential={"reachable": False, "reason": "unreachable"},
-    )
+    status = remote_token.load_status(tmp_path, env={})
     assert status.configured is True
-    assert status.remote["reachable"] is False
+    assert status.verification == {}
 # HASHI-Fingerprint: hfp_ce26cb18bc0d480eb43babfdbb204363

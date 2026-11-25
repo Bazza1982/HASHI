@@ -1707,6 +1707,14 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
     arg = (context.args[0].lower() if context.args else "").strip()
+    if arg == "token":
+        # Shared Token management lives in its own module but is dispatched from
+        # here, so `/remote` keeps exactly one command handler and every
+        # existing lifecycle subcommand below stays reachable.
+        from orchestrator.commands.remote import run as run_remote_token
+
+        await run_remote_token(runtime, update, list(context.args[1:]))
+        return
     cfg = runtime._remote_config_snapshot()
     lifecycle = remote_lifecycle.load_settings(cfg["root"])
     disabled = remote_lifecycle.read_disabled_state(cfg["root"])
@@ -1958,3 +1966,4 @@ async def cmd_remote(runtime: Any, update: Any, context: Any) -> None:
         f"{ui_language.tr('remote.invalid_help')}",
         parse_mode="HTML",
     )
+# HASHI-Fingerprint: hfp_83f0950e8f7946de8e473845e7798fb9

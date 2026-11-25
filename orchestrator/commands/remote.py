@@ -1,24 +1,28 @@
-"""`/remote token` - owner-facing Shared Token status, set and clear.
+"""`/remote token` - owner-facing Shared Token status, verification and rotation.
 
-The credential value never appears in a reply, a log line or an error. The
-command reports a masked form plus a short fingerprint, and it confirms the
-Remote service's loaded credential generation through the loopback health
-endpoint instead of claiming a reload happened.
+This module is *not* a command module. The single `/remote` command stays in
+`orchestrator.runtime_remote.cmd_remote`; that handler forwards the `token`
+subcommand here, so every existing `/remote` lifecycle subcommand keeps its
+own dispatcher and no duplicate registration can shadow it.
+
+The credential value never appears in a reply, a log line or an error. Whether
+the running Remote service accepts it is proven with one real HMAC-signed
+request against an existing protected endpoint - never by comparing two
+configuration flags.
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
 from telegram import ForceReply
 
 from orchestrator import remote_token, ui_language
-from orchestrator.command_registry import RuntimeCommand
 
 PROMPT_TTL_SECONDS = 300
 PENDING_ATTRIBUTE = "_remote_token_pending"
+CANCEL_WORDS = frozenset({"cancel", "取消", "取消设置"})
 
 
 def _paths(runtime: Any) -> tuple[Path, Path]:
@@ -27,47 +31,72 @@ def _paths(runtime: Any) -> tuple[Path, Path]:
     return secrets.parent, secrets
 
 
-def _remote_port(root: Path) -> int | None:
-    try:
-        from orchestrator.remote_lifecycle import load_settings
+def _endpoint(runtime: Any, root: Path) -> tuple[int, bool, str]:
+    """Where to prove the credential: loopback port, TLS flag, sender name."""
+    cfg: dict[str, Any] = {}
+    snapshot = getattr(runtime, "_remote_config_snapshot", None)
+    if callable(snapshot):
+        try:
+            cfg = snapshot() or {}
+        except Exception:
+            cfg = {}
+    port = int(cfg.get("port") or 0)
+    if port <= 0:
+        try:
+            from orchestrator.remote_lifecycle import load_settings
 
-        return int(load_settings(root).port)
-    except Exception:
-        return None
+            port = int(load_settings(root).port)
+        except Exception:
+            port = 0
+    config = getattr(runtime, "global_config", None)
+    instance = str(getattr(config, "instance_id", "") or "HASHI")
+    return port, bool(cfg.get("use_tls", True)), instance
 
 
-def _read_status(root: Path, secrets: Path) -> remote_token.RemoteTokenStatus:
-    port = _remote_port(root)
-    health = (
-        remote_token.fetch_remote_credential(port)
-        if port
-        else {"reachable": False, "reason": "port_unknown"}
+def _probe(runtime: Any, root: Path, secrets: Path) -> dict:
+    """One signed request against the running service, using the real credential."""
+    _source, token = remote_token.effective_token(root, secrets_path=secrets)
+    port, use_tls, instance = _endpoint(runtime, root)
+    result = remote_token.verify_credential(
+        token, port=port, use_tls=use_tls, from_instance=instance
     )
-    return remote_token.load_status(root, secrets_path=secrets, remote_credential=health)
+    # A service that answers on the other scheme is still a service; only a
+    # genuinely silent port may be reported as unavailable.
+    if result.get("outcome") == "unavailable" and port:
+        alternate = remote_token.verify_credential(
+            token, port=port, use_tls=not use_tls, from_instance=instance
+        )
+        if alternate.get("outcome") != "unavailable":
+            return alternate
+    return result
+
+
+def _read_status(root: Path, secrets: Path, verification: dict | None = None):
+    return remote_token.load_status(
+        root, secrets_path=secrets, verification=verification or {}
+    )
 
 
 def _source_text(source: str) -> str:
     key = f"remote.token.source.{source}"
-    return ui_language.tr(key) if ui_language.tr(key) != key else source
+    translated = ui_language.tr(key)
+    return translated if translated != key else source
 
 
-def _remote_text(status: remote_token.RemoteTokenStatus) -> list[str]:
-    remote = status.remote or {}
-    if not remote.get("reachable"):
-        return [ui_language.tr("remote.token.remote_unreachable")]
-    loaded = ui_language.tr(
-        "remote.token.loaded" if remote.get("configured") else "remote.token.not_loaded"
-    )
-    generation = ui_language.tr(
-        "remote.token.generation", generation=int(remote.get("generation") or 0)
-    )
-    if remote.get("last_reload_at"):
-        moment = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(remote["last_reload_at"])))
-        generation = f"{generation} · {moment}"
-    mismatch = bool(status.configured) != bool(remote.get("configured"))
-    lines = [loaded, generation]
-    lines.append(ui_language.tr("remote.token.reload_pending" if mismatch else "remote.token.reload_ok"))
-    return lines
+def _verification_text(verification: dict) -> str:
+    outcome = str(verification.get("outcome") or "")
+    status = int(verification.get("status") or 0)
+    if outcome == "verified":
+        return ui_language.tr("remote.token.verified", status=status)
+    if outcome == "rejected":
+        return ui_language.tr("remote.token.rejected", status=status)
+    if outcome == "unavailable":
+        return ui_language.tr("remote.token.unavailable")
+    if outcome == "missing":
+        return ui_language.tr("remote.token.not_checked_missing")
+    if outcome == "failed":
+        return ui_language.tr("remote.token.check_failed", status=status)
+    return ui_language.tr("remote.token.not_checked")
 
 
 def render_status(status: remote_token.RemoteTokenStatus) -> str:
@@ -83,10 +112,10 @@ def render_status(status: remote_token.RemoteTokenStatus) -> str:
         lines.append(ui_language.tr("remote.token.environment_locked"))
     if status.error:
         lines.append(ui_language.tr("remote.token.invalid_state", error=status.error))
-    lines.extend(_remote_text(status))
+    lines.append(_verification_text(status.verification or {}))
     lines.append("")
     lines.append(ui_language.tr("remote.token.hint"))
-    return "\n".join(line for line in lines if line is not None)
+    return "\n".join(lines)
 
 
 def _failure_text(error: remote_token.RemoteTokenError) -> str:
@@ -118,30 +147,60 @@ def _clear_pending(runtime: Any) -> None:
 async def _apply_token(runtime: Any, update: Any, value: str) -> None:
     root, secrets = _paths(runtime)
     try:
-        status = remote_token.replace_token(root, value, secrets_path=secrets)
+        remote_token.replace_token(root, value, secrets_path=secrets)
     except remote_token.RemoteTokenError as error:
         await runtime._reply_text(update, _failure_text(error))
         return
     await runtime._reply_text(
         update,
-        f"{ui_language.tr('remote.token.saved')}\n\n{render_status(_read_status(root, secrets))}",
+        f"{ui_language.tr('remote.token.saved')}\n\n"
+        f"{render_status(_read_status(root, secrets, _probe(runtime, root, secrets)))}",
     )
 
 
-async def remote_command(runtime: Any, update: Any, context: Any) -> None:
+async def _start_prompt(runtime: Any, update: Any) -> None:
+    prompt = await runtime._reply_text(
+        update,
+        ui_language.tr("remote.token.prompt"),
+        reply_markup=ForceReply(
+            selective=True,
+            input_field_placeholder=ui_language.tr("remote.token.prompt_placeholder"),
+        ),
+    )
+    prompt_id = getattr(prompt, "message_id", None)
+    if prompt_id is None:
+        await runtime._reply_text(update, ui_language.tr("remote.token.prompt_unavailable"))
+        return
+    setattr(runtime, PENDING_ATTRIBUTE, {
+        "prompt_message_id": prompt_id,
+        "user_id": getattr(getattr(update, "effective_user", None), "id", None),
+        "chat_id": getattr(getattr(update, "effective_chat", None), "id", None),
+        "expires_at": _now() + PROMPT_TTL_SECONDS,
+    })
+
+
+def _now() -> float:
+    import time
+
+    return time.time()
+
+
+async def run(runtime: Any, update: Any, args: list[str]) -> None:
+    """Handle `/remote token ...`; `args` starts after the `token` subcommand."""
     if not _authorized(runtime, update):
         await runtime._reply_text(update, ui_language.tr("remote.token.denied"))
         return
-    args = list(getattr(context, "args", None) or [])
     action = str(args[0]).lower() if args else "status"
     root, secrets = _paths(runtime)
 
-    if action in {"status", ""}:
+    if action == "status":
         await runtime._reply_text(update, render_status(_read_status(root, secrets)))
         return
 
     if action == "verify":
-        await runtime._reply_text(update, render_status(_read_status(root, secrets)))
+        await runtime._reply_text(
+            update, render_status(_read_status(root, secrets, _probe(runtime, root, secrets)))
+        )
         return
 
     if action == "clear":
@@ -152,83 +211,70 @@ async def remote_command(runtime: Any, update: Any, context: Any) -> None:
             return
         await runtime._reply_text(
             update,
-            f"{ui_language.tr('remote.token.cleared')}\n\n{render_status(_read_status(root, secrets))}",
+            f"{ui_language.tr('remote.token.cleared')}\n\n"
+            f"{render_status(_read_status(root, secrets, _probe(runtime, root, secrets)))}",
         )
         return
 
+    if action == "cancel":
+        _clear_pending(runtime)
+        await runtime._reply_text(update, ui_language.tr("remote.token.cancelled"))
+        return
+
     if action == "set":
-        value = " ".join(args[1:]).strip()
-        if value:
-            await _apply_token(runtime, update, value)
+        if len(args) > 1:
+            # A typed credential is audited, echoed and kept in history. The
+            # two-step prompt exists precisely so that never happens.
+            await runtime._reply_text(update, ui_language.tr("remote.token.inline_removed"))
             return
-        prompt = await runtime._reply_text(
-            update,
-            ui_language.tr("remote.token.prompt"),
-            reply_markup=ForceReply(
-                selective=True,
-                input_field_placeholder=ui_language.tr("remote.token.prompt_placeholder"),
-            ),
-        )
-        prompt_id = getattr(prompt, "message_id", None)
-        if prompt_id is None:
-            await runtime._reply_text(update, ui_language.tr("remote.token.prompt_unavailable"))
-            return
-        user_id = getattr(getattr(update, "effective_user", None), "id", None)
-        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-        setattr(runtime, PENDING_ATTRIBUTE, {
-            "prompt_message_id": prompt_id,
-            "user_id": user_id,
-            "chat_id": chat_id,
-            "expires_at": time.time() + PROMPT_TTL_SECONDS,
-        })
+        await _start_prompt(runtime, update)
         return
 
     await runtime._reply_text(update, ui_language.tr("remote.token.usage"))
 
 
 async def handle_pending_reply(runtime: Any, update: Any) -> bool:
-    """Consume only the ForceReply message created by this command."""
+    """Consume the reply to a `set` prompt. Returns True when it was handled.
+
+    Runs before any history, queue or agent dispatch, so the credential never
+    becomes a normal chat message or an agent task.
+    """
     pending = getattr(runtime, PENDING_ATTRIBUTE, None)
     if not isinstance(pending, dict):
         return False
     message = getattr(update, "message", None)
-    reply_to = getattr(message, "reply_to_message", None) if message is not None else None
-    if message is None or reply_to is None:
+    if message is None:
         return False
-    if int(getattr(reply_to, "message_id", 0) or 0) != int(pending.get("prompt_message_id") or 0):
+    reply_to = getattr(message, "reply_to_message", None)
+    prompt_id = getattr(reply_to, "message_id", None)
+    # Only a reply to *this* prompt is a credential. An unrelated message that
+    # happens to arrive while the prompt is open must not be swallowed or
+    # mistaken for the token; `/remote token cancel` covers the rest.
+    if prompt_id is None or prompt_id != pending.get("prompt_message_id"):
         return False
-    if int(getattr(getattr(update, "effective_user", None), "id", 0) or 0) != int(pending.get("user_id") or 0):
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    if pending.get("user_id") is not None and user_id != pending.get("user_id"):
         return False
-    if int(getattr(getattr(update, "effective_chat", None), "id", 0) or 0) != int(pending.get("chat_id") or 0):
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    if pending.get("chat_id") is not None and chat_id != pending.get("chat_id"):
         return False
 
-    _clear_pending(runtime)
-    if float(pending.get("expires_at") or 0) < time.time():
+    if float(pending.get("expires_at") or 0) < _now():
+        _clear_pending(runtime)
         await runtime._reply_text(update, ui_language.tr("remote.token.expired"))
         return True
 
-    value = str(getattr(message, "text", "") or "").strip()
+    text = str(getattr(message, "text", "") or "").strip()
+    _clear_pending(runtime)
+    # Best effort: do not leave the secret sitting in the chat.
     try:
         await message.delete()
     except Exception:
-        # Deleting the plaintext message is best effort and depends on the
-        # client and bot rights. The value is never echoed either way.
         pass
-    if value.lower() in {"/cancel", "cancel", "取消"}:
+
+    if not text or text.lower() in CANCEL_WORDS:
         await runtime._reply_text(update, ui_language.tr("remote.token.cancelled"))
         return True
-    if not value:
-        await runtime._reply_text(update, ui_language.tr("remote.token.invalid"))
-        return True
-    await _apply_token(runtime, update, value)
+
+    await _apply_token(runtime, update, text)
     return True
-
-
-COMMANDS = [
-    RuntimeCommand(
-        name="remote",
-        description="Inspect or replace the HASHI Remote shared token",
-        callback=remote_command,
-    ),
-]
-# HASHI-Fingerprint: hfp_b418d72a39d449e386fcb40b8b89eee2

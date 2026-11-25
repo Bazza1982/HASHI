@@ -6,16 +6,17 @@ secrets.json or exporting HASHI_REMOTE_SHARED_TOKEN, and an explicit clear was
 impossible because startup provisioning recreated it.
 
 The public surface never returns the credential. It reports a masked form, a
-short SHA-256 fingerprint, a non-secret file revision, and the Remote service's
-currently loaded credential generation read from the unauthenticated loopback
-health endpoint.
+short SHA-256 fingerprint and a non-secret file revision. Whether the running
+Remote service actually accepts the credential is answered by one real signed
+request to an existing protected endpoint, never by comparing configuration
+flags.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -30,7 +31,7 @@ from orchestrator.workbench_auth import (
     REMOTE_SHARED_TOKEN_DISABLED_KEY,
     resolve_remote_runtime_sids,
 )
-from remote.security.shared_token import load_shared_token_snapshot
+from remote.security.shared_token import build_auth_headers, load_shared_token_snapshot
 
 TOKEN_KEY = "hashi_remote_shared_token"
 TOKEN_MIN_LENGTH = 16
@@ -58,7 +59,7 @@ class RemoteTokenStatus:
     disabled: bool = False
     environment_locked: bool = False
     error: str = ""
-    remote: dict = field(default_factory=dict)
+    verification: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -93,42 +94,63 @@ def _display_revision(revision: str) -> str:
     return str(revision or "")[:REVISION_DISPLAY_LENGTH]
 
 
-def fetch_remote_credential(port: int, *, host: str = "127.0.0.1", timeout: float = 1.5) -> dict:
-    """Read the Remote service's loaded credential generation over loopback.
-
-    /health needs no credential, so this cannot leak the token and cannot fail
-    because of the token itself. A missing service is reported, never guessed.
-    """
-    if not port:
-        return {"reachable": False, "reason": "port_unknown"}
-    url = f"http://{host}:{int(port)}/health"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - loopback only
-            payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
-        return {"reachable": False, "reason": "unreachable"}
-    credential = payload.get("credential") if isinstance(payload, dict) else None
-    if not isinstance(credential, dict):
-        return {"reachable": True, "reason": "credential_missing"}
-    return {
-        "reachable": True,
-        "configured": bool(credential.get("configured")),
-        "generation": int(credential.get("generation") or 0),
-        "last_reload_at": int(credential.get("last_reload_at") or 0),
-        "configuration_state": str(credential.get("configuration_state") or ""),
-        "configuration_error": str(credential.get("configuration_error") or ""),
-    }
+VERIFY_PATH = "/workbench/v1/status"
 
 
-def load_status(
-    hashi_root: Path | str,
+def verify_credential(
+    token: str,
     *,
-    secrets_path: Path | str | None = None,
-    env: dict | None = None,
-    remote_credential: dict | None = None,
-) -> RemoteTokenStatus:
-    root = Path(hashi_root)
-    secrets = Path(secrets_path) if secrets_path else root / "secrets.json"
+    port: int | None,
+    use_tls: bool = False,
+    from_instance: str = "HASHI",
+    host: str = "127.0.0.1",
+    timeout: float = 2.5,
+) -> dict:
+    """Proves a credential against the Remote service with one real signed request.
+
+    The signature is the same HMAC the Remote service already enforces on its
+    protected Workbench endpoint, so a success means the running service is
+    actually accepting this credential - not that two configuration flags agree.
+    """
+    value = str(token or "").strip()
+    if not value:
+        return {"outcome": "missing", "status": 0, "path": VERIFY_PATH}
+    if not port:
+        return {"outcome": "unavailable", "status": 0, "path": VERIFY_PATH, "reason": "port_unknown"}
+    scheme = "https" if use_tls else "http"
+    url = f"{scheme}://{host}:{int(port)}{VERIFY_PATH}"
+    try:
+        headers = build_auth_headers(
+            shared_token=value,
+            method="GET",
+            path=VERIFY_PATH,
+            from_instance=from_instance or "HASHI",
+            body_bytes=b"",
+        )
+    except Exception:  # pragma: no cover - defensive: signing must not leak the value
+        return {"outcome": "failed", "status": 0, "path": VERIFY_PATH, "reason": "signing_failed"}
+    request = urllib.request.Request(url, method="GET", headers=headers)
+    context = None
+    if use_tls:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:  # noqa: S310 - loopback only
+            status = int(getattr(response, "status", 0) or 0)
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code or 0)
+    except (urllib.error.URLError, OSError, ssl.SSLError):
+        return {"outcome": "unavailable", "status": 0, "path": VERIFY_PATH, "reason": "transport_failure"}
+    if 200 <= status < 300:
+        return {"outcome": "verified", "status": status, "path": VERIFY_PATH}
+    if status in (401, 403):
+        return {"outcome": "rejected", "status": status, "path": VERIFY_PATH}
+    return {"outcome": "failed", "status": status, "path": VERIFY_PATH}
+
+
+def _resolve(root: Path, secrets: Path, env: dict | None):
+    """Resolve the effective credential. The value is returned, never rendered."""
     snapshot = load_shared_token_snapshot(root)
     environment = env if env is not None else os.environ
     env_token = str(environment.get("HASHI_REMOTE_SHARED_TOKEN", "") or "").strip()
@@ -138,7 +160,7 @@ def load_status(
         document = read_config_json(secrets)
         disabled = bool(document.get(REMOTE_SHARED_TOKEN_DISABLED_KEY))
     except (OSError, ValueError, TypeError):
-        document = None
+        pass
 
     if env_token:
         source, token = "environment", env_token
@@ -150,6 +172,36 @@ def load_status(
         source, token = "invalid", ""
     else:
         source, token = "absent", ""
+    return snapshot, disabled, source, token
+
+
+def effective_token(
+    hashi_root: Path | str,
+    *,
+    secrets_path: Path | str | None = None,
+    env: dict | None = None,
+) -> tuple[str, str]:
+    """(source, value) of the credential that is actually in force.
+
+    The value is only ever handed to the HMAC signer; it must not be rendered,
+    logged or persisted anywhere else.
+    """
+    root = Path(hashi_root)
+    secrets = Path(secrets_path) if secrets_path else root / "secrets.json"
+    _snapshot, _disabled, source, token = _resolve(root, secrets, env)
+    return source, token
+
+
+def load_status(
+    hashi_root: Path | str,
+    *,
+    secrets_path: Path | str | None = None,
+    env: dict | None = None,
+    verification: dict | None = None,
+) -> RemoteTokenStatus:
+    root = Path(hashi_root)
+    secrets = Path(secrets_path) if secrets_path else root / "secrets.json"
+    snapshot, disabled, source, token = _resolve(root, secrets, env)
 
     return RemoteTokenStatus(
         configured=bool(token),
@@ -158,9 +210,9 @@ def load_status(
         fingerprint=token_fingerprint(token) if token else "",
         revision=_display_revision(snapshot.revision),
         disabled=disabled,
-        environment_locked=bool(env_token),
+        environment_locked=source == "environment",
         error=str(snapshot.error or ""),
-        remote=dict(remote_credential or {}),
+        verification=dict(verification or {}),
     )
 
 
