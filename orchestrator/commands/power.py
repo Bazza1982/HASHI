@@ -26,9 +26,9 @@ async def _trigger_after_delay(cmd: list[str], delay: float = 2.0) -> None:
 
 async def sleep_command(runtime: Any, update: Any, context: Any) -> None:
     if sys.platform != "win32":
-        await _send(runtime, update, "❌ /sleep is only supported on Windows.")
+        await _send(runtime, update, "❌ /sleep 仅支持 Windows。")
         return
-    await _send(runtime, update, "😴 Going to sleep... Wake me via WOL when you're ready.")
+    await _send(runtime, update, "😴 正在进入睡眠……需要时可通过网络唤醒（WOL）唤醒。")
     asyncio.ensure_future(_trigger_after_delay(
         ["powershell", "-NonInteractive", "-Command", "Suspend-Computer"]
     ))
@@ -36,21 +36,21 @@ async def sleep_command(runtime: Any, update: Any, context: Any) -> None:
 
 async def hibernate_command(runtime: Any, update: Any, context: Any) -> None:
     if sys.platform != "win32":
-        await _send(runtime, update, "❌ /hibernate is only supported on Windows.")
+        await _send(runtime, update, "❌ /hibernate 仅支持 Windows。")
         return
-    await _send(runtime, update, "💤 Hibernating... Wake me via WOL when you're ready.")
+    await _send(runtime, update, "💤 正在休眠……需要时可通过网络唤醒（WOL）唤醒。")
     asyncio.ensure_future(_trigger_after_delay(["shutdown", "/h"]))
 
 
 COMMANDS = [
     RuntimeCommand(
         name="sleep",
-        description="Put this PC into sleep mode (WOL-safe, not shutdown)",
+        description="让这台电脑进入睡眠（支持网络唤醒，不是关机）",
         callback=sleep_command,
     ),
     RuntimeCommand(
         name="hibernate",
-        description="Put this PC into hibernate mode (WOL-safe, not shutdown)",
+        description="让这台电脑进入休眠（支持网络唤醒，不是关机）",
         callback=hibernate_command,
     ),
 ]

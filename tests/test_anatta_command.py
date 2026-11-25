@@ -131,7 +131,7 @@ async def test_anatta_command_preserves_existing_config_when_switching_off(tmp_p
 def test_anatta_runtime_command_is_registered():
     commands = {command.name: command for command in load_runtime_commands()}
 
-    assert commands["anatta"].description == "Read-only Anatta diagnostics"
+    assert commands["anatta"].description == "View or change Anatta mode"
 
 
 def test_anatta_mutation_reads_bom_crlf_and_normalizes_managed_configs(tmp_path):

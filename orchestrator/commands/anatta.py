@@ -16,8 +16,8 @@ from tools.anatta_diagnostics import build_report
 ANATTA_OBSERVER_FACTORY = "orchestrator.anatta.post_turn_observer:build_post_turn_observer"
 ANATTA_MODES = {"off", "shadow", "on"}
 USAGE = (
-    "Usage: /anatta [status|full|off|shadow|on]\n"
-    "status/full inspect Anatta. off/shadow/on update this workspace's Anatta mode."
+    "用法：/anatta [status|full|off|shadow|on]\n"
+    "status/full 查看当前模式；off/shadow/on 切换本工作区的 Anatta 模式。"
 )
 
 
@@ -234,7 +234,7 @@ async def _send(runtime: Any, update: Any, text: str, *, reply_markup=None) -> N
 COMMANDS = [
     RuntimeCommand(
         name="anatta",
-        description="Read-only Anatta diagnostics",
+        description="View or change Anatta mode",
         callback=anatta_command,
     )
 ]

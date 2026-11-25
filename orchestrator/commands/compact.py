@@ -111,7 +111,7 @@ def _compact_wip_journals(
             journal_count=len(journals),
             record_count=sum(snapshot.record_count for snapshot in snapshots),
             source_bytes=sum(snapshot.size_bytes for snapshot in snapshots),
-            message="Canonical HER recovery state retained; WIP is shadow-only.",
+            message="已保留原有恢复状态；未完成的工作仅作参考。",
         )
     committed = 0
     record_count = 0
