@@ -8,7 +8,7 @@ name: Call connector focused checks
     - orchestrator/workbench_api.py
     - orchestrator/flexible_agent_runtime.py
     - tests/frontend_call/**
-    - tests/test_desktop_failure_details.py
+    - tests/
     - examples/call_profiles.example.json
     - docs/call/**
     - orchestrator/frontend_live_voice/**
@@ -27,7 +27,7 @@ name: Call connector focused checks
     - orchestrator/workbench_api.py
     - orchestrator/flexible_agent_runtime.py
     - tests/frontend_call/**
-    - tests/test_desktop_failure_details.py
+    - tests/
     - orchestrator/frontend_live_voice/**
     - orchestrator/translate_manager.py
     - orchestrator/translate_settings.py
