@@ -688,6 +688,96 @@ async def test_dsh_resumed_session_without_baseline_keeps_estimate(
         await adapter.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_dsh_late_usage_flush_is_not_billed_to_the_next_turn(
+    tmp_path: Path, monkeypatch
+):
+    """CRC-225-01 follow-up: a late flush from an estimated turn stays out of
+    the following turn's provider usage."""
+
+    from adapters import dsh_cli as dsh
+
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh-home"))
+    mock_script = tmp_path / "mock_dsh_acp.py"
+    mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
+    adapter = _make_adapter(
+        tmp_path, mock_script, session_mode=True, model="deepseek-flash", effort="off"
+    )
+    assert await adapter.initialize() is True
+
+    def totals(uncached: int, output: int) -> dict[str, int]:
+        return {
+            "uncachedInputTokens": uncached,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "outputTokens": output,
+        }
+
+    turn1 = totals(1_000, 40)
+    turn2 = totals(3_000, 100)
+    turn3 = totals(1_000, 40)
+    turn4 = totals(1_000, 40)
+    combined = {name: turn1[name] + turn2[name] + turn3[name] for name in turn1}
+    after_turn4 = {name: combined[name] + turn4[name] for name in combined}
+
+    after_turn1 = (1, turn1)
+    # Turn 2's counters flushed late and landed together with turn 3's.
+    late_flush = (3, combined)
+    after_turn4_snapshot = (4, after_turn4)
+
+    # Scripted store: the late flush appears only after the following turn's
+    # pre-turn snapshot, which is exactly the boundary the old code missed.
+    state = {"phase": "turn1", "reads": 0}
+
+    def fake_read(session_id: str):
+        state["reads"] += 1
+        reads = state["reads"]
+        phase = state["phase"]
+        if phase == "turn1":
+            return None if reads == 1 else after_turn1
+        if phase == "turn2":
+            return after_turn1
+        if phase == "turn3":
+            return after_turn1 if reads == 1 else late_flush
+        return late_flush if reads == 1 else after_turn4_snapshot
+
+    def begin(phase: str) -> None:
+        state["phase"] = phase
+        state["reads"] = 0
+
+    monkeypatch.setattr(dsh, "_read_dsh_session_snapshot", fake_read)
+
+    try:
+        begin("turn1")
+        res1 = await adapter.generate_response("late usage one", "req-late-1")
+        assert res1.usage is not None
+        assert res1.usage.input_tokens == 1_000
+        assert res1.usage.output_tokens == 40
+
+        begin("turn2")
+        res2 = await adapter.generate_response("late usage two", "req-late-2")
+        assert res2.usage is None
+        assert (res2.stream_metadata or {}).get("token_usage_source") == "estimated"
+
+        begin("turn3")
+        res3 = await adapter.generate_response("late usage three", "req-late-3")
+        # The late flush of turn 2 must not be billed as turn 3's usage; the
+        # old delta reported 4000 input / 140 output here.
+        assert res3.usage is None
+        assert (res3.stream_metadata or {}).get("token_usage_source") == "estimated"
+
+        begin("turn4")
+        res4 = await adapter.generate_response("late usage four", "req-late-4")
+        assert res4.usage is not None
+        assert res4.usage.input_tokens == 1_000
+        assert res4.usage.output_tokens == 40
+        assert (res4.stream_metadata or {}).get("token_usage_source") == (
+            "dsh_session_projcache"
+        )
+    finally:
+        await adapter.shutdown()
+
+
 def test_dsh_preflight_and_local_invocation_resolution():
     argv, cwd, label = resolve_dsh_invocation("dsh")
     assert "--profile" in argv

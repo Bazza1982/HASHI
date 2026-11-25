@@ -574,6 +574,12 @@ class DshCLIAdapter(BaseBackend):
         )
         self._session_id: str | None = None
         self._session_in_current_worker: bool = False
+        # A turn whose counters DSH flushed after the bounded wait leaves the
+        # next turn unable to separate its own increment from that late write.
+        # Remember the last trustworthy boundary so the late flush is never
+        # billed to a later turn. Holds at most the active session.
+        self._pending_usage_session_id: str | None = None
+        self._pending_usage_boundary: tuple[int, dict[str, int]] | None = None
         self._config_options: list[dict[str, Any]] = []
         self._effective_model: str | None = None
         self._effective_effort: str | None = None
@@ -1392,6 +1398,17 @@ class DshCLIAdapter(BaseBackend):
             # ACP ``usage_update`` only carries context size, so snapshot DSH's
             # own cumulative counters here and price this turn's delta below.
             usage_before = _read_dsh_session_snapshot(session_id)
+            # A previous turn that fell back to the estimate may still have its
+            # counters pending in DSH. Only once that write lands does this
+            # snapshot become a clean boundary; until then the turn keeps the
+            # estimate instead of claiming the late delta as its own.
+            usage_boundary_unconfirmed = False
+            if self._pending_usage_session_id == session_id:
+                if usage_before is not None and usage_before != self._pending_usage_boundary:
+                    self._pending_usage_session_id = None
+                    self._pending_usage_boundary = None
+                else:
+                    usage_boundary_unconfirmed = True
 
             # Turn-level streaming state
             held_message_id: str | None = None
@@ -1576,16 +1593,30 @@ class DshCLIAdapter(BaseBackend):
             usage_after = await _await_dsh_usage_snapshot(
                 session_id, usage_before, fresh_session=created_fresh_session
             )
-            turn_usage_delta = _dsh_turn_usage(
-                usage_before[1] if usage_before is not None else None,
-                usage_after[1] if usage_after is not None else None,
-                fresh_session=created_fresh_session,
-                revision_advanced=(
-                    usage_before is not None
-                    and usage_after is not None
-                    and usage_after[0] > usage_before[0]
-                ),
-            )
+            # While an earlier turn's write is still outstanding, any revision
+            # bump seen here may carry both turns' counters, so this turn keeps
+            # the estimate until a clean boundary is observed again.
+            turn_usage_delta = None
+            if not usage_boundary_unconfirmed:
+                turn_usage_delta = _dsh_turn_usage(
+                    usage_before[1] if usage_before is not None else None,
+                    usage_after[1] if usage_after is not None else None,
+                    fresh_session=created_fresh_session,
+                    revision_advanced=(
+                        usage_before is not None
+                        and usage_after is not None
+                        and usage_after[0] > usage_before[0]
+                    ),
+                )
+            if turn_usage_delta is not None:
+                self._pending_usage_session_id = None
+                self._pending_usage_boundary = None
+            elif not usage_boundary_unconfirmed:
+                # This turn's usage could not be confirmed. Keep the boundary
+                # it started from so a late flush is recognised next turn
+                # instead of being billed as fresh provider usage.
+                self._pending_usage_session_id = session_id
+                self._pending_usage_boundary = usage_before
             token_usage = (
                 TokenUsage(
                     input_tokens=(
