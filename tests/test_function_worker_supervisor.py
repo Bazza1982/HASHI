@@ -414,6 +414,167 @@ async def test_saved_token_is_not_polled_by_worker_with_previous_bot_identity(
     assert not supervisor.telegram_ingress_running("alpha")
 
 
+@pytest.mark.asyncio
+async def test_core_telegram_disconnect_stops_ingress_and_worker_connector():
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    client = _Client("zelda", 101)
+    handle = _handle(kernel, client)
+    kernel.runtimes = [handle]
+    kernel.secrets = {"zelda": "123456:disconnect-token"}
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    stopped = []
+
+    class FakeIngress:
+        token = "123456:disconnect-token"
+
+        async def stop(self, notify_status=False):
+            stopped.append(notify_status)
+
+    supervisor._telegram_ingress["zelda"] = FakeIngress()
+    supervisor._telegram_ingress_diagnostics["zelda"] = SimpleNamespace()
+    supervisor._telegram_status_failures["zelda"] = ("timeout", "poll")
+
+    def respond(method, params):
+        if method == "worker.telegram_disconnect":
+            return {"ok": True, "telegram_stopped": True, "application_stopped": True}
+        return {"ok": True}
+
+    client.responder = respond
+
+    ok, message = await supervisor.handle_worker_request(
+        client, "core.telegram.disconnect", {"agent_name": "zelda", "owner_id": "user:42"}
+    )
+
+    assert ok is True
+    assert message == "telegram disconnected"
+    assert "worker.telegram_disconnect" in client.calls
+    assert stopped == [False]
+    assert "zelda" not in supervisor._telegram_ingress
+    assert "zelda" not in supervisor._telegram_ingress_diagnostics
+    assert "zelda" not in supervisor._telegram_status_failures
+    assert "zelda" not in kernel.secrets
+    assert supervisor.telegram_ingress_snapshot("zelda")["configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_core_telegram_disconnect_requires_confirmed_worker_stop():
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    client = _Client("zelda", 101)
+    handle = _handle(kernel, client)
+    kernel.runtimes = [handle]
+    kernel.secrets = {"zelda": "123456:disconnect-token"}
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    # The Worker does not confirm the connector stop.
+    client.responder = lambda method, params: {"ok": True}
+    ok, message = await supervisor.handle_worker_request(
+        client, "core.telegram.disconnect", {"agent_name": "zelda", "owner_id": "user:42"}
+    )
+    assert ok is False
+    assert message == "telegram_disconnect_runtime_unconfirmed"
+
+    # The kernel-side cleanup still happened; success is never fabricated.
+    assert "zelda" not in kernel.secrets
+
+
+@pytest.mark.asyncio
+async def test_core_telegram_disconnect_reports_missing_worker():
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    client = _Client("zelda", 101)
+    kernel.runtimes = [_handle(kernel, client)]
+    kernel.secrets = {"sunny": "123456:disconnect-token"}
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    ok, message = await supervisor.handle_worker_request(
+        client, "core.telegram.disconnect", {"agent_name": "sunny", "owner_id": "user:42"}
+    )
+    # No live Worker means no live connector; the runtime side is complete by
+    # construction and the kernel-side cleanup still happened.
+    assert ok is True
+    assert "runtime not active" in message
+    assert "sunny" not in kernel.secrets
+
+
+@pytest.mark.asyncio
+async def test_worker_telegram_disconnect_stops_connector_and_drops_token():
+    host = FunctionWorkerHost.__new__(FunctionWorkerHost)
+    host.agent_name = "lily"
+
+    class _Bot:
+        async def shutdown(self):
+            pass
+
+    class _App:
+        def __init__(self):
+            self.bot = _Bot()
+            self.running = True
+            self.stops = 0
+
+        async def stop(self):
+            self.running = False
+            self.stops += 1
+
+        async def shutdown(self):
+            pass
+
+    runtime = SimpleNamespace(
+        token="123456:disconnect-token",
+        app=_App(),
+        telegram_connected=True,
+        telegram_ingress_connected=True,
+        _telegram_connector_attempts=4,
+        _telegram_connector_permanent_failure=None,
+        _telegram_connector_failure_token_revision="old-rev",
+    )
+    host.runtime = runtime
+    host.connector_task = None
+    host.command_menu_task = None
+    host.connector_owner = True
+    publications = []
+
+    async def emit_metadata():
+        publications.append("metadata")
+
+    host.emit_metadata = emit_metadata
+
+    result = await host.handle_request("worker.telegram_disconnect", {})
+
+    assert result == {"ok": True, "telegram_stopped": True, "application_stopped": True}
+    assert host.connector_owner is False
+    assert runtime.telegram_connected is False
+    assert runtime.telegram_ingress_connected is False
+    assert runtime.token == "WORKBENCH_ONLY_NO_TOKEN"
+    assert runtime._telegram_connector_permanent_failure == "disconnected"
+    assert runtime.app.stops == 1
+    assert publications == ["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_core_telegram_disconnect_rejects_inactive_worker_and_bad_target():
+    kernel = _Kernel()
+    kernel.global_cfg = SimpleNamespace(instance_id="TEST")
+    client = _Client("zelda", 101)
+    kernel.runtimes = [_handle(kernel, client)]
+    supervisor = FunctionWorkerSupervisor(kernel)
+
+    stranger = _Client("sunny", 202)
+    from orchestrator.function_worker_protocol import FunctionWorkerProtocolError
+
+    with pytest.raises(FunctionWorkerProtocolError):
+        await supervisor.handle_worker_request(
+            stranger, "core.telegram.disconnect", {"agent_name": "zelda", "owner_id": "user:42"}
+        )
+
+    with pytest.raises(ValueError):
+        await supervisor.handle_worker_request(
+            client, "core.telegram.disconnect", {"agent_name": "  ", "owner_id": "user:42"}
+        )
+
+
 def _scheduler_rpc_stack(tmp_path: Path, *, worker_agent: str):
     kernel = _Kernel()
     state_path = tmp_path / "scheduler_state.json"

@@ -356,13 +356,22 @@ def _bounded_partial_tail(stdout: bytes | None, stderr: bytes | None, encoding) 
     return text
 
 
-def _communicate_partial_tail(communicate_task, encoding) -> str:
-    if communicate_task is None or not communicate_task.done():
-        return ""
-    if communicate_task.cancelled() or communicate_task.exception() is not None:
-        return ""
-    stdout, stderr = communicate_task.result()
-    return _bounded_partial_tail(stdout, stderr, encoding)
+def _communicate_partial_tail(communicate_task, encoding, partial_state=None) -> str:
+    if (
+        communicate_task is not None
+        and communicate_task.done()
+        and not communicate_task.cancelled()
+        and communicate_task.exception() is None
+    ):
+        stdout, stderr = communicate_task.result()
+        return _bounded_partial_tail(stdout, stderr, encoding)
+    if partial_state:
+        return _bounded_partial_tail(
+            partial_state.get("stdout_bytes") or b"",
+            partial_state.get("stderr_bytes") or b"",
+            encoding,
+        )
+    return ""
 
 
 async def execute_shell(
@@ -392,6 +401,7 @@ async def execute_shell(
     communicate_task: asyncio.Task | None = None
     pgid: int | None = None
     invocation = None
+    partial_state: dict[str, bytes] = {}
     try:
         invocation = resolve_shell_invocation(command, args.get("shell"))
         proc = await asyncio.create_subprocess_exec(
@@ -408,7 +418,9 @@ async def execute_shell(
         if activity:
             activity.watch_process(proc)
             activity.update(state="running", liveness="alive")
-        communicate_task = asyncio.create_task(bounded_communicate(proc, activity=activity))
+        communicate_task = asyncio.create_task(
+            bounded_communicate(proc, activity=activity, partial=partial_state)
+        )
         if timeout is None:
             stdout, stderr = await asyncio.shield(communicate_task)
         else:
@@ -424,7 +436,7 @@ async def execute_shell(
                     )
                 )
                 partial_tail = _communicate_partial_tail(
-                    communicate_task, invocation.encoding
+                    communicate_task, invocation.encoding, partial_state
                 )
                 message = f"Error: command timed out after {_seconds_label(timeout)}s"
                 if partial_tail:
@@ -528,6 +540,7 @@ async def execute_shell(
         partial_tail = _communicate_partial_tail(
             communicate_task,
             invocation.encoding if invocation is not None else None,
+            partial_state,
         )
         details = {
             **timeout_details,

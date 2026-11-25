@@ -111,7 +111,7 @@ function Get-CimInstance {
     if ($ClassName -eq 'Win32_Process') {
         if ($Filter -match "ProcessId = $global:OwnedPid") {
             return [pscustomobject]@{ CommandLine = "python.exe -B -m remote --hashi-root `"$global:OwnedRoot`" --port 8767";
-                ExecutablePath = "C:\Users\thene\projects\HASHI3\.venv\Scripts\python.exe" }
+                ExecutablePath = "C:\hashi-fixtures\remote-venv\Scripts\python.exe" }
         }
         return [pscustomobject]@{ CommandLine = 'C:\Windows\System32\svchost.exe -k netsvcs' }
     }
@@ -284,7 +284,7 @@ def test_doctor_program_restricted_block_for_our_listener_is_evidence(tmp_path):
         '$global:FirewallRules = @([pscustomobject]@{ Name="python-block"; DisplayName="python-block"; '
         'Direction="Inbound"; Action="Block"; Enabled=$true; Profile=@("Private","Public") }); '
         '$global:PortFilters["python-block"] = [pscustomobject]@{ Protocol="TCP"; LocalPort="Any" }; '
-        '$global:ApplicationFilters["python-block"] = [pscustomobject]@{ Program="C:\\Users\\thene\\projects\\HASHI3\\.venv\\Scripts\\python.exe" }'
+        '$global:ApplicationFilters["python-block"] = [pscustomobject]@{ Program="C:\\hashi-fixtures\\remote-venv\\Scripts\\python.exe" }'
     )
     result, parsed = _run_doctor(tmp_path, scenario, "-Json")
     assert parsed["firewall"]["reason_code"] == "firewall_explicitly_blocked"

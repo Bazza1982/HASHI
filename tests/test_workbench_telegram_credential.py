@@ -761,4 +761,282 @@ async def test_always_on_still_reports_missing_telegram_delivery_prerequisites(t
     assert result["mirror_policy"] == "always_on"
     assert result["resolved_mirror_enabled"] is True
     assert result["mirror_delivery_ready"] is False
+
+
+def test_disconnect_removes_token_and_persists_unconfigured_state(tmp_path):
+    config_path, secrets_path = _write_config(tmp_path)
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    )
+    before = service.status("lily")
+    assert before["configured"] is True
+    assert before["credential_revision"]
+
+    result = service.disconnect(
+        "lily", expected_revision=before["credential_revision"]
+    )
+
+    assert result["ok"] is True
+    assert result["configured"] is False
+    assert result["activation_status"] == "unconfigured"
+    assert result["disconnected"] is True
+    assert result["activation_required"] is None
+    assert result["credential_revision"] != before["credential_revision"]
+    stored = read_config_json(secrets_path)
+    assert "lily.telegram" not in stored
+    assert stored["provider_api_key"] == "preserve-me"
+    assert stored["workbench_admin_token"] == ADMIN_TOKEN
+
+    # Persistence: a freshly built service must agree the credential is gone.
+    rebuilt = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    ).status("lily")
+    assert rebuilt["configured"] is False
+
+
+def test_disconnect_rejects_invalid_revision_and_shared_reference(tmp_path):
+    config_path, secrets_path = _write_config(tmp_path)
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    )
+    with pytest.raises(TelegramCredentialError) as captured:
+        service.disconnect("lily", expected_revision="not-a-revision")
+    assert captured.value.error_code == "invalid_request"
+    assert captured.value.status_code == 400
+
+    shared_config, shared_secrets = _write_config(tmp_path, shared=True)
+    shared_service = TelegramCredentialService(
+        config_path=shared_config,
+        secrets_path=shared_secrets,
+    )
+    revision = shared_service.status("lily")["credential_revision"]
+    with pytest.raises(TelegramCredentialError) as captured:
+        shared_service.disconnect("lily", expected_revision=revision)
+    assert captured.value.error_code == "telegram_credential_shared"
+    assert captured.value.status_code == 409
+    assert read_config_json(shared_secrets)["shared.telegram"] == OLD_TOKEN
+
+
+def test_disconnect_refuses_stale_revision(tmp_path):
+    config_path, secrets_path = _write_config(tmp_path)
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    )
+    stale = service.status("lily")["credential_revision"]
+    current = read_config_json(secrets_path)
+    current["unrelated"] = "newer-value"
+    write_config_json(secrets_path, current)
+
+    with pytest.raises(TelegramCredentialError) as captured:
+        service.disconnect("lily", expected_revision=stale)
+    assert captured.value.error_code == "credential_state_changed"
+    stored = read_config_json(secrets_path)
+    assert stored["lily.telegram"] == OLD_TOKEN
+    assert stored["unrelated"] == "newer-value"
+
+
+def test_disconnect_is_idempotent_when_not_configured(tmp_path):
+    config_path, secrets_path = _write_config(tmp_path, configured=False)
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    )
+    revision = service.status("lily")["credential_revision"]
+    first = service.disconnect("lily", expected_revision=revision)
+    assert first["configured"] is False
+    assert first["disconnected"] is False
+
+    second = service.disconnect(
+        "lily", expected_revision=first["credential_revision"]
+    )
+    assert second["configured"] is False
+    assert second["disconnected"] is False
+    assert "lily.telegram" not in read_config_json(secrets_path)
+
+
+def test_disconnect_durability_warning_never_fabricates_removal(tmp_path, monkeypatch):
+    from orchestrator.config_json import ConfigDurabilityError
+
+    config_path, secrets_path = _write_config(tmp_path)
+    service = TelegramCredentialService(
+        config_path=config_path,
+        secrets_path=secrets_path,
+    )
+    real_write = telegram_credential_module.write_config_json
+
+    def failing_secret_write(path, document, **kwargs):
+        if Path(path).resolve() == secrets_path.resolve():
+            raise ConfigDurabilityError("durability unavailable")
+        return real_write(path, document, **kwargs)
+
+    monkeypatch.setattr(
+        telegram_credential_module, "write_config_json", failing_secret_write
+    )
+    revision = service.status("lily")["credential_revision"]
+    result = service.disconnect("lily", expected_revision=revision)
+    assert result["configured"] is False
+    assert result["disconnected"] is True
+    assert result["warning_code"] == "credential_removed_durability_unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_endpoint_requires_admin_and_removes_credential(tmp_path):
+    async def verify(token):
+        raise AssertionError("disconnect must never call Telegram")
+
+    server = _server(tmp_path, verifier=verify, runtime_active=True)
+    headers = {"X-Workbench-Token": ADMIN_TOKEN}
+
+    denied = await server.handle_admin_agent_telegram_disconnect(
+        _Request(payload={"expected_revision": "0" * 64})
+    )
+    assert denied.status == 403
+    assert json.loads(denied.text)["error_code"] == "admin_auth_failed"
+
+    bad_body = await server.handle_admin_agent_telegram_disconnect(
+        _Request(headers=headers, payload={"expected_revision": "0" * 64, "extra": 1})
+    )
+    assert bad_body.status == 400
+    assert json.loads(bad_body.text)["error_code"] == "invalid_request"
+
+    bad_revision = await server.handle_admin_agent_telegram_disconnect(
+        _Request(headers=headers, payload={"expected_revision": "short"})
+    )
+    assert bad_revision.status == 400
+    assert json.loads(bad_revision.text)["error_code"] == "invalid_request"
+
+    status = server.telegram_credential_service.status("lily")
+    response = await server.handle_admin_agent_telegram_disconnect(
+        _Request(
+            headers=headers,
+            payload={"expected_revision": status["credential_revision"]},
+        )
+    )
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    result = json.loads(response.text)
+    assert result["ok"] is True
+    assert result["agent_id"] == "lily"
+    assert result["configured"] is False
+    assert result["activation_status"] == "unconfigured"
+    assert result["disconnected"] is True
+    assert OLD_TOKEN not in response.text
+    assert "token_key" not in response.text
+    stored = read_config_json(tmp_path / "secrets.json")
+    assert "lily.telegram" not in stored
+    assert stored["provider_api_key"] == "preserve-me"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_endpoint_refuses_shared_and_stale_states(tmp_path):
+    server = _server(tmp_path, verifier=None, shared=True)
+    headers = {"X-Workbench-Token": ADMIN_TOKEN}
+    revision = server.telegram_credential_service.status("lily")["credential_revision"]
+    shared = await server.handle_admin_agent_telegram_disconnect(
+        _Request(headers=headers, payload={"expected_revision": revision})
+    )
+    assert shared.status == 409
+    assert json.loads(shared.text)["error_code"] == "telegram_credential_shared"
+
+    plain = _server(tmp_path / "plain", verifier=None)
+    stale_revision = plain.telegram_credential_service.status("lily")[
+        "credential_revision"
+    ]
+    current = read_config_json(tmp_path / "plain" / "secrets.json")
+    current["unrelated"] = "touched"
+    write_config_json(tmp_path / "plain" / "secrets.json", current)
+    stale = await plain.handle_admin_agent_telegram_disconnect(
+        _Request(
+            headers={"X-Workbench-Token": ADMIN_TOKEN},
+            payload={"expected_revision": stale_revision},
+        )
+    )
+    assert stale.status == 409
+    assert json.loads(stale.text)["error_code"] == "credential_state_changed"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_endpoint_stops_ingress_and_refreshes_projection(tmp_path, monkeypatch):
+    server = _server(tmp_path, verifier=None, runtime_active=True)
+    refreshed = []
+    disconnected = []
+
+    class FakeProjection:
+        def refresh_configuration(self):
+            refreshed.append(True)
+            return True
+
+    async def disconnect_agent_telegram(agent_id):
+        disconnected.append(agent_id)
+        return (True, "telegram disconnected")
+
+    fake_workers = SimpleNamespace(
+        _telegram_summary=lambda: FakeProjection(),
+    )
+    fake_workers.disconnect_agent_telegram = disconnect_agent_telegram
+    server.orchestrator = SimpleNamespace(
+        runtimes=server.orchestrator.runtimes,
+        function_workers=fake_workers,
+    )
+    revision = server.telegram_credential_service.status("lily")[
+        "credential_revision"
+    ]
+    response = await server.handle_admin_agent_telegram_disconnect(
+        _Request(
+            headers={"X-Workbench-Token": ADMIN_TOKEN},
+            payload={"expected_revision": revision},
+        )
+    )
+    assert response.status == 200
+    result = json.loads(response.text)
+    assert disconnected == ["lily"]
+    assert result["runtime_stopped"] is True
+    assert "runtime_stop_warning" not in result
+    assert refreshed == [True]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_endpoint_reports_unconfirmed_runtime_stop(tmp_path):
+    server = _server(tmp_path, verifier=None, runtime_active=True)
+
+    class FakeProjection:
+        def refresh_configuration(self):
+            return True
+
+    async def disconnect_agent_telegram(agent_id):
+        return (False, "telegram_disconnect_runtime_unconfirmed")
+
+    fake_workers = SimpleNamespace(
+        _telegram_summary=lambda: FakeProjection(),
+    )
+    fake_workers.disconnect_agent_telegram = disconnect_agent_telegram
+    server.orchestrator = SimpleNamespace(
+        runtimes=server.orchestrator.runtimes,
+        function_workers=fake_workers,
+    )
+    revision = server.telegram_credential_service.status("lily")[
+        "credential_revision"
+    ]
+    response = await server.handle_admin_agent_telegram_disconnect(
+        _Request(
+            headers={"X-Workbench-Token": ADMIN_TOKEN},
+            payload={"expected_revision": revision},
+        )
+    )
+    assert response.status == 200
+    result = json.loads(response.text)
+    assert result["disconnected"] is True
+    assert result["runtime_stopped"] is False
+    assert result["runtime_stop_warning"] == "telegram_disconnect_runtime_unconfirmed"
+
+
+def _async_capture(collector):
+    async def capture(agent_id):
+        collector.append(agent_id)
+
+    return capture
 # HASHI-Fingerprint: hfp_08188eaf241848f3820249463eac3bae

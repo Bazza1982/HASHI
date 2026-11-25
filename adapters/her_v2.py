@@ -36,7 +36,11 @@ from orchestrator.her_v2.backend_session import (
     HerBackendSessionCoordinator,
     HerFixedProtocolError,
 )
-from orchestrator.her_v2.commentary import PersonaCommentaryPipeline
+from orchestrator.her_v2.commentary import (
+    COMMENTARY_STAGES,
+    NullCommentaryPort,
+    PersonaCommentaryPipeline,
+)
 from orchestrator.her_v2.config import (
     HERv2Config,
     HERv2ConfigurationError,
@@ -1210,6 +1214,23 @@ class HERv2Adapter(BaseBackend):
             self._initialized = False
             return False
 
+    def commentary_effective_mode(self, mode: str) -> str:
+        """Effective commentary mode for the active HERV3 Provider Profile.
+
+        Reuses the same resolution the adapter applies when it builds the
+        commentary pipeline, so a saved ORIGINAL or PACKAGED preference on a
+        local provider is honestly reported as RAW. The saved value itself is
+        never overwritten.
+        """
+
+        from adapters.her_v2_provider import effective_commentary_mode
+
+        try:
+            profile = self._v2_config.profile_for(Stage.IMMEDIATE_RESPONSE)
+        except Exception:
+            profile = None
+        return effective_commentary_mode(mode, profile)
+
     def prepare_fixed_turn_input(
         self,
         *,
@@ -1217,6 +1238,7 @@ class HERv2Adapter(BaseBackend):
         user_message: str,
         request_id: str,
         request_meta: Mapping[str, Any],
+        pcm_profile: str = "cloud",
     ) -> tuple[str, dict[str, Any]]:
         """Create one full-open or incremental fixed-backend transport envelope.
 
@@ -1265,6 +1287,7 @@ class HERv2Adapter(BaseBackend):
             request_id=str(request_id),
             message_id=str(request_meta.get("hashi_message_id") or request_id),
             conversation_at=str(request_meta.get("conversation_at") or ""),
+            pcm_profile=str(pcm_profile),
             **binding,
             removed_section_keys=removed_sections,
             revoked_resource_ids=[str(item) for item in revoked_resources],
@@ -2414,14 +2437,39 @@ class HERv2Adapter(BaseBackend):
         commentary_packager = getattr(self.config, "_her_v2_persona_packager", None)
         if commentary_packager is None:
             commentary_packager = configured_packager
+        from orchestrator import telegram_stream_policy
+
+        commentary_mode = telegram_stream_policy.get_commentary_mode(self.config)
+        # Local-inference providers present only the PCM prompt; the Persona
+        # modes degrade to objective raw for the actual Provider Profile.
+        from adapters.her_v2_provider import effective_commentary_mode
+
+        try:
+            primary_profile = runtime_config.profile_for(Stage.IMMEDIATE_RESPONSE)
+        except Exception:
+            primary_profile = None
+        commentary_mode = effective_commentary_mode(commentary_mode, primary_profile)
+        if isinstance(provider, HashiStageProvider):
+            provider._commentary_mode = commentary_mode
         if commentary is None and commentary_packager is not None:
-            commentary = PersonaCommentaryPipeline(
-                packager=commentary_packager,
-                delivery=delivery,
-                stage_authored_persona_stages=frozenset(
-                    {Stage.TRIAGE, Stage.PLANNING}
-                ),
-            )
+            if commentary_mode == "off":
+                # Truly end-to-end off: no pipeline, so no Persona packager call
+                # and no provider-authored commentary delivery.
+                commentary = NullCommentaryPort()
+            elif commentary_mode in {"raw", "original"}:
+                # The main model already authored its own progress text (raw =
+                # objective, original = Persona-styled); never re-package it.
+                commentary = PersonaCommentaryPipeline(
+                    packager=commentary_packager,
+                    delivery=delivery,
+                    stage_authored_persona_stages=frozenset(COMMENTARY_STAGES),
+                )
+            else:  # packaged
+                commentary = PersonaCommentaryPipeline(
+                    packager=commentary_packager,
+                    delivery=delivery,
+                    stage_authored_persona_stages=frozenset(),
+                )
         turn_services = None
         if isinstance(provider, HashiStageProvider):
             from orchestrator.her_v2.turn_services import HEALTH_QUESTION, TurnServices
@@ -2449,6 +2497,9 @@ class HERv2Adapter(BaseBackend):
                 turn_id=(fixed_turn.turn_id if fixed_turn is not None else request_id),
                 downstream=commentary,
                 commentary_interval_s=runtime_config.commentary_interval_s,
+                liveness_delivery=(
+                    delivery if commentary_mode != "off" else None
+                ),
                 companion_enabled=runtime_config.agent_companion.enabled,
                 companion_interval_s=(
                     runtime_config.agent_companion.interval_minutes * 60.0

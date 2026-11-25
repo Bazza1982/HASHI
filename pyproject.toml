@@ -45,6 +45,7 @@ standard = [
     "cryptography>=45.0.0",
     "rich>=13.0.0",
     "textual>=0.50.0",
+    "playwright>=1.40.0",
 ]
 media = [
     "pillow>=13.0.0",

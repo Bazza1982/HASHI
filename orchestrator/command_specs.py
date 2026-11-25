@@ -262,7 +262,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         guide=CommandGuide(
             "/debug [on <agent@instance> <journal>|off|<request>]",
             ("on", "off"),
-            example="/debug on zhaojun@HASHI1 C:\\path\\journal.md",
+            example="/debug on agent1@HASHI1 C:\\path\\journal.md",
         ),
     ),
     CommandSpec(
@@ -310,7 +310,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "ticket",
         "cmd_ticket",
-        "Submit IT support ticket to Arale",
+        "Submit an IT support ticket",
         "everyday",
         guide=CommandGuide(
             "/ticket <description>", example="/ticket TUI command menu is unclear"

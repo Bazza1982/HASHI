@@ -172,7 +172,13 @@ async def create_execution(runtime, item, frozen):
     execution.values["backend_manager"] = manager
     with bind(execution):
         if not await manager.initialize_active_backend():
-            raise RuntimeError("Session execution backend initialization failed")
+            detail = str(
+                getattr(manager, "last_backend_init_error", "") or ""
+            ).strip()
+            raise RuntimeError(
+                "Session execution backend initialization failed"
+                + (f": {detail}" if detail else "")
+            )
         backend = manager.current_backend
         session_mode = manager.agent_mode == "fixed" and bool(backend.capabilities.supports_sessions)
         if callable(getattr(backend, "set_session_mode", None)):

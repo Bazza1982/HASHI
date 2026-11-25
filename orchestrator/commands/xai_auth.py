@@ -72,7 +72,7 @@ async def xaiauth_command(runtime: Any, update: Any, context: Any) -> None:
             "",
             f"<b>{html.escape(ui_language.tr('common.use'))}</b>",
             f"<code>python hashi.py auth xai login</code> · {html.escape(ui_language.tr('xai.use.login'))}",
-            f"<code>/backend her grok-4.5</code> · {html.escape(ui_language.tr('xai.use.backend'))}",
+            f"<code>/model</code> · {html.escape(ui_language.tr('xai.use.backend'))}",
         ]
         await _send(runtime, update, "\n".join(lines))
         return

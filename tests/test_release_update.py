@@ -12,6 +12,8 @@ from tools.release_update import (
     ReleaseUpdateError,
     complete_runtime_release,
     fast_forward_checkout,
+    force_align_checkout,
+    release_failure,
     validate_release_payload,
 )
 
@@ -301,3 +303,378 @@ def test_windows_remote_is_reregistered_before_it_is_restarted(
     }
     assert [call[0][7] for call in calls] == ["register", "restart"]
     assert all("-InstanceId" in call[0] for call in calls)
+# HASHI-Fingerprint: hfp_c24fb81627c64ef9bb853b13e8536902
+
+
+def test_fast_forward_checkout_returns_a_feature_checkout_to_main(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    _git(deployed, "checkout", "-b", "fix/cleanup")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    result = fast_forward_checkout(deployed, remote="origin", branch="main")
+
+    assert result["previous_branch"] == "fix/cleanup"
+    assert result["switched_to_branch"] is True
+    assert result["changed"] is True
+    assert _git(deployed, "rev-parse", "HEAD") == target
+    assert _git(deployed, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+def test_fast_forward_checkout_names_the_diverged_branch_and_keeps_it(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    _git(deployed, "checkout", "-b", "topic/local")
+    (deployed / "local.txt").write_text("mine\n", encoding="utf-8")
+    _git(deployed, "add", "local.txt")
+    _git(deployed, "commit", "-m", "local commit")
+    local = _git(deployed, "rev-parse", "HEAD")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        fast_forward_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "not_fast_forward"
+    assert failure["source_changed"] is False
+    assert failure["previous_branch"] == "topic/local"
+    assert failure["previous_commit"] == local
+    assert failure["target_commit"] == target
+    assert _git(deployed, "rev-parse", "HEAD") == local
+
+
+def test_fast_forward_checkout_refuses_to_reset_a_diverged_local_target_branch(
+    tmp_path: Path,
+):
+    source, deployed = _source_repository(tmp_path)
+    (deployed / "main-only.txt").write_text("main only\n", encoding="utf-8")
+    _git(deployed, "add", "main-only.txt")
+    _git(deployed, "commit", "-m", "local main only")
+    main_tip = _git(deployed, "rev-parse", "refs/heads/main")
+    _git(deployed, "checkout", "-b", "fix/cleanup", "HEAD~1")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        fast_forward_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "not_fast_forward"
+    assert failure["source_changed"] is False
+    assert failure["branch"] == "main"
+    assert failure["target_commit"] == target
+    assert failure["target_branch_commit"] == main_tip
+    assert _git(deployed, "rev-parse", "refs/heads/main") == main_tip
+    assert _git(deployed, "rev-parse", "--abbrev-ref", "HEAD") == "fix/cleanup"
+
+
+def test_fast_forward_checkout_does_not_overwrite_an_ignored_file(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (source / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+    _git(source, "add", ".gitignore")
+    _git(source, "commit", "-m", "ignore secret")
+    _git(deployed, "fetch", "origin", "main")
+    _git(deployed, "merge", "--ff-only", "FETCH_HEAD")
+    deployed_tip = _git(deployed, "rev-parse", "HEAD")
+    (deployed / "secret.txt").write_text("local\n", encoding="utf-8")
+    (source / "secret.txt").write_text("remote\n", encoding="utf-8")
+    _git(source, "add", "-f", "secret.txt")
+    _git(source, "commit", "-m", "track secret")
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        fast_forward_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "checkout_failed"
+    assert failure["source_changed"] is False
+    assert _git(deployed, "rev-parse", "HEAD") == deployed_tip
+    assert (deployed / "secret.txt").read_text(encoding="utf-8") == "local\n"
+
+
+def test_fast_forward_checkout_does_not_overwrite_an_ignored_file_when_switching(
+    tmp_path: Path,
+):
+    source, deployed = _source_repository(tmp_path)
+    (source / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+    _git(source, "add", ".gitignore")
+    _git(source, "commit", "-m", "ignore secret")
+    _git(deployed, "fetch", "origin", "main")
+    _git(deployed, "merge", "--ff-only", "FETCH_HEAD")
+    deployed_tip = _git(deployed, "rev-parse", "HEAD")
+    _git(deployed, "checkout", "-b", "fix/cleanup")
+    (deployed / "secret.txt").write_text("local\n", encoding="utf-8")
+    (source / "secret.txt").write_text("remote\n", encoding="utf-8")
+    _git(source, "add", "-f", "secret.txt")
+    _git(source, "commit", "-m", "track secret")
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        fast_forward_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "checkout_failed"
+    assert _git(deployed, "rev-parse", "--abbrev-ref", "HEAD") == "fix/cleanup"
+    assert _git(deployed, "rev-parse", "refs/heads/main") == deployed_tip
+    assert (deployed / "secret.txt").read_text(encoding="utf-8") == "local\n"
+
+
+def test_force_align_checkout_backs_up_a_diverged_local_target_branch(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (deployed / "main-only.txt").write_text("main only\n", encoding="utf-8")
+    _git(deployed, "add", "main-only.txt")
+    _git(deployed, "commit", "-m", "local main only")
+    main_tip = _git(deployed, "rev-parse", "refs/heads/main")
+    _git(deployed, "checkout", "-b", "wip/experiment", "HEAD~1")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    result = force_align_checkout(deployed, remote="origin", branch="main")
+
+    assert result["previous_branch"] == "wip/experiment"
+    assert result["backup_ref"] is None
+    assert result["target_branch_commit"] == main_tip
+    assert result["target_branch_backup_ref"].startswith("refs/hashideploy-backups/")
+    assert _git(deployed, "rev-parse", result["target_branch_backup_ref"]) == main_tip
+    assert _git(deployed, "rev-parse", "HEAD") == target
+    assert _git(deployed, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+def test_force_align_checkout_backs_up_both_heads_when_both_diverged(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (deployed / "main-only.txt").write_text("main only\n", encoding="utf-8")
+    _git(deployed, "add", "main-only.txt")
+    _git(deployed, "commit", "-m", "local main only")
+    main_tip = _git(deployed, "rev-parse", "refs/heads/main")
+    _git(deployed, "checkout", "-b", "wip/experiment")
+    (deployed / "wip.txt").write_text("wip only\n", encoding="utf-8")
+    _git(deployed, "add", "wip.txt")
+    _git(deployed, "commit", "-m", "local wip only")
+    wip_tip = _git(deployed, "rev-parse", "HEAD")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    result = force_align_checkout(deployed, remote="origin", branch="main")
+
+    assert result["backup_ref"] != result["target_branch_backup_ref"]
+    assert _git(deployed, "rev-parse", result["backup_ref"]) == wip_tip
+    assert _git(deployed, "rev-parse", result["target_branch_backup_ref"]) == main_tip
+    assert _git(deployed, "rev-parse", "HEAD") == target
+
+
+def test_force_align_checkout_does_not_overwrite_an_ignored_file(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (source / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+    _git(source, "add", ".gitignore")
+    _git(source, "commit", "-m", "ignore secret")
+    _git(deployed, "fetch", "origin", "main")
+    _git(deployed, "merge", "--ff-only", "FETCH_HEAD")
+    deployed_tip = _git(deployed, "rev-parse", "HEAD")
+    _git(deployed, "checkout", "-b", "fix/cleanup")
+    (deployed / "secret.txt").write_text("local\n", encoding="utf-8")
+    (source / "secret.txt").write_text("remote\n", encoding="utf-8")
+    _git(source, "add", "-f", "secret.txt")
+    _git(source, "commit", "-m", "track secret")
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        force_align_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "checkout_failed"
+    assert failure["source_changed"] is False
+    assert (deployed / "secret.txt").read_text(encoding="utf-8") == "local\n"
+    assert _git(deployed, "rev-parse", "--abbrev-ref", "HEAD") == "fix/cleanup"
+    assert _git(deployed, "rev-parse", "refs/heads/main") == deployed_tip
+
+
+def test_force_align_checkout_stashes_local_work_and_backs_up_main(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (deployed / "local.txt").write_text("committed only here\n", encoding="utf-8")
+    _git(deployed, "add", "local.txt")
+    _git(deployed, "commit", "-m", "local only")
+    old = _git(deployed, "rev-parse", "HEAD")
+    (deployed / "version.txt").write_text("local edit\n", encoding="utf-8")
+    (deployed / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    result = force_align_checkout(deployed, remote="origin", branch="main")
+
+    assert result["forced"] is True
+    assert result["previous_branch"] == "main"
+    assert result["old_commit"] == old
+    assert _git(deployed, "rev-parse", "HEAD") == target
+    assert _git(deployed, "status", "--porcelain") == ""
+    assert result["stashed_dirty_count"] == 2
+    assert result["stash_commit"]
+    assert result["backup_ref"].startswith("refs/hashideploy-backups/")
+    assert _git(deployed, "rev-parse", result["backup_ref"]) == old
+    assert result["stash_message"] in _git(deployed, "stash", "list")
+    assert "local edit" in _git(deployed, "show", "stash@{0}:version.txt")
+
+
+def test_force_align_checkout_keeps_a_feature_branch_pointer(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    _git(deployed, "checkout", "-b", "wip/experiment")
+    (deployed / "experiment.txt").write_text("unmerged work\n", encoding="utf-8")
+    _git(deployed, "add", "experiment.txt")
+    _git(deployed, "commit", "-m", "unmerged experiment")
+    old = _git(deployed, "rev-parse", "HEAD")
+    (deployed / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    target = _git(source, "rev-parse", "HEAD")
+
+    result = force_align_checkout(deployed, remote="origin", branch="main")
+
+    assert result["previous_branch"] == "wip/experiment"
+    assert _git(deployed, "rev-parse", result["backup_ref"]) == old
+    assert _git(deployed, "rev-parse", "wip/experiment") == old
+    assert _git(deployed, "rev-parse", "HEAD") == target
+
+
+def test_force_align_checkout_leaves_everything_untouched_when_fetch_fails(tmp_path: Path):
+    _source, deployed = _source_repository(tmp_path)
+    (deployed / "version.txt").write_text("local edit\n", encoding="utf-8")
+    old = _git(deployed, "rev-parse", "HEAD")
+    _git(deployed, "remote", "set-url", "origin", str(tmp_path / "missing-remote"))
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        force_align_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "fetch_failed"
+    assert failure["source_changed"] is False
+    assert _git(deployed, "rev-parse", "HEAD") == old
+    assert "local edit" in (deployed / "version.txt").read_text(encoding="utf-8")
+    assert _git(deployed, "stash", "list") == ""
+
+
+def test_force_align_checkout_does_not_stash_when_clean(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+
+    result = force_align_checkout(deployed, remote="origin", branch="main")
+
+    assert result["stash_commit"] is None
+    assert result["stashed_dirty_count"] == 0
+    assert result["backup_ref"] is None
+
+
+def test_source_metadata_rejects_paths_and_non_objects():
+    with pytest.raises(ReleaseUpdateError):
+        release_update._normalize_source_meta("forced")
+    with pytest.raises(ReleaseUpdateError):
+        release_update._normalize_source_meta(
+            {"forced": True, "previous_branch": "main\nrm -rf /"}
+        )
+    with pytest.raises(ReleaseUpdateError):
+        release_update._normalize_source_meta({"forced": True, "stash_commit": "not-a-commit"})
+    with pytest.raises(ReleaseUpdateError):
+        release_update._normalize_source_meta(
+            {"forced": True, "target_branch_commit": "not-a-commit"}
+        )
+    meta = release_update._normalize_source_meta({
+        "forced": True,
+        "target_branch_commit": "b" * 40,
+        "target_branch_backup_ref": "refs/hashideploy-backups/x-target-bbbbbbbbbbbb",
+    })
+    assert meta["target_branch_commit"] == "b" * 40
+    assert meta["target_branch_backup_ref"].endswith("x-target-bbbbbbbbbbbb")
+    assert release_update._normalize_source_meta(None) == {}
+    assert release_update._normalize_source_meta({"forced": False, "stash_commit": "a" * 40}) == {}
+
+
+def test_clean_checkout_reports_untracked_and_tracked_changes_separately(tmp_path: Path):
+    _source, deployed = _source_repository(tmp_path)
+    (deployed / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+
+    with pytest.raises(ReleaseUpdateError) as untracked:
+        release_update._require_clean_checkout(deployed, phase="source_preflight")
+    failure = release_failure(untracked.value)
+    assert failure["code"] == "untracked_only"
+    assert failure["untracked_count"] == 1
+    assert failure["modified_count"] == 0
+    assert failure["untracked_paths"] == ["scratch.txt"]
+
+    (deployed / "version.txt").write_text("changed\n", encoding="utf-8")
+    with pytest.raises(ReleaseUpdateError) as mixed:
+        release_update._require_clean_checkout(deployed, phase="source_preflight")
+    failure = release_failure(mixed.value)
+    assert failure["code"] == "local_changes"
+    assert failure["modified_count"] == 1
+    assert failure["untracked_count"] == 1
+
+
+def test_force_align_checkout_leaves_ignored_files_in_place(tmp_path: Path):
+    source, deployed = _source_repository(tmp_path)
+    (source / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    _git(source, "add", ".gitignore")
+    _git(source, "commit", "-m", "ignore logs")
+    _git(deployed, "fetch", "origin", "main")
+    _git(deployed, "merge", "--ff-only", "FETCH_HEAD")
+    (deployed / "debug.log").write_text("keep me\n", encoding="utf-8")
+    (deployed / "scratch.txt").write_text("stash me\n", encoding="utf-8")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+
+    result = force_align_checkout(deployed, remote="origin", branch="main")
+
+    assert result["stashed_dirty_count"] == 1
+    assert (deployed / "debug.log").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_force_align_checkout_aborts_when_a_locked_file_survives_the_stash(
+    tmp_path: Path, monkeypatch
+):
+    source, deployed = _source_repository(tmp_path)
+    (deployed / "scratch.txt").write_text("locked\n", encoding="utf-8")
+    old = _git(deployed, "rev-parse", "HEAD")
+    (source / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(source, "add", "version.txt")
+    _git(source, "commit", "-m", "second")
+    real_git = release_update._git
+
+    def fake_git(root, *args, **kwargs):
+        if args[:2] == ("status", "--porcelain") and kwargs.get("phase") == "source_force_stash":
+            return subprocess.CompletedProcess(["git"], 0, "?? locked.sqlite\n", "")
+        return real_git(root, *args, **kwargs)
+
+    monkeypatch.setattr(release_update, "_git", fake_git)
+
+    with pytest.raises(ReleaseUpdateError) as raised:
+        force_align_checkout(deployed, remote="origin", branch="main")
+
+    failure = release_failure(raised.value)
+    assert failure["code"] == "stash_incomplete"
+    assert failure["dirty_paths"] == ["locked.sqlite"]
+    assert failure["stash_commit"]
+    assert _git(deployed, "rev-parse", "HEAD") == old
+    assert _git(deployed, "stash", "list") != ""
+
+
+def test_dirty_summary_keeps_the_first_path_intact_after_strip():
+    summary = release_update._dirty_summary("M README.md\n?? scratch.txt")
+    assert summary["modified_paths"] == ["README.md"]
+    assert summary["untracked_paths"] == ["scratch.txt"]
+
+    summary = release_update._dirty_summary(" M README.md\n?? scratch.txt")
+    assert summary["modified_paths"] == ["README.md"]
+    assert summary["untracked_paths"] == ["scratch.txt"]
+
+    summary = release_update._dirty_summary("MM docs/a b.md")
+    assert summary["modified_paths"] == ["docs/a b.md"]

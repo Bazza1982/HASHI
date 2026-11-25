@@ -87,7 +87,13 @@ async def _get_page(
 
     If cdp_url is not provided, attempts auto-discovery via browser_bridge.
     """
-    from playwright.async_api import async_playwright
+    try:
+        from playwright.async_api import async_playwright
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Playwright is not installed for the standalone HASHI browser. "
+            "Run: python -m pip install -e '.[browser]' && playwright install chromium"
+        ) from exc
 
     # Auto-discover CDP if not explicitly provided
     if not cdp_url:

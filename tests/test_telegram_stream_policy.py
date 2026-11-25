@@ -33,6 +33,39 @@ def _runtime(tmp_path, *, extra=None):
     )
 
 
+def test_commentary_mode_defaults_off_and_persists(tmp_path):
+    runtime = _runtime(tmp_path)
+    assert telegram_stream_policy.get_commentary_mode(runtime) == "off"
+
+    telegram_stream_policy.set_commentary_mode(runtime, "raw")
+    assert telegram_stream_policy.get_commentary_mode(runtime) == "raw"
+    assert not (runtime.workspace_dir / ".commentary_off").exists()
+
+    telegram_stream_policy.set_commentary_mode(runtime, "off")
+    assert telegram_stream_policy.get_commentary_mode(runtime) == "off"
+    assert (runtime.workspace_dir / ".commentary_off").exists()
+
+
+def test_commentary_mode_migrates_legacy_marker_and_boolean(tmp_path):
+    marker = _runtime(tmp_path)
+    (marker.workspace_dir / ".commentary_off").touch()
+    assert telegram_stream_policy.get_commentary_mode(marker) == "off"
+
+    on = _runtime(tmp_path)
+    telegram_stream_policy.set_display_preference(on, "commentary", True)
+    assert telegram_stream_policy.get_commentary_mode(on) == "raw"
+
+    off = _runtime(tmp_path)
+    telegram_stream_policy.set_display_preference(off, "commentary", False)
+    assert telegram_stream_policy.get_commentary_mode(off) == "off"
+
+
+def test_commentary_mode_rejects_unknown(tmp_path):
+    runtime = _runtime(tmp_path)
+    with pytest.raises(ValueError):
+        telegram_stream_policy.set_commentary_mode(runtime, "bogus")
+
+
 def test_stream_policy_migrates_to_live_typing_only_persisted_default(tmp_path):
     runtime = _runtime(tmp_path, extra={"answer_stream_preview": True})
 

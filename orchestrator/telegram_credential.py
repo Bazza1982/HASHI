@@ -445,6 +445,118 @@ class TelegramCredentialService:
             result["warning_code"] = durability_warning
         return result
 
+    def disconnect(
+        self,
+        agent_id: str,
+        *,
+        expected_revision: str,
+        runtime_active: bool = False,
+        runtime_metadata: Mapping | None = None,
+    ) -> dict:
+        """Remove one Agent's saved Telegram Bot token without revoking it remotely.
+
+        The removal is a local deletion: it never calls Telegram, so an invalid
+        or already-rejected token disconnects exactly like a valid one. The
+        ``telegram_token_key`` configuration stays in place so the Agent can be
+        reconfigured later; the mirror policy is untouched.
+        """
+        if (
+            not isinstance(expected_revision, str)
+            or not _REVISION_PATTERN.fullmatch(expected_revision)
+        ):
+            raise TelegramCredentialError(
+                "Credential revision is invalid.",
+                error_code="invalid_request",
+                status_code=400,
+            )
+
+        config = read_config_json(self.config_path)
+        context = self._context_from_documents(
+            agent_id=agent_id,
+            config=config,
+            secrets=self._read_secrets(),
+        )
+        if context.shared_reference:
+            raise TelegramCredentialError(
+                "This Telegram credential is shared by multiple Agents.",
+                error_code="telegram_credential_shared",
+                status_code=409,
+            )
+        if expected_revision != context.credential_revision:
+            raise TelegramCredentialError(
+                "Telegram credential status changed. Reload and try again.",
+                error_code="credential_state_changed",
+                status_code=409,
+            )
+        was_configured = context.configured
+        durability_warning = None
+        try:
+            # Freeze the Agent-to-secret mapping while the credential document
+            # performs its own optimistic, serialized publication.
+            with telegram_configuration_lock(self.secrets_path), file_write_lock(self.config_path):
+                latest_config = read_config_json(self.config_path)
+                if latest_config.revision != context.config_revision:
+                    raise TelegramCredentialError(
+                        "Agent configuration changed. Reload and try again.",
+                        error_code="credential_state_changed",
+                        status_code=409,
+                    )
+                latest_secrets = self._read_secrets()
+                latest_context = self._context_from_documents(
+                    agent_id=agent_id,
+                    config=latest_config,
+                    secrets=latest_secrets,
+                )
+                if (
+                    latest_context.token_key != context.token_key
+                    or latest_context.shared_reference
+                    or latest_context.credential_revision
+                    != context.credential_revision
+                ):
+                    raise TelegramCredentialError(
+                        "Telegram credential status changed. Reload and try again.",
+                        error_code="credential_state_changed",
+                        status_code=409,
+                    )
+                latest_secrets.pop(context.token_key, None)
+                try:
+                    write_config_json(
+                        self.secrets_path,
+                        latest_secrets,
+                        private_full_control_sids=self.private_full_control_sids,
+                    )
+                except ConfigDurabilityError:
+                    durability_warning = "credential_removed_durability_unconfirmed"
+        except TelegramCredentialError:
+            raise
+        except ConfigConflictError:
+            raise TelegramCredentialError(
+                "Telegram credential status changed. Reload and try again.",
+                error_code="credential_state_changed",
+                status_code=409,
+            ) from None
+        except OSError:
+            raise TelegramCredentialError(
+                "Telegram credential could not be removed.",
+                error_code="telegram_credential_save_failed",
+                status_code=500,
+            ) from None
+
+        published_context = self._context_from_documents(
+            agent_id=agent_id,
+            config=latest_config,
+            secrets=latest_secrets,
+        )
+        result = self._status_payload(
+            published_context,
+            runtime_active=runtime_active,
+            runtime_metadata=runtime_metadata,
+        )
+        result["disconnected"] = was_configured
+        if durability_warning:
+            result["warning_code"] = durability_warning
+        return result
+
     async def replace(
         self,
         agent_id: str,

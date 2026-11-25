@@ -780,6 +780,7 @@ def _execution_system_prompt(
     delegated_execution: Mapping[str, Any] | None,
     strategy_handoff: Mapping[str, Any] | None,
     tool_catalogue: list[Mapping[str, Any]],
+    commentary_mode: str | None = None,
 ) -> str:
     return render_execution_system_prompt(
         goal=goal,
@@ -791,6 +792,7 @@ def _execution_system_prompt(
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
+        commentary_mode=commentary_mode,
         persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
         persona_block_end=her_persona.PERSONA_BLOCK_END,
     )
@@ -804,6 +806,7 @@ def _direct_system_prompt(
     skills_catalogue: Sequence[Mapping[str, Any]],
     tool_catalogue: Sequence[Mapping[str, Any]],
     strategy_playbook: Mapping[str, Any] | None,
+    commentary_mode: str | None = None,
 ) -> str:
     return render_direct_system_prompt(
         goal=goal,
@@ -814,6 +817,7 @@ def _direct_system_prompt(
         guidance=source.guidance,
         display_name=source.display_name,
         usable=source.usable,
+        commentary_mode=commentary_mode,
         persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
         persona_block_end=her_persona.PERSONA_BLOCK_END,
     )
@@ -3262,6 +3266,7 @@ class HashiStageProvider(StageProvider):
         self._provider_context_recovery = dict(recovery or {})
         self._provider_context_recovery_consumed = False
         self._provider_context_resume_pending = bool(resume_pending_tools)
+        self._provider_recovery_deferred_followups: list[dict[str, Any]] = []
 
     def _bind_provider_context_observer(
         self,
@@ -3343,6 +3348,23 @@ class HashiStageProvider(StageProvider):
                 "private provider recovery contains an invalid message"
             )
         continuation = [copy.deepcopy(dict(item)) for item in raw_messages]
+        raw_deferred = context.get("deferred_followups", [])
+        if raw_deferred is None:
+            raw_deferred = []
+        if not isinstance(raw_deferred, list) or any(
+            not isinstance(item, Mapping)
+            or item.get("role") not in {"user", "system"}
+            or not isinstance(item.get("content"), (str, list))
+            or (
+                isinstance(item.get("content"), list)
+                and any(not isinstance(part, Mapping) for part in item["content"])
+            )
+            for item in raw_deferred
+        ):
+            raise ProviderContextObserverError(
+                "private provider recovery contains invalid deferred tool follow-ups"
+            )
+        deferred = [copy.deepcopy(dict(item)) for item in raw_deferred]
         if context.get("boundary") == "pending_tool_batch":
             from orchestrator.her_v2.provider_continuation import pending_tool_calls
 
@@ -3361,21 +3383,28 @@ class HashiStageProvider(StageProvider):
                             ),
                         }
                     )
+                # All pending calls now have cancellation results.  Deliver
+                # completed reads before the new steering instruction even if
+                # the Provider does not request any further Tools.
+                continuation.extend(deferred)
+                deferred.clear()
                 continuation.append(
                     {"role": "user", "content": stage_prompt}
                 )
         elif context.get("boundary") == "ready_provider_request":
+            continuation.extend(deferred)
+            deferred.clear()
             if not self._provider_context_resume_pending:
-                # /steer successor: the checkpoint ends at the original
-                # provider request, so the new steering instruction must be
-                # appended or the backend payload only carries the old one.
-                # Ordinary crash recovery re-drives the identical request and
-                # must not duplicate the original prompt.
+                # /steer successor keeps the original request as history and
+                # appends the new instruction after recovered follow-ups.
                 continuation.append(
                     {"role": "user", "content": stage_prompt}
                 )
         else:
+            continuation.extend(deferred)
+            deferred.clear()
             continuation.append({"role": "user", "content": stage_prompt})
+        self._provider_recovery_deferred_followups = deferred
         self._provider_context_recovery_consumed = True
         return continuation
 
@@ -5617,14 +5646,22 @@ class HashiStageProvider(StageProvider):
                 profile=profile,
                 request=request,
             )
-            prompt_request = request
+            prompt_request = replace(
+                request,
+                context={
+                    **dict(request.context),
+                    "commentary_mode": str(
+                        getattr(self, "_commentary_mode", "") or "off"
+                    ),
+                },
+            )
             if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
                 "available_execution_tools" not in request.context
             ):
                 prompt_request = replace(
-                    request,
+                    prompt_request,
                     context={
-                        **dict(request.context),
+                        **dict(prompt_request.context),
                         "available_execution_tools": list(
                             self.tool_catalogue(
                                 allow_side_effects=bool(
@@ -5793,6 +5830,9 @@ class HashiStageProvider(StageProvider):
                                 reference_projector=getattr(
                                     backend, "project_main_references", None
                                 ),
+                                pcm_profile=str(
+                                    pcm_input.get("pcm_profile") or "cloud"
+                                ),
                             )
                         else:
                             system_prompt = _direct_system_prompt(
@@ -5807,6 +5847,9 @@ class HashiStageProvider(StageProvider):
                                         request.context.get("strategy_playbook"), Mapping
                                     )
                                     else None
+                                ),
+                                commentary_mode=str(
+                                    getattr(self, "_commentary_mode", "") or "off"
                                 ),
                             )
                     else:
@@ -5855,6 +5898,9 @@ class HashiStageProvider(StageProvider):
                                 else None
                             ),
                             tool_catalogue=tool_catalogue,
+                            commentary_mode=str(
+                                getattr(self, "_commentary_mode", "") or "off"
+                            ),
                         )
                 else:
                     system_prompt = _finalisation_system_prompt(
@@ -6050,6 +6096,23 @@ class HashiStageProvider(StageProvider):
                     generation_kwargs["continuation_messages"] = (
                         continuation_messages
                     )
+                    recovered_deferred = list(
+                        getattr(
+                            self, "_provider_recovery_deferred_followups", None
+                        )
+                        or []
+                    )
+                    if recovered_deferred:
+                        if (
+                            "deferred_followups" not in parameters
+                            and not accepts_extra_keywords
+                        ):
+                            raise ProviderContextObserverError(
+                                "selected provider cannot restore deferred tool follow-ups"
+                            )
+                        generation_kwargs["deferred_followups"] = (
+                            recovered_deferred
+                        )
                     if (
                         self._provider_context_recovery.get("boundary")
                         == "pending_tool_batch"
@@ -7000,6 +7063,26 @@ def _pcm_only_presentation(profile: ProviderProfile) -> bool:
     return canonical_model_provider(profile.engine) in {"ollama-api", "hli-api"}
 
 
+def effective_commentary_mode(
+    mode: str, profile: ProviderProfile | None
+) -> str:
+    """Return the mode the HERV3 adapter actually uses for one profile.
+
+    Local-inference providers present only the PCM prompt, so the Persona
+    modes degrade to objective raw. The saved preference is never overwritten;
+    callers keep it and disclose this effective value instead.
+    """
+
+    resolved = str(mode or "off").casefold()
+    if (
+        resolved in {"original", "packaged"}
+        and profile is not None
+        and _pcm_only_presentation(profile)
+    ):
+        return "raw"
+    return resolved
+
+
 class _ConfiguredFinalStyleRenderer(FinalStyleRenderer):
     """Use the auxiliary profile for one fail-open presentation-only check."""
 
@@ -7264,3 +7347,4 @@ class _ConfiguredPersonaPackager(PersonaPackager, RequiredPersonaRenderer):
             fallback=True,
             error_type=reason,
         )
+# HASHI-Fingerprint: hfp_e12bd24318a14e08bdd4753e410d4ea0

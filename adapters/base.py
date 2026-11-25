@@ -157,6 +157,14 @@ class BaseBackend(ABC):
         image_input = str(configured_image_input or "none").strip().casefold()
         if image_input not in {"none", "native", "tool"}:
             raise ValueError("image_input must be one of: none, native, tool")
+        # Validate the PCM projection profile once at backend construction so a
+        # misconfiguration fails with a clear diagnostic instead of on every
+        # turn. The effective profile is still resolved per request from the
+        # actual inference target.
+        if extra.get("pcm_profile") not in (None, ""):
+            from orchestrator.pcm_profile import normalize_pcm_profile
+
+            normalize_pcm_profile(extra["pcm_profile"])
         capability = self.resolve_input_capability()
         self._apply_input_capability_snapshot(capability, extra=extra)
         self.image_input_mode = (
@@ -285,6 +293,7 @@ class BaseBackend(ABC):
                 "OpenRouterAdapter": "openrouter-api",
                 "HashiApiAdapter": "hashi-api",
                 "CodexCLIAdapter": "codex-cli",
+                "DshCLIAdapter": "dsh-cli",
                 "HERv2Adapter": "her-v2",
             }.get(type(self).__name__, "")
         return resolve_input_capability(

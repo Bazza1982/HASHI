@@ -127,17 +127,17 @@ def test_p1_shell_file_write_targets_only_concrete_files_and_multiline_resolutio
     if os.name == "nt":
         assert (
             _shell_file_write_targets(
-                "wsl.exe -d Ubuntu-22.04 -- bash -lc 'cd /mnt/c/Users/thene/projects/HASHI3 && pytest'",
+                "wsl.exe -d Ubuntu-22.04 -- bash -lc 'cd /mnt/c/hashi-fixtures/synthetic-repo && pytest'",
                 ws_a.resolve(),
                 "powershell",
             )
             == []
         )
         assert _shell_file_write_targets(
-            "wsl.exe -d Ubuntu-22.04 -- bash -lc 'cd /mnt/c/Users/thene/projects/HASHI3\necho ok > out.txt'",
+            "wsl.exe -d Ubuntu-22.04 -- bash -lc 'cd /mnt/c/hashi-fixtures/synthetic-repo\necho ok > out.txt'",
             ws_a.resolve(),
             "powershell",
-        ) == [Path("C:/Users/thene/projects/HASHI3/out.txt").resolve()]
+        ) == [Path("C:/hashi-fixtures/synthetic-repo/out.txt").resolve()]
 
 
 @pytest.mark.asyncio

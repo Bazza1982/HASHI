@@ -632,3 +632,31 @@ def test_generation_assets_do_not_include_local_runtime_state():
     assert all(not item.relative_path.startswith("flow/runs/") for item in manifest.assets)
     assert all("state/function_generations" not in item.relative_path for item in manifest.assets)
     assert os.path.isabs(str(ROOT))
+
+
+def test_function_generation_packages_the_whole_hal_package():
+    # Regression: hal/ was absent from FUNCTION_MODULE_PREFIXES, so the
+    # generation artifact shipped no hal code and every /api/v1/hal/* route
+    # vanished with an ImportError at Worker start.
+    assert "hal.service" in FUNCTION_GENERATION_ENTRYPOINTS
+
+    manifest = build_source_manifest(["hal.service"], code_root=ROOT)
+
+    assert {
+        "hal",
+        "hal.service",
+        "hal.language",
+        "hal.runtime",
+        "hal.store",
+        "hal.dispatch",
+        "hal.event_source",
+    } <= set(manifest.module_names)
+    assert {
+        "hal/__init__.py",
+        "hal/service.py",
+        "hal/language.py",
+        "hal/runtime.py",
+        "hal/store.py",
+        "hal/dispatch.py",
+        "hal/event_source.py",
+    } <= {entry.relative_path for entry in manifest.entries}
