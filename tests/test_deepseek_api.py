@@ -4055,4 +4055,141 @@ async def test_herv3_stream_inactivity_does_not_retry_after_partial_answer_text(
     assert response.error_code == "PROVIDER_STREAM_IDLE_TIMEOUT"
     assert response.stream_metadata["provider_transport_retry_count"] == 0
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_response_after_completed_tool_steps_retries_only_that_step(
+    monkeypatch,
+    tmp_path,
+):
+    """A long Tool loop must not die on one unusable final completion.
+
+    DeepSeek Flash can return 6 thinking tokens, empty text, no Tool call and
+    finish_reason="stop" after dozens of completed Tool steps. That step has no
+    new Tool call, so the adapter resends exactly that step; no historical Tool
+    may run twice.
+    """
+
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    observed = []
+    adapter.set_provider_call_observer(observed.append)
+    first_tool = [
+        {
+            "id": "call_first",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":"/first"}'},
+        }
+    ]
+    second_tool = [
+        {
+            "id": "call_second",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":"/second"}'},
+        }
+    ]
+    replies = iter(
+        [
+            _APIResult("", first_tool, "tool_calls", provider_response_id="p-step-1"),
+            _APIResult("", second_tool, "tool_calls", provider_response_id="p-step-2"),
+            _APIResult(
+                "",
+                None,
+                "stop",
+                completion_tokens=6,
+                thinking_tokens=6,
+                provider_response_id="p-empty",
+            ),
+            _APIResult("done", None, "stop", provider_response_id="p-final"),
+        ]
+    )
+    payloads = []
+
+    async def fake_call(payload, headers, on_stream_event):
+        payloads.append(payload)
+        return next(replies)
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-empty-recovery")
+
+    assert response.is_success is True
+    assert response.text == "done"
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/first"}, "call_first"),
+        ("file_list", {"path": "/second"}, "call_second"),
+    ]
+    assert len(payloads) == 4
+    # The recovered step is the identical conversation state: every earlier
+    # Tool result is already in the history and nothing was appended for the
+    # unusable completion, so no Tool can be replayed.
+    assert payloads[2]["messages"] == payloads[3]["messages"]
+    provider_calls = response.stream_metadata["meter"]["provider_calls"]
+    assert len(provider_calls) == 4
+    assert provider_calls[2]["decision"] == "reject_empty_response"
+    assert provider_calls[2]["recovery_kind"] == "none"
+    assert provider_calls[3]["recovery_kind"] == "empty_response_retry"
+    assert response.stream_metadata["provider_local_recovery_count"] == 1
+    assert response.stream_metadata["provider_tool_repair_count"] == 0
+    assert "provider_local_recovery_exhausted" not in response.stream_metadata
+
+
+@pytest.mark.asyncio
+async def test_empty_response_recovery_is_bounded_and_reports_exhaustion(
+    monkeypatch,
+    tmp_path,
+):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    first_tool = [
+        {
+            "id": "call_first",
+            "type": "function",
+            "function": {"name": "file_list", "arguments": '{"path":"/first"}'},
+        }
+    ]
+    empty = lambda name: _APIResult(  # noqa: E731 - compact fixture
+        "",
+        None,
+        "stop",
+        completion_tokens=6,
+        thinking_tokens=6,
+        provider_response_id=name,
+    )
+    replies = iter(
+        [
+            _APIResult("", first_tool, "tool_calls", provider_response_id="p-step-1"),
+            empty("p-empty-1"),
+            empty("p-empty-2"),
+            empty("p-empty-3"),
+        ]
+    )
+    payloads = []
+
+    async def fake_call(payload, headers, on_stream_event):
+        payloads.append(payload)
+        return next(replies)
+
+    monkeypatch.setattr(adapter, "_call_api_once", fake_call)
+
+    response = await adapter.generate_response("inspect", "req-empty-exhausted")
+
+    assert response.is_success is False
+    assert response.error_code == "PROVIDER_EMPTY_RESPONSE"
+    assert adapter.tool_registry.calls == [
+        ("file_list", {"path": "/first"}, "call_first")
+    ]
+    assert len(payloads) == 4
+    assert payloads[1]["messages"] == payloads[2]["messages"]
+    assert payloads[2]["messages"] == payloads[3]["messages"]
+    assert response.stream_metadata["provider_local_recovery_count"] == 2
+    assert response.stream_metadata["provider_empty_response_recovery_count"] == 2
+    assert response.stream_metadata["provider_local_recovery_exhausted"] is True
+    protocol = response.stream_metadata["provider_protocol"]
+    assert protocol["decision"] == "reject_empty_response"
+    assert protocol["empty_response_recovery_attempts"] == 2
+    assert protocol["empty_response_recovery_limit"] == 2
+    assert response.provider_request_id == "p-empty-3"
+    # The outer stage still refuses to replay a turn whose earlier steps had
+    # side effects; the bounded local recovery above is the only safe retry.
+    assert response.error_retryable is True
+    assert response.side_effects_possible is True
 # HASHI-Fingerprint: hfp_9ddcf188413f48ae81bb6000ab818d3e
