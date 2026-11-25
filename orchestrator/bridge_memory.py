@@ -38,6 +38,14 @@ from tools.token_tracker import estimate_tokens as _estimate_tokens
 
 CURRENT_REQUEST_SEPARATOR = "\n\n--- CURRENT USER REQUEST — AUTHORITATIVE ---\n"
 
+# HERV3 attaches the selected model's native function schemas to the same
+# request, so the PCM text catalogue only repeats names it already has. The
+# index keeps discovery cheap without duplicating descriptions or arguments.
+NATIVE_TOOL_INDEX_NOTE = (
+    "Index only: native function schemas carry each tool's description and "
+    "arguments. Call the tools directly."
+)
+
 sys_prompt_logger = logging.getLogger("BridgeU.SysPrompt")
 memory_logger = logging.getLogger("BridgeU.Memory")
 
@@ -1903,13 +1911,24 @@ class BridgeContextAssembler:
         return "file_read" in names
 
     @staticmethod
-    def _catalogue_lines(provider) -> list[str]:
+    def _catalogue_items(provider) -> list:
         if not callable(provider):
             return []
         try:
-            raw_items = list(provider() or [])
+            return list(provider() or [])
         except Exception:
             return []
+
+    @staticmethod
+    def _catalogue_name(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("name") or item.get("id") or "").strip()
+        if isinstance(item, (tuple, list)) and item:
+            return str(item[0] or "").strip()
+        return str(item or "").strip()
+
+    @staticmethod
+    def _catalogue_lines_from(raw_items: list) -> list[str]:
         lines: list[str] = []
         for item in raw_items:
             if isinstance(item, dict):
@@ -1925,6 +1944,31 @@ class BridgeContextAssembler:
             if name:
                 lines.append(f"- {name}" + (f": {description}" if description else ""))
         return lines
+
+    @classmethod
+    def _catalogue_lines(cls, provider) -> list[str]:
+        return cls._catalogue_lines_from(cls._catalogue_items(provider))
+
+    @staticmethod
+    def _delivers_native_tool_schemas(
+        engine: str, pcm_profile: str, retrieval_capable: bool
+    ) -> bool:
+        """True when the model request also carries native function schemas.
+
+        HERV3 always ships the selected model's tool definitions with the
+        main-model request. CLI Engines do not, so they keep the text form.
+        A model with tools disabled keeps the text form as a harmless fallback
+        because nothing else tells it what exists.
+        """
+
+        if (
+            str(pcm_profile or "").strip().casefold()
+            == pcm_profile_module.PCM_PROFILE_LOCAL
+        ):
+            return False
+        if not retrieval_capable:
+            return False
+        return str(engine or "").strip().casefold() in {"her", "her-v2", "her-v3"}
 
     def _build_time_fyi(self, *, minimal: bool = False) -> str:
         """Build accurate local date/time information for one external turn."""
@@ -2609,26 +2653,64 @@ class BridgeContextAssembler:
                     metadata={"schema": "hashi.call-interaction-policy", "version": 1},
                 )
 
+        native_schemas = self._delivers_native_tool_schemas(
+            engine, pcm_profile, retrieval_capable
+        )
         if not local_profile:
-            # Local relies on native tool schemas + on-demand tool_find and on
-            # explicit skill discovery instead of re-sending full catalogues.
-            skill_lines = self._catalogue_lines(self.skill_catalog_provider)
+            # Native tool schemas make the full text catalogue redundant. Keep
+            # a bounded index instead of repeating descriptions and arguments.
+            skill_items = self._catalogue_items(self.skill_catalog_provider)
+            skill_lines = self._catalogue_lines_from(skill_items)
             if skill_lines:
+                skill_count = len(skill_lines)
+                compact_skills = False
+                if native_schemas and all(
+                    hasattr(item, "get") for item in skill_items
+                ):
+                    from orchestrator.her_v2.v3_prompt import skill_index_payload
+
+                    index = skill_index_payload(skill_items)
+                    if index:
+                        compact_skills = True
+                        header = str(index.get("note") or "")
+                        if index.get("root"):
+                            header = f"{header} Root: {index['root']}".strip()
+                        skill_lines = (
+                            [header, *index["skills"]]
+                            if header
+                            else list(index["skills"])
+                        )
+                        skill_count = len(index["skills"])
                 add_section(
                     "skills_catalogue",
                     "AVAILABLE HASHI SKILLS",
                     "\n".join(skill_lines),
                     "runtime_context",
-                    item_count=len(skill_lines),
+                    item_count=skill_count,
+                    metadata={"compact": True} if compact_skills else None,
                 )
-            tool_lines = self._catalogue_lines(self.tool_catalog_provider)
+            tool_items = self._catalogue_items(self.tool_catalog_provider)
+            tool_lines = self._catalogue_lines_from(tool_items)
             if tool_lines:
+                tool_count = len(tool_lines)
+                if native_schemas:
+                    names = [
+                        name
+                        for name in (self._catalogue_name(item) for item in tool_items)
+                        if name
+                    ]
+                    tool_lines = [
+                        NATIVE_TOOL_INDEX_NOTE,
+                        *[f"- {name}" for name in names],
+                    ]
+                    tool_count = len(names)
                 add_section(
                     "tools_catalogue",
                     "AVAILABLE HASHI TOOLS",
                     "\n".join(tool_lines),
                     "runtime_context",
-                    item_count=len(tool_lines),
+                    item_count=tool_count,
+                    metadata={"compact": True} if native_schemas else None,
                 )
         else:
             removed_section_keys.extend(("skills_catalogue", "tools_catalogue"))
