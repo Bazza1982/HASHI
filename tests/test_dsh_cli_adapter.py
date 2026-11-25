@@ -698,23 +698,50 @@ async def test_dsh_p1_03_truthful_model_and_effort_config_and_custom_model_suppo
 
 
 @pytest.mark.asyncio
-async def test_dsh_cli_reuses_recent_help_probe_across_rebuilt_executions(tmp_path: Path, monkeypatch):
+async def test_dsh_cli_initialize_never_spawns_a_help_probe(tmp_path: Path, monkeypatch):
     mock_script = tmp_path / "mock_dsh_acp.py"
     mock_script.write_text(_MOCK_ACP_SERVER_SCRIPT, encoding="utf-8")
     real_exec = asyncio.create_subprocess_exec
-    help_probes: list[tuple] = []
+    spawns: list[tuple] = []
 
     async def counting_exec(*args, **kwargs):
-        if "--help" in args:
-            help_probes.append(tuple(args))
+        spawns.append(tuple(args))
         return await real_exec(*args, **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", counting_exec)
-    for _ in range(2):
-        adapter = _make_adapter(tmp_path, mock_script)
-        assert await adapter.initialize() is True
-        await adapter.shutdown()
-    assert len(help_probes) == 1
+    adapter = _make_adapter(tmp_path, mock_script)
+    assert await adapter.initialize() is True
+    # An idle interval past the former 600s probe TTL must stay probe-free.
+    monkeypatch.setattr("adapters.dsh_cli.time.monotonic", lambda: 10_000_000.0)
+    assert await adapter.initialize() is True
+    assert spawns == []
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dsh_cli_initialize_reports_missing_entry_without_spawning(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "missing_dsh_entry.js"
+    agent_cfg = SimpleNamespace(
+        name="dsh-test-agent",
+        engine="dsh-cli",
+        model="deepseek-v4-pro",
+        workspace_dir=tmp_path / "workspace",
+        extra={"session_mode": True, "effort": "high"},
+        access_scope="drive",
+    )
+    global_cfg = SimpleNamespace(
+        dsh_cmd=f'"{sys.executable}" "{missing}"',
+        idle_timeout_sec=30,
+    )
+    adapter = DshCLIAdapter(agent_cfg, global_cfg)
+
+    async def fail_exec(*args, **kwargs):
+        raise AssertionError("initialize must not spawn the CLI")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_exec)
+    assert await adapter.initialize() is False
+    assert "launch script not found" in adapter.last_initialize_error
+    assert str(missing) in adapter.last_initialize_error
 
 
 def test_dsh_cli_reports_images_not_transmitted_for_legacy_and_canonical_content(tmp_path: Path, caplog):

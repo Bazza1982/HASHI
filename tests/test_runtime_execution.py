@@ -327,3 +327,60 @@ async def test_execution_capacity_timeout_is_retryable(tmp_path, monkeypatch):
     finally:
         dispatcher.cancel()
         await asyncio.gather(dispatcher, return_exceptions=True)
+
+@pytest.mark.asyncio
+async def test_create_execution_reports_backend_initialization_reason(tmp_path, monkeypatch):
+    from tests.test_flexible_backend_state import _make_manager
+    from orchestrator.session_backend_manager import SessionBackendManager
+
+    owner = _make_manager(tmp_path / "agent")
+    runtime = FlexibleAgentRuntime.__new__(FlexibleAgentRuntime)
+    runtime.config = owner.config
+    runtime.backend_manager = owner
+    runtime._session_executions = {}
+    owner.runtime = runtime
+
+    async def fail_initialize(self):
+        self.last_backend_init_error = (
+            "dsh-cli: launch script not found: C:\\missing\\bin.js"
+        )
+        return False
+
+    monkeypatch.setattr(
+        SessionBackendManager, "initialize_active_backend", fail_initialize
+    )
+    with pytest.raises(RuntimeError) as failure:
+        await execution.create_execution(
+            runtime,
+            SimpleNamespace(session_id="A", context_generation=1),
+            execution.snapshot(runtime),
+        )
+    message = str(failure.value)
+    assert "Session execution backend initialization failed" in message
+    assert "launch script not found" in message
+
+
+@pytest.mark.asyncio
+async def test_backend_manager_records_adapter_initialization_reason(tmp_path, monkeypatch):
+    from tests.test_flexible_backend_state import _make_manager
+    import adapters.registry as registry
+
+    owner = _make_manager(tmp_path / "agent")
+
+    class FailingAdapter:
+        def __init__(self, *args, **kwargs):
+            self.last_initialize_error = ""
+
+        async def initialize(self):
+            self.last_initialize_error = (
+                "launch script not found: /home/lily/projects/deepseek-harness/bin.js"
+            )
+            return False
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(registry, "get_backend_class", lambda engine: FailingAdapter)
+    assert await owner._create_initialized_backend("codex-cli") is None
+    assert "launch script not found" in owner.last_backend_init_error
+    assert owner.last_backend_init_error.startswith("codex-cli:")

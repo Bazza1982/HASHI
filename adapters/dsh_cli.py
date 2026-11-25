@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import Any, Callable, Mapping
 
@@ -39,15 +40,43 @@ _ACP_PROTOCOL_VERSION = 1
 _ACP_STDOUT_LIMIT = 16 * 1024 * 1024  # 16 MiB per JSON-RPC line
 _ACP_RPC_TIMEOUT_SEC = 30.0
 _ACP_CANCEL_GRACE_SEC = 5.0
-# ``dsh --help`` is a 4.5-12.6s synchronous spawn on cold workers. Every rebuilt
-# Execution used to pay it again; remember a recent successful probe per launch
-# invocation so model/effort switches do not re-run it.
-_HELP_CHECK_TTL_S = 600.0
-_HELP_CHECK_CACHE: dict[tuple[tuple[str, ...], str], float] = {}
+# ``dsh --help`` boots the whole CLI application (5-13s warm on Windows, and
+# routinely longer once an idle Agent's page cache goes cold). Probing it from
+# ``initialize()`` used to block the first message after idle past the old 20s
+# hard limit, so the launch is validated by entry-file existence instead. The
+# persistent ACP ``initialize`` handshake in ``_ensure_worker`` remains the
+# authoritative runtime health check.
+_SCRIPT_SUFFIXES = frozenset({".js", ".mjs", ".cjs", ".ts", ".mts"})
 _SUPPORTED_IMAGE_MIMES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
 )
 _SUPPORTED_REASONING_EFFORTS = frozenset({"off", "low", "high", "max"})
+
+
+def _launch_problem(argv: list[str]) -> str:
+    """Return why ``argv`` cannot start, or ``""`` when its entries exist.
+
+    Cheap, non-spawning preflight: it catches a missing executable or launch
+    script without paying the multi-second CLI cold start. Anything deeper
+    (broken install, bad Node modules) is reported by the real ACP worker
+    handshake with its stderr attached.
+    """
+
+    if not argv or not str(argv[0] or "").strip():
+        return "empty launch command"
+    head = str(argv[0])
+    if not Path(head).is_file() and shutil.which(head) is None:
+        return f"executable not found: {head}"
+    for token in argv[1:]:
+        text = str(token)
+        if text.startswith("-"):
+            continue
+        candidate = Path(text)
+        if candidate.suffix.lower() in _SCRIPT_SUFFIXES:
+            if not candidate.is_file():
+                return f"launch script not found: {text}"
+            break
+    return ""
 
 
 def _canonical_image_parts(
@@ -392,6 +421,7 @@ class DshCLIAdapter(BaseBackend):
         self._image_prompts_supported: bool = False
         self._hashi_mcp_enabled: bool = False
         self._active_run_mcp_invocation: HashiMcpInvocation | None = None
+        self._last_initialize_error: str = ""
 
         # Persistent ACP stdio worker state
         self._request_lock = asyncio.Lock()
@@ -434,40 +464,24 @@ class DshCLIAdapter(BaseBackend):
     async def initialize(self) -> bool:
         self.logger.info("Initializing DSH (DeepSeek Harness ACP) backend...")
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
-        argv, launch_cwd, label = self._resolve_launch()
-        cache_key = (tuple(argv), str(launch_cwd or ""))
-        cached_at = _HELP_CHECK_CACHE.get(cache_key)
-        if cached_at is not None and (time.monotonic() - cached_at) < _HELP_CHECK_TTL_S:
-            self.logger.info(
-                "DSH ACP backend ready (%s): reused recent help check", label
+        argv, _launch_cwd, label = self._resolve_launch()
+        problem = _launch_problem(argv)
+        if problem:
+            self._last_initialize_error = f"{problem} (launch: {label})"
+            self.logger.error(
+                "DSH ACP backend not accessible (%s): %s", label, problem
             )
-            self._probe_hashi_mcp()
-            return True
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                "--help",
-                cwd=str(launch_cwd) if launch_cwd else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **process_group_kwargs(),
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20.0)
-            if proc.returncode != 0:
-                err = stderr.decode("utf-8", errors="replace").strip()
-                self.logger.error("DSH ACP help check failed (%s): %s", label, err)
-                return False
-            _HELP_CHECK_CACHE[cache_key] = time.monotonic()
-            self.logger.info(
-                "DSH ACP backend ready (%s): %s",
-                label,
-                self._preview_text(stdout, 120),
-            )
-            self._probe_hashi_mcp()
-            return True
-        except Exception as exc:
-            self.logger.error("DSH ACP backend not accessible (%s): %s", label, exc)
             return False
+        self._last_initialize_error = ""
+        self.logger.info(
+            "DSH ACP backend command verified (%s): %s", label, argv[0]
+        )
+        self._probe_hashi_mcp()
+        return True
+
+    @property
+    def last_initialize_error(self) -> str:
+        return self._last_initialize_error
 
     def _probe_hashi_mcp(self) -> None:
         try:

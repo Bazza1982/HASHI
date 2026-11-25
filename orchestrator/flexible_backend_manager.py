@@ -1873,7 +1873,15 @@ class FlexibleBackendManager:
         raise_on_failure: bool = False,
     ):
         """Prepare an adapter without replacing the live backend or saved state."""
+        # Keep the adapter's own failure reason so the execution layer can
+        # report something actionable instead of only "initialization failed".
+        self.last_backend_init_error = ""
+
         def rejected(error: Exception, phase: str):
+            if not self.last_backend_init_error:
+                self.last_backend_init_error = (
+                    str(error).strip() or type(error).__name__
+                )
             if raise_on_failure:
                 raise OperationFailed(operation_failure(
                     error, operation="backend_switch", phase=phase,
@@ -1946,6 +1954,17 @@ class FlexibleBackendManager:
             with span("backend.initialize_adapter"):
                 initialized = bool(await backend.initialize())
             if not initialized:
+                detail = str(
+                    getattr(backend, "last_initialize_error", "") or ""
+                ).strip()
+                self.last_backend_init_error = (
+                    f"{engine}: {detail}"
+                    if detail
+                    else f"{engine}: initialize() returned false"
+                )
+                self.logger.error(
+                    "Backend %s unavailable: %s", engine, self.last_backend_init_error
+                )
                 return rejected(OperationRejected("backend_unavailable"), "initialize")
             return backend
         except OperationFailed:
