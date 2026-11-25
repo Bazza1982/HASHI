@@ -1686,6 +1686,36 @@ class FunctionWorkerHost:
             runtime.telegram_ingress_connected = bool(params.get("connected"))
             await self.emit_metadata()
             return {"ok": True, "metadata": self.metadata()}
+        if method == "worker.telegram_disconnect":
+            # Stop THIS Worker's Telegram connector only: cancel the connect
+            # retry loop and command-menu task, fence re-arming, drop the
+            # in-memory credential and close the Application (outbound sends,
+            # connection pool). The Agent, its local work and any queued
+            # request stay untouched.
+            runtime = self._require_runtime()
+            await self._cancel_connector_tasks()
+            self.connector_owner = False
+            runtime.telegram_connected = False
+            runtime.telegram_ingress_connected = False
+            runtime.token = LOCAL_MODE_TOKEN
+            runtime._telegram_connector_permanent_failure = "disconnected"
+            runtime._telegram_connector_failure_token_revision = None
+            self._telegram_cleanup_required = True
+            application_stopped = True
+            try:
+                await self._reset_telegram_application(runtime)
+            except Exception:
+                application_stopped = False
+                logger.warning(
+                    "Telegram application stop after disconnect incomplete for %s",
+                    self.agent_name,
+                )
+            await self.emit_metadata()
+            return {
+                "ok": True,
+                "telegram_stopped": True,
+                "application_stopped": application_stopped,
+            }
         if method == "worker.identity.refresh":
             runtime = self._require_runtime()
             extra = dict(getattr(runtime.config, "extra", None) or {})

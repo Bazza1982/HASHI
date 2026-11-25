@@ -6101,24 +6101,31 @@ class WorkbenchApiServer:
                 status=503,
             )
         workers = getattr(self.orchestrator, "function_workers", None)
-        # Full cleanup, not just the ingress stop: it also clears the stale
-        # diagnostics/failure evidence and the in-memory token, so the status
-        # snapshot stops reporting "configured" and a later worker restart
-        # cannot resurrect the connection from the kernel's memory copy.
-        stop = getattr(workers, "_disconnect_telegram_ingress", None) or getattr(
-            workers, "stop_telegram_ingress", None
-        )
-        if callable(stop):
+        # Kernel cleanup (ingress, diagnostics, in-memory token) plus a
+        # confirmed Worker-side connector stop. Success is only reported once
+        # the running Worker has dropped its credential and stopped retrying;
+        # otherwise the response carries an honest runtime_stop_warning.
+        canonical_id = str(result.get("agent_id") or agent_id)
+        runtime_stopped = False
+        runtime_stop_message = ""
+        disconnect = getattr(workers, "disconnect_agent_telegram", None)
+        if callable(disconnect):
             try:
-                await stop(agent_id)
+                runtime_stopped, runtime_stop_message = await disconnect(canonical_id)
             except Exception as exc:
-                # The credential is already committed; a failed connection stop
-                # must never turn a successful removal into a retryable error.
+                runtime_stop_message = f"{type(exc).__name__}: {exc}"
                 logger.warning(
-                    "Telegram ingress stop after disconnect failed: agent=%s error_type=%s",
-                    agent_id,
+                    "Telegram runtime disconnect failed: agent=%s error_type=%s",
+                    canonical_id,
                     type(exc).__name__,
                 )
+        else:
+            runtime_stop_message = "telegram_disconnect_runtime_unavailable"
+        result["runtime_stopped"] = runtime_stopped
+        if not runtime_stopped:
+            result["runtime_stop_warning"] = (
+                runtime_stop_message or "telegram_disconnect_runtime_unconfirmed"
+            )
         await self._refresh_telegram_status_projection()
         logger.info(
             "telegram_credential.disconnected agent_name=%s disconnected=%s runtime_active=%s",

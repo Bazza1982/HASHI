@@ -206,8 +206,9 @@ async def _disconnect_command(runtime: Any, update: Any, args: list[str]) -> Non
             runtime, update, ui_language.tr("menu.telegram.disconnect.not_configured")
         )
         return
+    canonical = context.agent_id
     try:
-        service.disconnect(target, expected_revision=context.credential_revision)
+        service.disconnect(canonical, expected_revision=context.credential_revision)
     except TelegramCredentialError as exc:
         if exc.error_code == "telegram_credential_shared":
             await _send(runtime, update, ui_language.tr("menu.telegram.disconnect.shared"))
@@ -219,7 +220,7 @@ async def _disconnect_command(runtime: Any, update: Any, args: list[str]) -> Non
         orchestrator = getattr(runtime, "orchestrator", None)
         request = getattr(orchestrator, "request_telegram_disconnect", None)
         if callable(request):
-            ok, _message = await request(target, owner_id=_owner_id(runtime, update))
+            ok, _message = await request(canonical, owner_id=_owner_id(runtime, update))
             if not ok:
                 kernel_notice = ui_language.tr("menu.telegram.disconnect.kernel_notice")
     except Exception:

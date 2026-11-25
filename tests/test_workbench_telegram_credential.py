@@ -962,20 +962,22 @@ async def test_disconnect_endpoint_refuses_shared_and_stale_states(tmp_path):
 @pytest.mark.asyncio
 async def test_disconnect_endpoint_stops_ingress_and_refreshes_projection(tmp_path, monkeypatch):
     server = _server(tmp_path, verifier=None, runtime_active=True)
-    stopped = []
     refreshed = []
+    disconnected = []
 
     class FakeProjection:
         def refresh_configuration(self):
             refreshed.append(True)
             return True
 
+    async def disconnect_agent_telegram(agent_id):
+        disconnected.append(agent_id)
+        return (True, "telegram disconnected")
+
     fake_workers = SimpleNamespace(
         _telegram_summary=lambda: FakeProjection(),
     )
-    fake_workers.stop_telegram_ingress = _async_capture(stopped)
-    full_cleanup = []
-    fake_workers._disconnect_telegram_ingress = _async_capture(full_cleanup)
+    fake_workers.disconnect_agent_telegram = disconnect_agent_telegram
     server.orchestrator = SimpleNamespace(
         runtimes=server.orchestrator.runtimes,
         function_workers=fake_workers,
@@ -990,11 +992,46 @@ async def test_disconnect_endpoint_stops_ingress_and_refreshes_projection(tmp_pa
         )
     )
     assert response.status == 200
-    assert full_cleanup == ["lily"]
-    # The full cleanup (diagnostics + in-memory token) wins over the plain
-    # ingress stop, so a restart can never resurrect the removed credential.
-    assert stopped == []
+    result = json.loads(response.text)
+    assert disconnected == ["lily"]
+    assert result["runtime_stopped"] is True
+    assert "runtime_stop_warning" not in result
     assert refreshed == [True]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_endpoint_reports_unconfirmed_runtime_stop(tmp_path):
+    server = _server(tmp_path, verifier=None, runtime_active=True)
+
+    class FakeProjection:
+        def refresh_configuration(self):
+            return True
+
+    async def disconnect_agent_telegram(agent_id):
+        return (False, "telegram_disconnect_runtime_unconfirmed")
+
+    fake_workers = SimpleNamespace(
+        _telegram_summary=lambda: FakeProjection(),
+    )
+    fake_workers.disconnect_agent_telegram = disconnect_agent_telegram
+    server.orchestrator = SimpleNamespace(
+        runtimes=server.orchestrator.runtimes,
+        function_workers=fake_workers,
+    )
+    revision = server.telegram_credential_service.status("lily")[
+        "credential_revision"
+    ]
+    response = await server.handle_admin_agent_telegram_disconnect(
+        _Request(
+            headers={"X-Workbench-Token": ADMIN_TOKEN},
+            payload={"expected_revision": revision},
+        )
+    )
+    assert response.status == 200
+    result = json.loads(response.text)
+    assert result["disconnected"] is True
+    assert result["runtime_stopped"] is False
+    assert result["runtime_stop_warning"] == "telegram_disconnect_runtime_unconfirmed"
 
 
 def _async_capture(collector):

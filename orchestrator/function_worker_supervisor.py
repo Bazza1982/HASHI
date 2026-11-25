@@ -1836,6 +1836,40 @@ class FunctionWorkerSupervisor:
         ingress = self._telegram_ingress.get(str(agent_name))
         return bool(ingress is not None and ingress.is_running)
 
+    async def disconnect_agent_telegram(self, agent_name: str) -> tuple[bool, str]:
+        """Kernel-side cleanup plus a confirmed Worker-side connector stop.
+
+        The kernel cleanup (ingress, diagnostics, failure evidence, in-memory
+        token) runs first so a Worker that is already gone cannot resurrect the
+        connection. The running Worker is then told to stop its own Telegram
+        connector - connect retry loop, command-menu task, outbound
+        Application and in-memory credential - without touching the Agent's
+        local work. Success is only reported once the Worker confirms.
+        """
+        name = str(agent_name or "").strip()
+        await self._disconnect_telegram_ingress(name)
+        projection = self._telegram_summary()
+        if projection is not None:
+            projection.refresh_configuration()
+        # The kernel runtime map is keyed by the canonical Agent name.
+        handle = self.kernel._runtime_map().get(name)
+        client = getattr(handle, "client", None) if handle is not None else None
+        call = getattr(client, "call", None)
+        if not callable(call):
+            return False, "telegram_disconnect_worker_unavailable"
+        try:
+            receipt = await call("worker.telegram_disconnect", {})
+        except Exception as exc:
+            bridge_logger.warning(
+                "Worker telegram stop request failed: agent=%s error_type=%s",
+                name,
+                type(exc).__name__,
+            )
+            return False, f"telegram_disconnect_worker_error:{type(exc).__name__}"
+        if isinstance(receipt, dict) and receipt.get("ok") and receipt.get("telegram_stopped"):
+            return True, "telegram disconnected"
+        return False, "telegram_disconnect_runtime_unconfirmed"
+
     def _telegram_summary(self):
         projection = getattr(self, "_telegram_summary_projection", None)
         if projection is not None:
@@ -2618,11 +2652,8 @@ class FunctionWorkerSupervisor:
                 raise ValueError("invalid Telegram disconnect target")
             # The credential removal is already committed; stopping a missing
             # target is a no-op, so an unknown Agent name must not fail here.
-            await self._disconnect_telegram_ingress(agent_name)
-            projection = self._telegram_summary()
-            if projection is not None:
-                projection.refresh_configuration()
-            return (True, "telegram disconnected")
+            # A confirmed Worker-side stop is required before success.
+            return await self.disconnect_agent_telegram(agent_name)
         if method == "core.start_agent":
             return list(await self.kernel.start_agent(str(params["agent_name"])))
         if method == "core.stop_agent":
