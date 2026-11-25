@@ -10,6 +10,7 @@ Core, runtime selectors and ordinary Agent tool protection are unchanged.
 | `hashi --instance <name> deploy --confirm <name>` | Ready to reboot | None |
 | `hashi --instance <name> update --stage-only --confirm <name>` | Ready to reboot | None |
 | `/hashideploy` | Ready to reboot | None |
+| `/hashideploy force` | Ready to reboot | None |
 | `hashi --instance <name> update --confirm <name>` | Complete running release | Core and Remote restart |
 
 CLI source commands default to `origin/main`; `--remote` and `--branch` select
@@ -30,6 +31,23 @@ independently supervised Remote to report the target commit.
 2. Serialize preparation per instance. Require a clean Git checkout and fetch
    the requested branch, allowing only an exact fast-forward. Git hooks are
    disabled so a post-merge hook cannot perform an implicit lifecycle action.
+   A clean checkout left on another branch is accepted only while its HEAD is
+   an ancestor of the fetched target; it is then checked out at the requested
+   branch and exact commit instead of advancing the unrelated branch. Dirty or
+   diverged checkouts are refused without fetching, moving or deleting
+   anything, and the reply names the branch and both commits.
+
+    `/hashideploy force` is the explicit exception, available to the human
+    owner only: automated HAL dispatch cannot run it. It fetches first (a
+    network failure changes nothing), stashes tracked and untracked changes
+    with `git stash push --include-untracked` (never ignored files), refuses
+    to continue if anything remains, records a `refs/hashideploy-backups/...`
+    ref when the old HEAD is `main` or detached, and only then checks out
+    `main` at the fetched commit. Local commits are never reset away and
+    nothing is force-pushed. The readiness receipt records the stash commit,
+    the backup ref and the previous branch/commit. All source, protected-Core,
+    runtime-pair, qualification and receipt gates still run; force changes how
+    the checkout is aligned, not what must pass.
 3. Run the protected-Core source gate and invoke the fetched coordinator with
    the separate `stage` verb. An older coordinator without that verb fails
    safely; it cannot fall back to restarting deployment.
@@ -75,12 +93,20 @@ Worker set and all component versions. Partial or mixed adoption returns failure
 
 ## Failure and recovery
 
-Failures return a non-zero result naming the failed phase. A failed preparation
-never returns readiness or an activation claim. Errors after source advancement
-include the previous and target commit, state that no restart occurred, and
-retain the updated source for investigation. The command never performs an
-automatic reset or rewind, which could discard concurrent work or cross a
-migration. Resolve the cause and retry; an unchanged target is requalified.
+Failures return a non-zero result and a human-readable reply. The reply names
+one real failure class: instance source/Git configuration, dirty checkout,
+fetch, non-fast-forward, protected gate, runtime/toolchain, commit mismatch,
+receipt/state-I/O, or force recovery. It always states whether the checkout had
+already moved, with the relevant commit, and never prints an internal phase
+identifier or a raw `??` status line. Force failures additionally report the
+stash commit and backup ref so nothing is lost.
+
+A failed preparation never returns readiness or an activation claim. Errors
+after source advancement include the previous and target commit, state that no
+restart occurred, and retain the updated source for investigation. The command
+never performs an automatic reset or rewind, which could discard concurrent
+work or cross a migration. Resolve the cause and retry; an unchanged target is
+requalified.
 
 Existing configuration, credentials, databases, sessions and runtime selectors
 stay in place. Packaged installs remain a separate verified release channel;

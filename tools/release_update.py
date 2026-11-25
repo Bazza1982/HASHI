@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
@@ -43,6 +44,88 @@ class ReleaseUpdateError(RuntimeError):
         if self.details not in (None, "", [], {}):
             payload["details"] = self.details
         return payload
+
+
+_MAX_FAILURE_PATHS = 10
+
+_PHASE_FAILURE_CODES = {
+    "source_update": "instance_source",
+    "source_preflight": "instance_source",
+    "source_fetch": "fetch_failed",
+    "source_fast_forward": "not_fast_forward",
+    "source_verify": "commit_mismatch",
+    "source_force_stash": "stash_failed",
+    "source_force_backup": "backup_failed",
+    "source_force_checkout": "checkout_failed",
+    "protected_core_gate": "protected_gate",
+    "stage_runtime": "runtime_unavailable",
+    "stage_qualification": "qualification_failed",
+    "stage_verify": "commit_mismatch",
+    "stage_receipt": "receipt_failed",
+    "stage_io": "state_io",
+}
+
+
+def _release_failure(
+    code: str, *, source_changed: bool | None, stage: str, **values: Any
+) -> dict[str, Any]:
+    """Build the structured failure that user-facing surfaces render.
+
+    ``stage`` is ``pre_change`` before the checkout has moved, ``post_change``
+    once it has, and ``unknown`` when the failure position cannot be proven.
+    """
+
+    failure: dict[str, Any] = {
+        "code": str(code),
+        "source_changed": source_changed,
+        "stage": str(stage),
+    }
+    for key, value in values.items():
+        if value not in (None, "", [], {}):
+            failure[key] = value
+    return failure
+
+
+def _dirty_summary(status: str) -> dict[str, Any]:
+    modified: list[str] = []
+    untracked: list[str] = []
+    for line in str(status or "").splitlines():
+        path = line[3:].strip() if len(line) > 3 else ""
+        if not path:
+            continue
+        path = path.replace("\\", "/")
+        if line.startswith("??"):
+            untracked.append(path)
+        else:
+            modified.append(path)
+    paths = modified + untracked
+    return {
+        "dirty_count": len(paths),
+        "modified_count": len(modified),
+        "untracked_count": len(untracked),
+        "modified_paths": modified[:_MAX_FAILURE_PATHS],
+        "untracked_paths": untracked[:_MAX_FAILURE_PATHS],
+        "dirty_paths": paths[:_MAX_FAILURE_PATHS],
+        "dirty_truncated": len(paths) > _MAX_FAILURE_PATHS,
+    }
+
+
+def release_failure(exc: ReleaseUpdateError) -> dict[str, Any]:
+    """Return the structured failure carried by an error, or derive one."""
+
+    details = exc.details
+    candidates: list[Any] = []
+    if isinstance(details, dict):
+        candidates.append(details)
+        cause = details.get("cause")
+        if isinstance(cause, dict):
+            candidates.append(cause)
+    for candidate in candidates:
+        failure = candidate.get("failure") if isinstance(candidate, dict) else None
+        if isinstance(failure, dict) and failure.get("code"):
+            return dict(failure)
+    code = _PHASE_FAILURE_CODES.get(exc.phase, "internal")
+    return _release_failure(code, source_changed=None, stage="unknown")
 
 
 class RuntimeReleaseAdapter(Protocol):
@@ -137,12 +220,34 @@ def _validate_ref_inputs(remote: str, branch: str) -> tuple[str, str]:
     return selected_remote, selected_branch
 
 
-def _require_clean_checkout(root: Path, *, phase: str) -> str:
+def _require_clean_checkout(
+    root: Path,
+    *,
+    phase: str,
+    failure_code: str = "local_changes",
+    source_changed: bool = False,
+) -> str:
     if not root.is_dir():
-        raise ReleaseUpdateError(phase, f"source root does not exist: {root}")
+        raise ReleaseUpdateError(
+            phase,
+            f"source root does not exist: {root}",
+            details={"failure": _release_failure(
+                "instance_source", source_changed=source_changed,
+                stage="pre_change" if not source_changed else "post_change",
+                root=str(root),
+            )},
+        )
     inside = _git_text(root, "rev-parse", "--is-inside-work-tree", phase=phase)
     if inside.casefold() != "true":
-        raise ReleaseUpdateError(phase, "selected instance is not a Git checkout")
+        raise ReleaseUpdateError(
+            phase,
+            "selected instance is not a Git checkout",
+            details={"failure": _release_failure(
+                "instance_source", source_changed=source_changed,
+                stage="pre_change" if not source_changed else "post_change",
+                root=str(root),
+            )},
+        )
     status = _git_text(
         root,
         "status",
@@ -151,15 +256,58 @@ def _require_clean_checkout(root: Path, *, phase: str) -> str:
         phase=phase,
     )
     if status:
+        summary = _dirty_summary(status)
+        code = failure_code
+        if (
+            code == "local_changes"
+            and summary.get("modified_count") == 0
+            and summary.get("untracked_count")
+        ):
+            code = "untracked_only"
         raise ReleaseUpdateError(
             phase,
             "source checkout must be clean before release",
-            details=_bounded_output(status),
+            details={
+                "failure": _release_failure(
+                    code,
+                    source_changed=source_changed,
+                    stage="pre_change" if not source_changed else "post_change",
+                    **summary,
+                ),
+                "status": _bounded_output(status),
+            },
         )
     head = _git_text(root, "rev-parse", "HEAD", phase=phase).casefold()
     if not _HEX_COMMIT.fullmatch(head):
-        raise ReleaseUpdateError(phase, "Git HEAD is not an exact commit")
+        raise ReleaseUpdateError(
+            phase,
+            "Git HEAD is not an exact commit",
+            details={"failure": _release_failure(
+                failure_code, source_changed=source_changed,
+                stage="pre_change" if not source_changed else "post_change",
+                previous_commit=head,
+            )},
+        )
     return head
+
+
+def _with_failure(
+    exc: ReleaseUpdateError,
+    code: str,
+    *,
+    source_changed: bool,
+    stage: str,
+    **values: Any,
+) -> ReleaseUpdateError:
+    """Attach one structured failure class without dropping earlier detail."""
+
+    details = dict(exc.details) if isinstance(exc.details, dict) else {}
+    if exc.details not in (None, "", [], {}) and not isinstance(exc.details, dict):
+        details["cause"] = exc.details
+    details["failure"] = _release_failure(
+        code, source_changed=source_changed, stage=stage, **values
+    )
+    return ReleaseUpdateError(exc.phase, str(exc), details=details)
 
 
 def fast_forward_checkout(
@@ -167,36 +315,73 @@ def fast_forward_checkout(
     *,
     remote: str = "origin",
     branch: str = "main",
+    switch_to_branch: bool = True,
 ) -> dict[str, Any]:
-    """Fetch one branch and advance the selected checkout by fast-forward only."""
+    """Fetch one branch and advance the selected checkout by fast-forward only.
+
+    A clean checkout on another branch is only accepted when that HEAD is an
+    ancestor of the fetched target; it is then moved to the requested branch at
+    the exact target commit.  Nothing is reset, forced or discarded.
+    """
 
     root = Path(code_root).expanduser().resolve()
-    selected_remote, selected_branch = _validate_ref_inputs(remote, branch)
+    try:
+        selected_remote, selected_branch = _validate_ref_inputs(remote, branch)
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "instance_source", source_changed=False, stage="pre_change",
+            remote=str(remote), branch=str(branch), root=str(root),
+        ) from exc
     old_commit = _require_clean_checkout(root, phase="source_preflight")
-    _git(root, "remote", "get-url", selected_remote, phase="source_preflight")
-    _git(
-        root,
-        "check-ref-format",
-        "--branch",
-        selected_branch,
-        phase="source_preflight",
+    previous_branch = _git_text(
+        root, "rev-parse", "--abbrev-ref", "HEAD", phase="source_preflight"
     )
+    try:
+        _git(root, "remote", "get-url", selected_remote, phase="source_preflight")
+        _git(
+            root,
+            "check-ref-format",
+            "--branch",
+            selected_branch,
+            phase="source_preflight",
+        )
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "instance_source", source_changed=False, stage="pre_change",
+            remote=selected_remote, branch=selected_branch, root=str(root),
+            previous_branch=previous_branch, previous_commit=old_commit,
+        ) from exc
 
     _progress(f"fetching {selected_remote}/{selected_branch}")
-    _git(
-        root,
-        "fetch",
-        "--no-tags",
-        selected_remote,
-        selected_branch,
-        phase="source_fetch",
-        timeout=300.0,
-    )
+    try:
+        _git(
+            root,
+            "fetch",
+            "--no-tags",
+            selected_remote,
+            selected_branch,
+            phase="source_fetch",
+            timeout=300.0,
+        )
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "fetch_failed", source_changed=False, stage="pre_change",
+            remote=selected_remote, branch=selected_branch,
+            previous_branch=previous_branch, previous_commit=old_commit,
+        ) from exc
     target_commit = _git_text(
         root, "rev-parse", "--verify", "FETCH_HEAD^{commit}", phase="source_fetch"
     ).casefold()
     if not _HEX_COMMIT.fullmatch(target_commit):
-        raise ReleaseUpdateError("source_fetch", "fetched target is not a commit")
+        raise ReleaseUpdateError(
+            "source_fetch",
+            "fetched target is not a commit",
+            details={"failure": _release_failure(
+                "fetch_failed", source_changed=False, stage="pre_change",
+                remote=selected_remote, branch=selected_branch,
+                previous_branch=previous_branch, previous_commit=old_commit,
+            )},
+        )
 
     ancestry = _git(
         root,
@@ -211,31 +396,77 @@ def fast_forward_checkout(
         raise ReleaseUpdateError(
             "source_fast_forward",
             "fetched target is not a fast-forward of the deployed source",
-            details={"current": old_commit, "target": target_commit},
+            details={
+                "current": old_commit,
+                "target": target_commit,
+                "failure": _release_failure(
+                    "not_fast_forward", source_changed=False, stage="pre_change",
+                    previous_branch=previous_branch, previous_commit=old_commit,
+                    target_commit=target_commit, branch=selected_branch,
+                ),
+            },
         )
     if ancestry.returncode != 0:
         raise ReleaseUpdateError(
             "source_fast_forward",
             "could not verify source ancestry",
-            details=_bounded_output(ancestry.stderr),
+            details={
+                "failure": _release_failure(
+                    "not_fast_forward", source_changed=False, stage="pre_change",
+                    previous_branch=previous_branch, previous_commit=old_commit,
+                    target_commit=target_commit, branch=selected_branch,
+                ),
+                "status": _bounded_output(ancestry.stderr),
+            },
         )
 
     changed = target_commit != old_commit
-    if changed:
-        _progress(f"advancing source to {target_commit[:12]}")
-        _git(
-            root,
-            "merge",
-            "--ff-only",
-            target_commit,
-            phase="source_fast_forward",
-        )
-    adopted = _require_clean_checkout(root, phase="source_verify")
+    switched = switch_to_branch and previous_branch != selected_branch
+    try:
+        if switched:
+            _progress(
+                f"checking out {selected_branch} at {target_commit[:12]} "
+                f"(was {previous_branch})"
+            )
+            _git(
+                root,
+                "checkout",
+                "-B",
+                selected_branch,
+                target_commit,
+                phase="source_fast_forward",
+            )
+        elif changed:
+            _progress(f"advancing source to {target_commit[:12]}")
+            _git(
+                root,
+                "merge",
+                "--ff-only",
+                target_commit,
+                phase="source_fast_forward",
+            )
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "checkout_failed", source_changed=False, stage="pre_change",
+            previous_branch=previous_branch, previous_commit=old_commit,
+            target_commit=target_commit, branch=selected_branch,
+        ) from exc
+    adopted = _require_clean_checkout(
+        root, phase="source_verify", failure_code="commit_mismatch", source_changed=True
+    )
     if adopted != target_commit:
         raise ReleaseUpdateError(
             "source_verify",
             "source did not adopt the exact fetched commit",
-            details={"expected": target_commit, "actual": adopted},
+            details={
+                "expected": target_commit,
+                "actual": adopted,
+                "failure": _release_failure(
+                    "commit_mismatch", source_changed=True, stage="post_change",
+                    previous_branch=previous_branch, previous_commit=old_commit,
+                    target_commit=target_commit, actual_commit=adopted,
+                ),
+            },
         )
     return {
         "old_commit": old_commit,
@@ -243,6 +474,268 @@ def fast_forward_checkout(
         "changed": changed,
         "remote": selected_remote,
         "branch": selected_branch,
+        "previous_branch": previous_branch,
+        "switched_to_branch": switched,
+        "forced": False,
+    }
+
+
+def force_align_checkout(
+    code_root: Path | str,
+    *,
+    remote: str = "origin",
+    branch: str = "main",
+) -> dict[str, Any]:
+    """Explicit force: preserve local work, then check out the fetched target.
+
+    Order is deliberate: fetch first (a network failure changes nothing), then
+    stash tracked and untracked changes (never ignored files), record a backup
+    ref when the old HEAD is not a surviving named branch, and only then move
+    the checkout.  Local commits are never reset away or force-pushed.
+    """
+
+    root = Path(code_root).expanduser().resolve()
+    try:
+        selected_remote, selected_branch = _validate_ref_inputs(remote, branch)
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "instance_source", source_changed=False, stage="pre_change",
+            remote=str(remote), branch=str(branch), root=str(root),
+        ) from exc
+    if not root.is_dir():
+        raise ReleaseUpdateError(
+            "source_preflight",
+            f"source root does not exist: {root}",
+            details={"failure": _release_failure(
+                "instance_source", source_changed=False, stage="pre_change",
+                root=str(root),
+            )},
+        )
+    try:
+        inside = _git_text(root, "rev-parse", "--is-inside-work-tree", phase="source_preflight")
+        _git(root, "remote", "get-url", selected_remote, phase="source_preflight")
+        _git(root, "check-ref-format", "--branch", selected_branch, phase="source_preflight")
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "instance_source", source_changed=False, stage="pre_change",
+            remote=selected_remote, branch=selected_branch, root=str(root),
+        ) from exc
+    if inside.casefold() != "true":
+        raise ReleaseUpdateError(
+            "source_preflight",
+            "selected instance is not a Git checkout",
+            details={"failure": _release_failure(
+                "instance_source", source_changed=False, stage="pre_change",
+                root=str(root),
+            )},
+        )
+
+    previous_commit = _git_text(root, "rev-parse", "HEAD", phase="source_preflight").casefold()
+    if not _HEX_COMMIT.fullmatch(previous_commit):
+        raise ReleaseUpdateError(
+            "source_preflight",
+            "Git HEAD is not an exact commit",
+            details={"failure": _release_failure(
+                "instance_source", source_changed=False, stage="pre_change",
+                root=str(root), previous_commit=previous_commit,
+            )},
+        )
+    previous_branch = _git_text(
+        root, "rev-parse", "--abbrev-ref", "HEAD", phase="source_preflight"
+    )
+    status_before = _git_text(
+        root, "status", "--porcelain", "--untracked-files=normal", phase="source_preflight"
+    )
+    dirty = _dirty_summary(status_before)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    _progress(f"fetching {selected_remote}/{selected_branch}")
+    try:
+        _git(
+            root, "fetch", "--no-tags", selected_remote, selected_branch,
+            phase="source_fetch", timeout=300.0,
+        )
+    except ReleaseUpdateError as exc:
+        raise _with_failure(
+            exc, "fetch_failed", source_changed=False, stage="pre_change",
+            remote=selected_remote, branch=selected_branch,
+            previous_branch=previous_branch, previous_commit=previous_commit,
+        ) from exc
+    target_commit = _git_text(
+        root, "rev-parse", "--verify", "FETCH_HEAD^{commit}", phase="source_fetch"
+    ).casefold()
+    if not _HEX_COMMIT.fullmatch(target_commit):
+        raise ReleaseUpdateError(
+            "source_fetch",
+            "fetched target is not a commit",
+            details={"failure": _release_failure(
+                "fetch_failed", source_changed=False, stage="pre_change",
+                remote=selected_remote, branch=selected_branch,
+                previous_branch=previous_branch, previous_commit=previous_commit,
+            )},
+        )
+
+    stash_commit: str | None = None
+    stash_message: str | None = None
+    if status_before:
+        stash_message = (
+            f"hashideploy-force {stamp} "
+            f"{previous_branch or 'detached'}@{previous_commit[:12]}"
+        )
+        _progress("preserving local changes before checkout")
+        try:
+            stashed = _git(
+                root, "stash", "push", "--include-untracked", "-m", stash_message,
+                phase="source_force_stash", check=False,
+            )
+        except ReleaseUpdateError as exc:
+            raise _with_failure(
+                exc, "stash_failed", source_changed=False, stage="pre_change",
+                previous_branch=previous_branch, previous_commit=previous_commit,
+                target_commit=target_commit, dirty_count=dirty["dirty_count"],
+                dirty_paths=dirty["dirty_paths"],
+            ) from exc
+        if stashed.returncode != 0:
+            raise ReleaseUpdateError(
+                "source_force_stash",
+                "local changes could not be stashed safely",
+                details={
+                    "failure": _release_failure(
+                        "stash_failed", source_changed=False, stage="pre_change",
+                        previous_branch=previous_branch, previous_commit=previous_commit,
+                        target_commit=target_commit, dirty_count=dirty["dirty_count"],
+                        dirty_paths=dirty["dirty_paths"],
+                    ),
+                    "status": _bounded_output(stashed.stderr) or _bounded_output(stashed.stdout),
+                },
+            )
+        try:
+            stash_commit = _git_text(
+                root, "rev-parse", "--verify", "refs/stash", phase="source_force_stash"
+            ).casefold()
+            if not _HEX_COMMIT.fullmatch(stash_commit):
+                stash_commit = None
+            remaining = _git_text(
+                root, "status", "--porcelain", "--untracked-files=normal",
+                phase="source_force_stash",
+            )
+        except ReleaseUpdateError as exc:
+            raise _with_failure(
+                exc, "stash_failed", source_changed=False, stage="pre_change",
+                previous_branch=previous_branch, previous_commit=previous_commit,
+                target_commit=target_commit, stash_message=stash_message,
+            ) from exc
+        if remaining:
+            raise ReleaseUpdateError(
+                "source_force_stash",
+                "some local changes could not be preserved",
+                details={
+                    "failure": _release_failure(
+                        "stash_incomplete", source_changed=False, stage="pre_change",
+                        previous_branch=previous_branch, previous_commit=previous_commit,
+                        target_commit=target_commit, stash_commit=stash_commit,
+                        stash_message=stash_message,
+                        **_dirty_summary(remaining),
+                    ),
+                    "status": _bounded_output(remaining),
+                },
+            )
+
+    ancestry = _git(
+        root, "merge-base", "--is-ancestor", previous_commit, target_commit,
+        phase="source_force_backup", check=False,
+    )
+    if ancestry.returncode not in (0, 1):
+        raise ReleaseUpdateError(
+            "source_force_backup",
+            "could not verify whether local commits were already merged",
+            details={
+                "failure": _release_failure(
+                    "backup_failed", source_changed=False, stage="pre_change",
+                    previous_branch=previous_branch, previous_commit=previous_commit,
+                    target_commit=target_commit, stash_commit=stash_commit,
+                    stash_message=stash_message,
+                ),
+                "status": _bounded_output(ancestry.stderr),
+            },
+        )
+    # A named feature branch keeps its pointer; main or a detached HEAD only
+    # needs a backup ref when the old commit would become unreachable.
+    backup_ref: str | None = None
+    if previous_branch in {"", "HEAD", selected_branch} and ancestry.returncode == 1:
+        backup_ref = f"refs/hashideploy-backups/{stamp}-{previous_commit[:12]}"
+        _progress(f"recording pre-force HEAD at {backup_ref}")
+        try:
+            _git(
+                root, "update-ref", backup_ref, previous_commit,
+                phase="source_force_backup",
+            )
+        except ReleaseUpdateError as exc:
+            raise _with_failure(
+                exc, "backup_failed", source_changed=False, stage="pre_change",
+                previous_branch=previous_branch, previous_commit=previous_commit,
+                target_commit=target_commit, stash_commit=stash_commit,
+                stash_message=stash_message,
+            ) from exc
+
+    _progress(f"checking out {selected_branch} at {target_commit[:12]}")
+    checked_out = _git(
+        root, "checkout", "-B", selected_branch, target_commit,
+        phase="source_force_checkout", check=False,
+    )
+    if checked_out.returncode != 0:
+        if previous_branch not in {"", "HEAD"}:
+            _git(
+                root, "checkout", previous_branch,
+                phase="source_force_checkout", check=False,
+            )
+        raise ReleaseUpdateError(
+            "source_force_checkout",
+            "the checkout could not be moved to the fetched target",
+            details={
+                "failure": _release_failure(
+                    "checkout_failed", source_changed=False, stage="pre_change",
+                    previous_branch=previous_branch, previous_commit=previous_commit,
+                    target_commit=target_commit, stash_commit=stash_commit,
+                    stash_message=stash_message, backup_ref=backup_ref,
+                ),
+                "status": _bounded_output(checked_out.stderr)
+                or _bounded_output(checked_out.stdout),
+            },
+        )
+    adopted = _git_text(root, "rev-parse", "HEAD", phase="source_verify").casefold()
+    remaining = _git_text(
+        root, "status", "--porcelain", "--untracked-files=normal", phase="source_verify"
+    )
+    if adopted != target_commit or remaining:
+        raise ReleaseUpdateError(
+            "source_verify",
+            "the forced checkout did not adopt the exact clean target",
+            details={
+                "failure": _release_failure(
+                    "commit_mismatch", source_changed=True, stage="post_change",
+                    previous_branch=previous_branch, previous_commit=previous_commit,
+                    target_commit=target_commit, actual_commit=adopted,
+                    stash_commit=stash_commit, stash_message=stash_message,
+                    backup_ref=backup_ref, **_dirty_summary(remaining),
+                ),
+            },
+        )
+    return {
+        "old_commit": previous_commit,
+        "target_commit": target_commit,
+        "changed": previous_commit != target_commit,
+        "remote": selected_remote,
+        "branch": selected_branch,
+        "previous_branch": previous_branch,
+        "switched_to_branch": previous_branch != selected_branch,
+        "forced": True,
+        "stash_commit": stash_commit,
+        "stash_message": stash_message,
+        "stashed_dirty_count": dirty["dirty_count"],
+        "stashed_paths": dirty["dirty_paths"],
+        "stashed_truncated": dirty["dirty_truncated"],
+        "backup_ref": backup_ref,
     }
 
 
@@ -804,9 +1297,42 @@ def _qualify_staged_functions(root: Path, home: Path, staging: Path) -> dict[str
     }
 
 
+def _normalize_source_meta(value: Any) -> dict[str, Any]:
+    """Accept only the bounded force evidence the parent passed to staging."""
+
+    if value in (None, "", {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ReleaseUpdateError("stage_verify", "source metadata must be an object")
+    forced = value.get("forced") is True
+    if not forced:
+        return {}
+    meta: dict[str, Any] = {"forced": True}
+    for key in ("previous_branch", "previous_commit", "stash_commit", "backup_ref"):
+        item = value.get(key)
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text or len(text) > 200 or any(ch in text for ch in "\r\n\x00"):
+            raise ReleaseUpdateError("stage_verify", f"invalid {key}")
+        if key.endswith("commit") and not _HEX_COMMIT.fullmatch(text.casefold()):
+            raise ReleaseUpdateError("stage_verify", f"invalid {key}")
+        meta[key] = text
+    message = value.get("stash_message")
+    if isinstance(message, str) and message.strip():
+        meta["stash_message"] = message.strip()[:200]
+    count = value.get("stashed_dirty_count")
+    if isinstance(count, int) and count >= 0:
+        meta["stashed_dirty_count"] = count
+    paths = value.get("stashed_paths")
+    if isinstance(paths, list):
+        meta["stashed_paths"] = [str(p)[:300] for p in paths[:8]]
+    return meta
+
+
 def prepare_staged_release(
     *, code_root: Path | str, bridge_home: Path | str,
-    instance_id: str, expected_commit: str,
+    instance_id: str, expected_commit: str, source_meta: Any = None,
 ) -> dict[str, Any]:
     """Qualify committed source and persist a receipt; never activate it."""
     from datetime import datetime
@@ -816,22 +1342,48 @@ def prepare_staged_release(
     root = Path(code_root).expanduser().resolve()
     home = Path(bridge_home).expanduser().resolve()
     target = str(expected_commit).casefold()
+    meta = _normalize_source_meta(source_meta)
     if not _HEX_COMMIT.fullmatch(target):
         raise ReleaseUpdateError("stage_verify", "expected source commit is invalid")
-    if _require_clean_checkout(root, phase="stage_verify") != target:
-        raise ReleaseUpdateError("stage_verify", "source commit changed before qualification")
+    if _require_clean_checkout(
+        root, phase="stage_verify", failure_code="commit_mismatch", source_changed=True
+    ) != target:
+        raise ReleaseUpdateError(
+            "stage_verify", "source commit changed before qualification",
+            details={"failure": _release_failure(
+                "commit_mismatch", source_changed=True, stage="post_change",
+                target_commit=target,
+            )},
+        )
     staging = home / "state" / "source_deployments" / uuid4().hex
     qualification = _qualify_staged_functions(root, home, staging)
     if qualification.get("source_commit") != target:
-        raise ReleaseUpdateError("stage_verify", "qualified source commit differs from target")
-    if _require_clean_checkout(root, phase="stage_verify") != target:
-        raise ReleaseUpdateError("stage_verify", "source commit changed during qualification")
+        raise ReleaseUpdateError(
+            "stage_verify", "qualified source commit differs from target",
+            details={"failure": _release_failure(
+                "commit_mismatch", source_changed=True, stage="post_change",
+                target_commit=target,
+                actual_commit=str(qualification.get("source_commit") or ""),
+            )},
+        )
+    if _require_clean_checkout(
+        root, phase="stage_verify", failure_code="commit_mismatch", source_changed=True
+    ) != target:
+        raise ReleaseUpdateError(
+            "stage_verify", "source commit changed during qualification",
+            details={"failure": _release_failure(
+                "commit_mismatch", source_changed=True, stage="post_change",
+                target_commit=target,
+            )},
+        )
     receipt_path = staging / "ready.json"
     result = {
         "ok": True, "state": "ready_to_reboot", "message": "Ready to reboot",
         "instance_id": instance_id, "target_commit": target,
         "code_root": str(root), "bridge_home": str(home),
         "restarts_performed": False, "running_verified": False,
+        "forced": bool(meta.get("forced")),
+        "force": meta if meta.get("forced") else {},
         "qualification": qualification, "receipt_path": str(receipt_path),
         "validated_at": datetime.now().astimezone().isoformat(),
         "next_action": "Adopt the prepared Functions with /reboot when ready, then "
@@ -843,7 +1395,14 @@ def prepare_staged_release(
     except Exception as exc:
         raise ReleaseUpdateError(
             "stage_receipt", "Could not durably record readiness; inspect the "
-            "receipt before retrying. Nothing was restarted.", details=str(exc),
+            "receipt before retrying. Nothing was restarted.",
+            details={
+                "cause": str(exc),
+                "failure": _release_failure(
+                    "receipt_failed", source_changed=True, stage="post_change",
+                    target_commit=target,
+                ),
+            },
         ) from exc
     return result
 
@@ -851,7 +1410,7 @@ def prepare_staged_release(
 def run_staged_source_release(
     *, code_root: Path | str, bridge_home: Path | str, instance_id: str,
     runtime_command: Sequence[str], remote: str = "origin", branch: str = "main",
-    timeout: float = 300.0,
+    timeout: float = 300.0, force: bool = False,
 ) -> dict[str, Any]:
     """Fetch, verify and prepare source without any live lifecycle adapter."""
     from orchestrator.config_json import file_write_lock
@@ -864,7 +1423,10 @@ def run_staged_source_release(
     try:
         (home / "state").mkdir(parents=True, exist_ok=True)
         with file_write_lock(home / "state" / "source_deployment.lock"):
-            source = fast_forward_checkout(root, remote=remote, branch=branch)
+            if force:
+                source = force_align_checkout(root, remote=remote, branch=branch)
+            else:
+                source = fast_forward_checkout(root, remote=remote, branch=branch)
             _verify_release_source(root, home, instance_id, runtime_command)
             # An older fetched coordinator rejects the distinct 'stage' verb;
             # it can never silently fall back to the restarting 'deploy' verb.
@@ -874,6 +1436,17 @@ def run_staged_source_release(
                 "--instance-id", instance_id,
                 "--expected-commit", source["target_commit"],
             ]
+            if source.get("forced"):
+                argv += ["--source-meta", json.dumps({
+                    "forced": True,
+                    "previous_branch": source.get("previous_branch"),
+                    "previous_commit": source.get("old_commit"),
+                    "stash_commit": source.get("stash_commit"),
+                    "stash_message": source.get("stash_message"),
+                    "backup_ref": source.get("backup_ref"),
+                    "stashed_dirty_count": source.get("stashed_dirty_count"),
+                    "stashed_paths": source.get("stashed_paths"),
+                }, ensure_ascii=False, sort_keys=True)]
             completed = _run(
                 argv, cwd=root, phase="stage_qualification",
                 timeout=float(timeout) + 180.0,
@@ -908,9 +1481,15 @@ def run_staged_source_release(
                 raise ReleaseUpdateError("stage_verify", "source changed after qualification")
             return {**result, "source": source}
     except ReleaseUpdateError as exc:
+        failure = release_failure(exc)
+        if failure.get("source_changed") is None and isinstance(source, dict) and source:
+            # Reaching the stage means the checkout had already moved.
+            failure["source_changed"] = True
+            failure["stage"] = "post_change"
+            failure.setdefault("target_commit", source.get("target_commit"))
         raise ReleaseUpdateError(
             exc.phase, str(exc),
-            details={"cause": exc.details, "source": source,
+            details={"cause": exc.details, "source": source, "failure": failure,
                      "restarts_performed": False,
                      "next_action": "Inspect the reported source/runtime error before "
                                     "retrying or adopting. Source is retained at the "
@@ -920,7 +1499,12 @@ def run_staged_source_release(
         raise ReleaseUpdateError(
             "stage_io", "Source staging could not access or lock the deployment files. "
             "Check permissions and whether another deployment is in progress.",
-            details={"source": source, "restarts_performed": False, "cause": str(exc)},
+            details={
+                "source": source, "restarts_performed": False, "cause": str(exc),
+                "failure": _release_failure(
+                    "state_io", source_changed=None, stage="unknown",
+                ),
+            },
         ) from exc
 
 
@@ -1044,6 +1628,7 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--release-home", dest="bridge_home", type=Path, required=True)
     stage.add_argument("--instance-id", required=True)
     stage.add_argument("--expected-commit", required=True)
+    stage.add_argument("--source-meta", default=None)
     return parser
 
 
@@ -1053,9 +1638,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _deploy_command(args)
     if args.command == "stage":
         try:
+            source_meta = json.loads(args.source_meta) if args.source_meta else None
+        except ValueError:
+            print(json.dumps({
+                "ok": False, "phase": "stage_verify",
+                "error": "source metadata is not valid JSON",
+            }, ensure_ascii=False, sort_keys=True))
+            return 1
+        try:
             result = prepare_staged_release(
                 code_root=args.code_root, bridge_home=args.bridge_home,
                 instance_id=args.instance_id, expected_commit=args.expected_commit,
+                source_meta=source_meta,
             )
         except ReleaseUpdateError as exc:
             print(json.dumps(exc.to_payload(), ensure_ascii=False, sort_keys=True))
@@ -1067,3 +1661,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_82b4e0bed97a46b6bf71b830b1d13837

@@ -68,7 +68,9 @@ HERV3管Engine Turn/模型/工具循环/费用；前端管认证/呈现。
 
 Source preparation is separately supported by `hashi update --stage-only`,
 `hashi deploy` and owner-only `/hashideploy`: qualify source without restarting,
-then return `Ready to reboot` or a useful error. See
+then return `Ready to reboot` or a useful error. `/hashideploy` re-aligns a clean
+checkout to `main`; `/hashideploy force` is human-owner-only, preserves local
+work in a stash and a backup ref, and still runs every gate. See
 [source preparation and adoption](HASHI_SOURCE_RELEASE_CLOSURE.md).
 
 ## Configuration, identity, and persistence
