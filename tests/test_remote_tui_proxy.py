@@ -469,6 +469,7 @@ def test_authenticated_tui_session_run_forwards_only_typed_payload_and_origin(
             client_id="tui-origin-test",
             delivery_policy=policy,
             idempotency_key="tui-message-1",
+            originated_at="2026-11-23T10:11:12Z",
         )
     )
 
@@ -477,6 +478,7 @@ def test_authenticated_tui_session_run_forwards_only_typed_payload_and_origin(
     assert captured["path"].endswith("/api/v1/sessions/ses-1/runs")
     body = captured["body"]
     assert body["idempotency_key"] == "tui-message-1"
+    assert body["originated_at"] == "2026-11-23T10:11:12Z"
     assert body["surface"] == "tui"
     assert body["delivery_policy"] == policy
     assert body["message"]["content"] == [
@@ -725,10 +727,12 @@ def test_authenticated_cross_instance_tui_seals_origin_evidence(
             text="origin evidence",
             client_id="tui-origin-test",
             delivery_policy=policy,
+            originated_at="2026-11-23T10:11:12Z",
         )
     )
 
     assert status == 200
+    assert captured["originated_at"] == "2026-11-23T10:11:12Z"
     evidence = captured["request_metadata"]["_connector_evidence"]
     claims = verify_connector_evidence(
         tmp_path,
@@ -775,6 +779,7 @@ def test_tui_attachment_proxy_forwards_frozen_bytes_with_integrity(
             operation="chat_attachment",
             agent="akane",
             text="inspect this",
+            originated_at="2026-11-23T10:11:12Z",
             attachment={
                 "filename": "report.txt",
                 "media_type": "text/plain",
@@ -787,6 +792,7 @@ def test_tui_attachment_proxy_forwards_frozen_bytes_with_integrity(
 
     assert status == 200
     assert captured["text"] == "inspect this"
+    assert captured["originated_at"] == "2026-11-23T10:11:12Z"
     assert captured["attachment"]["content_b64"] == encoded
     assert captured["attachment"]["sha256"] == hashlib.sha256(content).hexdigest()
 
@@ -829,6 +835,7 @@ def _canonical_attachment_request(*, session_id="ses-1"):
         from_instance="HASHI2", operation="session_attachment_run",
         agent="akane", session_id=session_id, text="read this",
         client_id="tui-window-1", idempotency_key="tui-attachment-1",
+        originated_at="2026-11-23T10:11:12Z",
         delivery_policy=tui_run_delivery_policy(
             telegram_mirror=False, client_id="tui-window-1"
         ),
@@ -919,6 +926,7 @@ def test_remote_tui_attachment_stages_uploads_commits_and_binds_one_run(
         {"type": "attachment", "attachment_id": "att-1"},
     ]
     assert run["idempotency_key"] == "tui-attachment-1"
+    assert run["originated_at"] == "2026-11-23T10:11:12Z"
     assert run["delivery_policy"] == request.delivery_policy
     evidence = run["request_metadata"]["_connector_evidence"]
     claims = verify_connector_evidence(

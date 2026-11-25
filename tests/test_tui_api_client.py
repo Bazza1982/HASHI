@@ -6,7 +6,66 @@ import json
 
 import pytest
 
-from tui.api_client import TuiApiClient
+from tui.api_client import TuiApiClient, is_tui_slash_command
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("/mode flex", True),
+        ("/effortt", True),
+        ("// a code comment", False),
+        ("/* a code comment */", False),
+        ("/usr/local/bin/tool", False),
+        ("/mode flex\n# multiline input", False),
+        ("/help composer's text\nnot a command", False),
+    ),
+)
+def test_tui_command_classifier_distinguishes_commands_from_code_and_paths(text, expected):
+    assert is_tui_slash_command(text) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    (
+        "// preserve this comment\nconst complete = true;",
+        "/* preserve this block\nwithout a command invocation */",
+        "/usr/local/bin/tool\n# preserve as text",
+    ),
+)
+async def test_tui_api_client_sends_multiline_slash_prefixed_content_as_text_run(
+    monkeypatch, text,
+):
+    client = TuiApiClient("http://127.0.0.1:18800")
+    calls = []
+
+    async def request(method, path, *, json_body=None, timeout=10, pinned_base=None):
+        calls.append((method, path, json_body))
+        if path == "/api/v1/capabilities":
+            return {
+                "ok": True,
+                "session_api_version": "1.0",
+                "frontend_contract_versions": {"ingress": 2},
+                "tui_session_ingress": {
+                    "version": 1,
+                    "primary_session": True,
+                    "text_runs": True,
+                    "command_invocations": True,
+                },
+            }
+        if path == "/api/v1/agents/akane/primary-session":
+            return {"ok": True, "session": {"session_id": "ses-1", "context_generation": 7}}
+        if path == "/api/v1/sessions/ses-1/runs":
+            return {"ok": True, "session_id": "ses-1", "run_id": "run-1"}
+        raise AssertionError(f"unexpected route: {path}")
+
+    monkeypatch.setattr(client, "_direct_request", request)
+    result = await client.send_chat("akane", text, client_id="tui-1")
+
+    assert result["run_id"] == "run-1"
+    assert calls[-1][1] == "/api/v1/sessions/ses-1/runs"
+    assert calls[-1][2]["message"]["content"] == [{"type": "text", "text": text}]
 
 
 @pytest.mark.asyncio
@@ -245,6 +304,7 @@ async def test_direct_tui_text_uses_canonical_session_run_when_available(monkeyp
     accepted = await client.send_chat(
         "akane", "hello", client_id="tui-window-1",
         telegram_mirror=False, ui_locale="zh-CN",
+        originated_at="2026-11-23T10:11:12Z",
     )
 
     assert accepted["run_id"] == "run-1"
@@ -256,6 +316,7 @@ async def test_direct_tui_text_uses_canonical_session_run_when_available(monkeyp
     run = calls[-1][2]
     assert run["surface"] == "tui"
     assert run["client_id"] == "tui-window-1"
+    assert run["originated_at"] == "2026-11-23T10:11:12Z"
     assert run["message"]["content"] == [{"type": "text", "text": "hello"}]
     assert run["delivery_policy"]["targets"] == []
     assert run["idempotency_key"]
@@ -505,7 +566,7 @@ async def test_remote_tui_text_uses_session_run_over_authenticated_proxy(monkeyp
     monkeypatch.setattr(client, "_proxy_request", _proxy)
     result = await client.send_chat(
         "akane", "hello", client_id="tui-remote-1",
-        telegram_mirror=False,
+        telegram_mirror=False, originated_at="2026-11-23T10:11:12Z",
     )
 
     assert result["run_id"] == "run-1"
@@ -513,6 +574,7 @@ async def test_remote_tui_text_uses_session_run_over_authenticated_proxy(monkeyp
         "capabilities", "primary_session", "session_run"
     ]
     assert calls[-1][1]["session_id"] == "ses-remote"
+    assert calls[-1][1]["originated_at"] == "2026-11-23T10:11:12Z"
     assert calls[-1][1]["delivery_policy"]["targets"] == []
     assert calls[-1][1]["idempotency_key"]
 
@@ -523,6 +585,7 @@ async def test_remote_tui_old_proxy_falls_back_only_before_submission(monkeypatc
         remote_url="http://127.0.0.1:8766", target_instance="HASHI2"
     )
     calls = []
+    legacy_chat = {}
 
     async def _proxy(operation, **kwargs):
         calls.append(operation)
@@ -538,14 +601,19 @@ async def test_remote_tui_old_proxy_falls_back_only_before_submission(monkeypatc
         if operation == "primary_session":
             return {"ok": False, "error": "operation_not_allowed"}
         if operation == "chat":
+            legacy_chat.update(kwargs)
             return {"ok": True, "request_id": "req-legacy"}
         raise AssertionError(f"unexpected operation: {operation}")
 
     monkeypatch.setattr(client, "_proxy_request", _proxy)
-    result = await client.send_chat("akane", "hello", client_id="tui-remote-1")
+    result = await client.send_chat(
+        "akane", "hello", client_id="tui-remote-1",
+        originated_at="2026-11-23T10:11:12Z",
+    )
 
     assert result["request_id"] == "req-legacy"
     assert calls == ["capabilities", "primary_session", "chat"]
+    assert legacy_chat["originated_at"] == "2026-11-23T10:11:12Z"
 
 
 @pytest.mark.asyncio
@@ -702,6 +770,7 @@ async def test_direct_tui_attachment_uses_session_asset_and_run_when_advertised(
     accepted = await client.send_chat_attachment(
         "akane", "describe it", attachment=attachment,
         client_id="tui-1", telegram_mirror=False,
+        originated_at="2026-11-23T10:11:12Z",
     )
 
     assert accepted["run_id"] == "run-1"
@@ -719,6 +788,7 @@ async def test_direct_tui_attachment_uses_session_asset_and_run_when_advertised(
         {"type": "text", "text": "describe it"},
         {"type": "attachment", "attachment_id": "att-1"},
     ]
+    assert calls[-1][2]["originated_at"] == "2026-11-23T10:11:12Z"
     assert calls[-1][2]["delivery_policy"]["targets"] == []
 
 
@@ -762,6 +832,7 @@ async def test_remote_tui_attachment_uses_one_canonical_session_operation(monkey
     result = await client.send_chat_attachment(
         "akane", "read this", attachment=attachment,
         client_id="tui-window-1", telegram_mirror=False,
+        originated_at="2026-11-23T10:11:12Z",
     )
 
     assert result["run_id"] == "run-2"
@@ -770,6 +841,7 @@ async def test_remote_tui_attachment_uses_one_canonical_session_operation(monkey
     ]
     submitted = calls[-1][1]
     assert submitted["session_id"] == "ses-2"
+    assert submitted["originated_at"] == "2026-11-23T10:11:12Z"
     assert submitted["attachment"] == original_attachment
     assert submitted["idempotency_key"].startswith("tui-")
     assert submitted["delivery_policy"]["targets"] == []
@@ -826,6 +898,7 @@ async def test_remote_tui_attachment_uses_legacy_only_before_new_operation_exist
     )
     content = b"data"
     calls = []
+    legacy_attachment = {}
 
     async def proxy(operation, **kwargs):
         calls.append(operation)
@@ -841,6 +914,7 @@ async def test_remote_tui_attachment_uses_legacy_only_before_new_operation_exist
         if operation == "primary_session":
             return {"ok": False, "error": "operation_not_allowed"}
         if operation == "chat_attachment":
+            legacy_attachment.update(kwargs)
             return {"ok": True, "request_id": "legacy-1"}
         raise AssertionError(f"unexpected operation {operation}")
 
@@ -852,9 +926,11 @@ async def test_remote_tui_attachment_uses_legacy_only_before_new_operation_exist
             "sha256": hashlib.sha256(content).hexdigest(),
             "content_b64": base64.b64encode(content).decode("ascii"),
         },
+        originated_at="2026-11-23T10:11:12Z",
     )
     assert result["request_id"] == "legacy-1"
     assert calls == ["capabilities", "primary_session", "chat_attachment"]
+    assert legacy_attachment["originated_at"] == "2026-11-23T10:11:12Z"
 
 
 @pytest.mark.asyncio
