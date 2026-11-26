@@ -1,13 +1,97 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from orchestrator.context_compaction import CompactionStore, ContextCompactionCoordinator, install_history_section
+from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
+from orchestrator.context_compaction import (
+    CAPSULE_FORMAT,
+    CompactionStore,
+    ContextCompactionCoordinator,
+    install_history_section,
+)
 from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
+from orchestrator.pcm import render_pcm_document
 from orchestrator.session_store import SessionStore
-from tests.test_compaction_p0_remediation import _fixed_runtime, _valid_invoker
+
+
+def _valid_invoker(calls: list):
+    async def invoke(route, request, system_prompt, user_prompt):
+        calls.append((route, request, user_prompt))
+        payload = {
+            "format": CAPSULE_FORMAT,
+            "source_segment_ids": list(request.source_segment_ids),
+            "source_digest": request.source_digest,
+            "active_historical_goals": ["Continue fixed session work"],
+            "decisions_and_constraints": [],
+            "completed_work_and_verification": [],
+            "unresolved_work_questions_failures": [],
+            "evidence_refs": [],
+            "preferences_and_definitions": [],
+            "omissions_and_uncertainty": [],
+            "summary": "Compacted historical summary.",
+        }
+        return SimpleNamespace(text=json.dumps(payload), structured_data=None)
+
+    return invoke
+
+
+async def _async_empty():
+    return []
+
+
+def _fixed_runtime(tmp_path):
+    pcm = tmp_path / "agent.md"
+    pcm.write_text(
+        render_pcm_document(persona="Persona", system="System", memory=""),
+        encoding="utf-8",
+    )
+    mem = BridgeMemoryStore(tmp_path)
+    state_store = SimpleNamespace(
+        read=lambda: {},
+        update=lambda cb: cb({}),
+    )
+    manager = SimpleNamespace(
+        state_store=state_store,
+        agent_mode="fixed",
+        privacy_level=1,
+        config=SimpleNamespace(
+            active_backend="her-v2",
+            allowed_backends=[
+                {
+                    "engine": "deepseek-api",
+                    "model": "deepseek-v4-pro",
+                    "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+                    "context_window_tokens": 128_000,
+                    "response_headroom_tokens": 16_384,
+                }
+            ],
+        ),
+        get_her_v2_configuration=lambda: SimpleNamespace(
+            provider="deepseek-api",
+            fast_provider="deepseek-api",
+            fast_model="deepseek-v4-flash",
+            pro_model="deepseek-v4-pro",
+        ),
+    )
+    runtime = SimpleNamespace(
+        name="fixed-agent",
+        workspace_dir=tmp_path,
+        config=SimpleNamespace(active_backend="her-v2", system_md=pcm, name="fixed-agent"),
+        global_config=SimpleNamespace(bridge_home=tmp_path, timezone="UTC", instance_id="HASHI4"),
+        memory_store=mem,
+        context_assembler=BridgeContextAssembler(mem, pcm),
+        backend_manager=manager,
+        _get_active_skill_sections=lambda: [],
+        _get_available_skill_catalogue=lambda: [],
+        _get_available_tool_catalogue=lambda: [],
+        _workzone_prompt_section=lambda: [],
+        _request_meta_by_id={},
+    )
+    runtime._build_pre_turn_context_sections = lambda *_a, **_kw: _async_empty()
+    return runtime
 
 
 def test_timestamp_alone_cannot_remove_an_unverified_exchange():
@@ -129,3 +213,4 @@ async def test_compaction_removes_only_proven_fixed_session_prefix_after_restart
         *(f"req-{i}" for i in range(2, 12)), "req-next",
     ]
     assert compactor.store.read_state()["generation"] == 1
+# HASHI-Fingerprint: hfp_6d4cdc4e0fb247cda35ae96668e9ed33

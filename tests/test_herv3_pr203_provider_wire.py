@@ -12,7 +12,49 @@ import pytest
 from adapters.her_v2 import HERv2Adapter
 from adapters.her_v2_provider import HashiStageProvider
 from adapters.openrouter_api import OpenRouterAdapter
+from orchestrator.her_v2.backend_session import HerBackendSessionCoordinator
 from tests.test_her_v2_adapter import _agent_config, _global_config
+
+
+def _accept(coordinator, request_id, user_message):
+    encoded, _ = coordinator.prepare_transport(
+        session_id="test-session",
+        sections=[{
+            "key": "persona",
+            "title": "PERSONA",
+            "text": "Friendly",
+            "authority": "persona",
+            "order": 0,
+        }],
+        resources=[],
+        user_message=user_message,
+        request_id=request_id,
+        message_id="message-" + request_id,
+        instance_id="test-instance",
+        agent_id="test-agent",
+        owner_id="test-owner",
+        hashi_conversation_id="test-conversation",
+        context_generation=1,
+        workzone_identity="test-workzone",
+    )
+    return coordinator.accept(encoded)
+
+
+def _new_store(tmp_path):
+    coordinator = HerBackendSessionCoordinator(tmp_path / "state")
+    return coordinator, _accept(coordinator, "test-turn", "Read the files, then write")
+
+
+def _claim(state="running"):
+    return {
+        "run_id": "run-test-turn",
+        "request_id": "test-turn",
+        "attempt": 1,
+        "attempt_id": "run-test-turn:attempt:1",
+        "state_revision": 1,
+        "input_digest": "sha256:test-input",
+        "state": state,
+    }
 
 
 @pytest.mark.asyncio
@@ -545,7 +587,6 @@ async def test_openrouter_successor_audio_preserves_old_and_new_parts(tmp_path):
 @pytest.mark.asyncio
 async def test_ready_provider_request_recovers_from_real_sqlite_without_replaying_tools(tmp_path):
     from orchestrator.her_v2.config import ProviderProfile
-    from tests.test_herv3_deferred_recovery import _accept, _claim, _new_store
     from tests.test_openrouter_multimodal import _adapter
 
     coordinator, source = _new_store(tmp_path)
