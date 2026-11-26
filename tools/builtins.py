@@ -772,18 +772,58 @@ async def execute_file_read(
 
     offset = max(1, int(args.get("offset", 1)))
     limit = max(1, min(500, int(args.get("limit", 500))))
-    max_chars = 20_000
+    # Leave room inside MAX_TEXT_TOOL_OUTPUT_CHARS (20,000) for the header and
+    # the continuation notice; otherwise the registry clips the tail and a
+    # caller can never learn where to resume.
+    max_chars = 18_000
+    raw_char_offset = args.get("char_offset")
+    char_offset: int | None = None
+    if raw_char_offset not in (None, ""):
+        try:
+            char_offset = max(0, int(raw_char_offset))
+        except (TypeError, ValueError):
+            return "Error: char_offset must be a non-negative integer"
 
     try:
+        if char_offset is not None:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                skipped = 0
+                line_no = 1
+                while skipped < char_offset:
+                    chunk = handle.read(min(65536, char_offset - skipped))
+                    if not chunk:
+                        return f"[{path}] No content at char_offset {char_offset}"
+                    skipped += len(chunk)
+                    line_no += chunk.count("\n")
+                content = handle.read(max_chars + 1)
+            truncated = len(content) > max_chars
+            content = content[:max_chars]
+            start_char = char_offset
+            end_char = start_char + len(content)
+            header = (
+                f"[{path}] from line {line_no}, chars {start_char}-{end_char}"
+            )
+            if truncated:
+                header += f" (next_char_offset={end_char})"
+                content += (
+                    "\n[truncated by HASHI; continue with "
+                    f"char_offset={end_char}]"
+                )
+            else:
+                header += " (end of file)"
+            return f"{header}\n{content}"
+
         selected: list[str] = []
         remaining = max_chars
         truncated = False
+        start_char = 0
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for _ in range(offset - 1):
                 while True:
                     chunk = handle.readline(8192)
                     if not chunk:
                         return f"[{path}] No lines at offset {offset}"
+                    start_char += len(chunk)
                     if chunk.endswith("\n"):
                         break
             for _ in range(limit):
@@ -801,10 +841,18 @@ async def execute_file_read(
                     break
             else:
                 truncated = bool(handle.read(1))
-        header = f"[{path}] lines {offset}-{offset + len(selected) - 1}"
         content = "".join(selected)
+        end_char = start_char + len(content)
+        header = (
+            f"[{path}] lines {offset}-{offset + len(selected) - 1}, "
+            f"chars {start_char}-{end_char}"
+        )
         if truncated:
-            content += "\n[truncated by HASHI; use a narrower offset or log_query]"
+            header += f" (next_char_offset={end_char})"
+            content += (
+                "\n[truncated by HASHI; continue with "
+                f"char_offset={end_char}]"
+            )
         return f"{header}\n{content}"
     except Exception as e:
         return f"Error reading file: {e}"
@@ -1743,12 +1791,32 @@ async def execute_request_diagnostics(
     args: dict,
     workspace_dir: Path,
     audit_context: dict | None = None,
+    agent_home: Path | None = None,
 ) -> str:
     """Join existing sanitised evidence for one request without changing it."""
 
     request_id = str(args.get("request_id") or "").strip()
     if not request_id:
         return "Error: request_id is required"
+    evidence_ref = args.get("recovery_evidence_ref")
+    offset = args.get("offset", 0)
+    if evidence_ref and type(offset) is int and offset > 0:
+        # The first page already returned the complete request report. Later
+        # pages need only their current, re-authorized recovery value.
+        from orchestrator.request_diagnostics import FORMAT, read_scoped_recovery_evidence
+
+        page = await asyncio.to_thread(
+            read_scoped_recovery_evidence,
+            agent_home=agent_home or workspace_dir,
+            request_id=request_id,
+            evidence_ref=str(evidence_ref),
+            item_id=str(args.get("recovery_item_id") or ""),
+            offset=offset,
+            expected_digest=str(args.get("expected_digest") or ""),
+            scope=dict(audit_context or {}),
+        )
+        return json.dumps({"format": FORMAT, "request_id": request_id,
+                           "recovery_evidence": page}, ensure_ascii=False, indent=2)
     manager = _background_manager_from_context(audit_context)
     records: list[Any] = []
     history: dict[str, list[dict[str, Any]]] = {}
@@ -1783,6 +1851,20 @@ async def execute_request_diagnostics(
         background_jobs=records,
         background_history=history,
     )
+    evidence_ref = args.get("recovery_evidence_ref")
+    if evidence_ref:
+        from orchestrator.request_diagnostics import read_scoped_recovery_evidence
+
+        report["recovery_evidence"] = await asyncio.to_thread(
+            read_scoped_recovery_evidence,
+            agent_home=agent_home or workspace_dir,
+            request_id=request_id,
+            evidence_ref=str(evidence_ref),
+            item_id=str(args.get("recovery_item_id") or ""),
+            offset=args.get("offset", 0),
+            expected_digest=str(args.get("expected_digest") or ""),
+            scope=dict(audit_context or {}),
+        )
     return json.dumps(report, ensure_ascii=False, indent=2)
 
 

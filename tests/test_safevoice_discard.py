@@ -17,7 +17,7 @@ from tests.test_audit_run_handoff import _listener_runtime
 from tests.test_session_attachment_authorization import (
     CodexConsumer, Consumer, HERConsumer, fixture, transcript_fixture,
 )
-from tests.test_wrapper_commands import (
+from tests.wrapper_runtime_fixtures import (
     _completed_task, _make_background_runtime, _make_foreground_runtime, _queued_request,
 )
 

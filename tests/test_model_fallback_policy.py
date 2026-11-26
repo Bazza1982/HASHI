@@ -589,13 +589,20 @@ def test_checkpoint_safety_rules_for_model_and_cross_engine_targets():
     assert partial_model.blocking_reason == REASON_UNSAFE_CHECKPOINT
 
 
-def test_unknown_cost_is_blocked_by_default_and_budget_stops_the_chain():
+def test_unknown_cost_blocks_only_under_an_explicit_budget_and_budget_stops_the_chain():
     policy = _auto_policy(HERV3_ROUTE)
     unknown = resolve_fallback_decision(
         policy, _facts(HERV3_ROUTE, known_extra_cost_usd=None)
     )
-    assert unknown.allowed is False
-    assert unknown.blocking_reason == REASON_UNKNOWN_COST
+    # No explicit ceiling: unknown pricing must not silently disable fallback.
+    assert unknown.allowed is True
+
+    capped = _auto_policy(HERV3_ROUTE, max_extra_cost_usd=0.05)
+    unknown_capped = resolve_fallback_decision(
+        capped, _facts(HERV3_ROUTE, known_extra_cost_usd=None)
+    )
+    assert unknown_capped.allowed is False
+    assert unknown_capped.blocking_reason == REASON_UNKNOWN_COST
 
     allowed_unknown = _auto_policy(HERV3_ROUTE, allow_unknown_cost=True)
     assert (
@@ -632,8 +639,7 @@ def test_unknown_cost_is_blocked_by_default_and_budget_stops_the_chain():
             },
         ),
     )
-    assert invalid_route_cost.allowed is False
-    assert invalid_route_cost.blocking_reason == REASON_UNKNOWN_COST
+    assert invalid_route_cost.allowed is True
 
 
 def test_cost_ceiling_applies_to_all_prior_fallback_attempts():
@@ -856,3 +862,4 @@ def test_excluded_route_is_never_reused_and_next_route_wins():
     )
     assert decision.allowed is True
     assert decision.route == SECOND_HERV3_ROUTE
+# HASHI-Fingerprint: hfp_b6c7ee5fb192484ca281cb88cef34a8d

@@ -104,15 +104,26 @@ def _maybe_focus(args: dict) -> dict | None:
     return win32.focus_window(target)
 
 
-def _helper_screenshot_response(data: bytes, provider: str, save_path: str = "", metadata: str = '{"all_screens": true}') -> str:
+def _helper_screenshot_response(
+    data: bytes, provider: str, save_path: str = "",
+    metadata: str = '{"all_screens": true}', *,
+    typed_media: bool = False,
+):
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         Path(save_path).write_bytes(data)
     saved_note = f"\nSaved to: {save_path}" if save_path else ""
-    return (
+    description = (
         f"Windows screenshot OK — provider={provider}, {len(data)//1024}KB\n"
-        f"Metadata: {metadata}{saved_note}\n"
-        f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+        f"Metadata: {metadata}{saved_note}"
+    )
+    if typed_media:
+        from tools.typed_media_result import screenshot_tool_result
+
+        native = screenshot_tool_result(data, description)
+        return {"output": native.output, "content": native.content}
+    return description + (
+        f"\ndata:image/png;base64,{base64.b64encode(data).decode('ascii')}"
     )
 
 
@@ -373,7 +384,10 @@ async def execute_action(action: str, args: dict) -> str:
                     data = tmp.read_bytes()
                 finally:
                     tmp.unlink(missing_ok=True)
-                return _helper_screenshot_response(data, "helper-native", save_path)
+                return _helper_screenshot_response(
+                    data, "helper-native", save_path,
+                    typed_media=bool(args.get("_hashi_typed_media")),
+                )
             except Exception as exc:
                 if native_only:
                     raise RuntimeError(f"native screenshot failed: {exc}") from exc
@@ -394,10 +408,20 @@ async def execute_action(action: str, args: dict) -> str:
                 Path(save_path).parent.mkdir(parents=True, exist_ok=True)
                 Path(save_path).write_bytes(raw)
             saved_note = f"\nSaved to: {save_path}" if save_path else ""
-            return (
+            description = (
                 f"Windows screenshot OK — provider=windows-mcp-helper\n"
-                f"Details: {text}{saved_note}\n"
-                f"data:{image.get('mimeType','image/png')};base64,{image.get('data','')}"
+                f"Details: {text}{saved_note}"
+            )
+            if args.get("_hashi_typed_media"):
+                from tools.typed_media_result import screenshot_tool_result
+
+                native = screenshot_tool_result(
+                    raw, description,
+                    mime_type=image.get("mimeType") or "image/png",
+                )
+                return {"output": native.output, "content": native.content}
+            return description + (
+                f"\ndata:{image.get('mimeType','image/png')};base64,{image.get('data','')}"
             )
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
@@ -415,7 +439,10 @@ async def execute_action(action: str, args: dict) -> str:
             if rc != 0:
                 return f"Error: screenshot failed: {err or out}"
             data = Path(tmp).read_bytes()
-            return _helper_screenshot_response(data, "helper", save_path, out or "{}")
+            return _helper_screenshot_response(
+                data, "helper", save_path, out or "{}",
+                typed_media=bool(args.get("_hashi_typed_media")),
+            )
         finally:
             Path(tmp).unlink(missing_ok=True)
 

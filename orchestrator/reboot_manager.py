@@ -47,6 +47,16 @@ WORKBENCH_CONTROL_RELEASE_TIMEOUT_SECONDS = 2.0
 
 TARGETED_REBOOT_MODES = frozenset({"min", "same", "number"})
 BROAD_REBOOT_MODES = frozenset({"max"})
+# A delayed reboot waits for a quiet instance instead of rejecting busy Agents.
+# The wait is always bounded, and it only ever observes: no route is fenced and
+# admission stays open, so an instance that never calms down keeps serving.
+REBOOT_DELAY_DEFAULT_SECONDS = 1800.0
+REBOOT_DELAY_MAX_SECONDS = 21600.0
+# A turn that just finished must not be allowed to hand over to its next turn
+# inside the cutover, so the whole target set has to stay quiet for this long.
+REBOOT_DELAY_IDLE_WINDOW_SECONDS = 15.0
+REBOOT_DELAY_POLL_SECONDS = 2.0
+REBOOT_DELAY_MIN_RECHECK_SECONDS = 0.05
 
 
 def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, ...]:
@@ -100,6 +110,7 @@ class RebootManager:
             getattr(getattr(kernel, "paths", None), "bridge_home", None)
         )
         self.active_operation = None
+        self._delay_tasks: dict[str, asyncio.Task] = {}
         self.delivery_task = None
         self.delivery_lock = asyncio.Lock()
         self.receipt_fault = False
@@ -166,6 +177,8 @@ class RebootManager:
 
     def submit(self, restart):
         """Durably acknowledge one exact request before waking the execution loop."""
+        if restart.get("cancel"):
+            return self.cancel_waiting()
         if self.receipt_fault:
             return {"accepted": False, "reason": "storage"}
         try:
@@ -181,6 +194,17 @@ class RebootManager:
                 "record": previous,
                 "operation": self._operation_projection(previous),
             }
+        raw_delay = restart.get("delay_seconds")
+        if raw_delay is None:
+            delay_seconds = 0.0
+        elif (
+            isinstance(raw_delay, bool)
+            or not isinstance(raw_delay, (int, float))
+            or not 0 < float(raw_delay) <= REBOOT_DELAY_MAX_SECONDS
+        ):
+            return {"accepted": False, "reason": "invalid_scope"}
+        else:
+            delay_seconds = float(raw_delay)
         if (
             self.active_operation
             or getattr(self.kernel, "_restart_request", None) is not None
@@ -201,6 +225,40 @@ class RebootManager:
             record = self._new_receipt(restart, targets)
         except (OSError, ValueError):
             return {"accepted": False, "reason": "storage"}
+        if delay_seconds:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return {"accepted": False, "reason": "unexpected"}
+            try:
+                record = self._reserve_delay_wait(record, delay_seconds)
+            except (OSError, ValueError):
+                try:
+                    self._finish(record, "rejected", reason="storage")
+                except (OSError, ValueError):
+                    pass
+                return {"accepted": False, "reason": "storage"}
+            # The receipt is the queue entry: admission stays open, no route is
+            # fenced and no Worker is touched until the wait actually ends.
+            self.active_operation = record["id"]
+            self._delay_tasks[record["id"]] = loop.create_task(
+                self._wait_for_idle_then_restart(restart, record, targets, handles)
+            )
+            bridge_logger.info(
+                "Reboot queued until idle: operation=%s source=%s mode=%s "
+                "targets=%s limit=%.0fs",
+                record["id"],
+                record["source_agent"],
+                record["mode"],
+                record["targets"],
+                delay_seconds,
+            )
+            return {
+                "accepted": True,
+                "waiting": True,
+                "record": record,
+                "operation": self._operation_projection(record),
+            }
         # Admission is intentionally non-disruptive.  The accepted receipt and
         # origin-visible start notice must exist before any selected route is
         # fenced; otherwise Workbench can only discover the start after the
@@ -223,6 +281,151 @@ class RebootManager:
             "record": record,
             "operation": self._operation_projection(record),
         }
+
+    def _reserve_delay_wait(self, record, delay_seconds: float):
+        """Record the bounded wait on the receipt before the first observation."""
+        now = time.time()
+        self.receipts.update(
+            record["id"],
+            phase="waiting_idle",
+            wait_limits={
+                "delay_seconds": float(delay_seconds),
+                "idle_window_seconds": float(REBOOT_DELAY_IDLE_WINDOW_SECONDS),
+                "deadline": now + float(delay_seconds),
+            },
+        )
+        return self.receipts.get(record["id"])
+
+    def cancel_waiting(self):
+        """Drop a queued reboot that never reached the cutover; no side effects."""
+        operation_id = self.active_operation
+        if not operation_id or operation_id not in self._delay_tasks:
+            return {"accepted": False, "reason": "not_waiting"}
+        record = self.receipts.get(operation_id)
+        task = self._delay_tasks.pop(operation_id)
+        task.cancel()
+        if self.active_operation == operation_id:
+            self.active_operation = None
+        if record is None:
+            return {"accepted": False, "reason": "not_waiting"}
+        bridge_logger.info("Reboot wait cancelled by request: operation=%s", operation_id)
+        self._finish(
+            record,
+            "rejected",
+            reason="delay_cancelled",
+            busy_targets=list(record.get("busy_targets") or ()),
+        )
+        return {
+            "accepted": True,
+            "record": self.receipts.get(operation_id) or record,
+            "operation": self._operation_projection(
+                self.receipts.get(operation_id) or record
+            ),
+        }
+
+    async def _wait_for_idle_then_restart(
+        self,
+        restart: Mapping[str, Any],
+        record: Mapping[str, Any],
+        targets: tuple[str, ...],
+        handles: Mapping[str, AgentRuntimeHandle],
+    ) -> bool:
+        """Hold an accepted reboot until the whole target set has gone quiet.
+
+        This only observes. Admission stays open, no route is fenced and no
+        Worker is touched, so a request that is never satisfiable expires
+        instead of degrading the instance that is still serving.
+        """
+        operation_id = str(record["id"])
+        limits = dict(record.get("wait_limits") or {})
+        idle_window = float(
+            limits.get("idle_window_seconds") or REBOOT_DELAY_IDLE_WINDOW_SECONDS
+        )
+        delay_budget = float(limits.get("delay_seconds") or 0.0)
+        if delay_budget <= 0:
+            delay_budget = max(0.0, float(limits.get("deadline") or 0.0) - time.time())
+        # The wait itself is measured on a monotonic clock: a wall-clock jump
+        # must neither shorten nor extend the budget the caller was promised.
+        started = time.monotonic()
+        handed_off = False
+        idle_since: float | None = None
+        busy_targets: list[str] = []
+        unavailable_targets: list[str] = []
+        try:
+            while True:
+                activity, unavailable_targets = await self._observe_target_activity(
+                    targets, handles
+                )
+                busy_targets = [
+                    name
+                    for name, (generating, queue_depth, detached) in activity.items()
+                    if generating or queue_depth or detached
+                ]
+                now = time.monotonic()
+                remaining = started + delay_budget - now
+                # Expiry is decided before the idle window. A metadata read is
+                # allowed to consume the rest of the budget, but an observation
+                # that returns past the deadline must never start a restart.
+                if remaining <= 0:
+                    bridge_logger.info(
+                        "Reboot wait expired before idle: operation=%s "
+                        "busy=%s unavailable=%s",
+                        operation_id,
+                        busy_targets,
+                        unavailable_targets,
+                    )
+                    self._finish(
+                        record,
+                        "rejected",
+                        reason="idle_timeout",
+                        busy_targets=list(busy_targets),
+                        activity_targets=list(unavailable_targets),
+                    )
+                    return False
+                if busy_targets or unavailable_targets:
+                    idle_since = None
+                elif idle_since is None:
+                    idle_since = now
+                    bridge_logger.info(
+                        "Reboot wait: all targets idle, holding window | "
+                        "operation=%s window=%.0fs",
+                        operation_id,
+                        idle_window,
+                    )
+                if idle_since is not None and now - idle_since >= idle_window:
+                    break
+                await asyncio.sleep(
+                    min(
+                        REBOOT_DELAY_POLL_SECONDS,
+                        max(REBOOT_DELAY_MIN_RECHECK_SECONDS, remaining),
+                    )
+                )
+            self.kernel._restart_request = {
+                **restart,
+                "operation_id": operation_id,
+                "targets": record["targets"],
+            }
+            bridge_logger.info(
+                "Reboot wait satisfied; starting cutover | operation=%s", operation_id
+            )
+            self.kernel.shutdown_event.set()
+            handed_off = True
+            return True
+        except asyncio.CancelledError:
+            if operation_id in self._delay_tasks:
+                self._delay_tasks.pop(operation_id, None)
+                self._finish(
+                    record,
+                    "rejected",
+                    reason="delay_cancelled",
+                    busy_targets=list(busy_targets),
+                    activity_targets=list(unavailable_targets),
+                )
+            raise
+        finally:
+            self._delay_tasks.pop(operation_id, None)
+            if not handed_off and self.active_operation == operation_id:
+                self.active_operation = None
 
     def latest(
         self,
@@ -284,7 +487,7 @@ class RebootManager:
             default=0,
         )
         reason = str(record.get("reason") or "")
-        if reason in {"target_busy", "target_became_busy"}:
+        if reason in {"target_busy", "target_became_busy", "idle_timeout"}:
             blocking_ids = record.get("busy_targets") or ()
         elif reason in {"activity_unavailable", "activity_became_unavailable"}:
             blocking_ids = record.get("activity_targets") or ()
@@ -1351,6 +1554,43 @@ class RebootManager:
             )
         return handles
 
+    async def _observe_target_activity(
+        self,
+        selected_targets: tuple[str, ...],
+        handles: Mapping[str, AgentRuntimeHandle],
+    ) -> tuple[dict[str, tuple[bool, int, int]], list[str]]:
+        """Read the owning Workers, not asynchronously updated route caches.
+
+        This is an observation, not an idle reservation: the transactional
+        route fence and drain still handle work arriving after this check.
+        """
+
+        observations = await asyncio.gather(
+            *(
+                handles[name].client.call("worker.metadata", timeout=10)
+                for name in selected_targets
+            ),
+            return_exceptions=True,
+        )
+        unavailable_targets: list[str] = []
+        activity_by_target: dict[str, tuple[bool, int, int]] = {}
+        for name, state in zip(selected_targets, observations, strict=True):
+            if (
+                not isinstance(state, dict)
+                or type(state.get("is_generating")) is not bool
+                or type(state.get("queue_depth")) is not int
+                or state["queue_depth"] < 0
+            ):
+                unavailable_targets.append(name)
+                continue
+            detached = state.get("detached_request_count")
+            activity_by_target[name] = (
+                state["is_generating"],
+                state["queue_depth"],
+                detached if type(detached) is int and detached > 0 else 0,
+            )
+        return activity_by_target, unavailable_targets
+
     async def _preflight_target_activity(
         self,
         selected_targets: tuple[str, ...],
@@ -1363,33 +1603,14 @@ class RebootManager:
         """Reject a reboot before cutover when live Worker work cannot drain."""
 
         started = time.perf_counter()
-        # Read the owning Workers, not asynchronously updated route caches.
-        # This is an observation, not an idle reservation: the transactional
-        # route fence and drain still handle work arriving after this check.
-        observations = await asyncio.gather(
-            *(
-                handles[name].client.call("worker.metadata", timeout=10)
-                for name in selected_targets
-            ),
-            return_exceptions=True,
+        activity_by_target, unavailable_targets = await self._observe_target_activity(
+            selected_targets, handles
         )
-        unavailable_targets: list[str] = []
-        busy_targets: list[str] = []
-        activity_by_target: dict[str, tuple[bool, int]] = {}
-        for name, state in zip(selected_targets, observations, strict=True):
-            if (
-                not isinstance(state, dict)
-                or type(state.get("is_generating")) is not bool
-                or type(state.get("queue_depth")) is not int
-                or state["queue_depth"] < 0
-            ):
-                unavailable_targets.append(name)
-                continue
-            generating = state["is_generating"]
-            queue_depth = state["queue_depth"]
-            activity_by_target[name] = (generating, queue_depth)
-            if generating or queue_depth:
-                busy_targets.append(name)
+        busy_targets = [
+            name
+            for name, (generating, queue_depth, _detached) in activity_by_target.items()
+            if generating or queue_depth
+        ]
 
         self._record_stage(record, "activity_preflight", started)
 
@@ -1407,7 +1628,7 @@ class RebootManager:
             return False
         if busy_targets:
             for name in busy_targets:
-                generating, queue_depth = activity_by_target[name]
+                generating, queue_depth, _detached = activity_by_target[name]
                 bridge_logger.info(
                     "Reboot target busy: target=%s generating=%s queued=%s",
                     name,

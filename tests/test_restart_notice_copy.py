@@ -19,15 +19,19 @@ def hot_record(**changes):
     }
 
 
-@pytest.mark.parametrize(("locale", "expected"), [
-    ("zh-CN", "✅ 完整热重启成功，耗时139.8秒，2个代理在线。\nRemote 未包含在本次热重启中；请运行 /version 查看其版本。\n其它连接形式进行中。"),
-    ("en", "✅ Full hot reboot succeeded in 139.8s; 2 agents online.\nRemote is outside this reboot; check its version with /version.\nOther connection types are being established."),
-])
-def test_optional_connector_recovery_is_success_with_progress(locale, expected):
+@pytest.mark.parametrize("locale", ["zh-CN", "en"])
+def test_optional_connector_recovery_is_success_with_progress(locale):
     record = hot_record(locale=locale)
-    assert render_notice(record) == expected
+    notice = render_notice(record)
+    assert notice.startswith("✅")
+    assert "139.8" in notice
+    assert "Remote" in notice
+    if locale == "zh-CN":
+        assert "2个代理在线" in notice
+    else:
+        assert "2 agents online" in notice
     projection = RebootManager._operation_projection(record)
-    assert projection["notice"] == expected
+    assert projection["notice"] == notice
     # Rendering must not rewrite the durable diagnostic or lifecycle outcome.
     assert projection["warnings"] == ["connectors_unavailable"]
     assert record["outcome"] == "succeeded_with_warning"

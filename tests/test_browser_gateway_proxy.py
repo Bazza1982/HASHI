@@ -144,6 +144,58 @@ async def test_cli_browser_gateway_uses_owner_registry_and_core_facade(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_cli_browser_gateway_preserves_native_image_parts(tmp_path):
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\n" + b"photo"
+    encoded = base64.b64encode(png).decode("ascii")
+
+    class ImageFacade(_Facade):
+        def capability_status(self):
+            value = super().capability_status()
+            value["capabilities"][0]["supported_actions"].append("screenshot")
+            return value
+
+        async def invoke_capability(self, kind, action, args, **kwargs):
+            self.calls.append((kind, action, args, kwargs))
+            return {"output": "Screenshot captured", "content": [
+                {"type": "text", "text": "Screenshot captured"},
+                {"type": "image", "mimeType": "image/png", "data": encoded},
+            ]}
+
+    facade = ImageFacade()
+    audit = {
+        "_runtime": SimpleNamespace(orchestrator=facade),
+        "agent_name": "agent1", "request_id": "request-photo",
+        "global_config": SimpleNamespace(instance_id="HASHI4"),
+    }
+    owner = ToolRegistry(
+        ["browser_screenshot"], access_root=tmp_path, workspace_dir=tmp_path,
+        secrets={}, audit_context=audit,
+    )
+    proxy = BrowserGatewayProxy(owner, asyncio.get_running_loop())
+    try:
+        proxy_audit = {
+            "browser_gateway_proxy": proxy.issue(audit),
+            "agent_name": "agent1", "request_id": "request-photo",
+            "global_config": SimpleNamespace(instance_id="HASHI4"),
+        }
+        gateway = ToolRegistry(
+            ["browser_screenshot"], access_root=tmp_path, workspace_dir=tmp_path,
+            secrets={}, audit_context=proxy_audit,
+        )
+        gateway._capability_status_snapshot = facade.capability_status
+        result = await gateway.execute("browser_screenshot", {}, "photo-call")
+        assert not result.is_error
+        assert result.output == "Screenshot captured"
+        assert result.content[1]["type"] == "image"
+        assert result.content[1]["data"] == encoded
+        assert encoded not in result.output
+    finally:
+        await asyncio.to_thread(proxy.close)
+
+
+@pytest.mark.asyncio
 async def test_cli_browser_gateway_tokens_are_concurrent_and_independently_revoked(tmp_path):
     facade = _Facade()
     owner_registry = _registry(tmp_path, {

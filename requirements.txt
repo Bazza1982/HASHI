@@ -23,7 +23,7 @@ uvicorn>=0.30.0
 zeroconf>=0.136.0
 cryptography>=45.0.0
 rich>=13.0.0
-textual>=0.50.0
+textual>=8.2.8,<9.0.0
 
 # Standard agent browser tool (standalone headless Chromium via Playwright).
 # Browser binaries are auto-detected from the system Chrome/Edge, so

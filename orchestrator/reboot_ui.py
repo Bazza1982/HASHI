@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from html import escape
+from math import ceil
 
 from orchestrator import ui_language
 
@@ -48,7 +49,10 @@ def render_notice(
     )
     lifecycle = record.get("lifecycle_state")
     partial = outcome == "partial" or bool(recovered_targets and targets)
-    if starting:
+    if record.get("phase") == "waiting_idle":
+        # Queued, not started: nothing has been fenced or restarted yet.
+        status = "waiting"
+    elif starting:
         status = "starting"
     elif partial and confidence == "unconfirmed":
         status = "partial_unconfirmed"
@@ -134,6 +138,10 @@ def render_notice(
         fallback_reason=ui_language.tr(
             "reboot.fallback_reason." + fallback_reason_code, locale=language
         ),
+        minutes=max(
+            1,
+            ceil(float((record.get("wait_limits") or {}).get("delay_seconds") or 0) / 60),
+        ),
     )
     if starting:
         return text
@@ -208,7 +216,7 @@ def render_notice(
             locale=language,
             reason=ui_language.tr("reboot.reason." + reason, locale=language),
         )
-    if reason == "target_busy" and record.get("busy_targets"):
+    if reason in {"target_busy", "idle_timeout"} and record.get("busy_targets"):
         busy_targets = list(dict.fromkeys(record["busy_targets"]))
         busy_names = [
             escape(str(names.get(name) or name)) for name in busy_targets[:6]

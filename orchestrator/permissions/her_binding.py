@@ -28,6 +28,21 @@ class ManagedHerTurn:
     resumed_unstarted: bool = False
     runtime: object | None = None
     media: object | None = None
+    successor_continuation: dict | None = None
+
+    def bind_successor_provider_context(self, recovery, *, resume_pending_tools, pcm_delta):
+        # Only the owning Worker calls this after the canonical HER store has
+        # verified and attached the source checkpoint to this successor Turn.
+        if self.recovery is not None or not isinstance(recovery, dict):
+            raise PermissionDenied("conflicting managed provider continuation")
+        import copy
+
+        self.recovery = copy.deepcopy(recovery)
+        self.successor_continuation = {
+            "successor_turn": True,
+            "resume_pending_tools": bool(resume_pending_tools),
+            "pcm_delta": copy.deepcopy(list(pcm_delta)),
+        }
 
     def bind_provider(self, provider):
         binder = getattr(self.executor, "bind_provider", None)

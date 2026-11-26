@@ -48,6 +48,7 @@ from orchestrator.audio_assets import (
 )
 from orchestrator.pcm import load_pcm_document
 from orchestrator.multimodal_contract import (
+    HASHI_API_MAX_IMAGE_BYTES,
     InputCapability,
     MultimodalContractError,
     attachment_manifest,
@@ -2106,6 +2107,13 @@ def _file_resource(arguments: dict) -> str:
 
 
 class OpenRouterAdapter(BaseBackend):
+    # The durable HERV3 checkpoint uses this adapter's chat-message contract.
+    HERV3_CONTEXT_FORMAT = "openai-chat-messages-v1"
+    HERV3_ACCEPTS_CONTEXT = True
+
+    def supports_herv3_context(self) -> bool:
+        return True
+
     # OpenRouter aggregates providers with different replay guarantees.  A
     # concrete compatible adapter may opt into narrowly scoped HTTP-call
     # recovery without replaying completed tool loops.
@@ -2154,43 +2162,18 @@ class OpenRouterAdapter(BaseBackend):
         """Optional provider-native check of the final, privacy-filtered payload.
 
         A subclass may return a replacement payload after proactive context
-        maintenance (for example, Compact). The caller re-protects and
-        re-estimates the rebuilt payload before submission. Returning None
-        sends the original payload unchanged.
+        maintenance (for example, Compact). The caller re-protects any
+        rebuilt payload and applies provider-specific final checks. Returning
+        None sends the original payload unchanged.
         """
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:
-        """Reject a clearly oversized text payload before an HTTP call.
+        """Defer uncertain token counts to the provider's typed admission.
 
-        Native media have provider-specific token accounting, so leave those
-        requests to the provider's typed rejection rather than guessing from
-        base64 wire bytes.
+        A heuristic upper estimate cannot prove that a request will not fit.
+        Model-specific capacity preparation and compaction run separately.
         """
-
-        from orchestrator.context_compaction import estimate_tokens, resolve_capacity_profile
-
-        runtime = getattr(self.config, "_hashi_runtime", None)
-        if runtime is None:
-            return
-        model = str(payload.get("model") or self.config.model)
-        capacity = resolve_capacity_profile(runtime, self.config.engine, model)
-        if capacity is None:
-            return
-        serialized = json.dumps(
-            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
-        if "data:" in serialized or "base64," in serialized:
-            return
-        estimated = estimate_tokens(serialized)
-        if estimated > capacity.usable_input_tokens:
-            raise ProviderContextCapacityPreflightError(
-                f"Prepared request estimate {estimated} tokens exceeds "
-                f"declared usable input capacity {capacity.usable_input_tokens} "
-                f"for {capacity.provider}/{capacity.model}."
-            )
+        del payload
 
     def _define_capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
@@ -4161,10 +4144,12 @@ class OpenRouterAdapter(BaseBackend):
         # must follow every tool-role result from the assistant's tool batch.
         # Interleaving them would break the tool-call protocol when a batch
         # contains more than one call.
-        if self._deferred_tool_followups:
-            messages.extend(self._deferred_tool_followups)
-            self._deferred_tool_followups.clear()
-        messages.extend(deferred_tool_result_messages)
+        from orchestrator.her_v2.provider_continuation import ordered_deferred_followups
+
+        messages.extend(ordered_deferred_followups(
+            self._deferred_tool_followups, deferred_tool_result_messages,
+        ))
+        self._deferred_tool_followups.clear()
         return tuple(effect_facts)
 
     def _evaluate_tool_policy(self, tool_name: str, arguments: dict):
@@ -4230,20 +4215,111 @@ class OpenRouterAdapter(BaseBackend):
         output: Any,
         content: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Translate one completed Tool result into provider messages.
+        """Preserve typed Tool media without ever classifying Tool text.
 
-        Provider adapters may override this boundary when their wire protocol
-        supports structured media returned by a Tool.  The default deliberately
-        preserves the historical text-only shape.
+        The OpenRouter-compatible Chat contract guarantees user image parts;
+        Tool-image support varies by upstream provider. DeepSeek overrides
+        this method because its Tool image parts are explicitly documented.
         """
 
-        del tool_name, content
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": output,
+        }
+        if not content:
+            return [tool_message]
+
+        texts: list[str] = []
+        images: list[str] = []
+        other_media: set[str] = set()
+        for raw_part in content:
+            if not isinstance(raw_part, Mapping):
+                continue
+            kind = str(raw_part.get("type") or "").casefold()
+            if kind == "text" and isinstance(raw_part.get("text"), str):
+                texts.append(raw_part["text"])
+            elif kind == "image":
+                mime = str(raw_part.get("mimeType") or raw_part.get("mime_type") or "")
+                encoded = raw_part.get("data")
+                if mime.startswith("image/") and isinstance(encoded, str):
+                    images.append(f"data:{mime};base64,{encoded}")
+            elif kind == "image_url":
+                data = raw_part.get("image_url")
+                url = data.get("url") if isinstance(data, Mapping) else data
+                if isinstance(url, str) and url:
+                    images.append(url)
+            elif kind in {"audio", "input_audio", "video", "input_video",
+                          "file", "input_file", "document"}:
+                other_media.add(kind)
+
+        if other_media:
+            # Do not send unsupported media bytes as ordinary Tool text.
+            # Native user audio, video and document input keep their existing
+            # separate capability-gated routing in the multimodal contract.
+            notice = (
+                "[Typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media))
+                + "; use an authorized media inspection route if available.]"
+            )
+            safe_text = "\n\n".join(t for t in texts if t.strip())
+            tool_message["content"] = "\n\n".join(
+                part for part in (safe_text, notice) if part
+            )
+
+        if not images:
+            return [tool_message]
+
+        # All media originates from a structured Tool part. Validate actual
+        # bytes but never inspect raw shell / file-read text for media patterns.
+        for url in images:
+            if url.casefold().startswith("data:"):
+                validate_inline_image_data_url(
+                    url, max_bytes=HASHI_API_MAX_IMAGE_BYTES,
+                )
+            elif not url.startswith("https://"):
+                raise MultimodalContractError(
+                    "Tool image URL requires HTTPS or encoded native image",
+                    code="INVALID_MULTIMODAL_CONTENT",
+                )
+
+        tool_text = "\n\n".join(t for t in texts if t.strip()) or (
+            f"{tool_name} returned {len(images)} image(s)."
+        )
+        if other_media:
+            tool_text += (
+                "\n[Other typed Tool media not forwarded natively: "
+                + ", ".join(sorted(other_media)) + ".]"
+            )
+        capability = self.resolve_input_capability()
+        image_transports = (
+            "data_url" if url.casefold().startswith("data:")
+            else "remote_url" for url in images
+        )
+        if not all(capability.supports("image", transport)
+                   for transport in image_transports):
+            tool_message["content"] = (
+                tool_text
+                + "\n[Image unavailable natively for this selected model; "
+                "use an authorized media fallback if available.]"
+            )
+            return [tool_message]
+
+        tool_message["content"] = tool_text
         return [
+            tool_message,
             {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": output,
-            }
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": (
+                        f"Image result of Tool {tool_name} (call_id={tool_call_id})."
+                    )},
+                    *(
+                        {"type": "image_url", "image_url": {"url": url}}
+                        for url in dict.fromkeys(images)
+                    ),
+                ],
+            },
         ]
 
     # ------------------------------------------------------------------
@@ -4755,6 +4831,7 @@ class OpenRouterAdapter(BaseBackend):
         continuation_messages: list[dict[str, Any]] | None = None,
         resume_pending_tools: bool = False,
         deferred_followups: Sequence[Mapping[str, Any]] | None = None,
+        continuation_request_content: bool = False,
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
@@ -4875,11 +4952,42 @@ class OpenRouterAdapter(BaseBackend):
                     dict(item) if isinstance(item, Mapping) else item
                     for item in continuation_messages
                 ]
-                media_routing = ()
-                self._last_media_routing = ()
-                native_attachment_ids = set()
-                native_local_refs = set()
-                all_media_native = False
+                if continuation_request_content:
+                    from orchestrator.her_v2.provider_continuation import (
+                        SUCCESSOR_AFTER_TOOL_BATCH, SUCCESSOR_CONTENT_DIGEST,
+                    )
+
+                    if provider_request_content is None:
+                        raise ProviderContextObserverError("successor request content is unavailable")
+                    if resume_pending_tools:
+                        target = next(
+                            (item for item in reversed(self._deferred_tool_followups)
+                             if item.get(SUCCESSOR_AFTER_TOOL_BATCH) is True),
+                            None,
+                        )
+                    else:
+                        target = messages[-1] if messages else None
+                    if not isinstance(target, dict) or target.get("role") != "user" or not isinstance(target.get("content"), str):
+                        raise ProviderContextObserverError("successor content has no owned user message")
+                    current_messages, media_routing = self._initial_messages(
+                        target["content"], provider_request_content,
+                        transient_images=transient_images,
+                    )
+                    target["content"] = current_messages[1]["content"]
+                    if resume_pending_tools and isinstance(target["content"], list):
+                        parts = target["content"]
+                        if not parts or not isinstance(parts[0], Mapping) or parts[0].get("type") != "text":
+                            raise ProviderContextObserverError("successor media has no owned text part")
+                        target[SUCCESSOR_CONTENT_DIGEST] = "sha256:" + hashlib.sha256(
+                            str(parts[0].get("text") or "").encode("utf-8")
+                        ).hexdigest()
+                    self._last_media_routing = media_routing
+                else:
+                    media_routing = ()
+                    self._last_media_routing = ()
+                    native_attachment_ids = set()
+                    native_local_refs = set()
+                    all_media_native = False
 
             if resume_pending_tools:
                 from orchestrator.her_v2.provider_continuation import pending_tool_calls
@@ -4927,16 +5035,11 @@ class OpenRouterAdapter(BaseBackend):
                             audio_output is None or audio_output.get("tools")
                         ),
                     )
-                    self._preflight_payload_capacity(payload)
                     payload = await self._protect_outbound_payload(
                         payload, request_id=str(request_id or ""), gate=privacy_gate
                     )
-                    # Level-2 placeholders may be longer than the sensitive
-                    # spans they replace.  The first check protects the local
-                    # privacy sidecar from an already-oversized request; this
-                    # second check governs the exact text payload that will be
-                    # audited and sent over HTTP.
-                    self._preflight_payload_capacity(payload)
+                    # Let the target's capacity preparation inspect the
+                    # privacy-filtered payload before any native admission.
                     capacity_start = len(provider_calls)
                     rebuilt_payload = await self._prepare_payload_capacity(
                         payload,
@@ -4948,7 +5051,10 @@ class OpenRouterAdapter(BaseBackend):
                         payload = await self._protect_outbound_payload(
                             payload, request_id=str(request_id or ""), gate=privacy_gate
                         )
-                        self._preflight_payload_capacity(payload)
+                    # A provider-specific exact constraint may still apply to
+                    # the final protected payload. Generic token estimates do
+                    # not reject; target preparation has already had a chance.
+                    self._preflight_payload_capacity(payload)
                     provider_call_count += len(provider_calls) - capacity_start
                     for capacity_call in provider_calls[capacity_start:]:
                         total_prompt += int(capacity_call.get("input") or 0)

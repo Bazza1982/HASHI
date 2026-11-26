@@ -35,7 +35,11 @@ async def test_failed_multi_quota_pass_releases_partial_slots_and_cancellation_r
             pytest.fail('occupied slot admitted another owner')
     task=asyncio.create_task(waiting())
     try:
-        while not reasons:await asyncio.sleep(.01)
+        deadline=asyncio.get_running_loop().time()+5
+        while not reasons:
+            if asyncio.get_running_loop().time()>deadline:
+                pytest.fail('waiting owner never registered a wait reason')
+            await asyncio.sleep(.01)
         available=FileLease(tmp_path,'a:0')
         assert available.try_acquire(), 'a blocked group cannot retain an earlier quota'
         available.close()

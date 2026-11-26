@@ -50,6 +50,15 @@ class OllamaAdapter(OpenRouterAdapter):
         self.ollama_url = extra.get("ollama_url", _DEFAULT_OLLAMA_URL)
         self.effort = extra.get("effort")
 
+    def accepts_herv3_messages(self, messages) -> bool:
+        # The existing native chat implementation accepts string content only,
+        # even when the selected model's separate vision capability is enabled.
+        if not self._native_chat_enabled():
+            return True
+        return all(isinstance(message, Mapping)
+                   and isinstance(message.get("content", ""), (str, type(None)))
+                   for message in messages)
+
     def _ollama_think(self) -> bool | None:
         extra = getattr(self.config, "extra", None) or {}
         configured = extra.get("provider_reasoning")
@@ -362,6 +371,7 @@ class OllamaAdapter(OpenRouterAdapter):
         continuation_messages=None,
         resume_pending_tools=False,
         deferred_followups=None,
+        continuation_request_content=False,
         provider_call_limit=None,
         before_provider_call=None,
         transient_images=None,
@@ -380,6 +390,7 @@ class OllamaAdapter(OpenRouterAdapter):
             continuation_messages=continuation_messages,
             **({"resume_pending_tools": True} if resume_pending_tools else {}),
             **({"deferred_followups": deferred_followups} if deferred_followups else {}),
+            **({"continuation_request_content": True} if continuation_request_content else {}),
             provider_call_limit=provider_call_limit,
             before_provider_call=before_provider_call,
             transient_images=transient_images,

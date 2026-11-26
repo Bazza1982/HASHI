@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchestrator.her_v2.recovery_projection import _bounded, _json_size, bounded_goal
 from orchestrator.process_resources import path_lock as process_path_lock
 from orchestrator.storage_profile import flush_projection
 
@@ -169,6 +170,35 @@ def _project_audit(record: Mapping[str, Any]) -> dict[str, Any] | None:
         if projected_payload:
             projected["facts"] = projected_payload
     return projected
+
+
+def _project_wip_activity(row: Any, *, evidence_ref: str) -> Any:
+    if not isinstance(row, Mapping) or _json_size(row) <= 1024:
+        return _bounded(row, budget_chars=1024, evidence_ref=evidence_ref)
+    result = {
+        key: _bounded(row[key], budget_chars=160, evidence_ref=evidence_ref)
+        for key in ("recorded_at", "event", "event_id", "stage", "role", "provider", "model", "attempt", "request_ref")
+        if row.get(key) not in (None, "", {}, [])
+    }
+    facts = row.get("facts")
+    if isinstance(facts, Mapping):
+        ordered = sorted(
+            facts,
+            key=lambda key: (str(key) not in {"summary", "error", "message", "reason", "status", "to", "output", "text"}, str(key)),
+        )
+        retained: dict[str, Any] = {}
+        for key in ordered:
+            candidate = _bounded(facts[key], budget_chars=384, evidence_ref=evidence_ref)
+            trial = {**result, "facts": {**retained, str(key): candidate},
+                     "facts_omitted": len(ordered), "evidence_ref": evidence_ref}
+            if _json_size(trial) <= 1024:
+                retained[str(key)] = candidate
+        if retained:
+            result["facts"] = retained
+        if len(retained) < len(ordered):
+            result["facts_omitted"] = len(ordered) - len(retained)
+            result["evidence_ref"] = evidence_ref
+    return result
 
 
 @dataclass(frozen=True)
@@ -345,13 +375,20 @@ class WIPJournal:
 
         with self._lock:
             prior = self._read_records_unlocked()
-            summary = str(request_summary or "").strip() or str(prompt or "")
+            # request_summary is an explicit request description, whereas
+            # prompt can already contain assembled recovery and PCM context.
+            # Preserve the source summary in the journal and bound only the
+            # model-facing projection.
+            summary = str(request_summary or "").strip()
+            if not summary:
+                summary = "Unfinished request; consult the accepted user message."
+            summary_projection = bounded_goal(summary, budget_chars=2048)
             record = {
                 "format": FORMAT,
                 "recorded_at": _now(),
                 "kind": "turn_received",
                 "request_id": _text(request_id),
-                "request_summary": summary,
+                "request_summary": summary_projection.get("goal", ""),
                 "prompt_chars": len(str(prompt or "")),
                 "prompt_sha256": _sha256_text(str(prompt or "")),
                 "session_id": _text(session_id),
@@ -359,6 +396,13 @@ class WIPJournal:
                     int(context_generation) if context_generation else None
                 ),
             }
+            if summary_projection.get("goal_truncated"):
+                # Keep the complete source in the private journal for cases
+                # without a fixed Session; compaction retains it in memory.
+                record["request_summary_full"] = summary
+                record["request_summary_sha256"] = summary_projection["goal_sha256"]
+                record["request_summary_truncated"] = True
+                record["request_summary_evidence_ref"] = f"wip_journal:{self.path}"
             self._append_unlocked(record)
         return self.render_context(prior)
 
@@ -397,6 +441,9 @@ class WIPJournal:
                 "recorded_at": _text(record.get("recorded_at")),
                 "request_id": _text(record.get("request_id")),
                 "request_summary": _text(record.get("request_summary")),
+                "request_summary_full": _text(record.get("request_summary_full")),
+                "request_summary_sha256": _text(record.get("request_summary_sha256")),
+                "request_summary_truncated": True if record.get("request_summary_truncated") else None,
                 "session_id": _text(record.get("session_id")),
                 "context_generation": record.get("context_generation"),
             }
@@ -491,12 +538,88 @@ class WIPJournal:
         return capsule
 
     @staticmethod
-    def render_context(records: Sequence[Mapping[str, Any]]) -> str:
+    def project_capsule(capsule: Mapping[str, Any], *, evidence_ref: str) -> dict[str, Any]:
+        """Bound the model view while retaining a queryable canonical source."""
+        projected: dict[str, Any] = {}
+        for key in (
+            "format", "authority", "source_sha256", "source_recorded_through",
+            "source_record_count", "request_id_count", "first_request_id", "last_request_id",
+        ):
+            if key in capsule:
+                projected[key] = _bounded(capsule[key], budget_chars=2048, evidence_ref=evidence_ref)
+        projected["evidence_ref"] = evidence_ref
+        for key in ("request_ids", "unfinished_requests", "event_counts", "unfinished_work_activity", "failures", "limitations", "summary"):
+            if key not in capsule:
+                continue
+            value = capsule[key]
+            if key == "unfinished_requests" and isinstance(value, list):
+                selected = value if len(value) <= 4 else [value[0], *value[-3:]]
+                rows = [row for row in selected if isinstance(row, Mapping)]
+                # The aggregate field, not only each individual summary, has
+                # an 8 KiB budget. Shrink excerpts progressively so the
+                # original and the most recent unfinished goals stay visible.
+                summary_budget = 2048
+                while True:
+                    recent = [
+                        {
+                            str(name): _bounded(
+                                item,
+                                budget_chars=summary_budget if name == "request_summary" else 256,
+                                evidence_ref=evidence_ref,
+                            )
+                            for name, item in row.items()
+                            if name != "request_summary_full"
+                        }
+                        for row in rows
+                    ]
+                    candidate = {
+                        "total": len(value), "recent": recent,
+                        "omitted": len(value) - len(recent), "evidence_ref": evidence_ref,
+                    }
+                    encoded = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
+                    if len(encoded.encode("utf-8")) <= 8 * 1024:
+                        value = candidate
+                        break
+                    if summary_budget <= 256:
+                        # Metadata is lower priority than the goals and source.
+                        for row in recent:
+                            for name in list(row):
+                                if name not in {"request_id", "request_summary"}:
+                                    row.pop(name, None)
+                        while _json_size(candidate) > 8 * 1024 and len(recent) > 2:
+                            recent.pop(1)
+                            candidate["omitted"] += 1
+                        value = candidate
+                        break
+                    summary_budget = max(256, summary_budget * 3 // 4)
+            elif key in {"unfinished_work_activity", "failures"} and isinstance(value, list):
+                recent = [
+                    _project_wip_activity(row, evidence_ref=evidence_ref)
+                    for row in value[-8:]
+                ]
+                summary = {"total": len(value), "recent": recent,
+                           "omitted": len(value) - len(recent), "evidence_ref": evidence_ref}
+                while _json_size(summary) > 8 * 1024 and len(recent) > 1:
+                    recent.pop(0)
+                    summary["omitted"] += 1
+                value = summary
+            projected[key] = _bounded(value, budget_chars=8 * 1024, evidence_ref=evidence_ref)
+        omitted = {key: value for key, value in capsule.items() if key not in projected}
+        if omitted:
+            projected["omitted_fields"] = {
+                "count": len(omitted),
+                "sha256": _sha256_text(json.dumps(omitted, ensure_ascii=False, sort_keys=True, default=str)),
+                "evidence_ref": evidence_ref,
+            }
+        return projected
+
+    def render_context(self, records: Sequence[Mapping[str, Any]]) -> str:
         if not records:
             return ""
-        capsule = WIPJournal.recovery_capsule(records)
+        capsule = self.recovery_capsule(records)
+        projected = self.project_capsule(capsule, evidence_ref=f"wip_journal:{self.path}")
         serialized = json.dumps(
-            capsule,
+            projected,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -530,3 +653,4 @@ __all__ = [
     "WIPJournal",
     "WIPSnapshot",
 ]
+# HASHI-Fingerprint: hfp_c6f1fca8e22747a4a443e38b59ba3fc1

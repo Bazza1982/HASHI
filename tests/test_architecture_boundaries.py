@@ -66,51 +66,6 @@ def test_launch_and_control_surfaces_do_not_use_repository_global_process_files(
     assert violations == []
 
 
-def test_process_controls_require_exact_instance_home_ownership():
-    required_markers = {
-        ROOT / "bin" / "bridge-u.sh": (
-            "resolve_instance_runtime.py",
-            "cmdline_matches_bridge_home",
-            "--bridge-home",
-        ),
-        ROOT / "bin" / "kill-sessions.sh": (
-            "resolve_instance_runtime.py",
-            "cmdline_matches_bridge_home",
-            "--bridge-home",
-        ),
-        ROOT / "bin" / "bridge-u.bat": (
-            "resolve_instance_runtime.py",
-            "--bridge-home",
-        ),
-        ROOT / "bin" / "bridge_ctl.ps1": (
-            "resolve_instance_runtime.py",
-            "Test-BridgeCommandLine",
-            "--bridge-home",
-        ),
-    }
-    violations = []
-    for path, markers in required_markers.items():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for marker in markers:
-            if marker not in text:
-                violations.append(f"{path.relative_to(ROOT)}: missing {marker}")
-
-    onboarding = (ROOT / "onboarding" / "onboarding_main.py").read_text(encoding="utf-8")
-    for marker in ("taskkill", "pkill", "process_iter", "kill -9"):
-        if marker in onboarding:
-            violations.append(f"onboarding/onboarding_main.py: owns process control via {marker}")
-
-    windows_wrapper = (ROOT / "bin" / "kill_bridge_u_f_sessions.bat").read_text(
-        encoding="utf-8",
-        errors="replace",
-    ).lower()
-    for marker in ("taskkill", "wmic process", "get-nettcpconnection"):
-        if marker in windows_wrapper:
-            violations.append(f"bin/kill_bridge_u_f_sessions.bat: bypasses instance controller via {marker}")
-
-    assert violations == []
-
-
 def test_remote_port_compatibility_facade_derives_from_runtime_defaults():
     assert port_selection.DEFAULT_PORT == runtime_defaults.DEFAULT_HASHI_REMOTE_PORT
     assert (

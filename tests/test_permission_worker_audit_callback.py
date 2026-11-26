@@ -84,4 +84,31 @@ async def test_foreign_record_never_reaches_the_original_writer(tmp_path, field,
     with pytest.raises(PermissionDenied):
         await callbacks.audit_record(binding=binding, record={**record, field: value})
     assert not primary.exists() and not fallback.exists() and not sequences
+
+@pytest.mark.asyncio
+async def test_successor_context_is_worker_bound_and_not_host_supplied(tmp_path):
+    from orchestrator.permissions.her_binding import ManagedHerTurn
+
+    callbacks, binding, _, _, _, _ = environment(tmp_path)
+    old = callbacks.controller._turns[binding.request_id]
+    turn = ManagedHerTurn(callbacks.controller, binding, SimpleNamespace(),
+                          adapter=old.adapter, accepted=old.accepted)
+    callbacks.controller._turns[binding.request_id] = turn
+    checkpoint = {"format": "herv3-provider-context-v1", "boundary": "pending_tool_batch",
+                  "messages": [{"role": "user", "content": "original task"}]}
+    turn.bind_successor_provider_context(checkpoint, resume_pending_tools=False,
+                                         pcm_delta=[{"op": "remove", "key": "reference"}])
+    result = await callbacks.recovery_context(binding=binding)
+    assert result["_herv3_continuation"] == {
+        "successor_turn": True, "resume_pending_tools": False,
+        "pcm_delta": [{"op": "remove", "key": "reference"}],
+    }
+    result["messages"][0]["content"] = "tampered in transit"
+    assert turn.recovery["messages"][0]["content"] == "original task"
+    with pytest.raises(PermissionDenied, match="conflicting"):
+        turn.bind_successor_provider_context(checkpoint, resume_pending_tools=True, pcm_delta=[])
+    with pytest.raises(PermissionDenied):
+        await callbacks.recovery_context(binding=replace(binding, request_id="other-request"))
+
+
 # HASHI-Fingerprint: hfp_da98f416086645018118657409ebbfc1

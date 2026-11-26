@@ -244,7 +244,9 @@ TOOL_SCHEMAS = [
             "name": "file_read",
             "description": (
                 "Read a file from disk and return its contents. "
-                "Supports optional offset (start line) and limit (max lines)."
+                "Supports optional offset (start line) and limit (max lines). "
+                "When the output is truncated, continue with the returned "
+                "char_offset to reconstruct long lines exactly."
             ),
             "parameters": {
                 "type": "object",
@@ -260,6 +262,13 @@ TOOL_SCHEMAS = [
                     "limit": {
                         "type": "integer",
                         "description": "Maximum lines to return (default 500).",
+                    },
+                    "char_offset": {
+                        "type": "integer",
+                        "description": (
+                            "Continue from an absolute 0-based character offset, "
+                            "as returned by a previous truncated read."
+                        ),
                     },
                 },
                 "required": ["path"],
@@ -2543,7 +2552,23 @@ TOOL_SCHEMAS.extend(
                             "type": "string",
                             "minLength": 1,
                             "description": "Exact HASHI request identifier.",
-                        }
+                        },
+                        "recovery_evidence_ref": {
+                            "type": "string",
+                            "description": "Optional canonical recovery receipt, side-effect or Provider-item reference for this Session.",
+                        },
+                        "recovery_item_id": {
+                            "type": "string",
+                            "description": "Exact Tool call ID for Provider items; optional operation, call, invocation or evidence ID for receipts.",
+                        },
+                        "offset": {
+                            "type": "integer", "minimum": 0,
+                            "description": "Next character offset returned by a recovery evidence page.",
+                        },
+                        "expected_digest": {
+                            "type": "string",
+                            "description": "Digest returned by the first recovery page; required for subsequent pages.",
+                        },
                     },
                     "required": ["request_id"],
                     "additionalProperties": False,

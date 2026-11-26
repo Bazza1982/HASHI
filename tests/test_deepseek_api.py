@@ -912,7 +912,10 @@ def test_stable_provider_capacity_code_is_typed_but_generic_400_is_not():
 
 
 @pytest.mark.asyncio
-async def test_declared_capacity_rejects_oversized_serialized_payload_before_http(tmp_path):
+@pytest.mark.parametrize("provider_accepts", [True, False])
+async def test_declared_capacity_defers_uncertain_estimate_to_provider(
+    tmp_path, provider_accepts
+):
     adapter = _adapter(tmp_path)
     adapter.tool_registry = None
     adapter.config._hashi_runtime = SimpleNamespace(
@@ -933,12 +936,27 @@ async def test_declared_capacity_rejects_oversized_serialized_payload_before_htt
         ),
         backend_manager=None,
     )
-    adapter._call_api_once = AsyncMock(return_value=_APIResult("done", None, "stop"))
+    if provider_accepts:
+        adapter._call_api_once = AsyncMock(return_value=_APIResult("done", None, "stop"))
+    else:
+        request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+        rejected = httpx.Response(
+            400, request=request,
+            json={"error": {"code": "context_length_exceeded", "message": "large"}},
+        )
+        adapter._call_api_once = AsyncMock(
+            side_effect=httpx.HTTPStatusError("HTTP 400", request=request, response=rejected)
+        )
 
     response = await adapter.generate_response("long " * 2500, "req-capacity-local")
 
-    assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
-    assert adapter._call_api_once.await_count == 0
+    assert adapter._call_api_once.await_count == 1
+    if provider_accepts:
+        assert response.is_success is True
+        assert response.text == "done"
+    else:
+        assert response.is_success is False
+        assert response.error_code == "CONTEXT_CAPACITY_REJECTED"
 
 
 @pytest.mark.parametrize(
@@ -1335,8 +1353,7 @@ async def test_cancelled_tool_forwards_cleanup_before_propagating_cancellation(
 @pytest.mark.asyncio
 async def test_deepseek_tool_screenshot_is_native_image_not_base64_text(tmp_path):
     adapter = _adapter(tmp_path, model="deepseek-flash")
-    data_url = (
-        "data:image/png;base64,"
+    encoded = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
         "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
     )
@@ -1345,43 +1362,50 @@ async def test_deepseek_tool_screenshot_is_native_image_not_base64_text(tmp_path
         del tool_name, arguments
         return ToolResult(
             tool_call_id=tool_call_id,
-            output=json.dumps(
-                {
-                    "data": (
-                        "Windows screenshot OK — provider=helper-native, 1KB\n"
-                        f"{data_url}"
-                    ),
-                    "effect": "observed",
-                    "error": None,
-                    "status": "success",
-                    "warning": None,
-                }
-            ),
+            output="Windows screenshot OK",
+            content=[
+                {"type": "text", "text": "Windows screenshot OK"},
+                {"type": "image", "mimeType": "image/png", "data": encoded},
+            ],
         )
 
     adapter.tool_registry.execute = execute_screenshot
     messages = []
     await adapter._run_tool_calls(
-        [
-            {
-                "id": "call_screenshot",
-                "type": "function",
-                "function": {"name": "windows_screenshot", "arguments": "{}"},
-            }
-        ],
+        [{"id": "call_screenshot", "type": "function",
+          "function": {"name": "windows_screenshot", "arguments": "{}"}}],
         messages,
         on_stream_event=None,
     )
 
-    assert [message["role"] for message in messages] == ["tool", "user"]
+    assert [message["role"] for message in messages] == ["tool"]
     assert messages[0]["tool_call_id"] == "call_screenshot"
-    assert "Windows screenshot OK" in messages[0]["content"]
-    assert "base64" not in messages[0]["content"]
-    assert messages[1]["content"][0]["type"] == "text"
-    assert messages[1]["content"][1] == {
+    assert messages[0]["content"][0]["text"] == "Windows screenshot OK"
+    assert messages[0]["content"][1] == {
         "type": "image_url",
-        "image_url": {"url": data_url},
+        "image_url": {"url": "data:image/png;base64," + encoded},
     }
+    deepseek_api._validate_deepseek_payload({"messages": messages})
+
+
+def test_deepseek_completed_tool_image_replay_keeps_native_shape(tmp_path):
+    adapter = _adapter(tmp_path, model="deepseek-flash")
+    native = [
+        {"type": "text", "text": "Previous screenshot"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl0sAAAAASUVORK5CYII=",
+        }},
+    ]
+    replayed = adapter._tool_result_messages(
+        tool_name="windows_screenshot",
+        tool_call_id="call-previous-image",
+        output=native,
+        content=None,
+    )
+    assert replayed == [{"role": "tool", "tool_call_id": "call-previous-image",
+                         "content": native}]
+    assert replayed[0]["content"] is not native
+    deepseek_api._validate_deepseek_payload({"messages": replayed})
 
 
 def test_deepseek_payload_requires_structured_image_content():
@@ -1390,29 +1414,30 @@ def test_deepseek_payload_requires_structured_image_content():
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
         "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
     )
-    deepseek_api._validate_deepseek_payload(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Inspect it."},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ]
-        }
-    )
+    deepseek_api._validate_deepseek_payload({
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "Inspect it."},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+            {"role": "tool", "tool_call_id": "call-image", "content": [
+                {"type": "text", "text": "An actual Tool image follows."},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]},
+            # Identical bytes in text are *not* media. Even valid Base64 can
+            # be source code, pytest output, or a user's technical question.
+            {"role": "tool", "tool_call_id": "call-text",
+             "content": "pytest example: " + data_url},
+            {"role": "assistant", "content": "example: " + data_url},
+        ],
+    })
 
     with pytest.raises(MultimodalContractError) as exc_info:
-        deepseek_api._validate_deepseek_payload(
-            {
-                "messages": [
-                    {"role": "tool", "content": f"screenshot follows: {data_url}"}
-                ]
-            }
-        )
-
+        deepseek_api._validate_deepseek_payload({
+            "messages": [{"role": "assistant", "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+        })
     assert exc_info.value.code == "INVALID_MULTIMODAL_CONTENT"
 
 
@@ -1450,45 +1475,41 @@ def test_deepseek_payload_enforces_actual_serialized_body_limit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deepseek_tool_batch_defers_image_followup_until_all_tool_results(
-    tmp_path,
-):
+async def test_deepseek_tool_batch_preserves_native_tool_image_order(tmp_path):
     adapter = _adapter(tmp_path, model="deepseek-flash")
-    data_url = (
-        "data:image/png;base64,"
+    encoded = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
         "/x8AAusB9Y9Wl0sAAAAASUVORK5CYII="
     )
 
     async def execute(tool_name, arguments, tool_call_id=""):
         del arguments
-        output = data_url if tool_name == "windows_screenshot" else "listed"
-        return ToolResult(tool_call_id=tool_call_id, output=output)
+        if tool_name == "windows_screenshot":
+            return ToolResult(
+                tool_call_id=tool_call_id, output="captured",
+                content=[{"type": "image", "mimeType": "image/png", "data": encoded}],
+            )
+        return ToolResult(tool_call_id=tool_call_id, output="listed")
 
     adapter.tool_registry.execute = execute
     messages = []
     await adapter._run_tool_calls(
         [
-            {
-                "id": "call_screenshot",
-                "type": "function",
-                "function": {"name": "windows_screenshot", "arguments": "{}"},
-            },
-            {
-                "id": "call_list",
-                "type": "function",
-                "function": {"name": "file_list", "arguments": "{}"},
-            },
+            {"id": "call_screenshot", "type": "function",
+             "function": {"name": "windows_screenshot", "arguments": "{}"}},
+            {"id": "call_list", "type": "function",
+             "function": {"name": "file_list", "arguments": "{}"}},
         ],
         messages,
         on_stream_event=None,
     )
 
-    assert [message["role"] for message in messages] == ["tool", "tool", "user"]
-    assert [message["tool_call_id"] for message in messages[:2]] == [
-        "call_screenshot",
-        "call_list",
+    assert [message["role"] for message in messages] == ["tool", "tool"]
+    assert [message["tool_call_id"] for message in messages] == [
+        "call_screenshot", "call_list",
     ]
+    assert messages[0]["content"][-1]["type"] == "image_url"
+    assert messages[1]["content"] == "listed"
 
 
 @pytest.mark.asyncio

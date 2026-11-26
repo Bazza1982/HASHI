@@ -1261,7 +1261,11 @@ def calculate_cost(
         return None
     separate_thinking = 0 if thinking_in_output else max(0, int(thinking_tokens or 0))
     if separate_thinking and rates["thinking_per_unit"] is None:
-        return None
+        # Reasoning models whose provider bills reasoning at the standard output
+        # rate publish no separate reasoning price (OpenRouter reports
+        # internal_reasoning=null).  Price it as output, matching
+        # token_tracker.calc_cost, instead of declaring the whole turn unknown.
+        rates["thinking_per_unit"] = rates["output_per_unit"]
     total = (
         (input_count - cached_count) * float(rates["input_per_unit"] or 0.0)
         + cached_count * float(rates["cache_read_per_unit"] or 0.0)
@@ -1299,3 +1303,4 @@ def schedule_prewarm(
         daemon=True,
     ).start()
     return True
+# HASHI-Fingerprint: hfp_5eb5a7b008a042f09d16681f47fa10e3

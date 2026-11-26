@@ -254,12 +254,9 @@ class HLIAdapter(OpenAICompatibleAdapter):
             return None
 
     def _payload_serialization(self, payload: Mapping) -> str:
-        return json.dumps(
-            {key: payload.get(key) for key in ("messages", "tools") if key in payload},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            default=str,
-        )
+        from orchestrator.provider_text_projection import provider_text_capacity_json
+
+        return provider_text_capacity_json(payload)
 
     def _estimate_payload_tokens(self, payload: Mapping) -> tuple[int | None, Any | None]:
         """Shared HLI capacity measurement; informational, never a rejection."""
@@ -271,8 +268,6 @@ class HLIAdapter(OpenAICompatibleAdapter):
         if capacity is None:
             return None, None
         serialized = self._payload_serialization(payload)
-        if "data:" in serialized or "base64," in serialized:
-            return None, capacity
         return _hli_native_estimate(serialized), capacity
 
     def _preflight_payload_capacity(self, payload: Mapping[str, Any]) -> None:

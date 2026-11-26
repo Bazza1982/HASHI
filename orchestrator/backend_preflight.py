@@ -10,6 +10,7 @@ from adapters.xai_oauth_credentials import (
 )
 from orchestrator.pathing import resolve_agy_executable, resolve_dsh_executable, resolve_dsh_invocation
 from orchestrator.flexible_backend_registry import (
+    canonical_backend_engine,
     get_secret_lookup_order,
     removed_backend_reason,
 )
@@ -36,6 +37,25 @@ class BackendPreflight:
                 if secrets.get(secret_key):
                     return True
         return False
+
+    def _find_secret(self, engine: str, agent_configs, secrets) -> str:
+        """Return the first configured secret value for ``engine``, if any."""
+        for cfg in agent_configs:
+            for secret_key in get_secret_lookup_order(engine, getattr(cfg, "name", "")):
+                value = secrets.get(secret_key)
+                if value:
+                    return str(value)
+        return ""
+
+    @staticmethod
+    def _engine_declares_no_secret(engine: str) -> bool:
+        """Whether the registry deliberately declares no secret for ``engine``.
+
+        An empty ``secret_keys`` list means the engine authenticates elsewhere
+        (local runtime, CLI keyring, per-agent provider row). It must not be
+        read as "missing API key", which would disable the engine forever.
+        """
+        return not get_secret_lookup_order(engine, "")
 
     def check_backend_availability(self, global_cfg, agent_configs, secrets) -> dict[str, tuple[bool, str]]:
         """
@@ -123,8 +143,42 @@ class BackendPreflight:
                     result[engine] = (True, "API key present")
                 else:
                     result[engine] = (False, "no API key in secrets.json")
+            elif engine in {"deepseek-api", "hashi-api", "openai-compatible-api", "hli-api"}:
+                if self._engine_declares_no_secret(engine):
+                    result[engine] = (
+                        True,
+                        "no API key required by this engine",
+                    )
+                elif key := self._find_secret(engine, agent_configs, secrets):
+                    result[engine] = (True, "API key present")
+                else:
+                    result[engine] = (
+                        False,
+                        f"no API key in secrets.json for {engine}",
+                    )
+            elif engine == "ollama-api":
+                # Reachability belongs to the Ollama adapter, which resolves the
+                # per-Agent ``extra.ollama_url`` when a request is made. Probing
+                # global_cfg here would use the wrong endpoint and stop Agents
+                # from starting whenever Ollama is briefly unavailable.
+                result[engine] = (
+                    True,
+                    "connection handled by the Ollama adapter; not gated at startup",
+                )
+            elif canonical_backend_engine(engine) == "her-v2":
+                # ``her-v2`` is the stored identifier of the live HER runtime,
+                # not a removable engine. Every Agent row resolves its own
+                # provider and credentials, so availability is decided per row;
+                # a blanket False here would stop every HER Agent from starting.
+                result[engine] = (
+                    True,
+                    "HER runtime: availability is decided by the Agent's configured provider row",
+                )
             else:
-                result[engine] = (True, "unknown engine, assuming available")
+                result[engine] = (
+                    False,
+                    f"unknown engine '{engine}': no availability check implemented",
+                )
         return result
 
     def partition_agents_by_availability(
@@ -175,3 +229,4 @@ class BackendPreflight:
                 else:
                     skipped.append((cfg.name, f"{engine}: {reason}"))
         return startable, skipped
+# HASHI-Fingerprint: hfp_f67303142f2e4bf989d56bcfa4c688b2

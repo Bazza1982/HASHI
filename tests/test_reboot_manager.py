@@ -1425,8 +1425,10 @@ async def test_successor_reconciles_shared_function_without_touching_remote(
     assert record["status"] == "succeeded"
     assert record["shared_replacement"]["status"] == "committed"
     assert record["shared_replacement"]["adoption"] == new_kernel.function_release_adoption
-    assert "New code was not adopted" in render_notice(record, locale="en")
-    assert "新代码未采用" in render_notice(record, locale="zh-CN")
+    # Wording is presentation, not contract: the restart succeeded, and the
+    # uncommitted/legacy source is surfaced as a warning in both locales.
+    assert "⚠️" in render_notice(record, locale="en")
+    assert "⚠️" in render_notice(record, locale="zh-CN")
     assert "remote" not in record["shared_replacement"]
     assert all(record["online"].values())
     assert {item["old_pid"] for item in record["workers"].values()} == {101, 102}
@@ -2044,6 +2046,68 @@ async def test_commands_callbacks_and_rpc_acknowledge_real_transaction_and_scope
     with pytest.raises(FunctionWorkerProtocolError, match="inactive"):
         await rpc("core.reboot.submit", {"mode": "min"})
     kernel._runtime_map()["zelda"]._client = old
+
+
+@pytest.mark.asyncio
+async def test_real_command_path_carries_delay_and_cancel_to_the_manager(tmp_path):
+    from orchestrator import runtime_reboot, ui_language
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.function_worker_host import WorkerKernelFacade
+    from orchestrator.function_worker_supervisor import FunctionWorkerSupervisor
+
+    kernel, manager, _request = _notice_manager(tmp_path)
+    active = kernel.runtimes[0].client
+    supervisor = SimpleNamespace(kernel=kernel)
+
+    async def rpc(method, params):
+        return await FunctionWorkerSupervisor.handle_worker_request(
+            supervisor, active, method, params
+        )
+
+    facade = object.__new__(WorkerKernelFacade)
+    facade.peer = SimpleNamespace(request=rpc)
+    replies = []
+
+    async def reply(_update, text, **_kwargs):
+        replies.append(text)
+
+    runtime = SimpleNamespace(
+        name="zelda",
+        orchestrator=facade,
+        global_config=SimpleNamespace(project_root=tmp_path, ui_language="zh-CN"),
+        _is_authorized_user=lambda value: value == 42,
+        _reply_text=reply,
+    )
+    update = SimpleNamespace(
+        update_id=321,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(message_thread_id=7),
+    )
+    ui_language.set_preferred_locale(runtime, "zh-CN", update)
+    with ui_language.language_scope(runtime, update):
+        await FlexibleAgentRuntime.cmd_reboot(
+            runtime, update, SimpleNamespace(args=["min", "delay"])
+        )
+        # The Worker RPC must carry the modifier: no immediate cutover.
+        waiting = manager.receipts.records()[-1]
+        assert waiting["phase"] == "waiting_idle"
+        assert waiting["wait_limits"]["delay_seconds"] == 1800.0
+        assert manager.active_operation == waiting["id"]
+        assert kernel._restart_request is None
+        assert not kernel.shutdown_event.is_set()
+
+        await runtime_reboot.command(
+            runtime, update, SimpleNamespace(args=["cancel"])
+        )
+        await asyncio.sleep(0)
+    record = manager.receipts.get(waiting["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "delay_cancelled"
+    assert manager.active_operation is None
+    assert kernel._restart_request is None
+    assert not kernel.shutdown_event.is_set()
+    assert len(replies) == 2  # queued notice, then the cancel confirmation
 
 
 def test_reboot_notices_use_names_for_one_target_and_counts_for_many():

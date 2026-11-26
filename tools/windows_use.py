@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -696,7 +697,7 @@ def _extract_mcp_image(content: list[dict] | None) -> tuple[str | None, str | No
     return None, None
 
 
-async def execute_windows_screenshot(args: dict) -> str:
+async def execute_windows_screenshot(args: dict, *, typed_media: bool = False) -> str:
     save_path, save_path_error = _resolve_windows_save_path(args.get("save_path"))
     if save_path_error:
         return f"Error: {save_path_error}"
@@ -707,7 +708,22 @@ async def execute_windows_screenshot(args: dict) -> str:
 
     helper_result = await _maybe_execute_windows_helper("screenshot", helper_args)
     if helper_result is not None:
-        return helper_result
+        if not typed_media or not helper_result.startswith("Windows screenshot OK"):
+            return helper_result
+        # The older Windows helper has only a string wire response. Decode
+        # that known screenshot response here at its owning Tool boundary,
+        # never by searching arbitrary conversation or Tool stdout.
+        description, marker, media = helper_result.rpartition("\ndata:")
+        header, separator, encoded = media.partition(",")
+        if not marker or not separator or header != "image/png;base64":
+            return "Error: Windows screenshot helper returned an invalid media envelope"
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+            from tools.typed_media_result import screenshot_tool_result
+
+            return screenshot_tool_result(payload, description)
+        except (ValueError, binascii.Error) as exc:
+            return f"Error: Windows screenshot helper image invalid: {type(exc).__name__}"
     requested_provider = args.get("provider")
     if error := _provider_error(requested_provider):
         return error
@@ -748,10 +764,18 @@ async def execute_windows_screenshot(args: dict) -> str:
                         Path(save_path).write_bytes(raw_bytes)
                     size_kb = len(raw_bytes) // 1024
                     saved_note = f"\nSaved to: {save_path}" if save_path else ""
-                    return (
+                    description = (
                         f"Windows screenshot OK — provider=windows-mcp, {size_kb}KB\n"
-                        f"Details: {text}{saved_note}\n"
-                        f"data:{mime_type or 'image/png'};base64,{image_b64}"
+                        f"Details: {text}{saved_note}"
+                    )
+                    if typed_media:
+                        from tools.typed_media_result import screenshot_tool_result
+
+                        return screenshot_tool_result(
+                            raw_bytes, description, mime_type=mime_type or "image/png",
+                        )
+                    return description + (
+                        f"\ndata:{mime_type or 'image/png'};base64,{image_b64}"
                     )
 
     extra = []
@@ -811,11 +835,19 @@ try {{
     metadata = data.get("metadata")
     saved = data.get("saved_to")
     saved_note = f"\nSaved to: {saved}" if saved else ""
-    return (
+    description = (
         f"Windows screenshot OK — provider=usecomputer, {size_kb}KB\n"
-        f"Metadata: {json.dumps(metadata, ensure_ascii=False)}{saved_note}\n"
-        f"data:image/png;base64,{data.get('base64', '')}"
+        f"Metadata: {json.dumps(metadata, ensure_ascii=False)}{saved_note}"
     )
+    if typed_media:
+        from tools.typed_media_result import screenshot_tool_result
+
+        try:
+            png = base64.b64decode(data.get("base64", ""), validate=True)
+            return screenshot_tool_result(png, description)
+        except (ValueError, binascii.Error) as exc:
+            return f"Error: Windows screenshot image invalid: {type(exc).__name__}"
+    return description + f"\ndata:image/png;base64,{data.get('base64', '')}"
 
 
 async def execute_windows_mouse_move(args: dict) -> str:

@@ -1,0 +1,60 @@
+name: HERV3 typed media integration
+
+'on':
+  pull_request:
+    paths:
+      - 'adapters/**'
+      - 'orchestrator/multimodal_contract.py'
+      - 'orchestrator/provider_text_projection.py'
+      - 'orchestrator/api_gateway.py'
+      - 'orchestrator/her_v2/privacy_gate.py'
+      - 'tools/**'
+      - 'tests/test_*media*'
+      - 'tests/test_deepseek_api.py'
+      - 'tests/test_hli_provider.py'
+      - 'tests/test_tool_gateway_mcp.py'
+      - 'tests/test_tool_registry_device_capabilities.py'
+      - 'tests/test_browser_gateway_proxy.py'
+      - '.github/workflows/herv3-typed-media.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typed-media:
+    name: Typed media, text preservation and tool transport
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Configure declared Python runtime
+        shell: bash
+        run: |
+          uv venv --seed --python "3.12.13" .venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Install Functions test environment
+        run: python -m pip install -r constraints/standard-py312.lock ".[test,media]"
+      - name: Compile changed HERV3 and Tool modules
+        run: |
+          python -m compileall -q adapters/deepseek_api.py adapters/openrouter_api.py adapters/hli_api.py orchestrator/multimodal_contract.py orchestrator/api_gateway.py orchestrator/her_v2/privacy_gate.py orchestrator/provider_text_projection.py tools/typed_media_result.py tools/browser.py tools/windows_use.py tools/desktop.py tools/registry.py tools/gateway/mcp_stdio.py tools/device_control_worker.py tools/windows_helper/backends.py
+      - name: Validate typed media and ordinary text paths
+        run: |
+          python -m pytest -q \
+            tests/test_typed_media_boundary.py \
+            tests/test_pr204_review_regressions.py \
+            tests/test_device_control_worker.py \
+            tests/test_deepseek_api.py \
+            tests/test_multimodal_contract.py \
+            tests/test_api_gateway_tool_passthrough.py \
+            tests/test_her_privacy_pilot.py \
+            tests/test_hli_provider.py \
+            tests/test_tool_gateway_mcp.py \
+            tests/test_tool_registry_device_capabilities.py \
+            tests/test_browser_gateway_proxy.py \
+            tests/test_windows_helper_backends.py

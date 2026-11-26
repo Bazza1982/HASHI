@@ -44,7 +44,7 @@ standard = [
     "zeroconf>=0.136.0",
     "cryptography>=45.0.0",
     "rich>=13.0.0",
-    "textual>=0.50.0",
+    "textual>=8.2.8,<9.0.0",
     "playwright>=1.40.0",
 ]
 media = [
@@ -59,9 +59,10 @@ remote = [
 ]
 tui = [
     "rich>=13.0.0",
-    "textual>=0.50.0",
+    "textual>=8.2.8,<9.0.0",
 ]
 test = [
+    "anyio>=4.0.0,<5.0.0",
     "pytest>=9.0.3,<10.0.0",
     "pytest-asyncio>=0.23.0",
     "httpx2>=2.12.0,<3.0.0",
@@ -102,7 +103,7 @@ all = [
     "zeroconf>=0.136.0",
     "cryptography>=45.0.0",
     "rich>=13.0.0",
-    "textual>=0.50.0",
+    "textual>=8.2.8,<9.0.0",
     "neonize>=0.4.3.post0,<0.5.0",
     "segno>=1.6.0",
     "playwright>=1.40.0",
@@ -172,7 +173,6 @@ testpaths = [
     "tests/test_device_control_worker.py",
     "tests/test_device_paths.py",
     "tests/test_her_v2_adapter.py",
-    "tests/test_her_v2_core.py",
     "tests/test_function_contract.py",
     "tests/test_function_generation.py",
     "tests/test_minimal_core.py",
@@ -190,12 +190,10 @@ testpaths = [
     "tests/test_runtime_command_binding.py",
     "tests/test_runtime_working_modes.py",
     "tests/test_runtime_lifecycle.py",
-    "tests/test_runtime_contract.py",
     "tests/test_runtime_roles.py",
     "tests/test_runtime_installation.py",
     "tests/test_runtime_role_profiles.py",
     "tests/test_runtime_process.py",
-    "tests/test_runtime_admission_failures.py",
     "tests/test_kernel_cancellation.py",
     "tests/test_runtime_builder_safety.py",
     "tests/test_service_manager_scheduler_lease.py",
@@ -249,8 +247,6 @@ select = ["E4", "E7", "E9", "F"]
 
 # These tests install dependency stubs before importing runtime modules.
 "tests/test_agent_runtime_job_transfer.py" = ["E402"]
-"tests/test_anatta_audit_compatibility.py" = ["E402"]
-"tests/test_audit_mode.py" = ["E402"]
 "tests/test_browser_mode.py" = ["E402"]
 "tests/test_flexible_runtime_observers.py" = ["E402"]
 "tests/test_pcm_audit_memory_wiki.py" = ["E402"]
