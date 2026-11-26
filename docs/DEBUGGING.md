@@ -594,3 +594,5 @@ Scope: active stress-testing cycle on 2026-03-11 (3-hour protocol, stopped early
 2. Add per-source delivery assertions (`api` vs `system` vs `fyi`) to catch branch regressions earlier.
 3. Add retries with capped attempts for transient Telegram failures, but preserve raw first-failure evidence.
 4. Prioritize fix validation for `Chat not found` on automatic send branches before next long soak run.
+
+Gateway observability retains up to 16 KiB of each request or response body with the full byte count, SHA-256 digest and truncation flag. The active Gateway and startup presentation logs rotate at 16 MiB with three backups. Restart receipts with no progress for over 24 hours are presented as unconfirmed terminal outcomes.

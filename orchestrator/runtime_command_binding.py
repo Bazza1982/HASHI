@@ -232,7 +232,16 @@ def get_flexible_bot_commands(runtime, *, locale: str | None = None) -> list[Bot
         )
         for command in runtime_bot_commands()
     ]
-    return commands + dynamic
+    # Telegram accepts at most 100 entries. Retain runtime commands and
+    # WOL, then omit older command aliases from the picker when necessary.
+    combined = commands + dynamic
+    for alias in ("fresh", "start"):
+        if len(combined) <= 100:
+            break
+        combined = [command for command in combined if command.command != alias]
+    if len(combined) > 100:
+        combined = combined[:100]
+    return combined
 
 
 async def register_flexible_bot_commands(runtime) -> None:

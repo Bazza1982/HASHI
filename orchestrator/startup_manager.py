@@ -1016,7 +1016,8 @@ class StartupManager:
             main_logger.warning("Connector startup is degraded; inspect /api/health for affected agents.",
                                 extra={"terminal_safe": True})
         report = getattr(self.kernel, "_report_startup", None)
-        if callable(report):
+        if callable(report) and not getattr(self, "_connector_startup_reported", False):
+            self._connector_startup_reported = True
             report()
 
     def show_startup_status(self) -> None:
