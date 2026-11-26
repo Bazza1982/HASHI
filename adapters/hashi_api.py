@@ -64,7 +64,6 @@ from adapters.openrouter_api import (
     _usage_cost_usd,
     _usage_cache_tokens,
     _usage_thinking_tokens,
-    compact_intra_turn_tool_messages,
 )
 from adapters.stream_events import (
     DELIVERY_INTERNAL,
@@ -990,6 +989,7 @@ class HashiApiAdapter(OpenRouterAdapter):
         provider_call_limit: int | None = None,
         before_provider_call: Any = None,
         transient_images=None,
+        history_messages=None,
     ) -> BackendResponse:
         del resume_pending_tools
         if continuation_messages is not None:
@@ -1041,6 +1041,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                 prompt,
                 request_content,
                 transient_images=transient_images,
+                history_messages=history_messages,
             )
             outbound_messages = messages
             self._last_media_routing = media_routing
@@ -1600,6 +1601,7 @@ class HashiApiAdapter(OpenRouterAdapter):
                 tool_loop_count += 1
                 total_tool_calls += len(result.tool_calls)
 
+                tool_round_msg_start = len(messages)
                 assistant_msg: dict = {"role": "assistant"}
                 if result.text:
                     assistant_msg["content"] = result.text
@@ -1662,29 +1664,15 @@ class HashiApiAdapter(OpenRouterAdapter):
                 # delta. Inline media deliberately bypasses that cache, so
                 # stateless rounds must retain the user content, assistant
                 # calls and every preceding tool result.
-                compacted_tool_outputs = compact_intra_turn_tool_messages(
+                self._maintain_intra_turn_context(
                     messages,
                     last_input_tokens=int(
                         (last_provider_call_record or {}).get("input") or 0
                     ),
-                    trigger_tokens=int(
-                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_TOKENS", 110_000)
-                    ),
-                    trigger_chars=int(
-                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_CHARS", 360_000)
-                    ),
-                    keep_recent_tool_messages=int(
-                        getattr(self, "INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS", 12)
-                    ),
+                    new_messages_start=tool_round_msg_start,
+                    request_id=request_id,
+                    loop_idx=loop_idx,
                 )
-                if compacted_tool_outputs:
-                    self.logger.info(
-                        "Intra-turn context maintenance compacted %d older tool result(s) "
-                        "(request_id=%s, loop=%d)",
-                        compacted_tool_outputs,
-                        request_id,
-                        loop_idx + 1,
-                    )
                 self._observe_provider_context(
                     boundary="completed_tool_batch",
                     messages=messages,

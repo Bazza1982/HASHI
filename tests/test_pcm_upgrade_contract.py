@@ -371,7 +371,7 @@ def test_workzones_use_protected_runtime_envelope_without_rendering_revision(tmp
     assert "workzone_revision" not in payload["final_prompt"]
 
 
-def test_legacy_assembler_caller_injects_latest_ten_completed_exchanges(tmp_path):
+def test_legacy_assembler_caller_preserves_completed_exchanges_append_only(tmp_path):
     store, assembler = _assembler(tmp_path)
     for index in range(12):
         store.record_completed_exchange(
@@ -385,9 +385,11 @@ def test_legacy_assembler_caller_injects_latest_ten_completed_exchanges(tmp_path
 
     payload = assembler.build_prompt_payload("now", "openrouter-api")
 
-    assert payload["audit"]["history_requested"] == 10
-    assert "USER: U0\n" not in payload["final_prompt"]
-    assert "USER: U1\n" not in payload["final_prompt"]
+    # Within budget, history stays append-only instead of sliding off oldest
+    # exchanges one-by-one past 10 turns.
+    assert payload["audit"]["history_requested"] == 12
+    assert "USER: U0\n" in payload["final_prompt"]
+    assert "USER: U1\n" in payload["final_prompt"]
     assert "USER: U2\n" in payload["final_prompt"]
     assert "USER: U11\n" in payload["final_prompt"]
     assert "INCOMPLETE" not in payload["final_prompt"]

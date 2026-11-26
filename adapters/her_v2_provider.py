@@ -100,7 +100,7 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
-from orchestrator.her_v2.v3_prompt import compile_main_prompt
+from orchestrator.her_v2.v3_prompt import compile_main_prompt, compile_main_turn
 from orchestrator.her_v2.task_state import (
     HASHI_TASK_DELTA_ARGUMENT,
     HERTaskState,
@@ -6092,6 +6092,7 @@ class HashiStageProvider(StageProvider):
             await self.on_stream_event(event)
 
         try:
+            stage_history_messages: list[dict[str, str]] = []
             if visual_fallback_notice is not None:
                 await self._deliver_visual_fallback_warning(
                     visual_fallback_notice,
@@ -6299,21 +6300,50 @@ class HashiStageProvider(StageProvider):
                                 and {"ask_user", "get_user_answer"} <= catalogue_tool_names
                                 and await self._question_cards_available()
                             )
-                            system_prompt, stage_prompt = compile_main_prompt(
-                                pcm_input=pcm_input,
-                                fallback_request=request.goal,
-                                context=request.context,
-                                fallback_persona=(source.guidance if source.usable else ""),
-                                tools_available=request.allow_tools,
-                                developer_toolkit_enabled=toolkit_guidance,
-                                question_cards_enabled=question_cards_available,
-                                reference_projector=getattr(
-                                    backend, "project_main_references", None
-                                ),
-                                pcm_profile=str(
-                                    pcm_input.get("pcm_profile") or "cloud"
-                                ),
+                            reference_projector = getattr(
+                                backend, "project_main_references", None
                             )
+                            backend_params = inspect.signature(
+                                backend.generate_response
+                            ).parameters
+                            supports_history_messages = (
+                                "history_messages" in backend_params
+                                or any(
+                                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                                    for parameter in backend_params.values()
+                                )
+                            )
+                            if reference_projector is None and supports_history_messages:
+                                (
+                                    system_prompt,
+                                    stage_history_messages,
+                                    stage_prompt,
+                                ) = compile_main_turn(
+                                    pcm_input=pcm_input,
+                                    fallback_request=request.goal,
+                                    context=request.context,
+                                    fallback_persona=(source.guidance if source.usable else ""),
+                                    tools_available=request.allow_tools,
+                                    developer_toolkit_enabled=toolkit_guidance,
+                                    question_cards_enabled=question_cards_available,
+                                    pcm_profile=str(
+                                        pcm_input.get("pcm_profile") or "cloud"
+                                    ),
+                                )
+                            else:
+                                system_prompt, stage_prompt = compile_main_prompt(
+                                    pcm_input=pcm_input,
+                                    fallback_request=request.goal,
+                                    context=request.context,
+                                    fallback_persona=(source.guidance if source.usable else ""),
+                                    tools_available=request.allow_tools,
+                                    developer_toolkit_enabled=toolkit_guidance,
+                                    question_cards_enabled=question_cards_available,
+                                    reference_projector=reference_projector,
+                                    pcm_profile=str(
+                                        pcm_input.get("pcm_profile") or "cloud"
+                                    ),
+                                )
                         else:
                             system_prompt = _direct_system_prompt(
                                 source,
@@ -6555,6 +6585,7 @@ class HashiStageProvider(StageProvider):
                     stage_prompt = f"{contract}\n\n{stage_prompt}"
 
             assembled_original_request = ""
+            assembled_prompt_index = 1 + len(stage_history_messages)
             if primary_direct and request.context.get("her_v3"):
                 current_pcm = request.context.get("pcm_input")
                 assembled_original_request = str(
@@ -6562,7 +6593,7 @@ class HashiStageProvider(StageProvider):
                     or request.goal
                 )
                 self._provider_context_prompt_candidate = (
-                    stage_prompt, assembled_original_request, 1,
+                    stage_prompt, assembled_original_request, assembled_prompt_index,
                     provider_request_content is not None, "assembled",
                 )
 
@@ -6612,7 +6643,7 @@ class HashiStageProvider(StageProvider):
                         + json.dumps(reconstructed, ensure_ascii=False, default=str)
                     )
                     self._provider_context_prompt_candidate = (
-                        stage_prompt, assembled_original_request, 1,
+                        stage_prompt, assembled_original_request, assembled_prompt_index,
                         provider_request_content is not None, "assembled",
                     )
                 if continuation_messages is not None:
@@ -6653,6 +6684,12 @@ class HashiStageProvider(StageProvider):
                         candidate = self._provider_context_prompt_candidate
                         if candidate:
                             self._provider_context_prompt_candidate = (*candidate[:3], True, candidate[4])
+            if (
+                stage_history_messages
+                and "continuation_messages" not in generation_kwargs
+                and ("history_messages" in parameters or accepts_extra_keywords)
+            ):
+                generation_kwargs["history_messages"] = stage_history_messages
             if provider_request_content is not None:
                 if "request_content" not in parameters and not any(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD

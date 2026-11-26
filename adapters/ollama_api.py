@@ -375,6 +375,7 @@ class OllamaAdapter(OpenRouterAdapter):
         provider_call_limit=None,
         before_provider_call=None,
         transient_images=None,
+        history_messages=None,
     ):
         self._ollama_prompt_tokens = None
         self._ollama_last_output_tokens = 0
@@ -394,5 +395,6 @@ class OllamaAdapter(OpenRouterAdapter):
             provider_call_limit=provider_call_limit,
             before_provider_call=before_provider_call,
             transient_images=transient_images,
+            history_messages=history_messages,
         )
 # HASHI-Fingerprint: hfp_3b97dc785a0241599b268280385c82ea

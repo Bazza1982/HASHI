@@ -1767,7 +1767,8 @@ class BridgeContextAssembler:
         "hashi_pcm_non_her_64k_tokens_v1"
     )
     HISTORY_CAPSULE_EXCERPT_CHARS: ClassVar[int] = 320
-    MAX_RECENT_EXCHANGES: ClassVar[int] = 10
+    HISTORY_COMPACTION_LOW_WATERMARK_RATIO: ClassVar[float] = 0.70
+    MAX_RECENT_EXCHANGES: ClassVar[int] = 64
     AUTHORITY_RANKS: ClassVar[dict[str, int]] = {
         "permanent_system": 900,
         "global_system": 800,
@@ -2427,7 +2428,9 @@ class BridgeContextAssembler:
         exchanges = []
         if should_inject_history:
             if recent_exchanges is not None:
-                exchanges = list(recent_exchanges)[-history_limit:]
+                # Preserve append-only history without sliding-window front drops;
+                # token-budget batch compaction below handles overflow cleanly.
+                exchanges = list(recent_exchanges)
             else:
                 # Compatibility for legacy callers and migration tooling. The
                 # live runtime always supplies a Session-scoped timeline.
@@ -2775,20 +2778,26 @@ class BridgeContextAssembler:
             )
             sections.insert(first_history, capsule)
 
-        if limit is not None:
-            while _estimate_tokens(self._render_pcm_prompt(sections)) > limit:
-                history_index = next(
-                    (
-                        index
-                        for index, section in enumerate(sections)
-                        if section["authority"] == "history"
-                        and section["key"].startswith("recent_exchange:")
-                    ),
-                    None,
-                )
-                if history_index is None:
+        if limit is not None and _estimate_tokens(self._render_pcm_prompt(sections)) > limit:
+            # Batch-compact oldest whole exchanges down to a low watermark so
+            # subsequent turns remain append-only instead of sliding off one
+            # exchange per turn and busting prefix KV caches.
+            low_target = max(1, int(limit * self.HISTORY_COMPACTION_LOW_WATERMARK_RATIO))
+            while True:
+                current_tokens = _estimate_tokens(self._render_pcm_prompt(sections))
+                if current_tokens <= low_target:
                     break
-                removed = sections.pop(history_index)
+                history_indices = [
+                    index
+                    for index, section in enumerate(sections)
+                    if section["authority"] == "history"
+                    and section["key"].startswith("recent_exchange:")
+                ]
+                if not history_indices:
+                    break
+                if len(history_indices) == 1 and current_tokens <= limit:
+                    break
+                removed = sections.pop(history_indices[0])
                 omitted.append(
                     {
                         "key": removed["key"],
