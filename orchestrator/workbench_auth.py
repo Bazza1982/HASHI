@@ -13,6 +13,10 @@ from pathlib import Path
 from orchestrator.config_json import ConfigDocument, write_config_json
 
 
+# Persisted after an explicit /remote token clear so startup provisioning does
+# not recreate a credential the owner deliberately removed.
+REMOTE_SHARED_TOKEN_DISABLED_KEY = "hashi_remote_shared_token_disabled"
+
 _WINDOWS_SID = re.compile(r"S-1(?:-\d+)+", re.IGNORECASE)
 _WINDOWS_REMOTE_QUERY_TIMEOUT = 30
 _WINDOWS_QUERY_PHASE = re.compile(r"HASHI_REMOTE_QUERY_PHASE:([a-z_]{1,40}):(\d{1,12})")
@@ -187,6 +191,9 @@ def ensure_local_api_credential(
     needs_network = not (
         (isinstance(network, str) and network.strip())
         or os.environ.get("HASHI_REMOTE_SHARED_TOKEN", "").strip()
+        # An explicit clear must survive the next startup, otherwise the
+        # auto-provisioning below would silently recreate the credential.
+        or bool(document.get(REMOTE_SHARED_TOKEN_DISABLED_KEY))
     )
     needs_local = not (isinstance(current, str) and current.strip())
     if isinstance(remote_runtime_sids, (str, bytes)):

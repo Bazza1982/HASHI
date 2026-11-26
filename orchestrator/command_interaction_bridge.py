@@ -14,6 +14,19 @@ from orchestrator.command_interactions import (
 )
 from orchestrator.slash_command_audit import redact_args
 
+
+INLINE_TOKEN_ERROR_CODE = "inline_token_rejected"
+INLINE_TOKEN_ERROR_MESSAGE = (
+    "Inline token values are not accepted; run /remote token set and reply to the prompt."
+)
+
+
+def _redact_inline_token_args(command_name: str, arguments: list[str]) -> list[str]:
+    from orchestrator.commands.remote import redact_inline_token_args
+
+    return redact_inline_token_args(command_name, arguments)
+
+
 logger = logging.getLogger("HASHI.CommandInteractions")
 
 
@@ -73,7 +86,9 @@ def build_frontend_command_invocation(
             "command": command_name,
             "issued_action_id": issued_action_id,
             "revision": revision,
-            "arguments": redact_args(command_name, arguments),
+            "arguments": redact_args(
+                command_name, _redact_inline_token_args(command_name, arguments)
+            ),
             "actor_digest": f"sha256:{actor_digest}",
             "idempotency_digest": f"sha256:{idempotency_digest}",
             "authorization": {"decision": decision, "scope": "owner"},
@@ -229,7 +244,13 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
             except ValueError:
                 raise InteractionError("command_menu_command_invalid", 400) from None
             from orchestrator.admin_local_testing import _split_command
+            from orchestrator.commands.remote import inline_token_attempt
+
             command, command_args = _split_command(command_line)
+            if inline_token_attempt(command, command_args):
+                raise InteractionError(
+                    INLINE_TOKEN_ERROR_CODE, 400, INLINE_TOKEN_ERROR_MESSAGE
+                )
             if not command_line.lstrip().startswith("/") or not _allowed(runtime, command):
                 raise InteractionError("command_menu_forbidden", 403)
             typed_invocations.append(
@@ -522,3 +543,4 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
         )
     except InteractionError as exc:
         return exc.result()
+# HASHI-Fingerprint: hfp_cce937288a884aeaab39b92daba2ad8a

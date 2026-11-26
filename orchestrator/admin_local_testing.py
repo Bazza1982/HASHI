@@ -309,6 +309,59 @@ def _runtime_agent_name(runtime) -> str:
     return str(getattr(runtime, "name", None) or getattr(getattr(runtime, "config", None), "name", "unknown"))
 
 
+INLINE_TOKEN_ERROR_CODE = "inline_token_rejected"
+INLINE_TOKEN_ERROR_MESSAGE = (
+    "Inline token values are not accepted; run /remote token set and reply to the prompt."
+)
+
+
+def _inline_token_attempt(command_name: str, args: list[str] | None) -> bool:
+    from orchestrator.commands.remote import inline_token_attempt
+
+    return inline_token_attempt(command_name, args)
+
+
+def _redact_inline_token_args(command_name: str, args: list[str] | None) -> list[str]:
+    from orchestrator.commands.remote import redact_inline_token_args
+
+    return redact_inline_token_args(command_name, args)
+
+
+def _reject_inline_token_command(
+    runtime,
+    command_name: str,
+    args: list[str],
+    *,
+    chat_id: int | str | None,
+    source_channel: str,
+) -> dict[str, Any]:
+    """Refuse an inline token before audit, invocation or session projection."""
+    audit_args = _redact_inline_token_args(command_name, args)
+    actor_id = getattr(getattr(runtime, "global_config", None), "authorized_id", None)
+    session = SlashCommandAuditSession(
+        audit_path=_runtime_audit_path(runtime),
+        agent=_runtime_agent_name(runtime),
+        command_name=command_name or "(empty)",
+        args=audit_args,
+        source_channel=source_channel,
+        handler_kind=resolve_handler_kind(runtime, command_name) if command_name else "unknown",
+        actor_id=actor_id,
+        chat_id=chat_id if chat_id is not None else actor_id,
+    )
+    try:
+        session.block(INLINE_TOKEN_ERROR_CODE)
+        return {
+            "ok": False,
+            "command": command_name,
+            "args": audit_args,
+            "error": INLINE_TOKEN_ERROR_MESSAGE,
+            "error_code": INLINE_TOKEN_ERROR_CODE,
+            "request_outcome": "rejected",
+        }
+    finally:
+        session.finish()
+
+
 async def try_execute_slash_command_text(
     runtime,
     text: str,
@@ -341,6 +394,15 @@ async def try_execute_slash_command_text(
         return interaction
     if not looks_like_slash_command(text):
         return None
+    command_name, args = parse_slash_command_text(text)
+    if _inline_token_attempt(command_name, args):
+        return _reject_inline_token_command(
+            runtime,
+            command_name,
+            args,
+            chat_id=chat_id,
+            source_channel=source_channel,
+        )
     if getattr(runtime, "is_function_worker_proxy", False):
         return await runtime.execute_slash_command(
             text,
@@ -348,7 +410,6 @@ async def try_execute_slash_command_text(
             chat_id=chat_id,
             session_metadata=session_metadata,
         )
-    command_name, args = parse_slash_command_text(text)
     if command_name in {"telegram", "whatsapp"}:
         return await _execute_connector_mirror_command(
             runtime,
@@ -365,11 +426,12 @@ async def try_execute_slash_command_text(
     if callable(is_allowed) and not is_allowed(command_name):
         local_chat_id = chat_id or runtime.global_config.authorized_id
         actor_id = getattr(runtime.global_config, "authorized_id", None)
+        audit_args = _redact_inline_token_args(command_name, args)
         session = SlashCommandAuditSession(
             audit_path=_runtime_audit_path(runtime),
             agent=_runtime_agent_name(runtime),
             command_name=command_name,
-            args=args,
+            args=audit_args,
             source_channel=source_channel,
             handler_kind=resolve_handler_kind(runtime, command_name),
             actor_id=actor_id,
@@ -380,7 +442,7 @@ async def try_execute_slash_command_text(
             return {
                 "ok": False,
                 "command": command_name,
-                "args": args,
+                "args": audit_args,
                 "error": f"/{command_name} is disabled for this agent.",
             }
         finally:
@@ -532,6 +594,15 @@ async def execute_local_command(
     capture_store: Any | None = None,
 ) -> dict[str, Any]:
     session_metadata = _trusted_command_session_metadata(session_metadata)
+    command_name, args = _split_command(command_line)
+    if _inline_token_attempt(command_name, args):
+        return _reject_inline_token_command(
+            runtime,
+            command_name,
+            args,
+            chat_id=chat_id,
+            source_channel=source_channel,
+        )
     if getattr(runtime, "is_function_worker_proxy", False):
         result = await runtime.execute_slash_command(
             command_line,

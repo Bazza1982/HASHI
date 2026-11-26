@@ -809,9 +809,10 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "Control Hashi Remote",
         "tools",
         guide=CommandGuide(
-            "/remote [status|refresh|exchange|direct|on|off]",
-            ("status", "refresh", "exchange", "direct", "on", "off"),
-            example="/remote refresh",
+            # `token` is a subcommand of this handler, not a second command.
+            "/remote [status|refresh|exchange|direct|on|off|token]",
+            ("status", "refresh", "exchange", "direct", "on", "off", "token"),
+            example="/remote token status",
         ),
     ),
     CommandSpec("wol", "cmd_wol", "Send Wake-on-LAN magic packet [pc_name]", "tools", menu_visible=False),
@@ -822,3 +823,4 @@ COMMAND_SPEC_BY_NAME = {spec.name: spec for spec in COMMAND_SPECS}
 SENSITIVE_COMMAND_NAMES = frozenset(
     spec.name for spec in COMMAND_SPECS if spec.sensitive
 )
+# HASHI-Fingerprint: hfp_2784e947eaf14567abf9bf493a9a6453
