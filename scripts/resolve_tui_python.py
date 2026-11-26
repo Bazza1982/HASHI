@@ -38,8 +38,13 @@ LABEL_VENV = "developer-venv"
 LABEL_PATH = "path-python3"
 
 
-def _functions_runtime(code_root: Path) -> str | None:
-    """Return the installer-qualified Functions interpreter, if declared.
+def _functions_runtime(code_root: Path) -> list[str]:
+    """Return the installer-prepared interpreters, in catalogue order.
+
+    This reuses the installer's own candidate catalogue and stops there: the
+    full Core/Functions contract is a *server* question, and a contract failure
+    must never hide the interpreter that can still run the TUI. Whether a
+    candidate is usable is decided by the TUI import probe alone.
 
     The checkout root is placed on ``sys.path`` first: when this script is
     started from outside the repository (a desktop shortcut, another directory)
@@ -52,15 +57,19 @@ def _functions_runtime(code_root: Path) -> str | None:
         if entry not in sys.path:
             sys.path.insert(0, entry)
     try:
-        from scripts.hashi_instance_cli import _select_core_runtime
+        from scripts.hashi_instance_cli import _prepared_role_candidates
     except Exception:  # pragma: no cover - only on a broken install tree
-        return None
+        return []
     try:
-        _core, functions = _select_core_runtime(code_root, with_functions=True)
+        prepared = _prepared_role_candidates(Path(code_root).resolve())
     except Exception:
-        return None
-    candidate = str(functions[0]) if functions else ""
-    return candidate or None
+        return []
+    found: list[str] = []
+    for candidate in prepared:
+        executable = str(candidate[0]) if candidate else ""
+        if executable and Path(executable).is_file():
+            found.append(executable)
+    return found
 
 
 def _portable_python(code_root: Path) -> str | None:
@@ -91,16 +100,17 @@ def _candidates(code_root: Path) -> list[tuple[str, str]]:
     ordered: list[tuple[str, str]] = []
     for label, resolver in (
         (LABEL_FUNCTIONS, lambda: _functions_runtime(code_root)),
-        (LABEL_PORTABLE, lambda: _portable_python(code_root)),
-        (LABEL_VENV, lambda: _venv_python(code_root)),
-        (LABEL_PATH, _path_python),
+        (LABEL_PORTABLE, lambda: [_portable_python(code_root)]),
+        (LABEL_VENV, lambda: [_venv_python(code_root)]),
+        (LABEL_PATH, lambda: [_path_python()]),
     ):
         try:
             resolved = resolver()
         except Exception:
-            resolved = None
-        if resolved:
-            ordered.append((label, resolved))
+            resolved = []
+        for executable in resolved or []:
+            if executable:
+                ordered.append((label, executable))
     # De-duplicate while preserving order.
     seen: set[str] = set()
     unique: list[tuple[str, str]] = []

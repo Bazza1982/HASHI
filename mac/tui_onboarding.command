@@ -41,15 +41,11 @@ if [ -z "$PYTHON_EXE" ] || [ ! -x "$PYTHON_EXE" ]; then
     echo "        starting in rescue mode."
 fi
 
-# ---- Server runtime contract: informational only, never fatal ----
-HASHI_TUI_RUNTIME_STATUS="unknown"
-if "$PYTHON_EXE" -B "$ROOT/scripts/check_runtime_contract.py" --code-root "$ROOT" >> "$LOG_FILE" 2>&1; then
-    HASHI_TUI_RUNTIME_STATUS="ok"
-else
-    HASHI_TUI_RUNTIME_STATUS="drifted"
-    echo "NOTICE: Core/Functions server dependencies are not satisfied; onboarding starts anyway." >> "$LOG_FILE"
-fi
-export HASHI_TUI_RUNTIME_STATUS
+# ---- Server runtime: reported by /doctor, never by this launcher ----
+# The TUI does not use server-side packages, so running the server dependency
+# contract here would check the wrong role under the TUI interpreter and blame
+# the TUI for a server mismatch. /doctor reports the Core/Functions pair from
+# the qualified selector instead.
 
 # Bridge launch command (needs the qualified Core runtime when declared).
 CORE_PYTHON="$PYTHON_EXE"
@@ -77,7 +73,6 @@ INSTANCE_ID="$("$BOOTSTRAP" "$ROOT/scripts/resolve_instance_runtime.py" \
     echo "Started: $(date)"
     echo "Python:  $PYTHON_EXE"
     echo "Root:    $ROOT"
-    echo "Server dependency contract: $HASHI_TUI_RUNTIME_STATUS"
     echo "===================================================="
 } >> "$LOG_FILE"
 

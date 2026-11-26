@@ -41,6 +41,12 @@ _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT  # noqa: E402
+
+# The documented fallback identity, identical to the value
+# ``tui.instances.load_launch_instance`` has always applied.
+DEFAULT_LAUNCH_INSTANCE_ID = "HASHI"
+
 
 def _get_bridge_home() -> Path:
     configured = str(os.environ.get("BRIDGE_HOME") or "").strip()
@@ -70,7 +76,7 @@ def _get_workbench_urls() -> tuple[str, list[str], str]:
             )
         return instance_id, [endpoint_url], endpoint_url
 
-    instance_id, port = _verified_launch_identity(bridge_home)
+    instance_id, port = _launch_identity(bridge_home)
     urls = _instances().local_workbench_urls(port)
     configured = str(os.environ.get("HASHI_WORKBENCH_URL") or "").strip().rstrip("/")
     if configured:
@@ -83,37 +89,46 @@ def _get_workbench_url() -> str:
     return _get_workbench_urls()[2]
 
 
-def _verified_launch_identity(bridge_home: Path) -> tuple[str, int]:
-    """Return the identity this installation declares, or raise.
+def _launch_identity(bridge_home: Path) -> tuple[str, int]:
+    """Return this installation's identity, or raise when it cannot be trusted.
 
-    The TUI is the operator's window onto one specific instance. Guessing
-    ("HASHI" on port 18800) can attach the window to a different installation
-    that happens to own that port, so an undeclared or unreadable identity is
-    reported instead of defaulted - ``_launch`` then opens the offline rescue
-    shell rather than an online session of unknown ownership.
+    The defaults are the existing legal ones (``HASHI`` on
+    ``DEFAULT_WORKBENCH_PORT``, the same values ``tui.instances`` has always
+    applied), so an installation without ``agents.json`` - a first install -
+    and every older configuration that predates these fields still start.
+
+    A *declared* but unusable value is a different matter: the configuration is
+    broken, and guessing around it could attach the window to another
+    installation that happens to own the port. That raises, and ``_launch``
+    opens the offline rescue shell instead. The same happens when an explicit
+    ``HASHI_LOCAL_ENDPOINT_FILE`` fails verification - the TUI never promotes a
+    failed identity check into a guessed online session.
     """
 
     path = Path(bridge_home) / "agents.json"
     try:
-        document = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"agents.json is missing at {path}") from exc
+        text = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return DEFAULT_LAUNCH_INSTANCE_ID, DEFAULT_WORKBENCH_PORT
     except OSError as exc:
         raise RuntimeError(f"agents.json is unreadable at {path}: {exc.strerror or exc}") from exc
+    try:
+        document = json.loads(text)
     except ValueError as exc:  # includes UnicodeDecodeError and JSON syntax errors
         raise RuntimeError(f"agents.json is not valid JSON: {exc}") from exc
-    global_cfg = document.get("global") if isinstance(document, dict) else None
-    if not isinstance(global_cfg, dict):
-        raise RuntimeError("agents.json does not declare a global section")
-    instance_id = str(global_cfg.get("instance_id") or "").strip().upper()
-    if not instance_id:
-        raise RuntimeError("agents.json does not declare global.instance_id")
+    if not isinstance(document, dict):
+        raise RuntimeError("agents.json is not a JSON object")
+    global_cfg = document.get("global") if isinstance(document.get("global"), dict) else {}
+    instance_id = str(global_cfg.get("instance_id") or DEFAULT_LAUNCH_INSTANCE_ID).strip().upper()
+    declared_port = global_cfg.get("workbench_port")
+    if declared_port is None or declared_port == "":
+        return instance_id, DEFAULT_WORKBENCH_PORT
     try:
-        port = int(global_cfg.get("workbench_port") or 0)
+        port = int(declared_port)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError("agents.json does not declare a numeric global.workbench_port") from exc
+        raise RuntimeError("agents.json declares a non-numeric global.workbench_port") from exc
     if not 1 <= port <= 65535:
-        raise RuntimeError("agents.json does not declare a valid global.workbench_port")
+        raise RuntimeError(f"agents.json declares an invalid global.workbench_port ({port})")
     return instance_id, port
 
 
@@ -152,6 +167,11 @@ def _launch(*, onboarding_mode: bool = False) -> int:
         return _rescue(
             f"the TUI packages or modules are unavailable ({type(exc).__name__}: {exc})"
         )
+
+    # No agents.json at all is a first install, not a broken one: the
+    # configuration wizard is the entry point and needs no existing instance.
+    if not (Path(_get_bridge_home()) / "agents.json").is_file():
+        onboarding_mode = True
 
     try:
         instance_id, workbench_urls, primary_url = _get_workbench_urls()

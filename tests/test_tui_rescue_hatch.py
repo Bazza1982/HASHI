@@ -23,7 +23,7 @@ def _write_agents(home: Path, *, instance_id: str = "HASHI9", port: int = 18899)
 def test_resolve_prefers_the_installer_runtime(tmp_path, monkeypatch):
     """Candidate order: Functions runtime, portable, venv, PATH."""
 
-    monkeypatch.setattr(resolve_tui_python, "_functions_runtime", lambda root: "C:/rt/functions.exe")
+    monkeypatch.setattr(resolve_tui_python, "_functions_runtime", lambda root: ["C:/rt/functions.exe"])
     monkeypatch.setattr(resolve_tui_python, "_portable_python", lambda root: "C:/root/python.exe")
     monkeypatch.setattr(resolve_tui_python, "_venv_python", lambda root: "C:/root/.venv/python.exe")
     monkeypatch.setattr(resolve_tui_python, "_path_python", lambda: "C:/path/python.exe")
@@ -36,7 +36,7 @@ def test_resolve_prefers_the_installer_runtime(tmp_path, monkeypatch):
 def test_resolve_skips_an_interpreter_without_the_tui_packages(tmp_path, monkeypatch):
     """A broken venv must not win just because it exists."""
 
-    monkeypatch.setattr(resolve_tui_python, "_functions_runtime", lambda root: None)
+    monkeypatch.setattr(resolve_tui_python, "_functions_runtime", lambda root: [])
     monkeypatch.setattr(resolve_tui_python, "_portable_python", lambda root: None)
     monkeypatch.setattr(resolve_tui_python, "_venv_python", lambda root: "C:/root/.venv/python.exe")
     monkeypatch.setattr(resolve_tui_python, "_path_python", lambda: "C:/path/python.exe")
@@ -49,7 +49,7 @@ def test_resolve_skips_an_interpreter_without_the_tui_packages(tmp_path, monkeyp
 
 
 def test_resolve_reports_failure_instead_of_guessing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(resolve_tui_python, "_functions_runtime", lambda root: None)
+    monkeypatch.setattr(resolve_tui_python, "_functions_runtime", lambda root: [])
     monkeypatch.setattr(resolve_tui_python, "_portable_python", lambda root: "C:/root/python.exe")
     monkeypatch.setattr(resolve_tui_python, "_venv_python", lambda root: None)
     monkeypatch.setattr(resolve_tui_python, "_path_python", lambda: None)
@@ -63,6 +63,29 @@ def test_resolve_reports_failure_instead_of_guessing(tmp_path, monkeypatch, caps
     stderr = capsys.readouterr().err
     assert "TUI needs only: textual, rich, aiohttp" in stderr
     assert "not a Core/Functions failure" in stderr
+
+
+def test_installer_candidate_survives_a_broken_server_contract(tmp_path, monkeypatch):
+    """A broken Core/Functions contract must not hide the TUI interpreter.
+
+    Discovery reuses the installer catalogue only; the server contract is a
+    separate question and must never remove a candidate the TUI can use.
+    """
+
+    from scripts import hashi_instance_cli
+
+    executable = tmp_path / "functions-python.exe"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        hashi_instance_cli, "_prepared_role_candidates", lambda root: [[str(executable)]]
+    )
+
+    def _broken_contract(*_args, **_kwargs):
+        raise RuntimeError("no installer-qualified independent Core/Functions pair is available")
+
+    monkeypatch.setattr(hashi_instance_cli, "_select_core_runtime", _broken_contract)
+
+    assert resolve_tui_python._functions_runtime(tmp_path) == [str(executable)]
 
 
 def _stub_core_runtime(monkeypatch, executable: str = "C:/core/python.exe"):
@@ -277,7 +300,7 @@ def test_onboarding_falls_back_to_the_same_rescue_shell(monkeypatch, capsys):
     assert "textual" in output
 
 
-# --- An unverified identity means rescue, never a guessed instance ---------
+# --- First install, legacy defaults and rejected endpoints ----------------
 
 
 def _stub_app(monkeypatch, app_class):
@@ -290,20 +313,75 @@ def _stub_app(monkeypatch, app_class):
     monkeypatch.setitem(sys.modules, "tui.app", stub)
 
 
-def test_entry_point_refuses_to_guess_the_instance_identity(monkeypatch, capsys, tmp_path):
+def test_first_install_enters_the_configuration_wizard(monkeypatch, tmp_path):
+    """No agents.json is a first install: the wizard runs, not the rescue shell."""
+
     entry = _entry_module()
-    _stub_app(monkeypatch, object)
     monkeypatch.delenv("HASHI_LOCAL_ENDPOINT_FILE", raising=False)
     monkeypatch.delenv("HASHI_WORKBENCH_URL", raising=False)
     monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+
+    recorded = {}
+
+    class _FakeApp:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def run(self):
+            recorded["ran"] = True
+
+    _stub_app(monkeypatch, _FakeApp)
+    assert entry.main([]) == 0
+    assert recorded["ran"] is True
+    assert recorded["onboarding_mode"] is True
+    assert recorded["launch_instance_id"] == "HASHI"
+    assert recorded["workbench_url"] == "http://127.0.0.1:18800"
+
+
+def test_legacy_config_without_identity_fields_still_starts(monkeypatch, tmp_path):
+    """A configuration that predates these fields keeps its legal defaults."""
+
+    entry = _entry_module()
+    (tmp_path / "agents.json").write_text(json.dumps({"global": {}}), encoding="utf-8")
+    monkeypatch.delenv("HASHI_LOCAL_ENDPOINT_FILE", raising=False)
+    monkeypatch.delenv("HASHI_WORKBENCH_URL", raising=False)
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+
+    recorded = {}
+
+    class _FakeApp:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def run(self):
+            recorded["ran"] = True
+
+    _stub_app(monkeypatch, _FakeApp)
+    assert entry.main([]) == 0
+    assert recorded["launch_instance_id"] == "HASHI"
+    assert recorded["workbench_url"] == "http://127.0.0.1:18800"
+    assert recorded["onboarding_mode"] is False
+
+
+def test_failed_endpoint_verification_stays_offline(monkeypatch, capsys, tmp_path):
+    """A rejected endpoint is never promoted into a guessed online session."""
+
+    entry = _entry_module()
+    _stub_app(monkeypatch, object)
+    _write_agents(tmp_path, instance_id="hashi9", port=18899)
+    endpoint = tmp_path / "elsewhere" / "local-endpoint.json"
+    endpoint.parent.mkdir()
+    endpoint.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.setenv("HASHI_LOCAL_ENDPOINT_FILE", str(endpoint))
+    monkeypatch.setenv("HASHI_WORKBENCH_URL", "http://127.0.0.1:18899")
     monkeypatch.setattr("builtins.input", _eof)
 
     assert entry.main([]) == 0
     output = capsys.readouterr().out
     assert "identity could not be verified" in output
-    assert "agents.json is missing" in output
-    # The old fail-open silently attached the window to "HASHI" on 18800.
-    assert "127.0.0.1:18800" not in output
+    assert "refusing to connect to a guessed instance" in output
+    assert "rescue shell" in output
 
 
 def test_verified_identity_uses_the_declared_port(monkeypatch, tmp_path):
@@ -479,23 +557,34 @@ def test_start_backend_refuses_to_run_core_with_the_tui_interpreter(monkeypatch,
 
 
 def test_diagnose_separates_the_tui_interpreter_from_the_server(monkeypatch, tmp_path):
+    """The selector verdict is the server answer; no second role-blind check."""
+
     home = _instance_home(tmp_path)
     (home / "secrets.json").write_text("{}", encoding="utf-8")
-    seen = {}
-
-    def _fake_contract(root, executable=None):
-        seen["executable"] = executable
-        return rescue_cli.CHECK_OK, "contract ok"
-
     monkeypatch.setattr(
         rescue_cli, "core_runtime", lambda root: (["C:/core/python.exe", "-I", "-B"], "")
     )
-    monkeypatch.setattr(rescue_cli, "_contract_status", _fake_contract)
 
     checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
     assert checks["python"]["detail"].startswith("TUI interpreter")
     assert checks["server runtime"]["status"] == rescue_cli.CHECK_OK
     assert "C:/core/python.exe" in checks["server runtime"]["detail"]
-    assert seen["executable"] == "C:/core/python.exe"
-    assert checks["server dependency contract"]["detail"] == "contract ok"
+    # A qualified Core/Functions pair must never be reported as dependency
+    # drift: the Functions contract is not re-run from the TUI interpreter.
+    assert "server dependency contract" not in checks
+
+
+def test_diagnose_reports_a_missing_server_runtime_as_a_server_problem(monkeypatch, tmp_path):
+    home = _instance_home(tmp_path)
+    (home / "secrets.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        rescue_cli,
+        "core_runtime",
+        lambda root: (None, "no installer-qualified Core runtime is available"),
+    )
+
+    checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
+    assert checks["server runtime"]["status"] == rescue_cli.CHECK_FAIL
+    assert "no installer-qualified Core runtime" in checks["server runtime"]["detail"]
+    assert checks["python"]["status"] == rescue_cli.CHECK_OK
 # HASHI-Fingerprint: hfp_695d915b6fcf4830bc89b78ee2c975ab

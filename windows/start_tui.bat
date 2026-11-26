@@ -47,19 +47,12 @@ echo Started: %DATE% %TIME% >> "%LOG_FILE%"
 echo Python: %PYTHON_EXE% >> "%LOG_FILE%"
 echo ==================================================== >> "%LOG_FILE%"
 
-:: ---- Server runtime contract: informational only, never fatal ----
+:: ---- Server runtime: reported by /doctor, never by this launcher ----
 :: The TUI does not use Playwright, greenlet, pyee or any other server-side
-:: package. A drift here means Core / Functions need attention; it does not
-:: mean the TUI is broken.
-set "HASHI_TUI_RUNTIME_STATUS=unknown"
-"%PYTHON_EXE%" -B "%ROOT%\scripts\check_runtime_contract.py" --code-root "%ROOT%" >nul 2>> "%LOG_FILE%"
-if errorlevel 1 (
-    set "HASHI_TUI_RUNTIME_STATUS=drifted"
-    echo NOTICE: the Core/Functions server dependency contract is not satisfied on this installation.>> "%LOG_FILE%"
-    echo         The TUI still starts. Open /doctor inside the TUI for the exact list.
-) else (
-    set "HASHI_TUI_RUNTIME_STATUS=ok"
-)
+:: package, so running the server dependency contract here would check the
+:: wrong role under the TUI interpreter and blame the TUI for a server
+:: mismatch. /doctor reports the Core/Functions pair from the qualified
+:: selector instead.
 
 set "PID_FILE="
 set "INSTANCE_ID=HASHI"
@@ -86,11 +79,6 @@ if "%BRIDGE_RUNNING%"=="0" (
 
 echo Starting %INSTANCE_ID% TUI...
 echo Log file: %LOG_FILE%
-if "%HASHI_TUI_RUNTIME_STATUS%"=="drifted" (
-    echo NOTE: Core/Functions dependencies need attention; the TUI starts anyway. Use /doctor inside it.
-    echo.
-)
-
 cd /d "%ROOT%"
 set PYTHONPATH=%ROOT%
 "%PYTHON_EXE%" -B tui.py 2>> "%LOG_FILE%"

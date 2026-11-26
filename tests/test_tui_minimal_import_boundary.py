@@ -85,8 +85,13 @@ def test_rescue_cli_imports_only_the_standard_library():
     assert leaked == [], f"tui.rescue_cli must stay dependency free: {leaked}"
 
 
-def test_launchers_do_not_gate_on_the_server_contract():
-    """No launcher may refuse to start the TUI because server deps drifted."""
+def test_launchers_do_not_check_the_server_contract_themselves():
+    """TUI launchers pick an interpreter and start; the server is /doctor's job.
+
+    ``check_runtime_contract.py`` checks the Functions role by default, so
+    running it here - with the TUI interpreter - would report a healthy
+    Core/Functions pair as drift and blame the TUI for a server problem.
+    """
 
     launchers = (
         ROOT / "windows" / "start_tui.bat",
@@ -97,7 +102,8 @@ def test_launchers_do_not_gate_on_the_server_contract():
     for launcher in launchers:
         text = launcher.read_text(encoding="utf-8", errors="replace")
         assert "resolve_tui_python.py" in text, launcher
-        assert "HASHI_TUI_RUNTIME_STATUS" in text, launcher
+        assert "check_runtime_contract" not in text, launcher
+        assert "HASHI_TUI_RUNTIME_STATUS" not in text, launcher
     windows_launcher = (ROOT / "windows" / "start_tui.bat").read_text(
         encoding="utf-8", errors="replace"
     )

@@ -98,35 +98,6 @@ def core_runtime(root: Path) -> tuple[list[str] | None, str]:
     return [str(part) for part in command], ""
 
 
-def _contract_status(root: Path, executable: str | None = None) -> tuple[str, str]:
-    """Run the server dependency contract check under the Core interpreter.
-
-    The TUI interpreter proves nothing about the server: checking the contract
-    with it reports ordinary TUI/server drift as a server fault. ``executable``
-    is the installer-qualified Core interpreter.
-    """
-
-    script = Path(root) / "scripts" / "check_runtime_contract.py"
-    if not script.is_file():
-        return CHECK_WARN, "scripts/check_runtime_contract.py is missing"
-    if not executable:
-        return CHECK_FAIL, "the Core interpreter is unknown, so the server contract cannot be checked"
-    try:
-        completed = subprocess.run(
-            [str(executable), "-I", "-B", str(script), "--code-root", str(root)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return CHECK_WARN, f"could not run the check: {exc}"
-    if completed.returncode == 0:
-        return CHECK_OK, "Core/Functions dependencies match the approved generation"
-    detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-    summary = detail[0] if detail else "no detail reported"
-    return CHECK_FAIL, summary
-
-
 def _health(
     port: int,
     timeout: float = 3.0,
@@ -176,15 +147,17 @@ def diagnose(root: Path, home: Path) -> list[dict]:
         add("tui packages", CHECK_OK, "textual, rich, aiohttp are importable")
 
     # The TUI interpreter and the Core runtime are separate contracts: a TUI
-    # package missing here says nothing about the server, and vice versa.
+    # package missing here says nothing about the server, and vice versa. The
+    # qualified selector already validated the Core/Functions pair (it runs
+    # scripts/check_runtime_selection.py under the installed Core interpreter),
+    # so its verdict is the server answer. Re-running the Functions dependency
+    # contract from here would check the wrong role and report a healthy pair as
+    # drift, so there is no second, duplicating check.
     core_command, core_error = core_runtime(root)
     if core_command:
-        add("server runtime", CHECK_OK, "qualified Core runtime: " + " ".join(core_command))
+        add("server runtime", CHECK_OK, "qualified Core/Functions pair: " + " ".join(core_command))
     else:
         add("server runtime", CHECK_FAIL, core_error)
-
-    status, detail = _contract_status(root, core_command[0] if core_command else None)
-    add("server dependency contract", status, detail)
 
     agents_path = home / "agents.json"
     if not agents_path.is_file():
@@ -207,8 +180,12 @@ def diagnose(root: Path, home: Path) -> list[dict]:
         _doc, error = _read_json(secrets_path)
         add("secrets.json", CHECK_FAIL if error else CHECK_OK, error or "present and parseable")
 
-    instance_id, port, port_error = instance_identity(home)
-    status, detail = _health(port, expected_instance=None if port_error else instance_id)
+    # The identity check is always applied: whatever answers on this port must
+    # name this installation, otherwise another instance would be reported as
+    # this one being healthy. An unreadable port falls back to the documented
+    # default and is still identity-checked; ``agents.json`` already warns.
+    instance_id, port, _port_error = instance_identity(home)
+    status, detail = _health(port, expected_instance=instance_id)
     add("local backend", status, detail)
 
     log_files = sorted(

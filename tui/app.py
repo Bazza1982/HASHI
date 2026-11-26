@@ -1050,31 +1050,6 @@ class HASHITuiApp(App):
             log.write(markup(
                 f"[bold hashi.accent]HASHI · {self.launch_instance_id}[/]\n[hashi.secondary]{status}[/]"
             ))
-        notice = self._runtime_status_notice()
-        if notice:
-            log.write(markup(notice))
-
-    def _runtime_status_notice(self) -> str:
-        """One honest line when the Core/Functions contract needs attention.
-
-        The launcher exports what it actually observed; the TUI never claims the
-        server runtime is fine just because it started.
-        """
-
-        status = str(os.environ.get("HASHI_TUI_RUNTIME_STATUS") or "").strip().casefold()
-        if status not in {"drifted", "missing"}:
-            return ""
-        if self._ui_language == "zh":
-            return (
-                "[hashi.warning]注意：Core/Functions 服务端依赖与批准的版本不一致。"
-                "TUI 仍可正常使用；输入 /doctor 查看具体差异。[/]"
-            )
-        return (
-            "[hashi.warning]Notice: the Core/Functions server dependencies do not match "
-            "the approved generation. The TUI keeps working; type /doctor for the exact "
-            "differences.[/]"
-        )
-
     # ── Onboarding ──────────────────────────────────────────────────────
 
     def _start_connection(self):
