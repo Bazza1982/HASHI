@@ -604,6 +604,7 @@ class RebootManager:
         }
         if manifest is not None:
             request["resume_manifest"] = str(manifest)
+            self.receipts.update(operation_id, resume_manifest=str(manifest))
         self.kernel._restart_request = request
         bridge_logger.info(
             "Reboot force: cutover starting | operation=%s stopped=%s",
@@ -1468,6 +1469,10 @@ class RebootManager:
                     generations={name: generation_id for name in record["targets"]},
                     shared_replacement=shared_result,
                 )
+                if record.get("resume_manifest"):
+                    # The new generation is live; only now can the captured work
+                    # be handed back without blocking the handoff.
+                    await self.resume_restored_work(record)
             else:
                 outcome = "partial" if online_count else "failed"
                 self._finish(
@@ -2162,6 +2167,8 @@ class RebootManager:
                         result = True
             else:
                 result = await self._perform_restart(restart, record)
+                if result:
+                    await self.resume_restored_work(restart)
         except asyncio.CancelledError:
             current = self.receipts.get(record["id"])
             if current["status"] in ACTIVE:
