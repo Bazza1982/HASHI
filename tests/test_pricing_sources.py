@@ -801,4 +801,74 @@ def test_cache_lock_reports_busy_when_permission_error_persists(monkeypatch, tmp
     with pytest.raises(pricing_sources.PricingSourceError, match="refresh_busy"):
         with pricing_sources._exclusive_cache_lock(target):
             pass
+
+
+def _make_known_fact(*, output_per_unit=0.000002, thinking_per_unit=None):
+    return pricing_sources.PricingFact(
+        status="known",
+        scope="model",
+        engine="deepseek-api",
+        requested_model_id="deepseek-reasoner",
+        canonical_model_id="deepseek-reasoner",
+        currency="USD",
+        unit="token",
+        input_per_unit=0.000001,
+        output_per_unit=output_per_unit,
+        cache_read_per_unit=None,
+        cache_write_per_unit=None,
+        cache_write_tiers=(),
+        thinking_per_unit=thinking_per_unit,
+        request_per_unit=None,
+        source_url=None,
+        unit_source_url=None,
+        source_kind=None,
+        fetched_at="2026-11-26T00:00:00Z",
+        expires_at="2026-11-27T00:00:00Z",
+        source_revision=None,
+        revision_kind=None,
+        evidence_sha256=None,
+        unknown_reason=None,
+    )
+
+
+def test_separate_thinking_falls_back_to_output_unit_when_thinking_rate_missing():
+    fact = _make_known_fact(output_per_unit=0.000003, thinking_per_unit=None)
+    cost = pricing_sources.calculate_cost(
+        fact,
+        input_tokens=1_000,
+        output_tokens=500,
+        thinking_tokens=1_500,
+        thinking_in_output=False,
+    )
+    # 1_000 * 1e-6 + (500 + 1_500) * 3e-6 = 0.007
+    assert cost == pytest.approx(0.007)
+
+
+def test_explicit_thinking_rate_overrides_output_fallback_and_missing_output_stays_unknown():
+    explicit = _make_known_fact(output_per_unit=0.000002, thinking_per_unit=0.000005)
+    assert pricing_sources.calculate_cost(
+        explicit,
+        input_tokens=1_000,
+        output_tokens=1_000,
+        thinking_tokens=1_000,
+        thinking_in_output=False,
+    ) == pytest.approx(0.008)
+
+    # When thinking is already folded into output tokens, never double-bill.
+    assert pricing_sources.calculate_cost(
+        explicit,
+        input_tokens=1_000,
+        output_tokens=1_000,
+        thinking_tokens=1_000,
+        thinking_in_output=True,
+    ) == pytest.approx(0.003)
+
+    # Missing output rate must remain unknown (None), never fabricate $0.
+    unknown_output = _make_known_fact(output_per_unit=None, thinking_per_unit=None)
+    assert pricing_sources.calculate_cost(
+        unknown_output,
+        input_tokens=1_000,
+        output_tokens=1_000,
+        thinking_tokens=500,
+    ) is None
 # HASHI-Fingerprint: hfp_9358b426e94244e1a25abc6b970900d6
