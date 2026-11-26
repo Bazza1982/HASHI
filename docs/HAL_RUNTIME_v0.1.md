@@ -26,6 +26,25 @@ HAL is an optional Layer-2 Function with zero effect when unused:
 - **`hal/service.py`** — runtime loop + Workbench API handlers, hosted by the
   existing `WorkbenchApiServer` process.
 
+## Cross-instance prompt chains
+
+The instance hosting an enabled rule owns the workflow and its durable
+receipts. Rule entry still observes that instance's event feed. A qualified
+peer target such as `@temp@HASHI7` uses the configured HASHI Remote peer
+directory and shared token. The sender verifies the destination before
+sending the prompt. Remote checks the signed source and expected destination
+before forwarding, and signs the returned receipt.
+
+The receiving PAO admits the prompt in the target Agent's stable activity
+Session using the original HAL idempotency key. The rule owner reads only
+that Agent and Run's terminal evidence over the same authenticated route.
+Dependent stages check the recorded target and correlation key before
+advancing. An unavailable peer leaves a waiting diagnostic or a bounded
+retry; reconnect reconciles against persisted evidence without redispatching
+a completed operation. Run detail identifies the instance of every prompt
+receipt. Cross-instance native commands and remote entry subscriptions
+remain outside this capability.
+
 ## Event availability (truthful, never faked)
 
 | HAL event | Source | Status |
@@ -91,6 +110,7 @@ detail (`waiting for #reboot_ok (no reboot-completion event source exists)`).
 | POST | `/api/v1/hal/rules/{id}/disable` | disable |
 | GET | `/api/v1/hal/runs` | workflow executions |
 | GET | `/api/v1/hal/runs/{exec_id}` | execution detail with receipts |
+| POST | `/api/v1/hal/peer` | authenticated peer prompt admission or keyed terminal Run evidence |
 
 All endpoints reuse the existing admin authentication (`_v1_owner_id` +
 `_check_admin_auth`), the same trust boundary as the HEA event feed. Request

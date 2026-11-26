@@ -401,7 +401,12 @@ def _correlates_with_previous_stage(
     prior = receipts.get((str(exec_row["exec_id"]), stage - 1))
     if prior is None:
         return False
-    return bool(trigger.run_idempotency_key) and trigger.run_idempotency_key == prior.get("idempotency_key")
+    if not trigger.run_idempotency_key or trigger.run_idempotency_key != prior.get("idempotency_key"):
+        return False
+    target = str(prior.get("target") or "").lower()
+    if target.startswith("@") and "@" in target[1:]:
+        return target == str(trigger.agent_identity or "").lower()
+    return True
 
 
 def _dependent_source_matches(rule, trigger: HalTrigger) -> bool:
