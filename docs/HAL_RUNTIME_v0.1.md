@@ -41,9 +41,10 @@ that Agent and Run's terminal evidence over the same authenticated route.
 Dependent stages check the recorded target and correlation key before
 advancing. An unavailable peer leaves a waiting diagnostic or a bounded
 retry; reconnect reconciles against persisted evidence without redispatching
-a completed operation. Run detail identifies the instance of every prompt
-receipt. Cross-instance native commands and remote entry subscriptions
-remain outside this capability.
+a completed operation. Unreadable or invalid peer credentials follow the
+same per-stage unavailable path, so local rules keep running. Run detail
+identifies the instance of every prompt receipt. Cross-instance native
+commands and remote entry subscriptions remain outside this capability.
 
 ## Event availability (truthful, never faked)
 

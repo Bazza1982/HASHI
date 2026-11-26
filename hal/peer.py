@@ -39,7 +39,10 @@ class HalPeerClient:
         from orchestrator.version_remote import resolve_instance_entry
 
         target = target.upper()
-        token = load_shared_token(self.root)
+        try:
+            token = load_shared_token(self.root)
+        except (OSError, ValueError) as exc:
+            raise RemoteTerminalUnavailable(f"HAL peer @{target} authentication unavailable") from exc
         if not token or not self.instance or target == self.instance:
             raise RemoteTerminalUnavailable(f"HAL peer @{target} authentication unavailable")
         try:

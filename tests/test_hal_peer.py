@@ -2,18 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import socket
 import threading
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 import uvicorn
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from hal.dispatch import GatewayDispatchAdapter
-from hal.peer import HalPeerClient
+from hal.peer import HalPeerClient, RemoteTerminalUnavailable
 from hal.service import HalService, handle_hal_peer
 from hal.store import HalStore
 from orchestrator.session_store import SessionStore
@@ -42,6 +44,63 @@ class SessionRuntime:
         if not accepted.replayed:
             self.accepted.append(accepted.request_id)
         return accepted.request_id
+
+
+@pytest.mark.parametrize("credential_error", [OSError, ValueError])
+def test_peer_credential_failure_keeps_the_local_hal_loop_running(tmp_path, monkeypatch, credential_error):
+    def unreadable(_root):
+        raise credential_error("test credential read failure")
+
+    monkeypatch.setattr("hal.peer.load_shared_token", unreadable)
+    store = SessionStore(tmp_path / "session.sqlite", instance_id="HALTEST-A")
+    owner = "user:7"
+    home = SessionRuntime(store, owner)
+    peer = HalPeerClient(tmp_path, "HALTEST-A")
+    service = HalService(
+        store=HalStore(tmp_path / "hal.sqlite"),
+        session_store=store,
+        dispatch=GatewayDispatchAdapter(SimpleNamespace(_runtime_map=lambda: {"temp": home})),
+        peer=peer,
+    )
+
+    for target in ("HALTEST-B", "HALTEST-A"):
+        rule, _ = service.upsert_rule(
+            owner_id=owner, name=target,
+            script=f'if @temp@HALTEST-A #turn_finish then @temp@{target} $prompt "{target}".',
+        )
+        service.set_enabled(owner_id=owner, rule_id=rule["rule_id"], enabled=True)
+
+    session = store.ensure_default_session(owner_id=owner, agent_id="temp")
+    initial = store.accept_run(
+        session_id=session["session_id"], owner_id=owner, agent_id="temp",
+        request_id="initial", text="start", source="workbench", idempotency_key="initial",
+    )
+    store.finish_request(initial.request_id, success=True, assistant_text="done")
+
+    async def scenario():
+        service.start_loop()
+        loop = service._loop_task
+        try:
+            async with asyncio.timeout(3):
+                while not home.accepted:
+                    if loop.done():
+                        await loop
+                    await asyncio.sleep(0.01)
+                while not any(run["state"] == "completed" for run in service.list_runs(owner, 10)):
+                    await asyncio.sleep(0.01)
+            assert not loop.done()
+            remote_run = next(run for run in service.list_runs(owner, 10) if run["rule_name"] == "HALTEST-B")
+            receipt, = service.run_detail(owner, remote_run["exec_id"])["receipts"]
+            assert receipt["state"] == "pending_retry"
+            assert "authentication unavailable" in receipt["detail"]
+            with pytest.raises(RemoteTerminalUnavailable, match="authentication unavailable"):
+                await peer.terminal_event("HALTEST-B", "temp", receipt["idempotency_key"])
+        finally:
+            service.stop_loop()
+            with suppress(asyncio.CancelledError):
+                await loop
+
+    asyncio.run(scenario())
 
 
 def test_authenticated_relay_recovers_after_disconnect_without_duplicate_dispatch(tmp_path):
