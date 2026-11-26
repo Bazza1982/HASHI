@@ -234,7 +234,9 @@ class HalService:
             rows.append(public)
         return rows
 
-    def list_runs(self, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_runs(
+        self, owner_id: str, limit: int = 50, rule_id: str | None = None
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "exec_id": row["exec_id"],
@@ -251,7 +253,7 @@ class HalService:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
-            for row in self.store.list_execs(owner_id, limit=limit)
+            for row in self.store.list_execs(owner_id, limit=limit, rule_id=rule_id)
         ]
 
     def run_detail(self, owner_id: str, exec_id: str) -> dict[str, Any] | None:
@@ -1492,8 +1494,15 @@ async def handle_hal_runs_get(server, request):
         limit = int(request.query.get("limit", "50"))
     except (TypeError, ValueError):
         limit = 50
+    # Optional filter so a caller inspecting one rule sees that rule's latest
+    # runs. Absent or blank keeps the previous "all rules" behaviour.
+    rule_id = (request.query.get("rule_id") or "").strip() or None
     return web.json_response(
-        {"ok": True, "schema": SCHEMA_ID, "runs": service.list_runs(owner_id, limit)},
+        {
+            "ok": True,
+            "schema": SCHEMA_ID,
+            "runs": service.list_runs(owner_id, limit, rule_id=rule_id),
+        },
         headers={"Cache-Control": "no-store"},
     )
 
