@@ -39,6 +39,10 @@ def _read_json(path: Path) -> tuple[dict, str]:
         text = Path(path).read_text(encoding="utf-8-sig")
     except OSError as exc:
         return {}, f"unreadable: {exc.strerror or exc}"
+    except UnicodeDecodeError as exc:
+        # A binary or mis-encoded config must be reported, never fatal: this
+        # function runs inside the rescue shell, which exists for exactly this.
+        return {}, f"not valid UTF-8 text: {exc}"
     try:
         document = json.loads(text)
     except ValueError as exc:
@@ -71,15 +75,45 @@ def _module_available(name: str) -> bool:
     return True
 
 
-def _contract_status(root: Path) -> tuple[str, str]:
-    """Run the server dependency contract check and report what it said."""
+def core_runtime(root: Path) -> tuple[list[str] | None, str]:
+    """Return the installer-qualified Core runtime command, or why it is unavailable.
+
+    Imported lazily: this module must stay standard-library only, and the
+    selector lives in the repository tree.
+    """
+
+    root = Path(root)
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from scripts.hashi_instance_cli import _select_core_runtime
+    except Exception as exc:
+        return None, f"the Core runtime selector is unavailable ({type(exc).__name__}: {exc})"
+    try:
+        command, _functions = _select_core_runtime(root, with_functions=True)
+    except Exception as exc:
+        return None, f"no installer-qualified Core runtime is available ({type(exc).__name__}: {exc})"
+    if not isinstance(command, list) or not command:
+        return None, "the Core runtime selector returned no command"
+    return [str(part) for part in command], ""
+
+
+def _contract_status(root: Path, executable: str | None = None) -> tuple[str, str]:
+    """Run the server dependency contract check under the Core interpreter.
+
+    The TUI interpreter proves nothing about the server: checking the contract
+    with it reports ordinary TUI/server drift as a server fault. ``executable``
+    is the installer-qualified Core interpreter.
+    """
 
     script = Path(root) / "scripts" / "check_runtime_contract.py"
     if not script.is_file():
         return CHECK_WARN, "scripts/check_runtime_contract.py is missing"
+    if not executable:
+        return CHECK_FAIL, "the Core interpreter is unknown, so the server contract cannot be checked"
     try:
         completed = subprocess.run(
-            [sys.executable, "-B", str(script), "--code-root", str(root)],
+            [str(executable), "-I", "-B", str(script), "--code-root", str(root)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -93,7 +127,13 @@ def _contract_status(root: Path) -> tuple[str, str]:
     return CHECK_FAIL, summary
 
 
-def _health(port: int, timeout: float = 3.0) -> tuple[str, str]:
+def _health(
+    port: int,
+    timeout: float = 3.0,
+    expected_instance: str | None = None,
+) -> tuple[str, str]:
+    """Probe ``/api/health`` and confirm the answer belongs to this instance."""
+
     url = f"http://127.0.0.1:{port}/api/health"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -103,7 +143,16 @@ def _health(port: int, timeout: float = 3.0) -> tuple[str, str]:
     except (ValueError, OSError) as exc:
         return CHECK_WARN, f"{url} returned an unusable response: {exc}"
     if isinstance(payload, dict) and payload.get("ok"):
-        instance = str(payload.get("instance_id") or "").strip()
+        instance = str(payload.get("instance_id") or "").strip().upper()
+        if expected_instance:
+            expected = str(expected_instance).strip().upper()
+            if not instance:
+                return CHECK_FAIL, f"{url} responded without an instance identity"
+            if instance != expected:
+                return CHECK_FAIL, (
+                    f"{url} belongs to instance {instance}, not {expected}; "
+                    "a different instance is answering on this port"
+                )
         return CHECK_OK, f"{url} responded ok (instance {instance or 'unknown'})"
     return CHECK_WARN, f"{url} responded without ok=true"
 
@@ -118,7 +167,7 @@ def diagnose(root: Path, home: Path) -> list[dict]:
     def add(label: str, status: str, detail: str) -> None:
         checks.append({"label": label, "status": status, "detail": detail})
 
-    add("python", CHECK_OK, f"{sys.version.split()[0]} at {sys.executable}")
+    add("python", CHECK_OK, f"TUI interpreter {sys.version.split()[0]} at {sys.executable}")
 
     missing = [name for name in ("textual", "rich", "aiohttp") if not _module_available(name)]
     if missing:
@@ -126,7 +175,15 @@ def diagnose(root: Path, home: Path) -> list[dict]:
     else:
         add("tui packages", CHECK_OK, "textual, rich, aiohttp are importable")
 
-    status, detail = _contract_status(root)
+    # The TUI interpreter and the Core runtime are separate contracts: a TUI
+    # package missing here says nothing about the server, and vice versa.
+    core_command, core_error = core_runtime(root)
+    if core_command:
+        add("server runtime", CHECK_OK, "qualified Core runtime: " + " ".join(core_command))
+    else:
+        add("server runtime", CHECK_FAIL, core_error)
+
+    status, detail = _contract_status(root, core_command[0] if core_command else None)
     add("server dependency contract", status, detail)
 
     agents_path = home / "agents.json"
@@ -150,8 +207,8 @@ def diagnose(root: Path, home: Path) -> list[dict]:
         _doc, error = _read_json(secrets_path)
         add("secrets.json", CHECK_FAIL if error else CHECK_OK, error or "present and parseable")
 
-    _instance_id, port, _port_error = instance_identity(home)
-    status, detail = _health(port)
+    instance_id, port, port_error = instance_identity(home)
+    status, detail = _health(port, expected_instance=None if port_error else instance_id)
     add("local backend", status, detail)
 
     log_files = sorted(
@@ -230,17 +287,25 @@ def logs_tail(root: Path, home: Path, lines: int = 40) -> str:
 
 
 def start_backend(root: Path, home: Path, timeout: float = 40.0) -> str:
-    """Start the Core bridge for this installation and report what happened."""
+    """Start Core through the installer-qualified launcher and report what happened.
+
+    Core is never started with the TUI interpreter: that interpreter is chosen
+    for textual/rich/aiohttp and is routinely a different Python from the one
+    the runtime policy allows for Core. ``run_qualified_core.py`` re-selects the
+    qualified runtime, so the launch cannot bypass the Core runtime contract.
+    """
 
     root = Path(root)
     home = Path(home)
-    script = None
-    for candidate in (root / "main.py", root / "scripts" / "run_qualified_core.py"):
-        if candidate.is_file():
-            script = candidate
-            break
-    if script is None:
-        return "Cannot start the backend: neither main.py nor scripts/run_qualified_core.py exists."
+    script = root / "scripts" / "run_qualified_core.py"
+    if not script.is_file():
+        return (
+            "Cannot start the backend: scripts/run_qualified_core.py is missing. "
+            "Core must be started through the installer-qualified launcher."
+        )
+    command, command_error = core_runtime(root)
+    if command is None:
+        return f"Cannot start the backend: {command_error}. The TUI interpreter is not used for Core."
 
     log_dir = home / "logs"
     try:
@@ -256,10 +321,11 @@ def start_backend(root: Path, home: Path, timeout: float = 40.0) -> str:
         )
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(root)
+    argv = [*command, str(script), "--bridge-home", str(home)]
     try:
         with log_path.open("ab") as log_handle:
             subprocess.Popen(
-                [sys.executable, "-B", str(script), "--bridge-home", str(home)],
+                argv,
                 cwd=str(root),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
@@ -270,10 +336,16 @@ def start_backend(root: Path, home: Path, timeout: float = 40.0) -> str:
     except OSError as exc:
         return f"Cannot start the backend: {exc.strerror or exc}"
 
-    _instance_id, port, _error = instance_identity(home)
+    expected_instance, port, identity_error = instance_identity(home)
+    if identity_error:
+        return (
+            "The launcher was started, but this installation's identity is unreadable "
+            f"({identity_error}), so the health check cannot prove which instance answered. "
+            f"See {log_path} and /logs."
+        )
     waited = 0.0
     while waited < timeout:
-        status, detail = _health(port, timeout=2.0)
+        status, detail = _health(port, timeout=2.0, expected_instance=expected_instance)
         if status == CHECK_OK:
             return f"Backend responded after {int(waited)}s. {detail}"
         waited += 2

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -64,7 +65,16 @@ def test_resolve_reports_failure_instead_of_guessing(tmp_path, monkeypatch, caps
     assert "not a Core/Functions failure" in stderr
 
 
-def test_diagnose_reports_a_broken_agents_json(tmp_path):
+def _stub_core_runtime(monkeypatch, executable: str = "C:/core/python.exe"):
+    """Keep diagnosis tests off the real (slow, machine-specific) selector."""
+
+    monkeypatch.setattr(
+        rescue_cli, "core_runtime", lambda root: ([executable, "-I", "-B"], "")
+    )
+
+
+def test_diagnose_reports_a_broken_agents_json(tmp_path, monkeypatch):
+    _stub_core_runtime(monkeypatch)
     home = tmp_path / "instance"
     home.mkdir()
     (home / "agents.json").write_text("{not json", encoding="utf-8")
@@ -77,7 +87,8 @@ def test_diagnose_reports_a_broken_agents_json(tmp_path):
     assert "local backend" in checks
 
 
-def test_diagnose_reads_the_instance_identity(tmp_path):
+def test_diagnose_reads_the_instance_identity(tmp_path, monkeypatch):
+    _stub_core_runtime(monkeypatch)
     home = tmp_path / "instance"
     home.mkdir()
     _write_agents(home)
@@ -197,4 +208,294 @@ def test_entry_point_falls_back_when_the_tui_import_is_broken(monkeypatch, capsy
     output = capsys.readouterr().out
     assert "TUI could not start" in output
     assert "textual" in output
+
+
+# --- The launchers start the resolver from outside the repository ----------
+
+
+def test_resolver_imports_the_checkout_when_started_from_elsewhere(tmp_path):
+    """A shortcut runs ``scripts/resolve_tui_python.py`` with only ``scripts/``
+    on ``sys.path``; the installer runtime must still be found."""
+
+    probe = f"""
+import importlib.util, sys
+from pathlib import Path
+root = Path({str(ROOT)!r})
+sys.path = [entry for entry in sys.path if Path(entry or ".").resolve() != root]
+spec = importlib.util.spec_from_file_location(
+    "resolver", root / "scripts" / "resolve_tui_python.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module._functions_runtime(root)
+print("scripts.hashi_instance_cli" in sys.modules)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", probe],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert completed.stdout.strip().splitlines()[-1] == "True", completed.stderr[-2000:]
+
+
+# --- Onboarding uses the same launch and rescue path -----------------------
+
+
+def _onboarding_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "tui_onboarding_entry", ROOT / "tui_onboarding.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _eof(_prompt=""):
+    raise EOFError
+
+
+def test_onboarding_falls_back_to_the_same_rescue_shell(monkeypatch, capsys):
+    """A missing TUI package must not turn onboarding into a traceback."""
+
+    onboarding = _onboarding_module()
+    real_import = __import__
+
+    def _broken(name, *args, **kwargs):
+        if name == "tui.app":
+            raise ImportError("No module named 'textual'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _broken)
+    monkeypatch.setattr("builtins.input", _eof)
+    assert onboarding.main() == 0
+    output = capsys.readouterr().out
+    assert "HASHI rescue shell (standard library only)" in output
+    assert "textual" in output
+
+
+# --- An unverified identity means rescue, never a guessed instance ---------
+
+
+def _stub_app(monkeypatch, app_class):
+    """Stand in for ``tui.app`` so the launch path runs without textual."""
+
+    import types
+
+    stub = types.ModuleType("tui.app")
+    stub.HASHITuiApp = app_class
+    monkeypatch.setitem(sys.modules, "tui.app", stub)
+
+
+def test_entry_point_refuses_to_guess_the_instance_identity(monkeypatch, capsys, tmp_path):
+    entry = _entry_module()
+    _stub_app(monkeypatch, object)
+    monkeypatch.delenv("HASHI_LOCAL_ENDPOINT_FILE", raising=False)
+    monkeypatch.delenv("HASHI_WORKBENCH_URL", raising=False)
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+    monkeypatch.setattr("builtins.input", _eof)
+
+    assert entry.main([]) == 0
+    output = capsys.readouterr().out
+    assert "identity could not be verified" in output
+    assert "agents.json is missing" in output
+    # The old fail-open silently attached the window to "HASHI" on 18800.
+    assert "127.0.0.1:18800" not in output
+
+
+def test_verified_identity_uses_the_declared_port(monkeypatch, tmp_path):
+    entry = _entry_module()
+    _write_agents(tmp_path, instance_id="hashi9", port=18899)
+    monkeypatch.delenv("HASHI_LOCAL_ENDPOINT_FILE", raising=False)
+    monkeypatch.delenv("HASHI_WORKBENCH_URL", raising=False)
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+
+    instance_id, urls, primary = entry._get_workbench_urls()
+    assert instance_id == "HASHI9"
+    assert primary == "http://127.0.0.1:18899"
+    assert urls == [primary]
+
+
+def test_entry_point_passes_the_verified_instance_to_the_app(monkeypatch, tmp_path):
+    entry = _entry_module()
+    _write_agents(tmp_path, instance_id="hashi9", port=18899)
+    monkeypatch.delenv("HASHI_LOCAL_ENDPOINT_FILE", raising=False)
+    monkeypatch.delenv("HASHI_WORKBENCH_URL", raising=False)
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+
+    recorded = {}
+
+    class _FakeApp:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def run(self):
+            recorded["ran"] = True
+
+    _stub_app(monkeypatch, _FakeApp)
+    assert entry.main([]) == 0
+    assert recorded["ran"] is True
+    assert recorded["workbench_url"] == "http://127.0.0.1:18899"
+    assert recorded["launch_instance_id"] == "HASHI9"
+    assert recorded["onboarding_mode"] is False
+
+
+def test_onboarding_reaches_the_shared_launch_in_onboarding_mode(monkeypatch, tmp_path):
+    onboarding = _onboarding_module()
+    _write_agents(tmp_path, instance_id="hashi9", port=18899)
+    monkeypatch.delenv("HASHI_LOCAL_ENDPOINT_FILE", raising=False)
+    monkeypatch.delenv("HASHI_WORKBENCH_URL", raising=False)
+    monkeypatch.setenv("BRIDGE_HOME", str(tmp_path))
+
+    recorded = {}
+
+    class _FakeApp:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def run(self):
+            recorded["ran"] = True
+
+    _stub_app(monkeypatch, _FakeApp)
+    assert onboarding.main() == 0
+    assert recorded["onboarding_mode"] is True
+    assert recorded["workbench_url"] == "http://127.0.0.1:18899"
+
+
+# --- A corrupt encoding must be reported, not raise -----------------------
+
+
+def test_undecodable_config_keeps_the_rescue_shell_alive(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "instance"
+    home.mkdir()
+    (home / "agents.json").write_bytes(b"\xff\xfe{\x00b\x00a\x00d\x00")
+
+    document, error = rescue_cli._read_json(home / "agents.json")
+    assert document == {}
+    assert "UTF-8" in error
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert rescue_cli.run(ROOT, home, "test") == 0
+    output = capsys.readouterr().out
+    assert "agents.json problem" in output
+    assert "UTF-8" in output
+
+
+# --- Health answers must belong to this instance --------------------------
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode("utf-8")
+
+
+def test_health_rejects_an_answer_from_another_instance(monkeypatch):
+    payloads = {"body": {"ok": True, "instance_id": "HASHI4"}}
+    monkeypatch.setattr(
+        rescue_cli.urllib.request,
+        "urlopen",
+        lambda url, timeout=0: _FakeResponse(payloads["body"]),
+    )
+
+    status, detail = rescue_cli._health(18806, expected_instance="HASHI5")
+    assert status == rescue_cli.CHECK_FAIL
+    assert "HASHI4" in detail and "HASHI5" in detail
+
+    status, _detail = rescue_cli._health(18806, expected_instance="HASHI4")
+    assert status == rescue_cli.CHECK_OK
+
+    payloads["body"] = {"ok": True}
+    status, detail = rescue_cli._health(18806, expected_instance="HASHI4")
+    assert status == rescue_cli.CHECK_FAIL
+    assert "without an instance identity" in detail
+
+
+# --- /start runs Core through the qualified launcher ---------------------
+
+
+def _instance_home(tmp_path, instance_id: str = "HASHI9", port: int = 18899) -> Path:
+    home = tmp_path / "instance"
+    home.mkdir()
+    _write_agents(home, instance_id=instance_id, port=port)
+    return home
+
+
+def test_start_backend_uses_the_qualified_core_launcher(monkeypatch, tmp_path):
+    home = _instance_home(tmp_path)
+    captured = {}
+    monkeypatch.setattr(
+        rescue_cli.subprocess,
+        "Popen",
+        lambda argv, **kwargs: captured.setdefault("argv", argv),
+    )
+    monkeypatch.setattr(
+        rescue_cli, "core_runtime", lambda root: (["C:/core/python.exe", "-I", "-B"], "")
+    )
+    monkeypatch.setattr(
+        rescue_cli,
+        "_health",
+        lambda port, timeout=0, expected_instance=None: (
+            rescue_cli.CHECK_OK,
+            f"instance {expected_instance}",
+        ),
+    )
+
+    message = rescue_cli.start_backend(ROOT, home)
+    argv = captured["argv"]
+    assert argv[0] == "C:/core/python.exe"
+    assert argv[1:3] == ["-I", "-B"]
+    assert argv[3].endswith("run_qualified_core.py")
+    assert "--bridge-home" in argv
+    assert "main.py" not in " ".join(argv)
+    assert message.startswith("Backend responded")
+    assert "HASHI9" in message
+
+
+def test_start_backend_refuses_to_run_core_with_the_tui_interpreter(monkeypatch, tmp_path):
+    home = _instance_home(tmp_path)
+    spawned = []
+    monkeypatch.setattr(rescue_cli.subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(
+        rescue_cli,
+        "core_runtime",
+        lambda root: (None, "no installer-qualified Core runtime is available"),
+    )
+
+    message = rescue_cli.start_backend(ROOT, home)
+    assert spawned == []
+    assert "TUI interpreter is not used for Core" in message
+
+
+def test_diagnose_separates_the_tui_interpreter_from_the_server(monkeypatch, tmp_path):
+    home = _instance_home(tmp_path)
+    (home / "secrets.json").write_text("{}", encoding="utf-8")
+    seen = {}
+
+    def _fake_contract(root, executable=None):
+        seen["executable"] = executable
+        return rescue_cli.CHECK_OK, "contract ok"
+
+    monkeypatch.setattr(
+        rescue_cli, "core_runtime", lambda root: (["C:/core/python.exe", "-I", "-B"], "")
+    )
+    monkeypatch.setattr(rescue_cli, "_contract_status", _fake_contract)
+
+    checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
+    assert checks["python"]["detail"].startswith("TUI interpreter")
+    assert checks["server runtime"]["status"] == rescue_cli.CHECK_OK
+    assert "C:/core/python.exe" in checks["server runtime"]["detail"]
+    assert seen["executable"] == "C:/core/python.exe"
+    assert checks["server dependency contract"]["detail"] == "contract ok"
 # HASHI-Fingerprint: hfp_695d915b6fcf4830bc89b78ee2c975ab

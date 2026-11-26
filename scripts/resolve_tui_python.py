@@ -39,8 +39,18 @@ LABEL_PATH = "path-python3"
 
 
 def _functions_runtime(code_root: Path) -> str | None:
-    """Return the installer-qualified Functions interpreter, if declared."""
+    """Return the installer-qualified Functions interpreter, if declared.
 
+    The checkout root is placed on ``sys.path`` first: when this script is
+    started from outside the repository (a desktop shortcut, another directory)
+    Python only puts ``scripts/`` on the path, so ``scripts.hashi_instance_cli``
+    would otherwise be unimportable and the installer runtime would silently
+    drop out of the candidate list.
+    """
+
+    for entry in (str(Path(code_root).resolve()), str(ROOT)):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
     try:
         from scripts.hashi_instance_cli import _select_core_runtime
     except Exception:  # pragma: no cover - only on a broken install tree

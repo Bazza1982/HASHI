@@ -30,6 +30,7 @@ crashing app never leaves the operator with a closed window and no diagnosis.
 It falls through to the standard-library rescue shell instead.
 """
 import argparse
+import json
 import os
 import sys
 import traceback
@@ -57,9 +58,9 @@ def _instances():
 def _get_workbench_urls() -> tuple[str, list[str], str]:
     """Resolve this repository's identity and local Workbench candidates."""
     bridge_home = _get_bridge_home()
-    helpers = _instances()
     endpoint_setting = str(os.environ.get("HASHI_LOCAL_ENDPOINT_FILE") or "").strip()
     if endpoint_setting:
+        helpers = _instances()
         instance_id, port = helpers.load_local_endpoint(bridge_home, Path(endpoint_setting))
         endpoint_url = helpers.local_workbench_urls(port)[0]
         configured = str(os.environ.get("HASHI_WORKBENCH_URL") or "").strip().rstrip("/")
@@ -69,8 +70,8 @@ def _get_workbench_urls() -> tuple[str, list[str], str]:
             )
         return instance_id, [endpoint_url], endpoint_url
 
-    instance_id, port = helpers.load_launch_instance(bridge_home)
-    urls = helpers.local_workbench_urls(port)
+    instance_id, port = _verified_launch_identity(bridge_home)
+    urls = _instances().local_workbench_urls(port)
     configured = str(os.environ.get("HASHI_WORKBENCH_URL") or "").strip().rstrip("/")
     if configured:
         urls = [configured, *(url for url in urls if url != configured)]
@@ -82,16 +83,38 @@ def _get_workbench_url() -> str:
     return _get_workbench_urls()[2]
 
 
-def _default_urls() -> tuple[str, list[str], str]:
-    """Last-resort local URLs when the instance configuration is unreadable."""
+def _verified_launch_identity(bridge_home: Path) -> tuple[str, int]:
+    """Return the identity this installation declares, or raise.
 
-    from orchestrator.runtime_defaults import (
-        DEFAULT_WORKBENCH_LOCALHOST_URL,
-        DEFAULT_WORKBENCH_URL,
-    )
+    The TUI is the operator's window onto one specific instance. Guessing
+    ("HASHI" on port 18800) can attach the window to a different installation
+    that happens to own that port, so an undeclared or unreadable identity is
+    reported instead of defaulted - ``_launch`` then opens the offline rescue
+    shell rather than an online session of unknown ownership.
+    """
 
-    urls = [DEFAULT_WORKBENCH_LOCALHOST_URL, DEFAULT_WORKBENCH_URL]
-    return "HASHI", urls, urls[0]
+    path = Path(bridge_home) / "agents.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"agents.json is missing at {path}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"agents.json is unreadable at {path}: {exc.strerror or exc}") from exc
+    except ValueError as exc:  # includes UnicodeDecodeError and JSON syntax errors
+        raise RuntimeError(f"agents.json is not valid JSON: {exc}") from exc
+    global_cfg = document.get("global") if isinstance(document, dict) else None
+    if not isinstance(global_cfg, dict):
+        raise RuntimeError("agents.json does not declare a global section")
+    instance_id = str(global_cfg.get("instance_id") or "").strip().upper()
+    if not instance_id:
+        raise RuntimeError("agents.json does not declare global.instance_id")
+    try:
+        port = int(global_cfg.get("workbench_port") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("agents.json does not declare a numeric global.workbench_port") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError("agents.json does not declare a valid global.workbench_port")
+    return instance_id, port
 
 
 def _rescue(reason: str) -> int:
@@ -116,10 +139,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv=None) -> int:
-    args = _parse_args(argv)
-    if args.rescue:
-        return _rescue("requested with --rescue")
+def _launch(*, onboarding_mode: bool = False) -> int:
+    """Start the TUI for this verified instance, or fall through to rescue.
+
+    Shared by ``tui.py`` and ``tui_onboarding.py`` so both entry points answer a
+    missing package, an unverified identity and a crashing app the same way.
+    """
 
     try:
         from tui.app import HASHITuiApp
@@ -131,20 +156,15 @@ def main(argv=None) -> int:
     try:
         instance_id, workbench_urls, primary_url = _get_workbench_urls()
     except Exception as exc:
-        instance_id, workbench_urls, primary_url = _default_urls()
-        print(
-            "Notice: the instance configuration could not be read "
-            f"({type(exc).__name__}: {exc}).",
-            file=sys.stderr,
-        )
-        print(
-            f"        The TUI starts anyway on {primary_url}; run /doctor inside it.",
-            file=sys.stderr,
+        return _rescue(
+            "this installation's identity could not be verified "
+            f"({type(exc).__name__}: {exc}); refusing to connect to a guessed instance"
         )
 
     try:
         app = HASHITuiApp(
             workbench_url=primary_url,
+            onboarding_mode=onboarding_mode,
             workbench_urls=workbench_urls,
             bridge_home=_get_bridge_home(),
             code_root=Path(_project_root),
@@ -155,6 +175,13 @@ def main(argv=None) -> int:
         traceback.print_exc()
         return _rescue(f"the TUI stopped unexpectedly ({type(exc).__name__}: {exc})")
     return 0
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
+    if args.rescue:
+        return _rescue("requested with --rescue")
+    return _launch()
 
 
 if __name__ == "__main__":
