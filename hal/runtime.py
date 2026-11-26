@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from hal import compile_hal, entry_matches, HALSyntaxError
+from hal.language import source_matches
 from hal.event_source import (
     EVENT_SYSTEM_IDLE,
     HalTrigger,
@@ -120,23 +121,6 @@ def validate_script(script: str) -> dict[str, Any]:
                     "event_source": reason,
                 }
             )
-            if (
-                rule.source_agent
-                and rule.source_agent != "@agent_any"
-                and "@" not in rule.source_agent[1:]
-            ):
-                diagnostics.append(
-                    {
-                        "workflow": index,
-                        "kind": "bare_source_name",
-                        "stage": stage_index,
-                        "message": (
-                            f"source {rule.source_agent} has no instance qualifier; "
-                            "canonical event identities are @name@instance, so this "
-                            "rule may never match"
-                        ),
-                    }
-                )
         entry_ok = stages[0]["event_available"]
         if not entry_ok:
             diagnostics.append(
@@ -412,17 +396,10 @@ def _correlates_with_previous_stage(
 def _dependent_source_matches(rule, trigger: HalTrigger) -> bool:
     """A dependent stage's declared source Agent must match the correlated run.
 
-    Mirrors the entry-rule source semantics: an unrelated Agent carrying the
-    same correlation key must never advance (or fail-hint) the workflow. A
-    missing declaration means "any source" only for stage 0 entry rules; for a
-    dependent stage the correlation key alone is not sufficient proof of origin.
+    A declared source uses the same matching rules as an entry stage.
+    The caller independently verifies the previous stage's correlation key.
     """
-    source_agent = getattr(rule, "source_agent", None)
-    if source_agent is None:
-        return True
-    if source_agent == "@agent_any":
-        return bool(trigger.agent_identity)
-    return source_agent == trigger.agent_identity
+    return source_matches(rule.source_agent, trigger.agent_identity)
 
 
 def stage_after_dispatch(stage: int, workflow_length: int) -> tuple[int, str]:

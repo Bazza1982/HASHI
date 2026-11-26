@@ -157,6 +157,33 @@ def test_entry_prompt_dispatch_binds_trigger_agent(tmp_path):
     assert len(adapter.prompt_calls) == 1
 
 
+def test_feed_waits_for_committed_worker_routes_and_dispatches_once(tmp_path):
+    from types import SimpleNamespace
+    from hal.dispatch import GatewayDispatchAdapter
+
+    feed = FakeSessionStore()
+    service, adapter = make_service(tmp_path, feed)
+    application = SimpleNamespace(_shared_committed=False, _handoff_draining=False)
+    adapter.ready_for_events = GatewayDispatchAdapter(
+        SimpleNamespace(orchestrator=application)
+    ).ready_for_events
+    rule = make_rule(service, "user:7", 'if @lily@testinst #turn_finish then @alice $prompt "hi".')
+    service.set_enabled(owner_id="user:7", rule_id=rule["rule_id"], enabled=True)
+    before = service.store.get_cursor("user:7")
+    feed.add_event(agent_id="lily")
+
+    run(service._process_owner("user:7"))
+    assert service.store.get_cursor("user:7") == before
+    assert service.store.list_execs("user:7") == []
+    assert adapter.prompt_calls == []
+
+    application._shared_committed = True
+    run(service._process_owner("user:7"))
+    run(service._process_owner("user:7"))
+    assert len(adapter.prompt_calls) == 1
+    assert service.store.list_execs("user:7")[0]["state"] == "completed"
+
+
 def test_automation_origin_event_never_starts_a_rule(tmp_path):
     feed = FakeSessionStore()
     service, adapter = make_service(tmp_path, feed)

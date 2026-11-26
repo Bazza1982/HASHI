@@ -52,7 +52,7 @@ commands and remote entry subscriptions remain outside this capability.
 |---|---|---|
 | `#turn_finish` | real feed `run.completed` | available |
 | `#turn_error` | real feed `run.failed` | available |
-| `#system_idle` | derived active→idle edge from committed Session evidence | available |
+| `#system_idle` | no reliable active-to-idle event source | **unavailable** |
 | `#turn_commentary` | no commentary events in the durable feed | **unavailable** |
 | `#hashideploy_finish` | no deployment-completion event source | **unavailable** |
 | `#reboot_ok` | no reboot-completion event source | **unavailable** |
@@ -79,11 +79,11 @@ detail (`waiting for #reboot_ok (no reboot-completion event source exists)`).
    canonical identity (`@name@instance`), never through a shared global. On
    system events there is no trigger Agent; a prompt referencing
    `@agent_trigger` fails that stage honestly.
-5. **`#system_idle` edge.** Emitted only when a non-automation run terminal
-   event arrives and the Session store shows no active runs, once per
-   transition batch (per-page latch + run-identity latch cleared when activity
-   resumes). It never fires on a permanently idle instance without a real
-   transition, and automation runs cannot re-arm it.
+5. **Committed routes and source matching.** At startup or shared handoff, the HAL loop leaves feed cursors unchanged until
+   the shared generation commits its Worker routes. A known Agent starting
+   individually may use the existing bounded, idempotent prompt retry.
+   Source names match case-insensitively. `@name` selects a local source and
+   `@name@instance` also checks the instance qualifier.
 6. **Native commands.** Executed through the existing slash-command path with
    the trigger Agent's runtime (or, for system events, the deterministic first
    runtime by sorted name). Native commands have no idempotency key: a failed

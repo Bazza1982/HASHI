@@ -329,6 +329,10 @@ class HalService:
 
     async def _process_owner(self, owner_id: str) -> bool:
         """One bounded feed check + deterministic planning + idempotent apply."""
+        # The API can listen before the shared Function generation commits its
+        # Worker routes. Keep the cursor intact until those routes are ready.
+        if not self.dispatch.ready_for_events():
+            return False
         activity = False
         try:
             cursor = await asyncio.to_thread(self.store.get_cursor, owner_id)

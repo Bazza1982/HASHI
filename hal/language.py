@@ -148,11 +148,22 @@ def entry_matches(rule: HALRule, event: HALEvent) -> bool:
     """
     if rule.event != event.name:
         return False
-    if rule.source_agent is None:
+    return source_matches(rule.source_agent, event.agent_identity)
+
+
+def source_matches(source: str | None, identity: str | None) -> bool:
+    """Match against a canonical identity from the local instance's event feed."""
+    if source is None:
         return True
-    if rule.source_agent == "@agent_any":
-        return bool(event.agent_identity)
-    return rule.source_agent == event.agent_identity
+    if not identity:
+        return False
+    source = source.casefold()
+    if source == "@agent_any":
+        return True
+    identity = identity.casefold()
+    if "@" not in source[1:]:
+        return source == "@" + identity.lstrip("@").split("@", 1)[0]
+    return source == identity
 
 
 def resolve_prompt(action: HALAction, *, agent_trigger: str | None) -> str:
