@@ -498,6 +498,10 @@ def clear_completed_interrupted_task(runtime: Any, item: Any) -> bool:
     """Clear only the /stop snapshot explicitly attached to this successful turn."""
     resumed = _value(item, "_resumed_interrupted_task")
     if _interrupted_task_snapshot(resumed) is None:
+        item_meta = _value(item, "request_metadata")
+        if isinstance(item_meta, dict):
+            resumed = item_meta.get("resumed_interrupted_task")
+    if _interrupted_task_snapshot(resumed) is None:
         current_meta = getattr(runtime, "current_request_meta", None)
         resumed = _value(current_meta, "resumed_interrupted_task")
     if _interrupted_task_snapshot(resumed) is None:
