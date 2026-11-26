@@ -161,9 +161,17 @@ def test_unknown_token_subcommand_shows_usage(tmp_path: Path):
 # --- credential handling ------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("command_text", "command_args"),
+    [
+        (f"/remote token set {TOKEN}", ["token", "set", TOKEN]),
+        (f"/remote token set={TOKEN}", ["token", f"set={TOKEN}"]),
+        (f"/remote token set: {TOKEN}", ["token", "set:", TOKEN]),
+    ],
+)
 @pytest.mark.asyncio
 async def test_inline_token_is_rejected_before_audit_history_or_invocation(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, command_text, command_args
 ):
     from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
     from orchestrator.slash_command_audit import default_audit_path
@@ -180,7 +188,7 @@ async def test_inline_token_is_rejected_before_audit_history_or_invocation(
 
     monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
     wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "remote", handler)
-    await wrapped(update(f"/remote token set {TOKEN}"), args("token", "set", TOKEN))
+    await wrapped(update(command_text), args(*command_args))
 
     # The handler is never reached, so nothing can write the credential.
     assert executed == []

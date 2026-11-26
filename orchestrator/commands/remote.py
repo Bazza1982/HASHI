@@ -32,11 +32,18 @@ def inline_token_attempt(command_name: str, args: list[str] | None) -> bool:
     if str(command_name or "").casefold() != "remote":
         return False
     words = [str(value) for value in (args or [])]
-    if len(words) < 3:
+    if len(words) < 2 or words[0].casefold() != "token":
         return False
-    if words[0].casefold() != "token" or words[1].casefold() != "set":
-        return False
-    return any(value.strip() for value in words[2:])
+    action = words[1].casefold()
+    if action == "set":
+        return any(value.strip() for value in words[2:])
+    # `set=<value>` / `set: <value>` are not accepted either, but they still
+    # carry a credential that must not be persisted.
+    if action.startswith(("set=", "set:")):
+        return bool(action[4:].strip()) or any(
+            value.strip() for value in words[2:]
+        )
+    return False
 
 
 def redact_inline_token_args(command_name: str, args: list[str] | None) -> list[str]:
@@ -50,7 +57,9 @@ def redact_inline_token_args(command_name: str, args: list[str] | None) -> list[
     words = [str(value) for value in (args or [])]
     if not inline_token_attempt(command_name, words):
         return words
-    return words[:2] + [REDACTED_INLINE_VALUE]
+    if len(words) > 1 and words[1].casefold() == "set":
+        return words[:2] + [REDACTED_INLINE_VALUE]
+    return words[:1] + [REDACTED_INLINE_VALUE]
 
 
 def is_pending_prompt_reply(runtime: Any, update: Any) -> bool:
