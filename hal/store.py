@@ -510,14 +510,25 @@ class HalStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def list_execs(self, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_execs(
+        self, owner_id: str, limit: int = 50, rule_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        # Filtering by rule belongs in the query: applying the limit first and
+        # filtering afterwards would let other rules' runs crowd out the
+        # history of the rule being inspected.
+        where = "owner_id=?"
+        params: list[Any] = [owner_id]
+        if rule_id:
+            where += " AND rule_id=?"
+            params.append(rule_id)
+        params.append(max(1, min(int(limit), 200)))
         with _LOCK:
             rows = self._conn.execute(
                 "SELECT exec_id, rule_id, rule_name, rule_revision, workflow_index, "
                 "stage, state, trigger_event_id, trigger_agent, trigger_kind, detail, "
-                "created_at, updated_at FROM hal_workflow_execs WHERE owner_id=? "
+                "created_at, updated_at FROM hal_workflow_execs WHERE " + where + " "
                 "ORDER BY created_at DESC LIMIT ?",
-                (owner_id, max(1, min(int(limit), 200))),
+                tuple(params),
             ).fetchall()
         return [dict(r) for r in rows]
 

@@ -945,6 +945,66 @@ def test_api_runs_listing(tmp_path):
     asyncio.run(scenario())
 
 
+def test_api_runs_filters_by_rule_before_the_limit(tmp_path):
+    """A rule's own history must survive other rules' newer runs."""
+    feed = FakeSessionStore()
+    service, _ = make_service(tmp_path, feed)
+    server = FakeServer(service)
+    script = 'if @agent_any #turn_finish then @alice $prompt "hi".'
+    quiet = make_rule(service, "user:7", script, name="quiet")
+    noisy = make_rule(service, "user:7", script, name="noisy")
+
+    # The quiet rule runs once, then the noisy rule produces enough runs to
+    # fill a newest-first limit=8 window all by itself.
+    service.set_enabled(owner_id="user:7", rule_id=quiet["rule_id"], enabled=True)
+    feed.add_event()
+    run(service._process_owner("user:7"))
+    service.set_enabled(owner_id="user:7", rule_id=quiet["rule_id"], enabled=False)
+    service.set_enabled(owner_id="user:7", rule_id=noisy["rule_id"], enabled=True)
+    for _ in range(9):
+        feed.add_event()
+    run(service._process_owner("user:7"))
+
+    # Timestamps are second-granular, so pin the ordering explicitly instead of
+    # depending on which row happened to be inserted first within a second.
+    rows = service.store.list_execs("user:7")
+    assert len(rows) == 10
+    for index, row in enumerate(reversed(rows)):
+        service.store._conn.execute(
+            "UPDATE hal_workflow_execs SET created_at=? WHERE exec_id=?",
+            (f"2026-01-01T00:00:{index:02d}Z", row["exec_id"]),
+        )
+    service.store._conn.commit()
+
+    async def scenario():
+        async with api_client(server) as client:
+            response = await client.get("/hal/runs?limit=8")
+            payload = await response.json()
+            assert response.status == 200
+            assert quiet["rule_id"] not in {row["rule_id"] for row in payload["runs"]}
+
+            # Filtering happens in SQL, before the limit: the single quiet run
+            # is still returned even though it is older than eight noisy runs.
+            response = await client.get(f"/hal/runs?limit=8&rule_id={quiet['rule_id']}")
+            payload = await response.json()
+            assert response.status == 200
+            assert [row["rule_id"] for row in payload["runs"]] == [quiet["rule_id"]]
+
+            response = await client.get(f"/hal/runs?limit=8&rule_id={noisy['rule_id']}")
+            payload = await response.json()
+            assert len(payload["runs"]) == 8
+            assert {row["rule_id"] for row in payload["runs"]} == {noisy["rule_id"]}
+
+            # An absent or blank filter keeps the old all-rules behaviour.
+            for query in ("/hal/runs?limit=8", "/hal/runs?limit=8&rule_id="):
+                response = await client.get(query)
+                payload = await response.json()
+                assert len(payload["runs"]) == 8
+                assert {row["rule_id"] for row in payload["runs"]} == {noisy["rule_id"]}
+
+    asyncio.run(scenario())
+
+
 # --- Round 4: A1 atomic enable ----------------------------------------------
 
 
