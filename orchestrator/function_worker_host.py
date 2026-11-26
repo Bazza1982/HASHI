@@ -990,6 +990,13 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError("Agent runtime is not prepared")
         return self.runtime
 
+    def _disarm_reboot_capture(self, runtime: Any, operation_id: str) -> dict[str, Any]:
+        """Drop the capture of an operation that will not cut over."""
+        if not operation_id:
+            return {"disarmed": False, "operation_id": ""}
+        reboot_capture.disarm(runtime, operation_id)
+        return {"disarmed": True, "operation_id": operation_id}
+
     def _arm_reboot_capture(self, runtime: Any, operation_id: str) -> dict[str, Any]:
         """Let this operation's stop record exactly what it removes.
 
@@ -1042,10 +1049,20 @@ class FunctionWorkerHost:
             if generation:
                 binding["session_context_generation"] = generation
             route = run.get("delivery_route")
-            if isinstance(route, Mapping) and route:
-                # The frozen delivery binding: where the original turn was meant
-                # to answer. Attachments are not replayed from here.
-                binding["_run_delivery_route"] = dict(route)
+            destination = None
+            if isinstance(route, Mapping):
+                primary = route.get("primary")
+                destination = primary if isinstance(primary, Mapping) else route
+            if isinstance(destination, Mapping):
+                # Admission rebuilds the delivery route from the accepted source
+                # channel, so hand it that channel rather than a frozen route
+                # object it would replace. Connector checks still apply.
+                surface = str(destination.get("surface") or "").strip()
+                channel_key = str(destination.get("channel_key") or "").strip()
+                if surface and surface != "unknown":
+                    binding["session_surface"] = surface
+                if channel_key:
+                    binding["session_channel_key"] = channel_key
         if not session_id:
             return binding, None
         binding["session_id"] = session_id
@@ -1159,11 +1176,6 @@ class FunctionWorkerHost:
             for item in (params.get("pending") or ())
             if isinstance(item, Mapping)
         ]
-        delayed = [
-            dict(item)
-            for item in (params.get("delayed") or ())
-            if isinstance(item, Mapping)
-        ]
         interrupted = [
             dict(item)
             for item in (params.get("interrupted") or ())
@@ -1263,66 +1275,11 @@ class FunctionWorkerHost:
                 continue
             turns_resumed += 1
 
-        delayed_resumed = 0
-        scheduled_ids: set[str] = set()
-        if delayed:
-            try:
-                for record in (
-                    await self.scheduler.list_delayed_messages(self.agent_name) or ()
-                ):
-                    if isinstance(record, Mapping):
-                        scheduled_ids.add(str(record.get("id") or ""))
-            except Exception:
-                logger.warning(
-                    "Delayed messages could not be listed before restoring for %s",
-                    self.agent_name,
-                )
-        restore_delayed = getattr(self.scheduler, "restore_delayed_message", None)
-        for entry in delayed:
-            delay_id = str(entry.get("id") or "")
-            record = entry.get("record")
-            if not isinstance(record, Mapping):
-                unconfirmed.append(
-                    {"kind": "delayed", "entry": entry, "reason": "record_missing"}
-                )
-                continue
-            if delay_id and delay_id in scheduled_ids:
-                # Still scheduled: it survived the stop, re-adding would repeat it.
-                continue
-            if not callable(restore_delayed):
-                unconfirmed.append(
-                    {
-                        "kind": "delayed",
-                        "entry": entry,
-                        "reason": "restore_unsupported",
-                    }
-                )
-                continue
-            # Put the persisted record back as it was: same id, same due time,
-            # same creation time. Only the reopened fence is restamped.
-            restored = dict(record)
-            restored["agent"] = str(restored.get("agent") or self.agent_name)
-            metadata = dict(restored.get("request_metadata") or {})
-            metadata["agent_stop_epoch"] = int(stop_epoch)
-            metadata[_REBOOT_RESUME_KEY] = operation_id
-            restored["request_metadata"] = metadata
-            try:
-                await restore_delayed(restored)
-            except Exception:
-                logger.warning(
-                    "Delayed message could not be restored for %s", self.agent_name
-                )
-                unconfirmed.append(
-                    {"kind": "delayed", "entry": entry, "reason": "restore_failed"}
-                )
-                continue
-            delayed_resumed += 1
-
+        # Delayed messages are owned by Core's Scheduler, not by the Worker, so
+        # this Agent only re-admits queue entries and interrupted turns.
         return {
             "pending_resumed": pending_resumed,
             "pending_total": len(pending),
-            "delayed_resumed": delayed_resumed,
-            "delayed_total": len(delayed),
             "turns_resumed": turns_resumed,
             "turn_resumed": turns_resumed > 0,
             "turns_total": len(interrupted),
@@ -2114,6 +2071,10 @@ class FunctionWorkerHost:
             return request_id
         if method == "runtime.reboot_capture_arm":
             return self._arm_reboot_capture(
+                runtime, str(params.get("operation_id") or "")
+            )
+        if method == "runtime.reboot_capture_disarm":
+            return self._disarm_reboot_capture(
                 runtime, str(params.get("operation_id") or "")
             )
         if method == "runtime.reboot_resume":

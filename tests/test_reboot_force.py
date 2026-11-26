@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator.agent_stop_fence import AgentStopFenceStore, stop_fence_path
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.reboot_ui import render_notice
 from tests.test_reboot_manager import _Kernel
@@ -60,6 +61,9 @@ def _write_capture(tmp_path, operation_id, agent, payload):
                 "delayed": list(payload.get("delayed") or ()),
                 "interrupted": list(payload.get("interrupted") or ()),
                 "unconfirmed": list(payload.get("unconfirmed") or ()),
+                # Only a finished record is evidence; the stop writes this last.
+                "phase": payload.get("phase", "stopped"),
+                "broken": bool(payload.get("broken", False)),
             }
         ),
         encoding="utf-8",
@@ -106,18 +110,16 @@ def _stop_clears_busy(handle, seen):
 def _resuming(handle, *, result=None):
     calls: list[dict] = []
 
-    async def resume(pending=(), *, delayed=(), interrupted=(), operation_id="", **_kw):
+    async def resume(pending=(), *, interrupted=(), operation_id="", **_kw):
         calls.append(
             {
                 "pending": list(pending),
-                "delayed": list(delayed),
                 "interrupted": list(interrupted),
                 "operation_id": operation_id,
             }
         )
         return result or {
             "pending_resumed": len(pending),
-            "delayed_resumed": len(delayed),
             "turns_resumed": len(interrupted),
         }
 
@@ -465,6 +467,114 @@ async def test_a_capture_time_unconfirmed_entry_is_reported_and_kept(
     assert calls == [], "nothing was removed, so there is nothing to re-admit"
     written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
     assert written["agents"]["zelda"]["unconfirmed"][0]["entry"]["id"] == "d1"
+
+
+class _DelayScheduler:
+    """The Scheduler's real restore contract: a receipt, or nothing."""
+
+    def __init__(self, *, accept=True):
+        self.records: list[dict] = []
+        self.accept = accept
+
+    async def restore_delayed_message(self, record):
+        if not self.accept:
+            return None
+        self.records.append(dict(record))
+        return dict(record)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_delayed_message_comes_back_through_the_scheduler(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    AgentStopFenceStore(stop_fence_path(tmp_path)).advance("zelda")
+    scheduler = _DelayScheduler()
+    kernel.scheduler = scheduler
+    due_at = 1_900_000_000.0
+    recorded = {
+        "delayed": [
+            {
+                "id": "d1",
+                "chat_id": 42,
+                "prompt": "later",
+                "due_at": due_at,
+                "record": {
+                    "id": "d1",
+                    "agent": "zelda",
+                    "chat_id": 42,
+                    "prompt": "later",
+                    "created_at": 1_700_000_000.0,
+                    "due_at": due_at,
+                    "request_metadata": {"agent_stop_epoch": 0, "owner_id": "42"},
+                },
+            }
+        ]
+    }
+    _worker(handle, tmp_path, recorded)
+    calls = _resuming(handle)
+
+    manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+    totals = await manager.resume_restored_work(kernel._restart_request)
+
+    assert totals == {"pending": 0, "turns": 0, "delayed": 1, "unconfirmed": 0}
+    assert calls == [], "Core restores the schedule; the Worker is not asked"
+    restored = scheduler.records[0]
+    assert restored["id"] == "d1"
+    assert restored["created_at"] == 1_700_000_000.0
+    assert restored["due_at"] == due_at
+    assert restored["request_metadata"]["agent_stop_epoch"] == 1
+    assert restored["request_metadata"]["owner_id"] == "42"
+    assert _manifests(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_message_the_scheduler_rejects_stays_unconfirmed(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    kernel.scheduler = _DelayScheduler(accept=False)
+    entry = {"id": "d1", "prompt": "later", "due_at": 1_900_000_000.0, "record": {}}
+    _worker(handle, tmp_path, {"delayed": [entry]})
+    _resuming(handle)
+
+    manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+    totals = await manager.resume_restored_work(kernel._restart_request)
+
+    assert totals == {"pending": 0, "turns": 0, "delayed": 0, "unconfirmed": 1}
+    written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
+    assert written["agents"]["zelda"]["delayed"] == [entry]
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_record_stops_the_cutover_and_is_kept(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    queued = {"request_id": "req-1", "chat_id": 42, "prompt": "queued"}
+    seen: list[str] = []
+    # The stop armed the record and wrote it, but never finished: no evidence.
+    _worker(handle, tmp_path, {"pending": [queued], "phase": "recording"}, seen=seen)
+
+    accepted = manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "force_capture_unconfirmed"
+    assert seen == ["/stop"]
+    assert not kernel.shutdown_event.is_set()
+    assert kernel._restart_request is None
+    assert record["resume"]["unconfirmed"] == 1
+    assert _capture_file(tmp_path, accepted["record"]["id"]).exists()
 
 
 def test_parser_accepts_force_alongside_delay():

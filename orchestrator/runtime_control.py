@@ -864,6 +864,9 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
         ),
     )
     dropped = removed.total
+    # Everything this stop removed is recorded by now. Finish the record before
+    # replying, so it either says it is usable or it says it is not.
+    reboot_capture.complete(runtime, reboot_record)
 
     unconfirmed = await asyncio.to_thread(
         _unconfirmed_stopped_requests, runtime, stopped_request_ids

@@ -166,6 +166,9 @@ class RebootWorkCapture:
         self.path = path
         self.armed_at = time.time()
         self.broken = False
+        # Only a finished record is evidence: an armed capture writes nothing
+        # until the stop has something to remember.
+        self.completed = False
         self.pending: list[dict[str, Any]] = []
         self.delayed: list[dict[str, Any]] = []
         self.interrupted: list[dict[str, Any]] = []
@@ -241,7 +244,24 @@ class RebootWorkCapture:
             "interrupted": [dict(entry) for entry in self.interrupted],
             "unconfirmed": [dict(entry) for entry in self.unconfirmed],
             "broken": self.broken,
+            "phase": self.phase,
         }
+
+    @property
+    def phase(self) -> str:
+        if self.broken:
+            return "incomplete"
+        return "stopped" if self.completed else "recording"
+
+    def complete(self) -> None:
+        """Finish the record: from here the file says whether it can be used."""
+        if self.completed:
+            return
+        self.completed = True
+        try:
+            self._flush()
+        except OSError:
+            self.broken = True
 
     # ------------------------------------------------------------------ internals
 
@@ -290,6 +310,7 @@ class RebootWorkCapture:
             "delayed": self.delayed,
             "interrupted": self.interrupted,
             "unconfirmed": self.unconfirmed,
+            "phase": self.phase,
         }
         try:
             encoded = json.dumps(payload, ensure_ascii=False)
@@ -325,18 +346,29 @@ def arm(runtime: Any, operation_id: str) -> RebootWorkCapture:
     path = capture_path(bridge_home_for(runtime), operation_id, name)
     capture = RebootWorkCapture(operation_id, name, path=path)
     setattr(runtime, _CAPTURE_ATTRIBUTE, capture)
-    if path is not None:
-        capture._flush()
     return capture
+
+
+def _detach(runtime: Any, operation_id: str | None = None) -> None:
+    """Drop the armed capture without consulting it (never recurses)."""
+    capture = getattr(runtime, _CAPTURE_ATTRIBUTE, None)
+    if not isinstance(capture, RebootWorkCapture):
+        return
+    if operation_id is not None and capture.operation_id != str(operation_id):
+        return
+    try:
+        delattr(runtime, _CAPTURE_ATTRIBUTE)
+    except AttributeError:
+        pass
 
 
 def armed(runtime: Any, operation_id: str | None = None) -> RebootWorkCapture | None:
     capture = getattr(runtime, _CAPTURE_ATTRIBUTE, None)
     if not isinstance(capture, RebootWorkCapture):
         return None
-    if capture.armed_at + CAPTURE_MAX_AGE_SECONDS < time.time():
-        # A reboot that never returned must not keep arming later stops.
-        disarm(runtime)
+    if capture.completed or capture.armed_at + CAPTURE_MAX_AGE_SECONDS < time.time():
+        # A finished or abandoned operation must not keep arming later stops.
+        _detach(runtime, capture.operation_id)
         return None
     if operation_id is not None and capture.operation_id != str(operation_id):
         return None
@@ -344,11 +376,19 @@ def armed(runtime: Any, operation_id: str | None = None) -> RebootWorkCapture | 
 
 
 def disarm(runtime: Any, operation_id: str | None = None) -> None:
-    if armed(runtime, operation_id) is not None:
-        try:
-            delattr(runtime, _CAPTURE_ATTRIBUTE)
-        except AttributeError:
-            pass
+    _detach(runtime, operation_id)
+
+
+def complete(runtime: Any, capture: RebootWorkCapture | None = None) -> None:
+    """Finish and detach this operation's capture; a normal /stop has none."""
+    if not isinstance(capture, RebootWorkCapture):
+        capture = armed(runtime)
+    if capture is None:
+        return
+    try:
+        capture.complete()
+    finally:
+        _detach(runtime, capture.operation_id)
 
 
 def read_capture(path: Path) -> dict[str, Any] | None:
@@ -361,10 +401,19 @@ def read_capture(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def is_complete(payload: Mapping[str, Any] | None) -> bool:
+    """A record the stop really finished writing, and could write at all."""
+    if not isinstance(payload, Mapping):
+        return False
+    return str(payload.get("phase") or "") == "stopped" and not payload.get("broken")
+
+
 __all__ = [
     "RebootWorkCapture",
     "arm",
     "armed",
+    "complete",
+    "is_complete",
     "safe_name",
     "capture_directory",
     "capture_path",

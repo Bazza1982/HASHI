@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from orchestrator.reboot_receipts import (
     REBOOT_WORK_COUNTS,
     RebootReceipts,
 )
+from orchestrator.agent_stop_fence import AgentStopFenceStore, stop_fence_path
 from orchestrator.reboot_ui import operation_notice, render_notice
 from orchestrator import reboot_capture, runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
@@ -69,16 +70,16 @@ def _read_captures(
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """The exact record each target's stop wrote, and the targets without one.
 
-    A target with no record is unknown, never "nothing to restore": if its stop
-    could not write down what it removed, the reboot must not claim the work is
-    safe.
+    A target with no finished record is unknown, never "nothing to restore": an
+    armed capture writes nothing yet, and a record the stop could not finish
+    writing says so instead of claiming the work is safe.
     """
     records: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
     for name in names:
         path = reboot_capture.capture_path(bridge_home, operation_id, name)
         payload = reboot_capture.read_capture(path) if path is not None else None
-        if payload is None:
+        if not reboot_capture.is_complete(payload):
             missing.append(name)
             continue
         records[name] = payload
@@ -845,21 +846,29 @@ class RebootManager:
                 for item in (payload.get("unconfirmed") or ())
                 if isinstance(item, Mapping)
             ]
+            # Delayed messages live in Core's Scheduler, so they are put back
+            # here against the real schedule instead of through the Worker.
+            delayed_resumed, delayed_unconfirmed = await self._restore_delayed(
+                name, delayed
+            )
             if not (pending or delayed or interrupted):
                 # The stop took nothing this Agent can be asked to put back.
-                if unconfirmed:
-                    remaining[name] = {"unconfirmed": unconfirmed}
-                    totals["unconfirmed"] += len(unconfirmed)
+                if unconfirmed or delayed_unconfirmed:
+                    remaining[name] = {
+                        "unconfirmed": unconfirmed + delayed_unconfirmed
+                    }
+                    totals["unconfirmed"] += len(unconfirmed) + len(
+                        delayed_unconfirmed
+                    )
                 continue
             handle = handles.get(name)
             result: dict[str, Any] = {}
             failed = handle is None
-            if handle is not None:
+            if handle is not None and (pending or interrupted):
                 try:
                     result = dict(
                         await handle.resume_after_reboot(
                             pending,
-                            delayed=delayed,
                             interrupted=interrupted,
                             operation_id=operation_id,
                         )
@@ -875,7 +884,7 @@ class RebootManager:
                     result = {}
             confirmed = {
                 "pending": int(result.get("pending_resumed") or 0),
-                "delayed": int(result.get("delayed_resumed") or 0),
+                "delayed": delayed_resumed,
                 "interrupted": int(result.get("turns_resumed") or 0),
             }
             totals["pending"] += confirmed["pending"]
@@ -885,13 +894,12 @@ class RebootManager:
                 "pending": [],
                 "delayed": [],
                 "interrupted": [],
-                "unconfirmed": unconfirmed,
+                "unconfirmed": unconfirmed + delayed_unconfirmed,
             }
             if failed:
                 bucket.update(
                     {
                         "pending": pending,
-                        "delayed": delayed,
                         "interrupted": interrupted,
                     }
                 )
@@ -1005,6 +1013,70 @@ class RebootManager:
             operation_id, self._manifest_agents(manifest)
         )
 
+    def _agent_stop_epoch(self, agent: str) -> int | None:
+        """The fence the stop of ``agent`` left behind, read from its own store."""
+        bridge_home = getattr(getattr(self.kernel, "paths", None), "bridge_home", None)
+        if not bridge_home:
+            return None
+        try:
+            return int(AgentStopFenceStore(stop_fence_path(bridge_home)).current(agent).epoch)
+        except Exception:
+            return None
+
+    async def _restore_delayed(
+        self,
+        agent: str,
+        entries: Sequence[Any],
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Put a stop's cancelled delayed records back through the real Scheduler.
+
+        Only the schedule's own receipt counts. A record that cannot be put back
+        stays recorded as unconfirmed instead of being reported as restored.
+        """
+        if not entries:
+            return 0, []
+        restore = getattr(
+            getattr(self.kernel, "scheduler", None), "restore_delayed_message", None
+        )
+        epoch = self._agent_stop_epoch(agent)
+        resumed = 0
+        unconfirmed: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            record = dict(entry.get("record") or {}) or {
+                key: value for key, value in entry.items() if key != "record"
+            }
+            record.setdefault("agent", agent)
+            record.setdefault("due_at", entry.get("due_at"))
+            delay_id = str(record.get("id") or entry.get("id") or "")
+            if delay_id:
+                record["id"] = delay_id
+            reason = ""
+            if not callable(restore):
+                reason = "restore_unsupported"
+            elif epoch is None:
+                reason = "fence_unavailable"
+            elif not delay_id or not record.get("prompt"):
+                reason = "record_missing"
+            else:
+                # Same record, same id, same due time; only the fence reopened by
+                # the stop is restamped so the message is accepted again.
+                metadata = dict(record.get("request_metadata") or {})
+                metadata["agent_stop_epoch"] = epoch
+                record["request_metadata"] = metadata
+                try:
+                    if await restore(record):
+                        resumed += 1
+                        continue
+                    reason = "not_scheduled"
+                except Exception:
+                    reason = "restore_failed"
+            unconfirmed.append(
+                {"kind": "delayed", "entry": dict(entry), "reason": reason}
+            )
+        return resumed, unconfirmed
+
     async def _hand_back_after_abort(
         self,
         operation_id: str,
@@ -1022,17 +1094,37 @@ class RebootManager:
         for name in stop_targets:
             handle = handles.get(name)
             payload = recorded.get(name)
-            if handle is None:
-                continue
+            disarm = getattr(handle, "disarm_reboot_capture", None)
+            if callable(disarm):
+                # This operation is over; its record must not arm a later stop.
+                try:
+                    await disarm(operation_id)
+                except Exception:
+                    bridge_logger.warning(
+                        "Reboot force: capture disarm failed | operation=%s agent=%s",
+                        operation_id,
+                        name,
+                    )
+            unconfirmed = [
+                dict(item) for item in (payload or {}).get("unconfirmed") or ()
+            ]
+            if payload is None:
+                # No finished record: what this stop took is unknown, and that
+                # is exactly what has to stay visible.
+                unconfirmed.append(
+                    {
+                        "kind": "capture",
+                        "entry": {"agent": name, "operation_id": operation_id},
+                        "reason": "capture_incomplete",
+                    }
+                )
             restored[name] = {
                 "pending": [dict(item) for item in (payload or {}).get("pending") or ()],
                 "delayed": [dict(item) for item in (payload or {}).get("delayed") or ()],
                 "interrupted": [
                     dict(item) for item in (payload or {}).get("interrupted") or ()
                 ],
-                "unconfirmed": [
-                    dict(item) for item in (payload or {}).get("unconfirmed") or ()
-                ],
+                "unconfirmed": unconfirmed,
             }
         totals = await self._resume_agents(
             operation_id, restored, handles=handles, discard_when_done=False

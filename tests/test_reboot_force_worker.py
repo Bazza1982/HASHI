@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -106,9 +105,9 @@ class _Runtime:
 
 
 def _host(runtime) -> FunctionWorkerHost:
+    # Built the way the real host is: it owns no Scheduler, that lives in Core.
     host = FunctionWorkerHost.__new__(FunctionWorkerHost)
     host.agent_name = "zelda"
-    host.scheduler = runtime.scheduler
     return host
 
 
@@ -389,7 +388,11 @@ async def test_a_turn_keeps_its_original_owner_and_generation(tmp_path):
     assert metadata["session_id"] == "s1"
     assert metadata["resumed_interrupted_task"] == turn
     assert admission["request_content"] == turn["request_content"]
-    assert metadata["_run_delivery_route"] == route
+    # Admission rebuilds the delivery route from this channel, so the original
+    # channel is carried, not a route object it would ignore.
+    assert metadata["session_surface"] == "telegram"
+    assert metadata["session_channel_key"] == "42"
+    assert "_run_delivery_route" not in metadata
 
 
 @pytest.mark.asyncio
@@ -469,64 +472,82 @@ async def test_a_turn_outside_the_record_is_never_revived(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_delayed_message_comes_back_exactly_as_it_was(tmp_path):
-    due_at = time.time() + 600
-    original = {
-        "id": "d1",
-        "agent": "zelda",
-        "chat_id": 42,
-        "prompt": "later",
-        "created_at": 1_700_000_000.0,
-        "due_at": due_at,
-        "deliver_to_telegram": True,
-        "request_metadata": {"agent_stop_epoch": 0, "owner_id": "42"},
-    }
-    runtime = _Runtime(tmp_path, delayed=[original])
+async def test_resume_works_without_a_worker_scheduler(tmp_path):
+    # The real FunctionWorkerHost owns no Scheduler: delayed messages belong to
+    # Core, so a resume of queued work must not reach for one.
+    runtime = _Runtime(tmp_path)
     capture = reboot_capture.arm(runtime, "op-13")
-
+    runtime.queue.put_nowait(_queued("queued"))
     await runtime_pending.recall_pending(runtime, capture=capture)
-    entry = _record(tmp_path, "op-13")["delayed"][0]
-    assert entry["id"] == "d1"
-    assert entry["due_at"] == due_at
-
+    entry = _record(tmp_path, "op-13")["pending"][0]
     _advance(tmp_path)
-    result = await _host(runtime)._resume_after_reboot(
-        runtime, {"delayed": [entry], "operation_id": "op-13"}
+
+    host = _host(runtime)
+    assert not hasattr(host, "scheduler")
+
+    result = await host._resume_after_reboot(
+        runtime, {"pending": [entry], "operation_id": "op-13"}
     )
 
-    assert result["delayed_resumed"] == 1
-    assert runtime.scheduler.recomputed == [], "the schedule is not rebuilt"
-    restored = runtime.scheduler.restored[0]
-    assert restored["id"] == "d1"
-    assert restored["due_at"] == due_at
-    assert restored["created_at"] == original["created_at"]
-    assert restored["request_metadata"]["agent_stop_epoch"] == 1
+    assert result["pending_resumed"] == 1
+    assert "delayed_resumed" not in result
+    assert runtime.enqueued[0]["prompt"] == "queued"
 
 
 @pytest.mark.asyncio
-async def test_a_delayed_message_that_survived_is_not_restored(tmp_path):
-    due_at = time.time() + 600
-    runtime = _Runtime(
-        tmp_path,
-        delayed=[
-            {
-                "id": "d1",
-                "agent": "zelda",
-                "chat_id": 42,
-                "prompt": "later",
-                "due_at": due_at,
-            }
-        ],
-    )
+async def test_arming_alone_writes_no_record(tmp_path):
+    runtime = _Runtime(tmp_path)
+    capture = reboot_capture.arm(runtime, "op-15")
+    assert reboot_capture.armed(runtime) is capture
+    assert not capture.path.exists(), "an armed capture is not evidence yet"
 
-    result = await _host(runtime)._resume_after_reboot(
-        runtime,
-        {
-            "delayed": [{"id": "d1", "chat_id": 42, "prompt": "later", "due_at": due_at}],
-            "operation_id": "op-14",
-        },
-    )
+    reboot_capture.complete(runtime, capture)
 
-    assert result["delayed_resumed"] == 0
-    assert runtime.scheduler.restored == []
+    payload = json.loads(capture.path.read_text(encoding="utf-8"))
+    assert payload["phase"] == "stopped"
+    assert payload["pending"] == []
+    assert reboot_capture.is_complete(payload)
+    assert reboot_capture.armed(runtime) is None, "a finished op cannot arm later stops"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_record_stops_arming_without_spinning(tmp_path):
+    runtime = _Runtime(tmp_path)
+    capture = reboot_capture.arm(runtime, "op-18")
+    capture.armed_at -= reboot_capture.CAPTURE_MAX_AGE_SECONDS + 1
+
+    assert reboot_capture.armed(runtime) is None
+    assert reboot_capture.armed(runtime, "op-18") is None
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_operation_leaves_a_normal_stop_alone(tmp_path):
+    runtime = _Runtime(tmp_path)
+    capture = reboot_capture.arm(runtime, "op-16")
+    reboot_capture.disarm(runtime, "op-16")
+    assert reboot_capture.armed(runtime) is None
+
+    runtime.queue.put_nowait(_queued("normal"))
+    await runtime_pending.recall_pending(runtime)
+
+    assert runtime.queue.qsize() == 0, "the ordinary stop still clears the queue"
+    assert not capture.path.exists(), "a normal stop records nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_could_not_be_written_says_so(tmp_path, monkeypatch):
+    runtime = _Runtime(tmp_path)
+    capture = reboot_capture.arm(runtime, "op-17")
+
+    def broken(*_args, **_kwargs):
+        raise OSError("disk is gone")
+
+    monkeypatch.setattr(capture, "_flush", broken)
+    with pytest.raises(OSError):
+        capture.record_interrupted([{"request_id": "req-1", "prompt": "long task"}])
+
+    assert capture.broken is True
+    reboot_capture.complete(runtime, capture)
+    assert capture.phase == "incomplete"
+    assert reboot_capture.is_complete(capture.payload()) is False
 # HASHI-Fingerprint: hfp_14ad2738c68841b893afa64e3b1c853e

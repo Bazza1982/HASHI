@@ -1178,11 +1178,23 @@ class AgentRuntimeHandle:
             or {}
         )
 
+    async def disarm_reboot_capture(
+        self, operation_id: str, *, timeout: float = 12
+    ) -> dict[str, Any]:
+        """Drop the record of an operation that will not cut over."""
+        return dict(
+            await self._route(
+                "runtime.reboot_capture_disarm",
+                {"operation_id": str(operation_id)},
+                timeout=timeout,
+            )
+            or {}
+        )
+
     async def resume_after_reboot(
         self,
         pending: Sequence[Mapping[str, Any]] = (),
         *,
-        delayed: Sequence[Mapping[str, Any]] = (),
         interrupted: Sequence[Mapping[str, Any]] = (),
         operation_id: str = "",
         timeout: float = 60,
@@ -1193,7 +1205,6 @@ class AgentRuntimeHandle:
                 "runtime.reboot_resume",
                 {
                     "pending": [dict(item) for item in pending],
-                    "delayed": [dict(item) for item in delayed],
                     "interrupted": [dict(item) for item in interrupted],
                     "operation_id": str(operation_id),
                 },
