@@ -6,10 +6,6 @@
       "-m",
       "pytest",
       "-q",
-      "-n",
-      "auto",
-      "--dist",
-      "loadscope",
       "--durations=25"
     ],
     "tests": [
@@ -72,10 +68,6 @@
       "-m",
       "pytest",
       "-q",
-      "-n",
-      "auto",
-      "--dist",
-      "loadscope",
       "--durations=25"
     ],
     "tests": [
@@ -134,10 +126,6 @@
       "-m",
       "pytest",
       "-q",
-      "-n",
-      "auto",
-      "--dist",
-      "loadscope",
       "--durations=25"
     ],
     "tests": [
@@ -178,10 +166,6 @@
       "-m",
       "pytest",
       "-q",
-      "-n",
-      "auto",
-      "--dist",
-      "loadscope",
       "--durations=25"
     ],
     "tests": [
@@ -211,10 +195,6 @@
       "-m",
       "pytest",
       "-q",
-      "-n",
-      "auto",
-      "--dist",
-      "loadscope",
       "--durations=25"
     ],
     "tests": [
