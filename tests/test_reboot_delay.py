@@ -7,6 +7,7 @@ assertion here is about what has *not* happened yet.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +103,64 @@ async def test_delayed_reboot_expires_without_fencing_anything(tmp_path, monkeyp
     rendered = render_notice(record, locale="en")
     assert "The wait limit expired" in rendered
     assert "zelda" in rendered
+
+
+@pytest.mark.asyncio
+async def test_delayed_reboot_expires_when_an_observation_passes_the_deadline(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch, poll=0.01, idle_window=0.05)
+    original = manager._observe_target_activity
+    calls = 0
+
+    async def slow_observe(targets, handles):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            # A metadata read may take up to its own timeout; here it returns
+            # after the whole wait budget is gone while every target is idle.
+            await asyncio.sleep(0.3)
+        return await original(targets, handles)
+
+    monkeypatch.setattr(manager, "_observe_target_activity", slow_observe)
+
+    accepted = manager.submit({**request, "delay_seconds": 0.2})
+    assert accepted["waiting"]
+
+    await asyncio.sleep(0.7)
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "idle_timeout"
+    assert not kernel.shutdown_event.is_set()
+    assert kernel._restart_request is None
+    assert manager.active_operation is None
+
+
+@pytest.mark.asyncio
+async def test_delayed_reboot_budget_uses_a_monotonic_clock(tmp_path, monkeypatch):
+    from orchestrator import reboot_manager as module
+
+    kernel, manager, request = _setup(tmp_path, monkeypatch, poll=0.01, idle_window=0.05)
+    kernel.runtimes[0].client.metadata["queue_depth"] = 1
+
+    accepted = manager.submit({**request, "delay_seconds": 0.2})
+    assert accepted["waiting"]
+
+    # A wall-clock correction must not move the wait budget either way.
+    monkeypatch.setattr(
+        module,
+        "time",
+        SimpleNamespace(
+            time=lambda: time.time() - 3600, monotonic=time.monotonic
+        ),
+    )
+
+    await asyncio.sleep(0.45)
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "idle_timeout"
+    assert not kernel.shutdown_event.is_set()
+    assert kernel._restart_request is None
 
 
 @pytest.mark.asyncio

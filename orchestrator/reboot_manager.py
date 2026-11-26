@@ -341,10 +341,12 @@ class RebootManager:
         idle_window = float(
             limits.get("idle_window_seconds") or REBOOT_DELAY_IDLE_WINDOW_SECONDS
         )
-        deadline = float(
-            limits.get("deadline")
-            or (time.time() + float(limits.get("delay_seconds") or 0.0))
-        )
+        delay_budget = float(limits.get("delay_seconds") or 0.0)
+        if delay_budget <= 0:
+            delay_budget = max(0.0, float(limits.get("deadline") or 0.0) - time.time())
+        # The wait itself is measured on a monotonic clock: a wall-clock jump
+        # must neither shorten nor extend the budget the caller was promised.
+        started = time.monotonic()
         handed_off = False
         idle_since: float | None = None
         busy_targets: list[str] = []
@@ -359,20 +361,12 @@ class RebootManager:
                     for name, (generating, queue_depth, detached) in activity.items()
                     if generating or queue_depth or detached
                 ]
-                now = time.time()
-                if busy_targets or unavailable_targets:
-                    idle_since = None
-                elif idle_since is None:
-                    idle_since = now
-                    bridge_logger.info(
-                        "Reboot wait: all targets idle, holding window | "
-                        "operation=%s window=%.0fs",
-                        operation_id,
-                        idle_window,
-                    )
-                if idle_since is not None and now - idle_since >= idle_window:
-                    break
-                if now >= deadline:
+                now = time.monotonic()
+                remaining = started + delay_budget - now
+                # Expiry is decided before the idle window. A metadata read is
+                # allowed to consume the rest of the budget, but an observation
+                # that returns past the deadline must never start a restart.
+                if remaining <= 0:
                     bridge_logger.info(
                         "Reboot wait expired before idle: operation=%s "
                         "busy=%s unavailable=%s",
@@ -388,10 +382,22 @@ class RebootManager:
                         activity_targets=list(unavailable_targets),
                     )
                     return False
+                if busy_targets or unavailable_targets:
+                    idle_since = None
+                elif idle_since is None:
+                    idle_since = now
+                    bridge_logger.info(
+                        "Reboot wait: all targets idle, holding window | "
+                        "operation=%s window=%.0fs",
+                        operation_id,
+                        idle_window,
+                    )
+                if idle_since is not None and now - idle_since >= idle_window:
+                    break
                 await asyncio.sleep(
                     min(
                         REBOOT_DELAY_POLL_SECONDS,
-                        max(REBOOT_DELAY_MIN_RECHECK_SECONDS, deadline - now),
+                        max(REBOOT_DELAY_MIN_RECHECK_SECONDS, remaining),
                     )
                 )
             self.kernel._restart_request = {
