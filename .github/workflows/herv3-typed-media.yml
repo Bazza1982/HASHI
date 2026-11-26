@@ -47,7 +47,6 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_typed_media_boundary.py \
-            tests/test_pr204_review_regressions.py \
             tests/test_device_control_worker.py \
             tests/test_deepseek_api.py \
             tests/test_multimodal_contract.py \

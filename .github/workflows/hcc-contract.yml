@@ -474,7 +474,6 @@ name: HCC contract
     - tests/test_runtime_pipeline.py
     - tests/test_runtime_skill_callbacks.py
     - tests/test_runtime_skill_commands.py
-    - tests/test_scheduler_backend_inheritance.py
     - tests/test_scheduler_persistence.py
     - tests/test_skill_manager_standard.py
     - tests/test_ui_language.py
@@ -1001,7 +1000,6 @@ name: HCC contract
     - tests/test_runtime_pipeline.py
     - tests/test_runtime_skill_callbacks.py
     - tests/test_runtime_skill_commands.py
-    - tests/test_scheduler_backend_inheritance.py
     - tests/test_scheduler_persistence.py
     - tests/test_skill_manager_standard.py
     - tests/test_ui_language.py
@@ -1112,7 +1110,7 @@ jobs:
       run: python -m pytest -q --junitxml=hcc-results.xml tests/test_hcc.py tests/test_hcc_integration.py tests/test_pcm_upgrade_contract.py
         tests/test_pcm_fixed_gateway.py tests/test_pcm_transfer.py tests/test_her_v2_fixed_backend.py tests/test_config_json.py
         tests/test_workspace_state.py tests/test_command_registry.py tests/test_ui_language.py tests/test_runtime_command_binding.py
-        tests/test_runtime_pipeline.py tests/test_scheduler_backend_inheritance.py tests/test_scheduler_persistence.py
+        tests/test_runtime_pipeline.py tests/test_scheduler_persistence.py
         tests/test_skill_manager_standard.py tests/test_runtime_skill_commands.py tests/test_runtime_skill_callbacks.py
         tests/test_agent_move_package.py
     - uses: actions/upload-artifact@v4

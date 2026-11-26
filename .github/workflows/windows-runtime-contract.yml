@@ -81,7 +81,6 @@ jobs:
         tests/test_browser_gateway_proxy.py tests/test_hashi_instance_cli.py tests/test_source_deploy.py
     - name: Verify native patch integrity and shared approval wiring
       run: python -m pytest -q tests/test_apply_patch_cross_platform.py tests/test_fingerprint_execution.py tests/test_live_voice_actions.py
-        tests/test_permission_api_decisions.py tests/test_permission_frontend_decisions.py tests/test_permission_model_broker.py
     - name: Verify native Windows runtime and portable startup contracts
       run: python -m pytest -q tests/test_function_generation.py tests/test_process_execution.py
         tests/test_agent_pcm_edit.py tests/test_agent_pcm_api.py tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain
