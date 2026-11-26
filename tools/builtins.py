@@ -772,18 +772,58 @@ async def execute_file_read(
 
     offset = max(1, int(args.get("offset", 1)))
     limit = max(1, min(500, int(args.get("limit", 500))))
-    max_chars = 20_000
+    # Leave room inside MAX_TEXT_TOOL_OUTPUT_CHARS (20,000) for the header and
+    # the continuation notice; otherwise the registry clips the tail and a
+    # caller can never learn where to resume.
+    max_chars = 18_000
+    raw_char_offset = args.get("char_offset")
+    char_offset: int | None = None
+    if raw_char_offset not in (None, ""):
+        try:
+            char_offset = max(0, int(raw_char_offset))
+        except (TypeError, ValueError):
+            return "Error: char_offset must be a non-negative integer"
 
     try:
+        if char_offset is not None:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                skipped = 0
+                line_no = 1
+                while skipped < char_offset:
+                    chunk = handle.read(min(65536, char_offset - skipped))
+                    if not chunk:
+                        return f"[{path}] No content at char_offset {char_offset}"
+                    skipped += len(chunk)
+                    line_no += chunk.count("\n")
+                content = handle.read(max_chars + 1)
+            truncated = len(content) > max_chars
+            content = content[:max_chars]
+            start_char = char_offset
+            end_char = start_char + len(content)
+            header = (
+                f"[{path}] from line {line_no}, chars {start_char}-{end_char}"
+            )
+            if truncated:
+                header += f" (next_char_offset={end_char})"
+                content += (
+                    "\n[truncated by HASHI; continue with "
+                    f"char_offset={end_char}]"
+                )
+            else:
+                header += " (end of file)"
+            return f"{header}\n{content}"
+
         selected: list[str] = []
         remaining = max_chars
         truncated = False
+        start_char = 0
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for _ in range(offset - 1):
                 while True:
                     chunk = handle.readline(8192)
                     if not chunk:
                         return f"[{path}] No lines at offset {offset}"
+                    start_char += len(chunk)
                     if chunk.endswith("\n"):
                         break
             for _ in range(limit):
@@ -801,10 +841,18 @@ async def execute_file_read(
                     break
             else:
                 truncated = bool(handle.read(1))
-        header = f"[{path}] lines {offset}-{offset + len(selected) - 1}"
         content = "".join(selected)
+        end_char = start_char + len(content)
+        header = (
+            f"[{path}] lines {offset}-{offset + len(selected) - 1}, "
+            f"chars {start_char}-{end_char}"
+        )
         if truncated:
-            content += "\n[truncated by HASHI; use a narrower offset or log_query]"
+            header += f" (next_char_offset={end_char})"
+            content += (
+                "\n[truncated by HASHI; continue with "
+                f"char_offset={end_char}]"
+            )
         return f"{header}\n{content}"
     except Exception as e:
         return f"Error reading file: {e}"

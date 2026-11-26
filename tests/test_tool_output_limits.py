@@ -27,14 +27,33 @@ async def test_recursive_file_list_stops_after_bounded_entries(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_file_read_bounds_one_very_long_line(tmp_path: Path):
+async def test_file_read_reconstructs_one_very_long_line(tmp_path: Path):
     source = tmp_path / "long.txt"
-    source.write_text("x" * 100_000, encoding="utf-8")
+    original = ("0123456789" * 10_000)  # 100,000 characters, no newline
+    source.write_text(original, encoding="utf-8")
 
-    output = await execute_file_read({"path": str(source)}, tmp_path, tmp_path)
+    pieces: list[str] = []
+    args: dict = {"path": str(source)}
+    for _ in range(20):  # hard stop so a broken cursor fails instead of looping
+        output = await execute_file_read(args, tmp_path, tmp_path)
+        # Must survive the registry's 20,000-character model-output budget.
+        assert len(output) < 20_000
+        header, body = output.split("\n", 1)
+        if "truncated by HASHI" in output:
+            body = body.rsplit("\n[truncated", 1)[0]
+            marker = "next_char_offset="
+            next_offset = int(header.split(marker, 1)[1].split(")", 1)[0])
+            pieces.append(body)
+            args = {"path": str(source), "char_offset": next_offset}
+        else:
+            assert "end of file" in header
+            pieces.append(body)
+            break
+    else:
+        pytest.fail("file_read never reached the end of the long line")
 
-    assert "[truncated" in output
-    assert len(output) < 30_000
+    assert "".join(pieces) == original
+    assert len(pieces) >= 5
 
 
 @pytest.mark.asyncio
@@ -94,3 +113,4 @@ async def test_browser_session_text_without_screenshot_is_bounded(tmp_path: Path
 
     assert "truncated by HASHI" in result.output
     assert len(result.output) < 30_000
+# HASHI-Fingerprint: hfp_88d0258bd790422599fedd314562d430
