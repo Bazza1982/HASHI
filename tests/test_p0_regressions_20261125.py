@@ -94,6 +94,23 @@ def test_preflight_treats_a_registry_engine_without_secrets_as_available():
     assert "no API key required" in reason
 
 
+def test_preflight_does_not_gate_ollama_on_startup_reachability():
+    preflight = BackendPreflight()
+    config = SimpleNamespace(engine="ollama-api", name="ollama-agent")
+    global_cfg = _preflight_global_config()
+    # Nothing listens on this port: a startup probe would mark the engine down.
+    global_cfg.ollama_base_url = "http://127.0.0.1:9"
+
+    result = preflight.check_backend_availability(global_cfg, [config], {})
+    available, reason = result["ollama-api"]
+    assert available is True
+    assert "adapter" in reason
+
+    startable, skipped = preflight.partition_agents_by_availability([config], result)
+    assert [cfg.name for cfg in startable] == ["ollama-agent"]
+    assert skipped == []
+
+
 def _pricing_fact(*, thinking_per_unit):
     return PricingFact(
         status="known",

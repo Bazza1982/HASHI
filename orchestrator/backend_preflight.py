@@ -57,21 +57,6 @@ class BackendPreflight:
         """
         return not get_secret_lookup_order(engine, "")
 
-    @staticmethod
-    def _probe_http(url: str, timeout: float = 1.0) -> tuple[bool, str]:
-        """Best-effort reachability probe with a hard, short timeout."""
-        import urllib.error
-        import urllib.request
-
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:
-                return 200 <= int(response.status) < 500, f"HTTP {response.status}"
-        except urllib.error.HTTPError as exc:
-            # An HTTP error still proves the endpoint is reachable.
-            return True, f"HTTP {exc.code}"
-        except Exception as exc:  # noqa: BLE001 - report the real reason
-            return False, f"{type(exc).__name__}: {exc}"
-
     def check_backend_availability(self, global_cfg, agent_configs, secrets) -> dict[str, tuple[bool, str]]:
         """
         Check which backend engines are available. Returns {engine: (available, reason)}.
@@ -172,14 +157,13 @@ class BackendPreflight:
                         f"no API key in secrets.json for {engine}",
                     )
             elif engine == "ollama-api":
-                base_url = str(
-                    getattr(global_cfg, "ollama_base_url", "")
-                    or "http://127.0.0.1:11434"
-                ).strip()
-                alive, detail = self._probe_http(f"{base_url.rstrip('/')}/api/tags")
+                # Reachability belongs to the Ollama adapter, which resolves the
+                # per-Agent ``extra.ollama_url`` when a request is made. Probing
+                # global_cfg here would use the wrong endpoint and stop Agents
+                # from starting whenever Ollama is briefly unavailable.
                 result[engine] = (
-                    (True, f"Ollama reachable at {base_url}") if alive
-                    else (False, f"Ollama not reachable at {base_url}: {detail}")
+                    True,
+                    "connection handled by the Ollama adapter; not gated at startup",
                 )
             elif canonical_backend_engine(engine) == "her-v2":
                 # ``her-v2`` is the stored identifier of the live HER runtime,
