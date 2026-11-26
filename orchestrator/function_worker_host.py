@@ -1,4 +1,4 @@
-"""Operational host for one isolated HASHI Agent Function Worker.
+﻿"""Operational host for one isolated HASHI Agent Function Worker.
 
 This module is imported only inside a spawned worker process.  The stable Core
 communicates with it through ``function_worker_protocol`` and never imports an
@@ -48,17 +48,25 @@ WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 LOCAL_MODE_TOKEN = "WORKBENCH_ONLY_NO_TOKEN"
 MENU_SYNC_RETRY_INITIAL_SECONDS = 5.0
 MENU_SYNC_RETRY_MAX_SECONDS = 60.0
-# One forced reboot manifest stays small: prompts, never attachments.
-_REBOOT_RESUME_LIMIT = 50
+# A forced reboot manifest carries prompts, never attachments. Every queued
+# request is recorded: a truncated manifest silently drops work on the floor.
+_REBOOT_RESUME_KEY = "reboot_resume_operation_id"
 
 
 def _reboot_resume_entry(item: Any) -> dict[str, Any] | None:
-    """Map one ready QueuedRequest onto the existing admission parameters."""
+    """Map one ready QueuedRequest onto the existing admission parameters.
+
+    The stable identity fields travel with the entry so a later stop can prove
+    which queued requests it actually removed, instead of guessing.
+    """
     chat_id = getattr(item, "chat_id", None)
     prompt = getattr(item, "prompt", None)
     if chat_id is None or not prompt:
         return None
     return {
+        "request_id": str(getattr(item, "request_id", "") or ""),
+        "session_id": str(getattr(item, "session_id", "") or "") or None,
+        "context_generation": getattr(item, "context_generation", None),
         "chat_id": int(chat_id),
         "prompt": str(prompt),
         "source": str(getattr(item, "source", "") or "api"),
@@ -79,6 +87,35 @@ def _reboot_resume_entry(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _reboot_delayed_entry(record: Any) -> dict[str, Any] | None:
+    """Map one scheduled delayed message onto the existing scheduler parameters."""
+    if not isinstance(record, Mapping):
+        return None
+    prompt = str(record.get("prompt") or "").strip()
+    if not prompt:
+        return None
+    try:
+        due_at = float(record.get("due_at") or 0.0)
+    except (TypeError, ValueError):
+        due_at = 0.0
+    return {
+        "id": str(record.get("id") or ""),
+        "chat_id": record.get("chat_id"),
+        "prompt": prompt,
+        "due_at": due_at,
+        "deliver_to_telegram": bool(record.get("deliver_to_telegram", True)),
+        "request_metadata": dict(record.get("request_metadata") or {}),
+    }
+
+
+def _reboot_restore_marker(payload: Mapping[str, Any]) -> str:
+    """Identity of one /stop snapshot: a Session plus the request it interrupted."""
+    return "{0}|{1}".format(
+        str(payload.get("session_id") or ""),
+        str(payload.get("request_id") or ""),
+    )
+
+
 def _interrupted_task_payloads(runtime: Any, runtime_retry: Any) -> list[Any]:
     """Every /stop snapshot this Agent holds, scoped sessions included."""
     found: list[Any] = []
@@ -88,7 +125,7 @@ def _interrupted_task_payloads(runtime: Any, runtime_retry: Any) -> list[Any]:
     for session_id in runtime_retry.interrupted_session_ids(runtime):
         if session_id not in session_ids:
             session_ids.append(session_id)
-    for session_id in session_ids[:5]:
+    for session_id in session_ids:
         snapshot = runtime_retry.capture_interrupted_task(
             runtime, session_id=str(session_id)
         )
@@ -1054,70 +1091,272 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError("Agent runtime is not prepared")
         return self.runtime
 
-    def _capture_reboot_state(self, runtime: Any) -> dict[str, Any]:
-        """Read-only snapshot of ready work, for a forced reboot manifest."""
+    async def _capture_reboot_state(self, runtime: Any) -> dict[str, Any]:
+        """Read-only snapshot of every piece of work a forced stop would remove.
+
+        Ready requests, FUTURE delayed messages and the /stop snapshots already
+        held by this Agent are all listed, each with the identity needed to prove
+        later what the stop actually removed.
+        """
         from orchestrator import runtime_pending, runtime_retry
 
         items = runtime_pending.ready_items(runtime)
-        pending: list[dict[str, Any]] = []
-        for item in items[:_REBOOT_RESUME_LIMIT]:
-            entry = _reboot_resume_entry(item)
-            if entry is not None:
-                pending.append(entry)
-        interrupted = _interrupted_task_payloads(runtime, runtime_retry)
+        pending = [
+            entry for entry in (_reboot_resume_entry(item) for item in items) if entry
+        ]
+        records = await self.scheduler.list_delayed_messages(self.agent_name)
+        delayed = [
+            entry
+            for entry in (_reboot_delayed_entry(record) for record in records or ())
+            if entry
+        ]
+        interrupted = [
+            _snapshot_payload(snapshot)
+            for snapshot in _interrupted_task_payloads(runtime, runtime_retry)
+        ]
         return {
             "pending": pending,
             "pending_total": len(items),
-            "interrupted": bool(interrupted),
+            "delayed": delayed,
+            "delayed_total": len(delayed),
+            "interrupted": interrupted,
         }
+
+    @staticmethod
+    def _resume_metadata(
+        entry: Mapping[str, Any], *, stop_epoch: int, operation_id: str
+    ) -> dict[str, Any]:
+        """Metadata for a re-admission this operation is explicitly allowed to make."""
+        metadata = dict(entry.get("request_metadata") or {})
+        session_id = str(
+            entry.get("session_id") or metadata.get("session_id") or ""
+        ).strip()
+        if session_id:
+            metadata["session_id"] = session_id
+        # The stop that produced this manifest advanced the durable fence, so the
+        # captured epoch is stale by construction. This operation re-admits its
+        # own captured work against the current epoch; every other request keeps
+        # meeting the unchanged fence.
+        metadata["agent_stop_epoch"] = int(stop_epoch)
+        metadata[_REBOOT_RESUME_KEY] = operation_id
+        return metadata
+
+    @staticmethod
+    def _admission_kwargs(
+        entry: Mapping[str, Any], metadata: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            key: entry[key]
+            for key in (
+                "chat_id",
+                "prompt",
+                "source",
+                "summary",
+                "silent",
+                "is_retry",
+                "deliver_to_telegram",
+                "skip_memory_injection",
+                "habit_learning_eligible",
+                "skill_id",
+                "scheduler_context",
+                "request_content",
+            )
+            if key in entry
+        }
+        kwargs.setdefault("source", "reboot_force")
+        kwargs.setdefault("summary", "")
+        kwargs["request_metadata"] = dict(metadata)
+        return kwargs
 
     async def _resume_after_reboot(
         self, runtime: Any, params: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Re-queue captured work through the normal admission path."""
-        from orchestrator import runtime_retry
+        """Re-admit exactly the work this operation's stop removed.
 
+        Nothing is rediscovered from history: every item carries the identity the
+        manifest recorded before the destructive stop, and an item only counts as
+        restored once admission returns a real request id.
+        """
+        from orchestrator import runtime_pending
+        from orchestrator.agent_stop_fence import current_runtime_epoch
+        from orchestrator.scheduler import MAX_DELAY_MINUTES
+
+        operation_id = str(params.get("operation_id") or "")
+        stop_epoch = current_runtime_epoch(runtime)
         pending = [
             dict(item)
             for item in (params.get("pending") or ())
             if isinstance(item, Mapping)
         ]
-        resumed = 0
+        delayed = [
+            dict(item)
+            for item in (params.get("delayed") or ())
+            if isinstance(item, Mapping)
+        ]
+        interrupted = [
+            dict(item)
+            for item in (params.get("interrupted") or ())
+            if isinstance(item, Mapping)
+        ]
+        queued_ids = {
+            str(getattr(item, "request_id", "") or "")
+            for item in runtime_pending.ready_items(runtime)
+        }
+
+        unconfirmed: list[dict[str, Any]] = []
+
+        pending_resumed = 0
         for entry in pending:
+            request_id = str(entry.get("request_id") or "")
+            if request_id and request_id in queued_ids:
+                # It survived the stop: re-queueing it would run it twice.
+                continue
+            metadata = self._resume_metadata(
+                entry, stop_epoch=stop_epoch, operation_id=operation_id
+            )
+            kwargs = self._admission_kwargs(entry, metadata)
+            receipt = None
             try:
-                await runtime.enqueue_request(**entry)
-                resumed += 1
+                receipt = await runtime.enqueue_request(
+                    **kwargs,
+                    idempotency_key=(
+                        f"reboot-resume:{operation_id}:"
+                        f"{request_id or str(entry.get('prompt') or '')[:40]}"
+                    ),
+                )
             except Exception:
                 logger.warning(
                     "Captured request could not be resumed for %s", self.agent_name
                 )
-        turn_resumed = False
-        if params.get("resume_interrupted"):
-            for snapshot in _interrupted_task_payloads(runtime, runtime_retry):
-                try:
-                    await runtime.enqueue_request(
-                        int(getattr(snapshot, "chat_id", 0) or 0),
-                        str(getattr(snapshot, "prompt", "") or ""),
-                        str(getattr(snapshot, "source", "") or "reboot_force"),
-                        str(getattr(snapshot, "summary", "") or "Resumed after reboot"),
-                        request_metadata={
-                            "resumed_interrupted_task": _snapshot_payload(snapshot)
-                        },
-                        idempotency_key=(
-                            "reboot-resume:"
-                            f"{params.get('operation_id') or ''}:"
-                            f"{getattr(snapshot, 'request_id', '') or ''}"
+            if not receipt:
+                unconfirmed.append({"kind": "pending", "entry": entry})
+                continue
+            pending_resumed += 1
+
+        turns_resumed = 0
+        for payload in interrupted:
+            chat_id = payload.get("chat_id")
+            prompt = str(payload.get("prompt") or "")
+            if chat_id is None or not prompt:
+                unconfirmed.append({"kind": "turn", "entry": payload})
+                continue
+            metadata = self._resume_metadata(
+                payload, stop_epoch=stop_epoch, operation_id=operation_id
+            )
+            metadata["resumed_interrupted_task"] = dict(payload)
+            receipt = None
+            try:
+                receipt = await runtime.enqueue_request(
+                    int(chat_id),
+                    prompt,
+                    str(payload.get("source") or "reboot_force"),
+                    str(payload.get("summary") or "Resumed after reboot"),
+                    request_metadata=metadata,
+                    request_content=payload.get("request_content") or None,
+                    idempotency_key=(
+                        "reboot-resume:"
+                        f"{operation_id}:turn:"
+                        f"{payload.get('request_id') or payload.get('session_id') or ''}"
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "Interrupted turn could not be resumed for %s", self.agent_name
+                )
+            if not receipt:
+                unconfirmed.append({"kind": "turn", "entry": payload})
+                continue
+            turns_resumed += 1
+
+        delayed_resumed = 0
+        now = time.time()
+        scheduled_restores: set[str] = set()
+        scheduled_ids: set[str] = set()
+        if delayed:
+            try:
+                for record in (
+                    await self.scheduler.list_delayed_messages(self.agent_name) or ()
+                ):
+                    if not isinstance(record, Mapping):
+                        continue
+                    scheduled_ids.add(str(record.get("id") or ""))
+                    marker = str(
+                        (record.get("request_metadata") or {}).get(
+                            "reboot_resume_delay_id"
+                        )
+                        or ""
+                    )
+                    if marker:
+                        scheduled_restores.add(marker)
+            except Exception:
+                logger.warning(
+                    "Delayed messages could not be listed before restoring for %s",
+                    self.agent_name,
+                )
+        for entry in delayed:
+            chat_id = entry.get("chat_id")
+            prompt = str(entry.get("prompt") or "")
+            delay_id = str(entry.get("id") or "")
+            if chat_id is None or not prompt:
+                unconfirmed.append({"kind": "delayed", "entry": entry})
+                continue
+            if delay_id and (delay_id in scheduled_ids or delay_id in scheduled_restores):
+                # Still scheduled: it survived the stop, re-scheduling would repeat it.
+                continue
+            metadata = self._resume_metadata(
+                entry, stop_epoch=stop_epoch, operation_id=operation_id
+            )
+            metadata.setdefault("reboot_resume_delay_id", delay_id)
+            idempotency_key = (
+                f"reboot-resume:{operation_id}:delay:{delay_id or prompt[:40]}"
+            )
+            try:
+                remaining = float(entry.get("due_at") or 0.0) - now
+                if remaining <= 0:
+                    # Already due while the reboot ran: admit it rather than drop it.
+                    receipt = await runtime.enqueue_request(
+                        int(chat_id),
+                        prompt,
+                        "reboot_force",
+                        "",
+                        request_metadata=metadata,
+                        idempotency_key=idempotency_key,
+                    )
+                    if not receipt:
+                        raise RuntimeError("delayed message was not admitted")
+                else:
+                    minutes = max(
+                        1,
+                        int(remaining / 60.0) + (1 if remaining % 60 else 0),
+                    )
+                    await self.scheduler.schedule_delayed_message(
+                        agent_name=self.agent_name,
+                        chat_id=int(chat_id),
+                        prompt=prompt,
+                        delay_minutes=min(minutes, MAX_DELAY_MINUTES),
+                        idempotency_key=idempotency_key,
+                        request_metadata=metadata,
+                        deliver_to_telegram=bool(
+                            entry.get("deliver_to_telegram", True)
                         ),
                     )
-                    turn_resumed = True
-                except Exception:
-                    logger.warning(
-                        "Interrupted turn could not be resumed for %s", self.agent_name
-                    )
+            except Exception:
+                logger.warning(
+                    "Delayed message could not be restored for %s", self.agent_name
+                )
+                unconfirmed.append({"kind": "delayed", "entry": entry})
+                continue
+            delayed_resumed += 1
+
         return {
-            "pending_resumed": resumed,
+            "pending_resumed": pending_resumed,
             "pending_total": len(pending),
-            "turn_resumed": turn_resumed,
+            "delayed_resumed": delayed_resumed,
+            "delayed_total": len(delayed),
+            "turns_resumed": turns_resumed,
+            "turn_resumed": turns_resumed > 0,
+            "turns_total": len(interrupted),
+            "unconfirmed": unconfirmed,
         }
 
     def metadata(self) -> dict[str, Any]:
@@ -1904,7 +2143,7 @@ class FunctionWorkerHost:
             await self.emit_metadata()
             return request_id
         if method == "runtime.reboot_capture":
-            return self._capture_reboot_state(runtime)
+            return await self._capture_reboot_state(runtime)
         if method == "runtime.reboot_resume":
             return await self._resume_after_reboot(runtime, params)
         if method == "runtime.telegram_update":

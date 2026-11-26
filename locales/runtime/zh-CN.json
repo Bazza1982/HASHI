@@ -3084,6 +3084,8 @@
     "reboot.reason.delay_cancelled": "已取消等待空闲时机。",
     "reboot.reason.not_waiting": "当前没有在等待中的重启。",
     "reboot.reason.force_stop_unconfirmed": "忙碌的代理未确认停止，旧实例继续服务。",
+    "reboot.reason.force_capture_failed": "排队任务未能存档，因此未停止任何代理，旧实例继续服务。",
+    "reboot.reason.force_manifest_unavailable": "排队任务未能安全保存，因此未停止任何代理，旧实例继续服务。",
     "reboot.reason.candidate_rejected": "启动检查未通过。",
     "reboot.reason.source_update_incomplete": "有一项程序更新尚未完成。",
     "reboot.reason.switch_failed": "切换未完成，已恢复原状态。",

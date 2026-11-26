@@ -3084,6 +3084,8 @@
     "reboot.reason.delay_cancelled": "Waiting for an idle moment was cancelled.",
     "reboot.reason.not_waiting": "No reboot is waiting to start.",
     "reboot.reason.force_stop_unconfirmed": "A busy Agent could not be stopped, so the old instance keeps serving.",
+    "reboot.reason.force_capture_failed": "Queued work could not be captured, so nothing was stopped and the old instance keeps serving.",
+    "reboot.reason.force_manifest_unavailable": "Queued work could not be recorded safely, so nothing was stopped and the old instance keeps serving.",
     "reboot.reason.candidate_rejected": "Startup checks did not pass.",
     "reboot.reason.source_update_incomplete": "A software update is still in progress.",
     "reboot.reason.switch_failed": "The change did not complete; the previous state was restored.",

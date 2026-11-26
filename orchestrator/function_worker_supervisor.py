@@ -1175,17 +1175,19 @@ class AgentRuntimeHandle:
         self,
         pending: Sequence[Mapping[str, Any]] = (),
         *,
-        resume_interrupted: bool = False,
+        delayed: Sequence[Mapping[str, Any]] = (),
+        interrupted: Sequence[Mapping[str, Any]] = (),
         operation_id: str = "",
         timeout: float = 60,
     ) -> dict[str, Any]:
-        """Re-queue captured work through the Worker's normal admission path."""
+        """Re-admit the exact work an operation's stop removed."""
         return dict(
             await self._route(
                 "runtime.reboot_resume",
                 {
                     "pending": [dict(item) for item in pending],
-                    "resume_interrupted": bool(resume_interrupted),
+                    "delayed": [dict(item) for item in delayed],
+                    "interrupted": [dict(item) for item in interrupted],
                     "operation_id": str(operation_id),
                 },
                 timeout=timeout,
