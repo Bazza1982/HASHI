@@ -5,15 +5,20 @@ setlocal
 :: ============================================================
 :: HASHI - Start TUI
 :: Auto-starts main bridge in a new window if not already running.
-:: Uses an approved private Python from \python\ when present.
-:: Falls back to .venv Python for local developer installs.
+::
+:: The TUI is the rescue hatch. It only needs textual / rich / aiohttp,
+:: so this script never blocks on the full Core/Functions dependency
+:: contract. Interpreters are tried in this order:
+::   1. installer-qualified Functions runtime
+::   2. portable private runtime  \python\python.exe
+::   3. developer venv            \.venv\Scripts\python.exe
+::   4. a Python 3 on PATH
+:: Server dependency drift is reported inside the TUI (/doctor), never by
+:: refusing to start it.
 :: Logs written to: windows\logs\tui_<timestamp>.log
 :: ============================================================
 
 set ROOT=%~dp0..
-:: Prefer a private runtime, then fall back to the developer venv.
-set PYTHON_EXE=%ROOT%\python\python.exe
-if not exist "%PYTHON_EXE%" set PYTHON_EXE=%ROOT%\.venv\Scripts\python.exe
 set LOG_DIR=%~dp0logs
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
@@ -21,37 +26,49 @@ for /f "tokens=1-3 delims=/ " %%a in ("%DATE%") do set D=%%a-%%b-%%c
 for /f "tokens=1-3 delims=:." %%a in ("%TIME: =0%") do set T=%%a%%b%%c
 set LOG_FILE=%LOG_DIR%\tui_%D%_%T%.log
 
+:: ---- Bootstrap interpreter (may lack the TUI packages; stdlib only) ----
+set "BOOTSTRAP="
+if exist "%ROOT%\python\python.exe" set "BOOTSTRAP=%ROOT%\python\python.exe"
+if not defined BOOTSTRAP if exist "%ROOT%\.venv\Scripts\python.exe" set "BOOTSTRAP=%ROOT%\.venv\Scripts\python.exe"
+if not defined BOOTSTRAP set "BOOTSTRAP=python"
+
+:: ---- TUI interpreter: first candidate that can import textual/rich/aiohttp ----
+set "PYTHON_EXE="
+set "TUI_PY_FILE=%TEMP%\hashi_tui_python_%RANDOM%.txt"
+"%BOOTSTRAP%" -B "%ROOT%\scripts\resolve_tui_python.py" --code-root "%ROOT%" > "%TUI_PY_FILE%" 2>nul
+if exist "%TUI_PY_FILE%" set /p PYTHON_EXE=<"%TUI_PY_FILE%"
+if exist "%TUI_PY_FILE%" del "%TUI_PY_FILE%" >nul 2>&1
+if not defined PYTHON_EXE set "PYTHON_EXE=%BOOTSTRAP%"
+if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%BOOTSTRAP%"
+
 echo ==================================================== >> "%LOG_FILE%"
 echo HASHI TUI >> "%LOG_FILE%"
 echo Started: %DATE% %TIME% >> "%LOG_FILE%"
 echo Python: %PYTHON_EXE% >> "%LOG_FILE%"
 echo ==================================================== >> "%LOG_FILE%"
 
-:: Check Python exists
-if not exist "%PYTHON_EXE%" (
-    echo ERROR: Python not found. >> "%LOG_FILE%"
-    echo.
-    echo ERROR: Python not found at %PYTHON_EXE%
-    echo        Build the verified Portable Windows image, or create .venv
-    echo        with the approved CPython and locked dependencies.
-    pause
-    exit /b 1
-)
-"%PYTHON_EXE%" -B "%ROOT%\scripts\check_runtime_contract.py" --code-root "%ROOT%" >nul
+:: ---- Server runtime contract: informational only, never fatal ----
+:: The TUI does not use Playwright, greenlet, pyee or any other server-side
+:: package. A drift here means Core / Functions need attention; it does not
+:: mean the TUI is broken.
+set "HASHI_TUI_RUNTIME_STATUS=unknown"
+"%PYTHON_EXE%" -B "%ROOT%\scripts\check_runtime_contract.py" --code-root "%ROOT%" >nul 2>> "%LOG_FILE%"
 if errorlevel 1 (
-    echo ERROR: Python or the dependency generation violates the HASHI Core runtime contract.
-    echo        Rebuild this installation; /reboot cannot replace the Core runtime.
-    pause
-    exit /b 78
+    set "HASHI_TUI_RUNTIME_STATUS=drifted"
+    echo NOTICE: the Core/Functions server dependency contract is not satisfied on this installation.>> "%LOG_FILE%"
+    echo         The TUI still starts. Open /doctor inside the TUI for the exact list.
+) else (
+    set "HASHI_TUI_RUNTIME_STATUS=ok"
 )
+
 set "PID_FILE="
 set "INSTANCE_ID=HASHI"
-for /f "delims=" %%P in ('"%PYTHON_EXE%" -B "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field pid-path') do set "PID_FILE=%%P"
-for /f "delims=" %%P in ('"%PYTHON_EXE%" -B "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field instance-id') do set "INSTANCE_ID=%%P"
+for /f "delims=" %%P in ('""%PYTHON_EXE%" -B "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field pid-path" 2^>nul') do set "PID_FILE=%%P"
+for /f "delims=" %%P in ('""%PYTHON_EXE%" -B "%ROOT%\scripts\resolve_instance_runtime.py" --code-root "%ROOT%" --bridge-home "%ROOT%" --field instance-id" 2^>nul') do set "INSTANCE_ID=%%P"
 
 :: Check if main bridge is running via PID file
 set BRIDGE_RUNNING=0
-if exist "%PID_FILE%" (
+if defined PID_FILE if exist "%PID_FILE%" (
     for /f "usebackq delims=" %%P in ("%PID_FILE%") do (
         powershell -NoProfile -Command "if (Get-Process -Id %%P -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1
         if not errorlevel 1 set BRIDGE_RUNNING=1
@@ -69,7 +86,10 @@ if "%BRIDGE_RUNNING%"=="0" (
 
 echo Starting %INSTANCE_ID% TUI...
 echo Log file: %LOG_FILE%
-echo.
+if "%HASHI_TUI_RUNTIME_STATUS%"=="drifted" (
+    echo NOTE: Core/Functions dependencies need attention; the TUI starts anyway. Use /doctor inside it.
+    echo.
+)
 
 cd /d "%ROOT%"
 set PYTHONPATH=%ROOT%

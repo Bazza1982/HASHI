@@ -101,6 +101,20 @@ _TUI_COMMAND_CUSTOMIZATIONS: tuple[dict[str, str], ...] = (
     },
     {
         "kind": "command_override",
+        "key": "doctor",
+        "route": "connector_local",
+        "semantic": "local_environment_diagnostics",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
+        "key": "logs",
+        "route": "connector_local",
+        "semantic": "local_log_inspection",
+        "reason": "local_control",
+    },
+    {
+        "kind": "command_override",
         "key": "theme",
         "route": "connector_local",
         "semantic": "local_theme",

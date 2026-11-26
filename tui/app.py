@@ -24,7 +24,6 @@ from textual.strip import Strip
 from textual.widgets import Input, RichLog, Static, TextArea
 
 from orchestrator import ui_language
-from orchestrator.command_registry import load_runtime_commands
 from orchestrator.command_specs import COMMAND_SPECS, CommandGuide
 from orchestrator.flexible_backend_registry import (
     HER_V2_ENGINE,
@@ -48,6 +47,7 @@ from tui.api_client import (
 from tui.attachments import PendingAttachment, TuiAttachmentError, snapshot_bytes, snapshot_path
 from tui.audio import TuiAudioError, decode_tui_audio, play_ogg_bytes
 from tui.clipboard import copy_to_windows_clipboard, read_windows_clipboard_png
+from tui.command_catalog import load_runtime_command_info
 from tui.instances import InstanceResolver, InstanceTarget, load_launch_instance
 from tui.light_onboarding import LightOnboardingPhase, is_onboarding_complete
 from tui.onboarding import (
@@ -88,6 +88,8 @@ TUI_COMMAND_HELP = {
     "say": ("在本机朗读最近一至四条代理回复", "Read one to four Agent replies on this computer"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
     "voice": ("设置本机自动朗读与共享声音", "Set local auto-read and the shared voice"),
+    "doctor": ("本机环境、端口、日志与依赖体检", "Local environment, port, log and dependency checks"),
+    "logs": ("查看最近的启动与后端日志", "Show the newest launcher and backend logs"),
 }
 TUI_COMMAND_HELP["sidepanel"] = (
     "控制只读信息面板及自动巡览",
@@ -845,17 +847,17 @@ class HASHITuiApp(App):
             ),
             default=False,
         )
-        runtime_commands = load_runtime_commands()
+        runtime_commands, self._runtime_command_notice = load_runtime_command_info()
         self._runtime_command_descriptions = {
-            command.name: command.description for command in runtime_commands
+            command["name"]: command["description"] for command in runtime_commands
         }
         command_names = [f"/{spec.name}" for spec in COMMAND_SPECS if spec.menu_visible]
-        command_names.extend(f"/{command.name}" for command in runtime_commands)
+        command_names.extend(f"/{command['name']}" for command in runtime_commands)
         command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._command_names = list(dict.fromkeys(command_names))
         self._command_specs = {spec.name: spec for spec in COMMAND_SPECS}
         known_command_names = [f"/{spec.name}" for spec in COMMAND_SPECS]
-        known_command_names.extend(f"/{command.name}" for command in runtime_commands)
+        known_command_names.extend(f"/{command['name']}" for command in runtime_commands)
         known_command_names.extend(f"/{name}" for name in TUI_COMMAND_HELP)
         self._known_command_names = list(dict.fromkeys(known_command_names))
         self._command_order = {
@@ -1048,6 +1050,30 @@ class HASHITuiApp(App):
             log.write(markup(
                 f"[bold hashi.accent]HASHI · {self.launch_instance_id}[/]\n[hashi.secondary]{status}[/]"
             ))
+        notice = self._runtime_status_notice()
+        if notice:
+            log.write(markup(notice))
+
+    def _runtime_status_notice(self) -> str:
+        """One honest line when the Core/Functions contract needs attention.
+
+        The launcher exports what it actually observed; the TUI never claims the
+        server runtime is fine just because it started.
+        """
+
+        status = str(os.environ.get("HASHI_TUI_RUNTIME_STATUS") or "").strip().casefold()
+        if status not in {"drifted", "missing"}:
+            return ""
+        if self._ui_language == "zh":
+            return (
+                "[hashi.warning]注意：Core/Functions 服务端依赖与批准的版本不一致。"
+                "TUI 仍可正常使用；输入 /doctor 查看具体差异。[/]"
+            )
+        return (
+            "[hashi.warning]Notice: the Core/Functions server dependencies do not match "
+            "the approved generation. The TUI keeps working; type /doctor for the exact "
+            "differences.[/]"
+        )
 
     # ── Onboarding ──────────────────────────────────────────────────────
 
@@ -1833,6 +1859,12 @@ class HASHITuiApp(App):
         if is_command and (normalized == "/help" or normalized.startswith("/help ")):
             self._handle_help_cmd(normalized)
             return
+        if is_command and normalized == "/doctor":
+            self._handle_doctor_cmd()
+            return
+        if is_command and (normalized == "/logs" or normalized.startswith("/logs ")):
+            self._handle_logs_cmd(normalized)
+            return
         if is_command and normalized == "/connect":
             self._start_connection()
             return
@@ -2543,6 +2575,61 @@ class HASHITuiApp(App):
         event.stop()
         event.prevent_default()
 
+    @staticmethod
+    def _rescue_helpers():
+        """Import the zero-dependency rescue helpers when a command needs them."""
+
+        from tui import rescue_cli
+
+        return rescue_cli
+
+    def _handle_doctor_cmd(self):
+        """Run the local rescue checks without touching the backend."""
+
+        chat = self.query_one("#chat-history", ChatHistory)
+        try:
+            checks = self._rescue_helpers().diagnose(self.code_root, self.bridge_home)
+            report = self._rescue_helpers().format_checks(checks)
+        except Exception as exc:  # never let a diagnostic kill the rescue hatch
+            chat.write(markup(f"[hashi.error]/doctor failed: {type(exc).__name__}: {exc}[/]"))
+            return
+        header = (
+            "[hashi.success]本机体检 / local doctor[/]"
+            if self._ui_language == "zh"
+            else "[hashi.success]Local doctor[/]"
+        )
+        lines = [header, *report.splitlines()]
+        if self._runtime_command_notice:
+            lines.append("")
+            lines.append(
+                f"[hashi.secondary]runtime command catalogue: {self._runtime_command_notice}[/]"
+            )
+        chat.write(markup("\n".join(lines)))
+
+    def _handle_logs_cmd(self, text: str):
+        """Show the tail of the newest launcher and bridge logs."""
+
+        chat = self.query_one("#chat-history", ChatHistory)
+        parts = text.split()
+        lines = 40
+        if len(parts) > 1:
+            try:
+                lines = max(5, min(200, int(parts[1])))
+            except ValueError:
+                lines = 40
+        try:
+            tail = self._rescue_helpers().logs_tail(self.code_root, self.bridge_home, lines)
+        except Exception as exc:
+            chat.write(markup(f"[hashi.error]/logs failed: {type(exc).__name__}: {exc}[/]"))
+            return
+        header = (
+            "[hashi.success]最近的日志 / recent logs[/]"
+            if self._ui_language == "zh"
+            else "[hashi.success]Recent logs[/]"
+        )
+        escaped = tail.replace("[", "\\[")
+        chat.write(markup(f"{header}\n{escaped}"))
+
     def _handle_tui_cmd(self, text: str):
         chat = self.query_one("#chat-history", ChatHistory)
         parts = text.split()
@@ -2702,6 +2789,8 @@ class HASHITuiApp(App):
 `/voice [on|off|档案|advanced]`　设置本机自动朗读与共享声音
 `/tui language zh|en`　切换界面语言
 `/tui sound on|off|test`　设置短提示音（不是回复朗读）
+`/doctor`　本机环境、端口、依赖与配置体检（后端离线也能用）
+`/logs [行数]`　查看最近的启动与后端日志
 `/clear`　清空当前显示　　`/quit`　退出
 
 输入命令前缀可自动补全；未知命令不会发送给 Agent。输入 `/help en` 查看英文版。"""
@@ -2727,6 +2816,8 @@ class HASHITuiApp(App):
 `@relative/path`　Send a file from the current Agent Workzone
 `/say [1..4|1-3]`　Read recent Agent replies in order on this computer only
 `/voice [on|off|profile|advanced]`　Set local auto-read and the shared voice
+`/doctor`　Local environment, port, dependency and config checks (works offline)
+`/logs [lines]`　Show the newest launcher and backend logs
 `/tui language zh|en`　Change the interface language
 `/tui sound on|off|test`　Configure short cues (not reply speech)
 `/clear`　Clear this view　　`/quit`　Exit

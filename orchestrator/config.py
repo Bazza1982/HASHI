@@ -33,6 +33,7 @@ from orchestrator.pcm import (
 )
 from orchestrator.runtime_defaults import (
     DEFAULT_API_GATEWAY_PORT,
+    DEFAULT_GLOBAL_ALLOWED_TOOLS,
     DEFAULT_HASHI_REMOTE_PORT,
     DEFAULT_WORKBENCH_PORT,
 )
@@ -56,7 +57,6 @@ SUPPORTED_AGENT_MODES = frozenset({"fixed", "flex"})
 RETIRED_AGENT_MODES = frozenset({"wrapper", "audit", "dual-brain"})
 LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
 LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
-DEFAULT_GLOBAL_ALLOWED_TOOLS = ("*",)
 config_logger = logging.getLogger("BridgeU.Config")
 
 
