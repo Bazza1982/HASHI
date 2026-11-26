@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -57,6 +57,9 @@ REBOOT_DELAY_MAX_SECONDS = 21600.0
 REBOOT_DELAY_IDLE_WINDOW_SECONDS = 15.0
 REBOOT_DELAY_POLL_SECONDS = 2.0
 REBOOT_DELAY_MIN_RECHECK_SECONDS = 0.05
+# A forced stop is confirmed by observation, never by the /stop reply alone.
+REBOOT_FORCE_STOP_CONFIRM_SECONDS = 20.0
+REBOOT_FORCE_STOP_POLL_SECONDS = 0.5
 
 
 def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, ...]:
@@ -111,6 +114,7 @@ class RebootManager:
         )
         self.active_operation = None
         self._delay_tasks: dict[str, asyncio.Task] = {}
+        self._force_tasks: dict[str, asyncio.Task] = {}
         self.delivery_task = None
         self.delivery_lock = asyncio.Lock()
         self.receipt_fault = False
@@ -259,6 +263,43 @@ class RebootManager:
                 "record": record,
                 "operation": self._operation_projection(record),
             }
+        if restart.get("force") is True:
+            # A forced reboot stops busy Agents before the cutover, so it runs
+            # as a task: the receipt exists first, and the stop is observed
+            # instead of assumed.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return {"accepted": False, "reason": "unexpected"}
+            self.active_operation = record["id"]
+            try:
+                self.receipts.update(record["id"], phase="stopping_targets")
+            except (OSError, ValueError):
+                self._finish(record, "rejected", reason="storage")
+                self.active_operation = None
+                return {"accepted": False, "reason": "storage"}
+            task = loop.create_task(
+                self._force_stop_then_cutover(restart, record, targets, handles)
+            )
+            self._force_tasks[record["id"]] = task
+            task.add_done_callback(
+                lambda _task, operation=record["id"]: self._force_tasks.pop(
+                    operation, None
+                )
+            )
+            bridge_logger.info(
+                "Reboot force accepted: operation=%s source=%s mode=%s targets=%s",
+                record["id"],
+                record["source_agent"],
+                record["mode"],
+                record["targets"],
+            )
+            return {
+                "accepted": True,
+                "stopping": True,
+                "record": record,
+                "operation": self._operation_projection(record),
+            }
         # Admission is intentionally non-disruptive.  The accepted receipt and
         # origin-visible start notice must exist before any selected route is
         # fenced; otherwise Workbench can only discover the start after the
@@ -302,6 +343,9 @@ class RebootManager:
         if not operation_id or operation_id not in self._delay_tasks:
             return {"accepted": False, "reason": "not_waiting"}
         record = self.receipts.get(operation_id)
+        if record is not None and str(record.get("phase") or "") == "stopping_targets":
+            # A forced reboot is already stopping Agents: no longer cancellable.
+            return {"accepted": False, "reason": "not_waiting"}
         task = self._delay_tasks.pop(operation_id)
         task.cancel()
         if self.active_operation == operation_id:
@@ -367,6 +411,23 @@ class RebootManager:
                 # allowed to consume the rest of the budget, but an observation
                 # that returns past the deadline must never start a restart.
                 if remaining <= 0:
+                    if restart.get("force") is True:
+                        bridge_logger.info(
+                            "Reboot wait expired; forcing busy targets: "
+                            "operation=%s busy=%s unavailable=%s",
+                            operation_id,
+                            busy_targets,
+                            unavailable_targets,
+                        )
+                        handed_off = await self._force_stop_then_cutover(
+                            restart,
+                            record,
+                            targets,
+                            handles,
+                            busy_targets=list(busy_targets),
+                            unavailable_targets=list(unavailable_targets),
+                        )
+                        return handed_off
                     bridge_logger.info(
                         "Reboot wait expired before idle: operation=%s "
                         "busy=%s unavailable=%s",
@@ -426,6 +487,211 @@ class RebootManager:
             self._delay_tasks.pop(operation_id, None)
             if not handed_off and self.active_operation == operation_id:
                 self.active_operation = None
+
+    async def _force_stop_then_cutover(
+        self,
+        restart: Mapping[str, Any],
+        record: Mapping[str, Any],
+        targets: tuple[str, ...],
+        handles: Mapping[str, AgentRuntimeHandle],
+        *,
+        busy_targets: list[str] | None = None,
+        unavailable_targets: list[str] | None = None,
+    ) -> bool:
+        """Capture queued work, stop what still runs, then start the cutover.
+
+        Every stop is confirmed by a fresh observation. If a target is still
+        busy at the deadline the reboot is rejected and the old instance keeps
+        serving: a forced reboot never trades a lost Agent for a restart.
+        """
+        operation_id = str(record["id"])
+        try:
+            self.receipts.update(operation_id, phase="stopping_targets")
+        except (OSError, ValueError):
+            self._finish(record, "rejected", reason="storage")
+            if self.active_operation == operation_id:
+                self.active_operation = None
+            return False
+        captured: dict[str, dict[str, Any]] = {}
+        for name in targets:
+            handle = handles.get(name)
+            if handle is None:
+                continue
+            try:
+                captured[name] = dict(await handle.capture_reboot_state() or {})
+            except Exception:
+                bridge_logger.warning(
+                    "Reboot force: capture failed | operation=%s agent=%s",
+                    operation_id,
+                    name,
+                )
+                captured[name] = {}
+        if busy_targets is None or unavailable_targets is None:
+            activity, missing = await self._observe_target_activity(targets, handles)
+            busy_targets = [
+                name
+                for name, (generating, depth, detached) in activity.items()
+                if generating or depth or detached
+            ]
+            unavailable_targets = list(missing or ())
+        stop_targets = list(
+            dict.fromkeys([*(busy_targets or ()), *(unavailable_targets or ())])
+        )
+        for name in stop_targets:
+            handle = handles.get(name)
+            if handle is None:
+                continue
+            try:
+                await handle.execute_slash_command("/stop", source_channel="reboot")
+            except Exception:
+                bridge_logger.warning(
+                    "Reboot force: stop request failed | operation=%s agent=%s",
+                    operation_id,
+                    name,
+                )
+        if stop_targets:
+            deadline = time.monotonic() + REBOOT_FORCE_STOP_CONFIRM_SECONDS
+            while True:
+                activity, missing = await self._observe_target_activity(targets, handles)
+                still_busy = [
+                    name
+                    for name, (generating, depth, detached) in activity.items()
+                    if generating or depth or detached
+                ] + list(missing or ())
+                if not still_busy:
+                    break
+                if time.monotonic() >= deadline:
+                    bridge_logger.warning(
+                        "Reboot force: stop unconfirmed, keeping the old instance | "
+                        "operation=%s agents=%s",
+                        operation_id,
+                        sorted(set(still_busy)),
+                    )
+                    self._finish(
+                        record,
+                        "rejected",
+                        reason="force_stop_unconfirmed",
+                        busy_targets=sorted(set(still_busy)),
+                    )
+                    if self.active_operation == operation_id:
+                        self.active_operation = None
+                    return False
+                await asyncio.sleep(REBOOT_FORCE_STOP_POLL_SECONDS)
+        manifest = self._write_resume_manifest(operation_id, captured)
+        request = {
+            **restart,
+            "operation_id": operation_id,
+            "targets": record["targets"],
+        }
+        if manifest is not None:
+            request["resume_manifest"] = str(manifest)
+        self.kernel._restart_request = request
+        bridge_logger.info(
+            "Reboot force: cutover starting | operation=%s stopped=%s",
+            operation_id,
+            stop_targets,
+        )
+        self.kernel.shutdown_event.set()
+        return True
+
+    def _resume_manifest_path(self, operation_id: str) -> Path | None:
+        bridge_home = getattr(getattr(self.kernel, "paths", None), "bridge_home", None)
+        if not bridge_home:
+            return None
+        return Path(bridge_home) / "state" / "reboot_resume" / f"{operation_id}.json"
+
+    def _write_resume_manifest(
+        self, operation_id: str, captured: Mapping[str, Mapping[str, Any]]
+    ) -> Path | None:
+        agents = {
+            name: dict(payload)
+            for name, payload in captured.items()
+            if payload.get("pending") or payload.get("interrupted")
+        }
+        if not agents:
+            return None
+        path = self._resume_manifest_path(operation_id)
+        if path is None:
+            return None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staged = path.with_suffix(".tmp")
+            staged.write_text(
+                json.dumps(
+                    {
+                        "operation_id": operation_id,
+                        "created_at": time.time(),
+                        "agents": agents,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.replace(staged, path)
+        except OSError:
+            bridge_logger.warning(
+                "Reboot force: resume manifest not written | operation=%s",
+                operation_id,
+            )
+            return None
+        return path
+
+    async def resume_restored_work(self, restart: Mapping[str, Any]) -> dict[str, int]:
+        """Re-queue what a forced reboot captured, once the new generation is up."""
+        raw = restart.get("resume_manifest")
+        totals = {"pending": 0, "turns": 0}
+        if not raw:
+            return totals
+        path = Path(str(raw))
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            bridge_logger.warning(
+                "Reboot force: resume manifest unreadable | path=%s", raw
+            )
+            return totals
+        operation_id = str(
+            manifest.get("operation_id") or restart.get("operation_id") or ""
+        )
+        agents = dict(manifest.get("agents") or {})
+        try:
+            handles = self._target_handles(tuple(agents))
+        except ValueError:
+            handles = {}
+        for name, payload in agents.items():
+            handle = handles.get(name)
+            if handle is None:
+                continue
+            try:
+                result = await handle.resume_after_reboot(
+                    payload.get("pending") or (),
+                    resume_interrupted=bool(payload.get("interrupted")),
+                    operation_id=operation_id,
+                )
+            except Exception:
+                bridge_logger.warning(
+                    "Reboot force: resume failed | operation=%s agent=%s",
+                    operation_id,
+                    name,
+                )
+                continue
+            totals["pending"] += int(result.get("pending_resumed") or 0)
+            totals["turns"] += 1 if result.get("turn_resumed") else 0
+        if operation_id:
+            try:
+                self.receipts.update(operation_id, resume=dict(totals))
+            except (OSError, ValueError):
+                pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        bridge_logger.info(
+            "Reboot force: work restored | operation=%s pending=%s turns=%s",
+            operation_id,
+            totals["pending"],
+            totals["turns"],
+        )
+        return totals
 
     def latest(
         self,

@@ -11,7 +11,7 @@ import os
 import shutil
 import stat
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1164,6 +1164,34 @@ class AgentRuntimeHandle:
             "owner_id": owner_id, "session_id": session_id, "run_id": run_id,
             "request_id": request_id, "reason": reason,
         }, timeout=12) or {})
+
+    async def capture_reboot_state(self, *, timeout: float = 12) -> dict[str, Any]:
+        """Read-only snapshot of queued requests and any interrupted turn."""
+        return dict(
+            await self._route("runtime.reboot_capture", {}, timeout=timeout) or {}
+        )
+
+    async def resume_after_reboot(
+        self,
+        pending: Sequence[Mapping[str, Any]] = (),
+        *,
+        resume_interrupted: bool = False,
+        operation_id: str = "",
+        timeout: float = 60,
+    ) -> dict[str, Any]:
+        """Re-queue captured work through the Worker's normal admission path."""
+        return dict(
+            await self._route(
+                "runtime.reboot_resume",
+                {
+                    "pending": [dict(item) for item in pending],
+                    "resume_interrupted": bool(resume_interrupted),
+                    "operation_id": str(operation_id),
+                },
+                timeout=timeout,
+            )
+            or {}
+        )
 
     async def execute_slash_command(
         self,
@@ -2639,6 +2667,7 @@ class FunctionWorkerSupervisor:
                     "request_key",
                     "delay_seconds",
                     "cancel",
+                    "force",
                 )
                 if key in params
             }

@@ -263,7 +263,12 @@ class UniversalOrchestrator:
         await self.agent_lifecycle.shutdown_all_agents(timeout)
 
     async def _do_hot_restart(self, restart: dict):
-        await self.reboot_manager.hot_restart(restart)
+        restarted = await self.reboot_manager.hot_restart(restart)
+        if restarted:
+            # A forced reboot stopped live work on purpose: hand it back to the
+            # new generation through the normal admission path.
+            await self.reboot_manager.resume_restored_work(restart)
+        return restarted
 
     def _report_startup(self):
         startup_status = dict(self.startup_status)
@@ -448,3 +453,4 @@ class UniversalOrchestrator:
 
             await self.shutdown_manager.full_shutdown()
             break
+# HASHI-Fingerprint: hfp_33e9cb98ae214e3097ec1aa516932591

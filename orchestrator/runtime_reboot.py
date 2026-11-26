@@ -79,6 +79,7 @@ async def submit(
     targets=None,
     delay_seconds=None,
     cancel=False,
+    force=False,
     query=None,
 ):
     origin = origin_from_update(runtime, update)
@@ -99,6 +100,8 @@ async def submit(
         request["delay_seconds"] = delay_seconds
     if cancel:
         request["cancel"] = True
+    if force:
+        request["force"] = True
     try:
         result = await runtime.orchestrator.request_reboot(**request)
     except Exception:
@@ -128,6 +131,13 @@ async def submit(
                 text = render_notice(
                     result["record"],
                     starting=True,
+                    locale=ui_language.preferred_locale(runtime, update),
+                )
+            elif result.get("stopping"):
+                # Forced reboots stop busy Agents first; the shared runtime
+                # still owns the start and final notices.
+                text = ui_language.tr(
+                    "reboot.force_stopping",
                     locale=ui_language.preferred_locale(runtime, update),
                 )
             else:
@@ -201,7 +211,7 @@ async def show_menu(runtime, update, *, status_only=False, query=None):
 
 
 def parse_request(value):
-    """Split `<target> [delay][=<minutes>]`; unknown modifiers are invalid.
+    """Split `<target> [delay][=<minutes>] [force]`; unknown modifiers fail.
 
     Returning no target keeps the command from guessing: an unrecognised
     modifier must fail loudly rather than quietly start an immediate reboot.
@@ -221,6 +231,8 @@ def parse_request(value):
             if not 0 < seconds <= REBOOT_DELAY_MAX_SECONDS:
                 return None, {}
             modifiers["delay_seconds"] = seconds
+        elif token == "force":
+            modifiers["force"] = True
         else:
             return None, {}
     return tokens[0], modifiers

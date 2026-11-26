@@ -48,6 +48,71 @@ WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 LOCAL_MODE_TOKEN = "WORKBENCH_ONLY_NO_TOKEN"
 MENU_SYNC_RETRY_INITIAL_SECONDS = 5.0
 MENU_SYNC_RETRY_MAX_SECONDS = 60.0
+# One forced reboot manifest stays small: prompts, never attachments.
+_REBOOT_RESUME_LIMIT = 50
+
+
+def _reboot_resume_entry(item: Any) -> dict[str, Any] | None:
+    """Map one ready QueuedRequest onto the existing admission parameters."""
+    chat_id = getattr(item, "chat_id", None)
+    prompt = getattr(item, "prompt", None)
+    if chat_id is None or not prompt:
+        return None
+    return {
+        "chat_id": int(chat_id),
+        "prompt": str(prompt),
+        "source": str(getattr(item, "source", "") or "api"),
+        "summary": str(getattr(item, "summary", "") or ""),
+        "silent": bool(getattr(item, "silent", False)),
+        "is_retry": bool(getattr(item, "is_retry", False)),
+        "deliver_to_telegram": bool(getattr(item, "deliver_to_telegram", True)),
+        "skip_memory_injection": bool(
+            getattr(item, "skip_memory_injection", False)
+        ),
+        "habit_learning_eligible": bool(
+            getattr(item, "habit_learning_eligible", True)
+        ),
+        "skill_id": getattr(item, "skill_id", None),
+        "scheduler_context": getattr(item, "scheduler_context", None),
+        "request_metadata": getattr(item, "request_metadata", None),
+        "request_content": getattr(item, "request_content", None),
+    }
+
+
+def _interrupted_task_payloads(runtime: Any, runtime_retry: Any) -> list[Any]:
+    """Every /stop snapshot this Agent holds, scoped sessions included."""
+    found: list[Any] = []
+    seen: set[str] = set()
+    scoped = getattr(runtime, "_interrupted_tasks", None)
+    if isinstance(scoped, dict):
+        for session_id in list(scoped)[:5]:
+            snapshot = runtime_retry.capture_interrupted_task(
+                runtime, session_id=str(session_id)
+            )
+            if snapshot is None:
+                continue
+            marker = str(getattr(snapshot, "request_id", "") or "")
+            if marker in seen:
+                continue
+            seen.add(marker)
+            found.append(snapshot)
+    snapshot = runtime_retry.capture_interrupted_task(runtime)
+    if snapshot is not None:
+        marker = str(getattr(snapshot, "request_id", "") or "")
+        if marker not in seen:
+            found.append(snapshot)
+    return found
+
+
+def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
+    payload = getattr(snapshot, "as_dict", None)
+    if callable(payload):
+        return dict(payload())
+    if hasattr(snapshot, "__dataclass_fields__"):
+        from dataclasses import asdict
+
+        return asdict(snapshot)
+    return {"prompt": str(getattr(snapshot, "prompt", "") or "")}
 
 
 class FunctionWorkerStateError(RuntimeError):
@@ -986,6 +1051,72 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError("Agent runtime is not prepared")
         return self.runtime
 
+    def _capture_reboot_state(self, runtime: Any) -> dict[str, Any]:
+        """Read-only snapshot of ready work, for a forced reboot manifest."""
+        from orchestrator import runtime_pending, runtime_retry
+
+        items = runtime_pending.ready_items(runtime)
+        pending: list[dict[str, Any]] = []
+        for item in items[:_REBOOT_RESUME_LIMIT]:
+            entry = _reboot_resume_entry(item)
+            if entry is not None:
+                pending.append(entry)
+        interrupted = _interrupted_task_payloads(runtime, runtime_retry)
+        return {
+            "pending": pending,
+            "pending_total": len(items),
+            "interrupted": bool(interrupted),
+        }
+
+    async def _resume_after_reboot(
+        self, runtime: Any, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Re-queue captured work through the normal admission path."""
+        from orchestrator import runtime_retry
+
+        pending = [
+            dict(item)
+            for item in (params.get("pending") or ())
+            if isinstance(item, Mapping)
+        ]
+        resumed = 0
+        for entry in pending:
+            try:
+                await runtime.enqueue_request(**entry)
+                resumed += 1
+            except Exception:
+                logger.warning(
+                    "Captured request could not be resumed for %s", self.agent_name
+                )
+        turn_resumed = False
+        if params.get("resume_interrupted"):
+            for snapshot in _interrupted_task_payloads(runtime, runtime_retry):
+                try:
+                    await runtime.enqueue_request(
+                        int(getattr(snapshot, "chat_id", 0) or 0),
+                        str(getattr(snapshot, "prompt", "") or ""),
+                        str(getattr(snapshot, "source", "") or "reboot_force"),
+                        str(getattr(snapshot, "summary", "") or "Resumed after reboot"),
+                        request_metadata={
+                            "resumed_interrupted_task": _snapshot_payload(snapshot)
+                        },
+                        idempotency_key=(
+                            "reboot-resume:"
+                            f"{params.get('operation_id') or ''}:"
+                            f"{getattr(snapshot, 'request_id', '') or ''}"
+                        ),
+                    )
+                    turn_resumed = True
+                except Exception:
+                    logger.warning(
+                        "Interrupted turn could not be resumed for %s", self.agent_name
+                    )
+        return {
+            "pending_resumed": resumed,
+            "pending_total": len(pending),
+            "turn_resumed": turn_resumed,
+        }
+
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         from orchestrator.agent_incarnation import lifecycle_id_from_config
@@ -1769,6 +1900,10 @@ class FunctionWorkerHost:
                 )
             await self.emit_metadata()
             return request_id
+        if method == "runtime.reboot_capture":
+            return self._capture_reboot_state(runtime)
+        if method == "runtime.reboot_resume":
+            return await self._resume_after_reboot(runtime, params)
         if method == "runtime.telegram_update":
             from telegram import Update
 
