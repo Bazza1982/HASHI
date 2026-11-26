@@ -33,19 +33,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - name: Configure declared Python runtime
         shell: bash
         run: |
           uv venv --seed --python "3.12.13" .venv
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install Functions test environment
-        run: python -m pip install -r constraints/standard-py312.lock ".[test,media]"
+        run: uv pip install --python .venv -r constraints/standard-py312.lock ".[test,media]"
       - name: Compile changed HERV3 and Tool modules
         run: |
           python -m compileall -q adapters/deepseek_api.py adapters/openrouter_api.py adapters/hli_api.py orchestrator/multimodal_contract.py orchestrator/api_gateway.py orchestrator/her_v2/privacy_gate.py orchestrator/provider_text_projection.py tools/typed_media_result.py tools/browser.py tools/windows_use.py tools/desktop.py tools/registry.py tools/gateway/mcp_stdio.py tools/device_control_worker.py tools/windows_helper/backends.py
       - name: Validate typed media and ordinary text paths
         run: |
-          python -m pytest -q \
+          python -m pytest -q -n auto --dist loadscope --durations=25 \
             tests/test_typed_media_boundary.py \
             tests/test_device_control_worker.py \
             tests/test_deepseek_api.py \

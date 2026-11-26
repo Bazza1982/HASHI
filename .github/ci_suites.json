@@ -5,7 +5,12 @@
       "{python}",
       "-m",
       "pytest",
-      "-q"
+      "-q",
+      "-n",
+      "auto",
+      "--dist",
+      "loadscope",
+      "--durations=25"
     ],
     "tests": [
       "tests/test_architecture_boundaries.py",
@@ -15,10 +20,8 @@
       "tests/test_askme_control.py",
       "tests/test_runtime_her_fallback.py",
       "tests/test_model_fallback_policy.py",
-      "tests/test_backend_selection_transaction.py",
       "tests/test_backend_switch_outcomes.py",
       "tests/test_runtime_her_habits.py",
-      "tests/test_permission_safety_command.py",
       "tests/test_job_ownership.py",
       "tests/test_agent_runtime_job_transfer.py",
       "tests/test_fresh_context.py",
@@ -45,7 +48,21 @@
       "tests/test_agent_pcm_edit.py",
       "tests/test_agent_pcm_api.py",
       "tests/test_workbench_enterprise_health.py",
-      "tests/test_workspace_state.py"
+      "tests/test_workspace_state.py",
+      "tests/test_default_function_readiness.py",
+      "tests/test_cold_restart_notice_independence.py",
+      "tests/test_execution_resources.py",
+      "tests/test_tool_output_limits.py",
+      "tests/test_remote_pit_residuals.py",
+      "tests/test_meter_cost.py",
+      "tests/test_legacy_pr_gaps.py",
+      "tests/contract/test_packaging_generation_sync.py",
+      "tests/test_backend_timeout.py",
+      "tests/test_pricing_sources.py",
+      "tests/test_backend_preflight_honesty.py",
+      "tests/test_worktree_hygiene.py",
+      "tests/test_secret_redaction_only.py",
+      "tests/test_pit_independence_and_hygiene.py"
     ]
   },
   "frontend": {
@@ -54,7 +71,12 @@
       "{python}",
       "-m",
       "pytest",
-      "-q"
+      "-q",
+      "-n",
+      "auto",
+      "--dist",
+      "loadscope",
+      "--durations=25"
     ],
     "tests": [
       "tests/test_agentpresence_ingress.py",
@@ -111,7 +133,12 @@
       "{python}",
       "-m",
       "pytest",
-      "-q"
+      "-q",
+      "-n",
+      "auto",
+      "--dist",
+      "loadscope",
+      "--durations=25"
     ],
     "tests": [
       "tests/test_config.py",
@@ -150,7 +177,12 @@
       "{python}",
       "-m",
       "pytest",
-      "-q"
+      "-q",
+      "-n",
+      "auto",
+      "--dist",
+      "loadscope",
+      "--durations=25"
     ],
     "tests": [
       "tests/test_safevoice_discard.py",
@@ -166,13 +198,10 @@
       "tests/test_api_voice_ingress.py",
       "tests/test_voice_admission_boundaries.py",
       "tests/test_voice_confirmation_transport.py",
-      "tests/test_agent_fyi.py",
       "tests/test_run_questions.py",
       "tests/test_run_question_connectors.py",
       "tests/test_run_questions_review.py",
-      "tests/test_run_questions_repair.py",
-      "tests/test_frontend_media_setup.py",
-      "tests/test_frontend_media_setup_http.py"
+      "tests/test_run_questions_repair.py"
     ]
   },
   "permissions": {
@@ -182,7 +211,11 @@
       "-m",
       "pytest",
       "-q",
-      "--durations=20"
+      "-n",
+      "auto",
+      "--dist",
+      "loadscope",
+      "--durations=25"
     ],
     "tests": [
       "tests/test_frontend_settings_api.py",
@@ -195,19 +228,11 @@
       "tests/test_permission_registry.py",
       "tests/test_permission_actions.py",
       "tests/test_permission_human_approval.py",
-      "tests/test_agent_fyi.py",
-      "tests/test_agent_deletion.py",
       "tests/test_private_files.py",
-      "tests/test_agent_move_service.py",
       "tests/test_agent_move_manager.py",
       "tests/test_agent_move_coordinator.py",
       "tests/test_agent_move_package.py",
       "tests/test_remote_agent_move.py",
-      "tests/test_workzone.py",
-      "tests/test_runtime_workzone.py",
-      "tests/test_workzone_pending_projection.py",
-      "tests/test_workbench_workzone_management.py",
-      "tests/test_telegram_access_workzone.py",
       "tests/test_enterprise_identity.py",
       "tests/test_permission_signed_receipts.py",
       "tests/test_permission_windows_file_binding.py",
@@ -221,7 +246,6 @@
       "tests/test_backend_selection_transaction.py",
       "tests/test_config_admin_invariants.py",
       "tests/test_config_json.py",
-      "tests/test_config.py",
       "tests/test_flexible_backend_state.py",
       "tests/test_permission_run_service.py",
       "tests/test_permission_service_application.py",

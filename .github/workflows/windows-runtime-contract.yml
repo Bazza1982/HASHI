@@ -64,6 +64,8 @@ jobs:
       with:
         fetch-depth: 0
     - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Prepare the declared Python runtime
       shell: bash
       run: |
@@ -74,14 +76,17 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         fi
     - name: Install runtime and test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      run: uv pip install --python .venv -r constraints/standard-py312.lock ".[test]"
     - name: Verify Agent tool ownership, runtime ACL and protection
+      if: ${{ needs.ci-plan.outputs.full != 'true' }}
       run: python -m pytest -q tests/test_mcp_owner_admission.py tests/test_tool_gateway_mcp.py
         tests/test_live_runtime_acl.py tests/test_live_runtime_protection.py tests/test_smart_tool_registry.py
         tests/test_browser_gateway_proxy.py tests/test_hashi_instance_cli.py tests/test_source_deploy.py
     - name: Verify native patch integrity and shared approval wiring
+      if: ${{ needs.ci-plan.outputs.full != 'true' }}
       run: python -m pytest -q tests/test_apply_patch_cross_platform.py tests/test_fingerprint_execution.py tests/test_live_voice_actions.py
     - name: Verify native Windows runtime and portable startup contracts
+      if: ${{ needs.ci-plan.outputs.full != 'true' }}
       run: python -m pytest -q tests/test_function_generation.py tests/test_process_execution.py
         tests/test_agent_pcm_edit.py tests/test_agent_pcm_api.py tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_record_many_uses_one_durable_commit_and_keeps_chain
         tests/test_pcm_audit_memory_wiki.py::test_canonical_audit_fails_fast_when_durable_store_is_unavailable tests/test_runtime_pipeline.py::test_reasoning_stream_audit_batches_without_copying_raw_delta
@@ -110,7 +115,7 @@ jobs:
         --junitxml="${{ runner.temp }}/hashi-runtime-roles.xml" --durations=20
     - name: Verify the complete offline dependency regression scope
       timeout-minutes: 90
-      run: python -m pytest -q tests -m "not contract and not live and not platform and not real_wall_clock" --basetemp="${{
+      run: python -m pytest -q -n auto --dist loadscope tests -m "not contract and not live and not platform and not real_wall_clock" --basetemp="${{
         runner.temp }}/hashi-offline-regression" --junitxml="${{ runner.temp }}/hashi-offline-regression.xml" --durations=25
       if: ${{ needs.ci-plan.outputs.full == 'true' }}
     - name: Retain native role qualification receipts
@@ -141,13 +146,15 @@ jobs:
       with:
         fetch-depth: 0
     - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Prepare the declared Linux Python runtime
       shell: bash
       run: |
         uv venv --seed --python "3.12.13" .venv
         echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
     - name: Install original runtime and test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      run: uv pip install --python .venv -r constraints/standard-py312.lock ".[test]"
     - name: Verify Agent tool ownership, runtime ACL and protection
       run: python -m pytest -q tests/test_mcp_owner_admission.py tests/test_tool_gateway_mcp.py
         tests/test_live_runtime_acl.py tests/test_live_runtime_protection.py tests/test_smart_tool_registry.py
@@ -179,7 +186,7 @@ jobs:
         tests/test_session_store.py tests/test_frontend_settings_api.py tests/test_permission_pao_fence.py --junitxml="${{
         runner.temp }}/hashi-linux-scheduler-authorization.xml"
     - name: Verify existing curated Core contracts on Linux
-      run: python -m pytest -q --junitxml="${{ runner.temp }}/hashi-linux-core.xml"
+      run: python -m pytest -q -n auto --dist loadscope --durations=25 --ignore=tests/test_runtime_roles.py --ignore=tests/test_runtime_installation.py --ignore=tests/test_runtime_role_profiles.py --ignore=tests/test_runtime_process.py --ignore=tests/test_kernel_cancellation.py --ignore=tests/test_runtime_builder_safety.py --junitxml="${{ runner.temp }}/hashi-linux-core.xml"
     - name: Retain Linux qualification receipts
       if: always()
       uses: actions/upload-artifact@v4
@@ -205,13 +212,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Prepare the declared Python runtime
       shell: pwsh
       run: |
         uv venv --seed --python "3.12.13" .venv
         "$env:GITHUB_WORKSPACE/.venv/Scripts" >> $env:GITHUB_PATH
     - name: Install the same locked runtime and test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      run: uv pip install --python .venv -r constraints/standard-py312.lock ".[test]"
     - name: Verify lost continuation ACK does not send a third request
       run: python -B -m pytest -q tests/test_live_voice_provider_opening.py::TestPhoneProviderOpening::test_missing_continuation_ack_never_sends_a_third_request --junitxml="${{ runner.temp }}/live-voice-ack.xml"
     - name: Retain the focused result

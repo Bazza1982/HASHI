@@ -162,6 +162,8 @@ jobs:
       with:
         fetch-depth: 0
     - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Prepare Python
       shell: bash
       run: |
@@ -172,7 +174,7 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         fi
     - name: Install test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+      run: uv pip install --python .venv -r constraints/standard-py312.lock ".[test]" ruff
     - name: Validate Protected Core manifest
       run: python scripts/check_protected_core_changes.py --validate-manifest
     - name: Verify Protected Core against the event baseline
