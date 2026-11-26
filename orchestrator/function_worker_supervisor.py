@@ -2628,7 +2628,20 @@ class FunctionWorkerSupervisor:
                 raise FunctionWorkerProtocolError("Reboot request came from an inactive Worker")
             if method == "core.reboot.status":
                 return self.kernel.reboot_manager.latest(actor_id=params.get("actor_id"), chat_id=params.get("chat_id"), thread_id=params.get("thread_id"), surface=params.get("surface") or "telegram")
-            allowed = {key: params[key] for key in ("mode", "agent_number", "targets", "origin", "locale", "request_key") if key in params}
+            allowed = {
+                key: params[key]
+                for key in (
+                    "mode",
+                    "agent_number",
+                    "targets",
+                    "origin",
+                    "locale",
+                    "request_key",
+                    "delay_seconds",
+                    "cancel",
+                )
+                if key in params
+            }
             return self.kernel.reboot_manager.submit({**allowed, "agent_name": client.agent_name})
         if method == "core.telegram.summary":
             handle = self.kernel._runtime_map().get(client.agent_name)
