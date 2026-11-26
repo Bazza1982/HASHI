@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -10,6 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator import remote_token
+from orchestrator.admin_local_testing import (
+    execute_local_command,
+    try_execute_slash_command_text,
+)
+from orchestrator.command_interaction_bridge import (
+    build_frontend_command_invocation,
+    dispatch_command_interaction,
+)
 from orchestrator.command_registry import load_runtime_commands
 from orchestrator.command_specs import COMMAND_SPECS
 from orchestrator.commands import remote as remote_command
@@ -412,3 +421,143 @@ def test_an_expired_prompt_is_refused(tmp_path: Path):
     assert handled is True
     assert remote_token.effective_token(tmp_path, env={})[0] != "secrets"
     assert getattr(runtime, remote_command.PENDING_ATTRIBUTE, None) is None
+
+# --- non-Telegram command admission ------------------------------------------
+
+INLINE_TOKEN_COMMANDS = [
+    f"/remote token set {TOKEN}",
+    f"/remote token set={TOKEN}",
+    f"/remote token set: {TOKEN}",
+]
+
+
+def _assert_token_absent(root: Path) -> None:
+    needle = TOKEN.encode("utf-8")
+    for path in root.rglob("*"):
+        if path.is_file():
+            assert needle not in path.read_bytes(), f"token persisted in {path}"
+
+
+@pytest.mark.parametrize("command_text", INLINE_TOKEN_COMMANDS)
+def test_local_command_admission_rejects_inline_token_before_audit(
+    tmp_path: Path, command_text: str
+):
+    seed(tmp_path, {})
+    runtime = IngressRuntime(tmp_path)
+
+    result = run(
+        execute_local_command(runtime, command_text, source_channel="workbench_api")
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "inline_token_rejected"
+    assert "[redacted]" in result["args"]
+    assert TOKEN not in json.dumps(result)
+    audit = (runtime.workspace_dir / "slash_command_audit.jsonl").read_text("utf-8")
+    assert "inline_token_rejected" in audit
+    assert "[redacted]" in audit
+    assert TOKEN not in audit
+    _assert_token_absent(tmp_path)
+    assert remote_token.effective_token(tmp_path, env={})[0] != "secrets"
+
+
+def test_worker_proxy_text_entry_rejects_before_dispatch(tmp_path: Path):
+    seed(tmp_path, {})
+    runtime = IngressRuntime(tmp_path)
+    runtime.is_function_worker_proxy = True
+    sent: list[str] = []
+
+    async def execute_slash_command(text, **kwargs):
+        sent.append(text)
+        return {"ok": True}
+
+    runtime.execute_slash_command = execute_slash_command
+
+    result = run(
+        try_execute_slash_command_text(
+            runtime,
+            INLINE_TOKEN_COMMANDS[0],
+            source_channel="api_chat",
+            session_metadata={"owner_id": "user:7"},
+        )
+    )
+
+    assert result is not None and result["error_code"] == "inline_token_rejected"
+    assert sent == []
+    assert TOKEN not in json.dumps(result)
+    _assert_token_absent(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["token", "set", TOKEN],
+        ["token", f"set={TOKEN}"],
+        ["token", "set:", TOKEN],
+    ],
+)
+def test_typed_invocation_never_contains_the_inline_token(arguments: list[str]):
+    invocation = build_frontend_command_invocation(
+        {"version": 1, "op": "open", "client_id": "clientabcdefghijkl",
+         "request_id": "requestabcdefghijkl", "ui_locale": "en",
+         "command": "/remote token set"},
+        {"session_id": "sessionabcdefghijkl", "instance_id": "HASHI1",
+         "connection_binding": "connectionabcdefghijkl", "context_generation": 1},
+        actor=7,
+        command_name="remote",
+        arguments=arguments,
+    )
+
+    assert "[redacted]" in invocation["arguments"]
+    assert TOKEN not in json.dumps(invocation)
+
+
+def test_typed_invocation_keeps_remote_lifecycle_arguments():
+    invocation = build_frontend_command_invocation(
+        {"version": 1, "op": "open", "client_id": "clientabcdefghijkl",
+         "request_id": "requestabcdefghijkl", "ui_locale": "en",
+         "command": "/remote token status"},
+        {"session_id": "sessionabcdefghijkl", "instance_id": "HASHI1",
+         "connection_binding": "connectionabcdefghijkl", "context_generation": 1},
+        actor=7,
+        command_name="remote",
+        arguments=["token", "status"],
+    )
+
+    assert invocation["arguments"] == ["token", "status"]
+
+
+@pytest.mark.parametrize("command_text", INLINE_TOKEN_COMMANDS)
+def test_command_menu_open_rejects_before_invocation_persistence(
+    tmp_path: Path, command_text: str
+):
+    seed(tmp_path, {})
+    runtime = SimpleNamespace(
+        name="agent",
+        workspace_dir=tmp_path,
+        global_config=SimpleNamespace(authorized_id=7, bridge_home=tmp_path),
+        _is_authorized_user=lambda actor: actor == 7,
+    )
+    payload = {
+        "version": 1,
+        "op": "open",
+        "client_id": "clientabcdefghijkl",
+        "request_id": "requestabcdefghijkl",
+        "ui_locale": "en",
+        "command": command_text,
+    }
+    metadata = {
+        "actor_id": 7,
+        "session_id": "sessionabcdefghijkl",
+        "connection_binding": "connectionabcdefghijkl",
+        "instance_id": "HASHI1",
+        "context_generation": 1,
+    }
+
+    result = run(dispatch_command_interaction(runtime, payload, metadata))
+
+    assert result["ok"] is False
+    assert result["error_code"] == "inline_token_rejected"
+    assert TOKEN not in json.dumps(result)
+    assert not runtime._command_interaction_store.menus
+    _assert_token_absent(tmp_path)
