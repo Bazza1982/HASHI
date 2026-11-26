@@ -60,8 +60,15 @@ def instance_identity(home: Path) -> tuple[str, int, str]:
         return "HASHI", DEFAULT_PORT, error
     global_cfg = document.get("global") if isinstance(document.get("global"), dict) else {}
     instance_id = str(global_cfg.get("instance_id") or "HASHI").strip().upper()
+    declared_port = global_cfg.get("workbench_port")
+    # Same rule as ``tui.py::_launch_identity``: only an absent value (missing,
+    # null or empty string) means "use the default". An explicit 0 is a
+    # declared, unusable port, so it must reach the range check below instead
+    # of being swallowed by a truthiness test.
+    if declared_port is None or declared_port == "":
+        return instance_id, DEFAULT_PORT, ""
     try:
-        port = int(global_cfg.get("workbench_port") or DEFAULT_PORT)
+        port = int(declared_port)
     except (TypeError, ValueError):
         return instance_id, DEFAULT_PORT, "workbench_port is not a number"
     if not 1 <= port <= 65535:

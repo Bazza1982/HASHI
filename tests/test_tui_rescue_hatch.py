@@ -168,12 +168,6 @@ def test_diagnose_refuses_an_out_of_range_port(tmp_path, monkeypatch):
     """The TUI refuses that port, so diagnosis must not pretend to probe it."""
 
     _stub_core_runtime(monkeypatch)
-    home = tmp_path / "instance"
-    home.mkdir()
-    (home / "agents.json").write_text(
-        json.dumps({"global": {"instance_id": "HASHI9", "workbench_port": 70000}}),
-        encoding="utf-8",
-    )
     probed: list[str] = []
     monkeypatch.setattr(
         rescue_cli.urllib.request,
@@ -181,11 +175,22 @@ def test_diagnose_refuses_an_out_of_range_port(tmp_path, monkeypatch):
         lambda url, timeout=0: probed.append(url) or _FakeResponse({"ok": True}),
     )
 
-    checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
-    assert checks["agents.json"]["status"] == rescue_cli.CHECK_WARN
-    assert "out of range" in checks["agents.json"]["detail"]
-    assert checks["local backend"]["status"] == rescue_cli.CHECK_WARN
-    assert probed == []
+    # 0 is a *declared* port, not an absent one: ``or DEFAULT_PORT`` used to
+    # swallow it and fall back to the default endpoint, which is exactly the
+    # guessing this hatch must never do.
+    for port in (70000, 0):
+        home = tmp_path / f"instance-{port}"
+        home.mkdir()
+        (home / "agents.json").write_text(
+            json.dumps({"global": {"instance_id": "HASHI9", "workbench_port": port}}),
+            encoding="utf-8",
+        )
+
+        checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
+        assert checks["agents.json"]["status"] == rescue_cli.CHECK_WARN
+        assert f"out of range ({port})" in checks["agents.json"]["detail"]
+        assert checks["local backend"]["status"] == rescue_cli.CHECK_WARN
+        assert probed == []
 
 
 def test_logs_tail_explains_when_nothing_was_logged(tmp_path):
