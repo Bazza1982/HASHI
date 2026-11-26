@@ -216,11 +216,25 @@ class GatewayDispatchAdapter(DispatchAdapter):
                 transient=False,
                 detail=f"prompt target @{target_agent} has no live runtime on this instance",
             )
+        # Delivery follows the target Agent's own durable binding. A
+        # Workbench-only Agent has no Telegram route, and HAL must neither
+        # invent one nor pass the unresolved 0 sentinel as a channel.
+        telegram_chat_id: int | None = None
+        try:
+            from orchestrator import runtime_session
+
+            telegram_chat_id = runtime_session.primary_telegram_chat_id(runtime)
+        except Exception:  # noqa: BLE001 - no route means the shared Session
+            self._logger.warning(
+                "HAL could not resolve the target Agent's Telegram route",
+                exc_info=True,
+            )
         try:
             await runtime.enqueue_api_text(
                 text,
                 source="hal",
-                deliver_to_telegram=True,
+                chat_id=telegram_chat_id,
+                deliver_to_telegram=telegram_chat_id is not None,
                 idempotency_key=idempotency_key,
                 request_metadata={
                     "hal_exec_id": exec_id,
