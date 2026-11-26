@@ -84,18 +84,21 @@ def _interrupted_task_payloads(runtime: Any, runtime_retry: Any) -> list[Any]:
     found: list[Any] = []
     seen: set[str] = set()
     scoped = getattr(runtime, "_interrupted_tasks", None)
-    if isinstance(scoped, dict):
-        for session_id in list(scoped)[:5]:
-            snapshot = runtime_retry.capture_interrupted_task(
-                runtime, session_id=str(session_id)
-            )
-            if snapshot is None:
-                continue
-            marker = str(getattr(snapshot, "request_id", "") or "")
-            if marker in seen:
-                continue
-            seen.add(marker)
-            found.append(snapshot)
+    session_ids = [str(key) for key in scoped] if isinstance(scoped, dict) else []
+    for session_id in runtime_retry.interrupted_session_ids(runtime):
+        if session_id not in session_ids:
+            session_ids.append(session_id)
+    for session_id in session_ids[:5]:
+        snapshot = runtime_retry.capture_interrupted_task(
+            runtime, session_id=str(session_id)
+        )
+        if snapshot is None:
+            continue
+        marker = str(getattr(snapshot, "request_id", "") or "")
+        if marker in seen:
+            continue
+        seen.add(marker)
+        found.append(snapshot)
     snapshot = runtime_retry.capture_interrupted_task(runtime)
     if snapshot is not None:
         marker = str(getattr(snapshot, "request_id", "") or "")

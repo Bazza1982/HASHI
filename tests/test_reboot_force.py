@@ -178,6 +178,69 @@ async def test_resume_restores_captured_work_after_the_cutover(tmp_path, monkeyp
     assert "1 queued request" in rendered and "1 interrupted turn" in rendered
 
 
+@pytest.mark.asyncio
+async def test_force_capture_reads_the_interrupted_turn_after_the_stop(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    stopped: list[str] = []
+
+    async def capture(*_args, **_kwargs):
+        return {
+            "pending": [],
+            "interrupted": bool(stopped),
+        }
+
+    async def stop(text, *, source_channel, **_kwargs):
+        stopped.append(text)
+        handle.client.metadata["is_generating"] = False
+        handle.client.metadata["queue_depth"] = 0
+        return {"ok": True}
+
+    handle.capture_reboot_state = capture
+    handle.execute_slash_command = stop
+
+    accepted = manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+
+    manifests = list((tmp_path / "state" / "reboot_resume").glob("*.json"))
+    assert len(manifests) == 1, "a stopped turn must be captured for the resume"
+    written = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert written["agents"]["zelda"]["interrupted"] is True
+    assert kernel._restart_request["operation_id"] == accepted["record"]["id"]
+
+
+def test_interrupted_payloads_include_persisted_sessions(tmp_path):
+    from orchestrator.function_worker_host import _interrupted_task_payloads
+    from orchestrator import runtime_retry
+
+    workspace = tmp_path / "agent"
+    (workspace / "state").mkdir(parents=True)
+    (workspace / "state" / "retry_state.json").write_text(
+        json.dumps(
+            {
+                "version": runtime_retry.RETRY_STATE_VERSION,
+                "unfinished_task_by_session": {
+                    "ses_restarted": {
+                        "prompt": "finish the deploy",
+                        "request_id": "req-restarted",
+                        "session_id": "ses_restarted",
+                        "reason": "user_stop",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(workspace_dir=workspace)
+
+    payloads = _interrupted_task_payloads(runtime, runtime_retry)
+
+    assert [item.request_id for item in payloads] == ["req-restarted"]
+
+
 def _fixed_capture(payload):
     async def capture(*_args, **_kwargs):
         return dict(payload)

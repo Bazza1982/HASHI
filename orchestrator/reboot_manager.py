@@ -577,6 +577,25 @@ class RebootManager:
                         self.active_operation = None
                     return False
                 await asyncio.sleep(REBOOT_FORCE_STOP_POLL_SECONDS)
+        if stop_targets:
+            # A confirmed /stop records the interrupted turn only afterwards, so
+            # read it back here: the queue was captured before the stop cleared it.
+            for name in stop_targets:
+                handle = handles.get(name)
+                if handle is None:
+                    continue
+                try:
+                    after = dict(await handle.capture_reboot_state() or {})
+                except Exception:
+                    bridge_logger.warning(
+                        "Reboot force: interrupted capture failed | "
+                        "operation=%s agent=%s",
+                        operation_id,
+                        name,
+                    )
+                    continue
+                if after.get("interrupted"):
+                    captured.setdefault(name, {})["interrupted"] = True
         manifest = self._write_resume_manifest(operation_id, captured)
         request = {
             **restart,
