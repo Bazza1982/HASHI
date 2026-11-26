@@ -262,8 +262,15 @@ async def recall_pending(
     *,
     session_id: str | None = None,
     before_agent_stop_epoch: int | None = None,
+    capture: Any = None,
 ) -> PendingRemoval:
-    """Recall READY+FUTURE requests, optionally only from before a stop fence."""
+    """Recall READY+FUTURE requests, optionally only from before a stop fence.
+
+    ``capture`` is the armed record of a forced reboot. When given, what is about
+    to be removed is written down first and nothing is removed if that record
+    cannot be stored; the delayed messages that really were cancelled are then
+    confirmed, so the record never claims a cancellation that did not happen.
+    """
 
     async with pending_lock(runtime):
         ready = [
@@ -316,17 +323,41 @@ async def recall_pending(
             if entry[2] == "delayed" and entry[3].get("id")
         }
 
+        if capture is not None:
+            try:
+                capture.record_ready(
+                    [entry[3] for entry in selected if entry[2] == "ready"]
+                )
+                capture.record_delayed(
+                    [
+                        entry[3]
+                        for entry in selected
+                        if entry[2] == "delayed"
+                    ]
+                )
+            except OSError:
+                # The record of what this removes could not be stored. Nothing
+                # has been taken out of the queue yet, so nothing is lost by
+                # refusing: the work stays exactly where it was.
+                return PendingRemoval()
+            if getattr(capture, "broken", False):
+                return PendingRemoval()
+
         removed_delayed = 0
         if selected_delay_ids:
             scheduler = scheduler_for(runtime)
             cancel = getattr(scheduler, "cancel_delayed_messages", None)
             if callable(cancel):
-                removed_delayed = len(
+                cancelled = list(
                     await cancel(
                         getattr(runtime, "name", ""),
                         delay_ids=selected_delay_ids,
                     )
+                    or ()
                 )
+                removed_delayed = len(cancelled)
+                if capture is not None:
+                    capture.confirm_delayed(cancelled)
 
         drained = _drain_ready_queue(runtime)
         kept = [item for item in drained if id(item) not in selected_ready]
@@ -385,3 +416,4 @@ async def cancel_pending_by_id(
             delay_ids={str(matches[0]["id"])},
         )
         return PendingRemoval(delayed=len(removed))
+# HASHI-Fingerprint: hfp_99d1821136184e52bea69a916be2dfa4

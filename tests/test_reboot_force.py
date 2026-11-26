@@ -1,4 +1,4 @@
-"""Forced reboot: stop what still runs, capture it, restart, hand it back."""
+"""Forced reboot: stop what still runs, keep exactly what the stop removed, restart."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.reboot_ui import render_notice
-
 from tests.test_reboot_manager import _Kernel
 
 
@@ -36,6 +35,64 @@ def _setup(tmp_path, monkeypatch, *, confirm=0.2, poll=0.01):
     return kernel, manager, request
 
 
+def _capture_file(tmp_path, operation_id, agent="zelda"):
+    directory = tmp_path / "state" / "reboot_resume"
+    return directory / f"capture-{operation_id}-{agent}.json"
+
+
+def _manifests(tmp_path):
+    directory = tmp_path / "state" / "reboot_resume"
+    if not directory.exists():
+        return []
+    return [path for path in directory.glob("*.json") if not path.name.startswith("capture-")]
+
+
+def _write_capture(tmp_path, operation_id, agent, payload):
+    path = _capture_file(tmp_path, operation_id, agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "operation_id": operation_id,
+                "agent": agent,
+                "pending": list(payload.get("pending") or ()),
+                "delayed": list(payload.get("delayed") or ()),
+                "interrupted": list(payload.get("interrupted") or ()),
+                "unconfirmed": list(payload.get("unconfirmed") or ()),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _worker(handle, tmp_path, payload=None, *, stop=True, seen=None):
+    """Fake the Worker contract: arming succeeds and /stop writes its record.
+
+    The record is written by the stop, exactly as the Worker writes it at the
+    removal point; nothing else is inspected afterwards.
+    """
+    name = handle.name
+    state = {"operation_id": ""}
+
+    async def arm(operation_id, **_kwargs):
+        state["operation_id"] = str(operation_id)
+        return {"armed": True, "operation_id": str(operation_id), "durable": True}
+
+    async def execute(text, *, source_channel, **_kwargs):
+        if seen is not None:
+            seen.append(text)
+        if stop:
+            handle.client.metadata["is_generating"] = False
+            handle.client.metadata["queue_depth"] = 0
+        _write_capture(tmp_path, state["operation_id"], name, payload or {})
+        return {"ok": True}
+
+    handle.arm_reboot_capture = arm
+    handle.execute_slash_command = execute
+    return state
+
+
 def _stop_clears_busy(handle, seen):
     async def execute(text, *, source_channel, **_kwargs):
         seen.append(text)
@@ -46,6 +103,28 @@ def _stop_clears_busy(handle, seen):
     return execute
 
 
+def _resuming(handle, *, result=None):
+    calls: list[dict] = []
+
+    async def resume(pending=(), *, delayed=(), interrupted=(), operation_id="", **_kw):
+        calls.append(
+            {
+                "pending": list(pending),
+                "delayed": list(delayed),
+                "interrupted": list(interrupted),
+                "operation_id": operation_id,
+            }
+        )
+        return result or {
+            "pending_resumed": len(pending),
+            "delayed_resumed": len(delayed),
+            "turns_resumed": len(interrupted),
+        }
+
+    handle.resume_after_reboot = resume
+    return calls
+
+
 @pytest.mark.asyncio
 async def test_force_reboot_stops_the_busy_agent_before_the_cutover(
     tmp_path, monkeypatch
@@ -54,7 +133,7 @@ async def test_force_reboot_stops_the_busy_agent_before_the_cutover(
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
     seen: list[str] = []
-    handle.execute_slash_command = _stop_clears_busy(handle, seen)
+    _worker(handle, tmp_path, seen=seen)
 
     accepted = manager.submit({**request, "force": True})
     assert accepted["accepted"] and accepted["stopping"]
@@ -72,11 +151,9 @@ async def test_force_reboot_keeps_the_old_instance_when_stop_is_unconfirmed(
 ):
     kernel, manager, request = _setup(tmp_path, monkeypatch, confirm=0.15)
 
-    async def never_stops(text, *, source_channel, **_kwargs):
-        return {"ok": True}
-
-    kernel.runtimes[0].client.metadata["is_generating"] = True
-    kernel.runtimes[0].execute_slash_command = never_stops
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    _worker(handle, tmp_path, stop=False)
 
     accepted = manager.submit({**request, "force": True})
     assert accepted["stopping"]
@@ -97,16 +174,14 @@ async def test_delayed_force_reboot_forces_once_the_wait_budget_runs_out(
     tmp_path, monkeypatch
 ):
     kernel, manager, request = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        "orchestrator.reboot_manager.REBOOT_DELAY_POLL_SECONDS", 0.01
-    )
+    monkeypatch.setattr("orchestrator.reboot_manager.REBOOT_DELAY_POLL_SECONDS", 0.01)
     monkeypatch.setattr(
         "orchestrator.reboot_manager.REBOOT_DELAY_IDLE_WINDOW_SECONDS", 0.05
     )
     handle = kernel.runtimes[0]
     handle.client.metadata["queue_depth"] = 3
     seen: list[str] = []
-    handle.execute_slash_command = _stop_clears_busy(handle, seen)
+    _worker(handle, tmp_path, seen=seen)
 
     accepted = manager.submit({**request, "force": True, "delay_seconds": 0.2})
     assert accepted["waiting"]
@@ -125,6 +200,7 @@ async def test_forced_wait_is_not_cancellable_once_stopping_began(
 ):
     kernel, manager, request = _setup(tmp_path, monkeypatch, confirm=1.0)
     kernel.runtimes[0].client.metadata["is_generating"] = True
+    _worker(kernel.runtimes[0], tmp_path)
 
     accepted = manager.submit({**request, "force": True})
     await asyncio.sleep(0.05)
@@ -140,7 +216,6 @@ async def test_resume_restores_captured_work_after_the_cutover(tmp_path, monkeyp
     kernel, manager, request = _setup(tmp_path, monkeypatch)
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
-    handle.execute_slash_command = _stop_clears_busy(handle, [])
 
     queued = {"request_id": "req-1", "chat_id": 42, "prompt": "queued", "session_id": "s1"}
     turn = {
@@ -151,35 +226,13 @@ async def test_resume_restores_captured_work_after_the_cutover(tmp_path, monkeyp
         "source": "telegram",
         "summary": "long task",
     }
-    handle.capture_reboot_state = _sequence_capture(
-        {"pending": [queued], "delayed": [], "interrupted": []},
-        {"pending": [], "delayed": [], "interrupted": [turn]},
-    )
-    results: list[dict] = []
-
-    async def resume(
-        pending=(), *, delayed=(), interrupted=(), operation_id="", **_kw
-    ):
-        results.append(
-            {
-                "pending": list(pending),
-                "delayed": list(delayed),
-                "interrupted": list(interrupted),
-                "operation_id": operation_id,
-            }
-        )
-        return {
-            "pending_resumed": len(pending),
-            "delayed_resumed": len(delayed),
-            "turns_resumed": len(interrupted),
-            "turn_resumed": bool(interrupted),
-        }
-
-    handle.resume_after_reboot = resume
+    _worker(handle, tmp_path, {"pending": [queued], "interrupted": [turn]})
+    calls = _resuming(handle)
 
     accepted = manager.submit({**request, "force": True})
     await asyncio.sleep(0.25)
-    manifests = list((tmp_path / "state" / "reboot_resume").glob("*.json"))
+
+    manifests = _manifests(tmp_path)
     assert len(manifests) == 1
     written = json.loads(manifests[0].read_text(encoding="utf-8"))
     assert written["phase"] == "stopped"
@@ -190,9 +243,9 @@ async def test_resume_restores_captured_work_after_the_cutover(tmp_path, monkeyp
     totals = await manager.resume_restored_work(kernel._restart_request)
 
     assert totals == {"pending": 1, "turns": 1, "delayed": 0, "unconfirmed": 0}
-    assert results[0]["interrupted"] == [turn]
-    assert results[0]["operation_id"] == accepted["record"]["id"]
-    assert not list((tmp_path / "state" / "reboot_resume").glob("*.json"))
+    assert calls[0]["interrupted"] == [turn]
+    assert calls[0]["operation_id"] == accepted["record"]["id"]
+    assert _manifests(tmp_path) == [], "nothing left once every item is confirmed"
     record = manager.receipts.get(accepted["record"]["id"])
     assert record["resume"] == {"pending": 1, "turns": 1, "delayed": 0, "unconfirmed": 0}
     rendered = render_notice(record, locale="en")
@@ -200,102 +253,48 @@ async def test_resume_restores_captured_work_after_the_cutover(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_force_capture_reads_the_interrupted_turn_after_the_stop(
-    tmp_path, monkeypatch
-):
+async def test_the_manifest_is_exactly_what_the_stop_recorded(tmp_path, monkeypatch):
+    """No before/after interpretation: the stop's own record is the manifest."""
     kernel, manager, request = _setup(tmp_path, monkeypatch)
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
-    stopped: list[str] = []
 
-    old_turn = {"session_id": "s-old", "request_id": "req-old", "prompt": "old stop"}
-    new_turn = {
-        "session_id": "s1",
-        "request_id": "req-new",
-        "chat_id": 42,
-        "prompt": "long task",
+    recorded = {
+        "pending": [
+            {"request_id": "req-gone", "chat_id": 42, "prompt": "enqueued after the arm"}
+        ],
+        "delayed": [
+            {"id": "d1", "chat_id": 42, "prompt": "later", "due_at": 1_900_000_000.0,
+             "record": {"id": "d1", "agent": "zelda", "chat_id": 42, "prompt": "later",
+                        "due_at": 1_900_000_000.0}}
+        ],
+        "interrupted": [],
     }
-
-    async def capture(*_args, **_kwargs):
-        return {
-            "pending": [],
-            "delayed": [],
-            "interrupted": [old_turn, new_turn] if stopped else [old_turn],
-        }
-
-    async def stop(text, *, source_channel, **_kwargs):
-        stopped.append(text)
-        handle.client.metadata["is_generating"] = False
-        handle.client.metadata["queue_depth"] = 0
-        return {"ok": True}
-
-    handle.capture_reboot_state = capture
-    handle.execute_slash_command = stop
-
-    accepted = manager.submit({**request, "force": True})
-    await asyncio.sleep(0.25)
-
-    manifests = list((tmp_path / "state" / "reboot_resume").glob("*.json"))
-    assert len(manifests) == 1, "a stopped turn must be captured for the resume"
-    written = json.loads(manifests[0].read_text(encoding="utf-8"))
-    interrupted = written["agents"]["zelda"]["interrupted"]
-    assert interrupted == [new_turn], "an older manual /stop must stay stopped"
-    assert kernel._restart_request["operation_id"] == accepted["record"]["id"]
-
-
-@pytest.mark.asyncio
-async def test_force_does_not_restore_work_that_survived_the_stop(
-    tmp_path, monkeypatch
-):
-    kernel, manager, request = _setup(tmp_path, monkeypatch)
-    handle = kernel.runtimes[0]
-    handle.client.metadata["is_generating"] = True
-    stopped = {"req-keep": True, "req-gone": True}
-
-    def payload():
-        return {
-            "pending": [
-                {"request_id": name, "chat_id": 42, "prompt": name}
-                for name, alive in stopped.items()
-                if alive
-            ],
-            "delayed": [],
-            "interrupted": [],
-        }
-
-    async def capture(*_args, **_kwargs):
-        return payload()
-
-    async def stop(text, *, source_channel, **_kwargs):
-        stopped["req-gone"] = False
-        handle.client.metadata["is_generating"] = False
-        handle.client.metadata["queue_depth"] = 0
-        return {"ok": True}
-
-    handle.capture_reboot_state = capture
-    handle.execute_slash_command = stop
+    _worker(handle, tmp_path, recorded)
+    _resuming(handle)
 
     manager.submit({**request, "force": True})
     await asyncio.sleep(0.25)
 
-    manifests = list((tmp_path / "state" / "reboot_resume").glob("*.json"))
-    written = json.loads(manifests[0].read_text(encoding="utf-8"))
-    pending = written["agents"]["zelda"]["pending"]
-    assert [entry["request_id"] for entry in pending] == ["req-gone"]
+    written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
+    assert written["agents"]["zelda"]["pending"] == recorded["pending"]
+    assert written["agents"]["zelda"]["delayed"] == recorded["delayed"]
 
 
 @pytest.mark.asyncio
-async def test_force_reboot_stops_nothing_when_capture_fails(tmp_path, monkeypatch):
+async def test_force_reboot_stops_nothing_when_capture_cannot_be_armed(
+    tmp_path, monkeypatch
+):
     kernel, manager, request = _setup(tmp_path, monkeypatch)
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
     seen: list[str] = []
     handle.execute_slash_command = _stop_clears_busy(handle, seen)
 
-    async def capture(*_args, **_kwargs):
+    async def arm(*_args, **_kwargs):
         raise TimeoutError("worker did not answer")
 
-    handle.capture_reboot_state = capture
+    handle.arm_reboot_capture = arm
 
     accepted = manager.submit({**request, "force": True})
     await asyncio.sleep(0.25)
@@ -305,21 +304,51 @@ async def test_force_reboot_stops_nothing_when_capture_fails(tmp_path, monkeypat
     assert record["reason"] == "force_capture_failed"
     assert seen == []
     assert not kernel.shutdown_event.is_set()
-    assert not list((tmp_path / "state" / "reboot_resume").glob("*.json"))
+    assert _manifests(tmp_path) == []
 
 
 @pytest.mark.asyncio
-async def test_force_reboot_stops_nothing_when_the_capture_cannot_be_stored(
+async def test_a_missing_record_stops_the_cutover_and_keeps_what_exists(
     tmp_path, monkeypatch
 ):
     kernel, manager, request = _setup(tmp_path, monkeypatch)
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
     seen: list[str] = []
-    handle.execute_slash_command = _stop_clears_busy(handle, seen)
-    handle.capture_reboot_state = _fixed_capture(
-        {"pending": [{"request_id": "req-1", "chat_id": 42, "prompt": "queued"}]}
-    )
+
+    async def arm(operation_id, **_kwargs):
+        return {"armed": True, "operation_id": str(operation_id), "durable": True}
+
+    async def execute(text, *, source_channel, **_kwargs):
+        seen.append(text)
+        handle.client.metadata["is_generating"] = False
+        handle.client.metadata["queue_depth"] = 0
+        return {"ok": True}
+
+    handle.arm_reboot_capture = arm
+    handle.execute_slash_command = execute  # never writes a record
+
+    accepted = manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "force_capture_unconfirmed"
+    assert seen == ["/stop"]
+    assert not kernel.shutdown_event.is_set()
+    assert kernel._restart_request is None
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_cannot_be_stored_hands_the_work_back(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    queued = {"request_id": "req-1", "chat_id": 42, "prompt": "queued"}
+    _worker(handle, tmp_path, {"pending": [queued]})
+    calls = _resuming(handle)
 
     def broken(*_args, **_kwargs):
         raise OSError("disk is gone")
@@ -332,8 +361,34 @@ async def test_force_reboot_stops_nothing_when_the_capture_cannot_be_stored(
     record = manager.receipts.get(accepted["record"]["id"])
     assert record["status"] == "rejected"
     assert record["reason"] == "force_manifest_unavailable"
-    assert seen == []
     assert not kernel.shutdown_event.is_set()
+    assert calls and calls[0]["pending"] == [queued], "stopped work goes back"
+    # The stop's own record is what made the hand-back possible; it is only
+    # cleared once every item is confirmed back in the queue.
+    assert not _capture_file(tmp_path, accepted["record"]["id"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_an_abort_keeps_the_record_when_the_hand_back_is_unconfirmed(
+    tmp_path, monkeypatch
+):
+    """Regression: an unconfirmed hand-back must not delete the manifest."""
+    kernel, manager, request = _setup(tmp_path, monkeypatch, confirm=0.15)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    queued = {"request_id": "req-1", "chat_id": 42, "prompt": "queued"}
+    _worker(handle, tmp_path, {"pending": [queued]}, stop=False)
+    _resuming(handle, result={"pending_resumed": 0})
+
+    accepted = manager.submit({**request, "force": True})
+    await asyncio.sleep(0.4)
+
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "force_stop_unconfirmed"
+    assert record["resume"]["unconfirmed"] == 1
+    written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
+    assert written["agents"]["zelda"]["pending"] == [queued]
 
 
 @pytest.mark.asyncio
@@ -341,13 +396,9 @@ async def test_unconfirmed_restore_keeps_the_manifest(tmp_path, monkeypatch):
     kernel, manager, request = _setup(tmp_path, monkeypatch)
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
-    handle.execute_slash_command = _stop_clears_busy(handle, [])
     queued = {"request_id": "req-1", "chat_id": 42, "prompt": "queued"}
-    handle.capture_reboot_state = _sequence_capture(
-        {"pending": [queued]},
-        {"pending": [], "delayed": [], "interrupted": []},
-    )
-    handle.resume_after_reboot = _always_rejected
+    _worker(handle, tmp_path, {"pending": [queued]})
+    _resuming(handle, result={"pending_resumed": 0})
 
     manager.submit({**request, "force": True})
     await asyncio.sleep(0.25)
@@ -355,7 +406,7 @@ async def test_unconfirmed_restore_keeps_the_manifest(tmp_path, monkeypatch):
 
     assert totals["pending"] == 0
     assert totals["unconfirmed"] == 1
-    manifests = list((tmp_path / "state" / "reboot_resume").glob("*.json"))
+    manifests = _manifests(tmp_path)
     assert len(manifests) == 1, "unconfirmed work must stay on disk"
     written = json.loads(manifests[0].read_text(encoding="utf-8"))
     assert written["agents"]["zelda"]["pending"] == [queued]
@@ -366,16 +417,11 @@ async def test_a_failed_restore_keeps_the_record_and_reports_it(tmp_path, monkey
     kernel, manager, request = _setup(tmp_path, monkeypatch)
     handle = kernel.runtimes[0]
     handle.client.metadata["is_generating"] = True
-    handle.execute_slash_command = _stop_clears_busy(handle, [])
     queued = {"request_id": "req-1", "chat_id": 42, "prompt": "queued"}
-    turn = {"session_id": "s1", "request_id": "req-2", "prompt": "long task"}
-    handle.capture_reboot_state = _sequence_capture(
-        {"pending": [queued]},
-        {"pending": [], "delayed": [], "interrupted": [turn]},
-    )
+    _worker(handle, tmp_path, {"pending": [queued]})
 
     async def broken(*_args, **_kwargs):
-        raise TimeoutError("worker went away")
+        raise RuntimeError("worker is not there yet")
 
     handle.resume_after_reboot = broken
 
@@ -383,84 +429,51 @@ async def test_a_failed_restore_keeps_the_record_and_reports_it(tmp_path, monkey
     await asyncio.sleep(0.25)
     totals = await manager.resume_restored_work(kernel._restart_request)
 
-    assert totals["unconfirmed"] == 2
-    manifests = list((tmp_path / "state" / "reboot_resume").glob("*.json"))
-    assert len(manifests) == 1, "work whose restore failed must stay recoverable"
-    written = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert totals == {"pending": 0, "turns": 0, "delayed": 0, "unconfirmed": 1}
+    written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
     assert written["agents"]["zelda"]["pending"] == [queued]
-    assert written["agents"]["zelda"]["interrupted"] == [turn]
 
 
-def test_interrupted_payloads_include_persisted_sessions(tmp_path):
-    from orchestrator.function_worker_host import _interrupted_task_payloads
-    from orchestrator import runtime_retry
-
-    workspace = tmp_path / "agent"
-    (workspace / "state").mkdir(parents=True)
-    (workspace / "state" / "retry_state.json").write_text(
-        json.dumps(
-            {
-                "version": runtime_retry.RETRY_STATE_VERSION,
-                "unfinished_task_by_session": {
-                    "ses_restarted": {
-                        "prompt": "finish the deploy",
-                        "request_id": "req-restarted",
-                        "session_id": "ses_restarted",
-                        "reason": "user_stop",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
+@pytest.mark.asyncio
+async def test_a_capture_time_unconfirmed_entry_is_reported_and_kept(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    _worker(
+        handle,
+        tmp_path,
+        {
+            "delayed": [],
+            "unconfirmed": [
+                {
+                    "kind": "delayed",
+                    "entry": {"id": "d1", "prompt": "later"},
+                    "reason": "cancel_not_confirmed",
+                }
+            ],
+        },
     )
-    runtime = SimpleNamespace(workspace_dir=workspace)
+    calls = _resuming(handle)
 
-    payloads = _interrupted_task_payloads(runtime, runtime_retry)
+    manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+    totals = await manager.resume_restored_work(kernel._restart_request)
 
-    assert [item.request_id for item in payloads] == ["req-restarted"]
-
-
-def _fixed_capture(payload):
-    async def capture(*_args, **_kwargs):
-        return dict(payload)
-
-    return capture
-
-
-def _sequence_capture(*payloads):
-    """Capture answers in order: before the stop, then after it."""
-    remaining = [dict(payload) for payload in payloads]
-
-    async def capture(*_args, **_kwargs):
-        if remaining:
-            return remaining.pop(0)
-        return {"pending": [], "delayed": [], "interrupted": []}
-
-    return capture
-
-
-async def _always_rejected(pending=(), *, delayed=(), interrupted=(), **_kwargs):
-    return {
-        "pending_resumed": 0,
-        "delayed_resumed": 0,
-        "turns_resumed": 0,
-        "turn_resumed": False,
-        "unconfirmed": [
-            *({"kind": "pending", "entry": entry} for entry in pending),
-            *({"kind": "delayed", "entry": entry} for entry in delayed),
-            *({"kind": "turn", "entry": entry} for entry in interrupted),
-        ],
-    }
+    assert totals["unconfirmed"] == 1
+    assert calls == [], "nothing was removed, so there is nothing to re-admit"
+    written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
+    assert written["agents"]["zelda"]["unconfirmed"][0]["entry"]["id"] == "d1"
 
 
 def test_parser_accepts_force_alongside_delay():
     from orchestrator.runtime_reboot import parse_request
 
-    assert parse_request("max force") == ("max", {"force": True})
     assert parse_request("max delay=15 force") == (
         "max",
         {"delay_seconds": 900.0, "force": True},
     )
     assert parse_request("max force delay") == ("max", {"delay_seconds": 1800.0, "force": True})
     assert parse_request("max bogus") == (None, {})
-# HASHI-Fingerprint: hfp_f35bc599f6634309bdcfa884403aa717
+# HASHI-Fingerprint: hfp_a098c810a7a4475282a2b62e57f1b229

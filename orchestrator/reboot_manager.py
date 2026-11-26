@@ -17,7 +17,7 @@ from orchestrator.reboot_receipts import (
     RebootReceipts,
 )
 from orchestrator.reboot_ui import operation_notice, render_notice
-from orchestrator import runtime_session, ui_language
+from orchestrator import reboot_capture, runtime_session, ui_language
 from orchestrator.telegram_delivery_failover import send_runtime_notice
 from orchestrator.kernel_process import instance_runtime_dir, write_record
 from orchestrator.reboot_adoption_bridge import legacy_handoff_markers
@@ -62,59 +62,58 @@ REBOOT_FORCE_STOP_CONFIRM_SECONDS = 20.0
 REBOOT_FORCE_STOP_POLL_SECONDS = 0.5
 
 
-def _snapshot_marker(payload: Mapping[str, Any]) -> str:
-    """Identity of one /stop snapshot: the Session and the request it interrupted."""
-    return "{0}|{1}".format(
-        str(payload.get("session_id") or ""),
-        str(payload.get("request_id") or ""),
-    )
+def _read_captures(
+    bridge_home: Any,
+    operation_id: str,
+    names: tuple[str, ...],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """The exact record each target's stop wrote, and the targets without one.
 
-
-def _verified_stop_removal(
-    before: Mapping[str, Any], after: Mapping[str, Any]
-) -> dict[str, list[dict[str, Any]]]:
-    """Keep only what this stop actually removed, matched by stable identity.
-
-    Ready requests and delayed messages that are still present were not removed
-    and must not be re-queued. Interrupted turns are taken from the post-stop
-    state but only when their identity was absent before the stop, so a turn a
-    user stopped earlier is never resurrected.
+    A target with no record is unknown, never "nothing to restore": if its stop
+    could not write down what it removed, the reboot must not claim the work is
+    safe.
     """
-    ready_ids = {
-        str(item.get("request_id") or "")
-        for item in (after.get("pending") or ())
-        if isinstance(item, Mapping)
-    }
-    delayed_ids = {
-        str(item.get("id") or "")
-        for item in (after.get("delayed") or ())
-        if isinstance(item, Mapping)
-    }
-    before_markers = {
-        _snapshot_marker(item)
-        for item in (before.get("interrupted") or ())
-        if isinstance(item, Mapping)
-    }
-    pending = [
-        dict(item)
-        for item in (before.get("pending") or ())
-        if isinstance(item, Mapping)
-        and str(item.get("request_id") or "")
-        and str(item.get("request_id")) not in ready_ids
-    ]
-    delayed = [
-        dict(item)
-        for item in (before.get("delayed") or ())
-        if isinstance(item, Mapping)
-        and str(item.get("id") or "")
-        and str(item.get("id")) not in delayed_ids
-    ]
-    interrupted = [
-        dict(item)
-        for item in (after.get("interrupted") or ())
-        if isinstance(item, Mapping) and _snapshot_marker(item) not in before_markers
-    ]
-    return {"pending": pending, "delayed": delayed, "interrupted": interrupted}
+    records: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+    for name in names:
+        path = reboot_capture.capture_path(bridge_home, operation_id, name)
+        payload = reboot_capture.read_capture(path) if path is not None else None
+        if payload is None:
+            missing.append(name)
+            continue
+        records[name] = payload
+    return records, missing
+
+
+def _capture_payloads(
+    records: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Normalise the per-target records into the manifest's agent payloads."""
+    payloads: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for name, record in records.items():
+        payloads[str(name)] = {
+            "pending": [
+                dict(item)
+                for item in (record.get("pending") or ())
+                if isinstance(item, Mapping)
+            ],
+            "delayed": [
+                dict(item)
+                for item in (record.get("delayed") or ())
+                if isinstance(item, Mapping)
+            ],
+            "interrupted": [
+                dict(item)
+                for item in (record.get("interrupted") or ())
+                if isinstance(item, Mapping)
+            ],
+            "unconfirmed": [
+                dict(item)
+                for item in (record.get("unconfirmed") or ())
+                if isinstance(item, Mapping)
+            ],
+        }
+    return payloads
 
 
 def _resolve_restart_targets(kernel, restart: Mapping[str, Any]) -> tuple[str, ...]:
@@ -578,20 +577,23 @@ class RebootManager:
         stop_targets = list(
             dict.fromkeys([*(busy_targets or ()), *(unavailable_targets or ())])
         )
-        # Capture before anything is removed, and only for Agents that will be
-        # stopped. Work we cannot capture is work we must not destroy: the whole
-        # operation is rejected with the old instance intact.
-        before: dict[str, dict[str, Any]] = {}
+        # Arm the record before anything is removed. Each target's stop writes
+        # down exactly what it takes, at the point it takes it: no queue
+        # difference is interpreted afterwards, which is the only way to tell a
+        # finished request from a removed one and to see work enqueued after the
+        # arm. An Agent that cannot be armed is not stopped at all.
         for name in stop_targets:
             handle = handles.get(name)
             if handle is None:
                 continue
             try:
-                before[name] = dict(await handle.capture_reboot_state() or {})
+                armed = dict(await handle.arm_reboot_capture(operation_id) or {})
             except Exception:
+                armed = {}
+            if not armed.get("armed"):
                 bridge_logger.warning(
-                    "Reboot force: capture failed, nothing stopped | operation=%s "
-                    "agent=%s",
+                    "Reboot force: capture could not be armed, nothing stopped | "
+                    "operation=%s agent=%s",
                     operation_id,
                     name,
                 )
@@ -604,19 +606,6 @@ class RebootManager:
                 if self.active_operation == operation_id:
                     self.active_operation = None
                 return False
-        # Durable record of the work about to be removed, written before the stop.
-        try:
-            self._write_resume_manifest(operation_id, before, phase="captured")
-        except OSError:
-            bridge_logger.warning(
-                "Reboot force: capture manifest not stored, nothing stopped | "
-                "operation=%s",
-                operation_id,
-            )
-            self._finish(record, "rejected", reason="force_manifest_unavailable")
-            if self.active_operation == operation_id:
-                self.active_operation = None
-            return False
         for name in stop_targets:
             handle = handles.get(name)
             if handle is None:
@@ -629,6 +618,32 @@ class RebootManager:
                     operation_id,
                     name,
                 )
+        # What the stops recorded, read from disk: the worker wrote it before it
+        # removed anything, so it survives the worker itself.
+        bridge_home = getattr(getattr(self.kernel, "paths", None), "bridge_home", None)
+        records, missing = _read_captures(bridge_home, operation_id, tuple(stop_targets))
+        recorded = _capture_payloads(records)
+        if missing:
+            # Unknown is not "nothing to restore": the old instance keeps serving
+            # and every record that does exist stays on disk for the hand-back.
+            bridge_logger.warning(
+                "Reboot force: stop record missing, cutover abandoned | "
+                "operation=%s agents=%s",
+                operation_id,
+                sorted(missing),
+            )
+            self._finish(
+                record,
+                "rejected",
+                reason="force_capture_unconfirmed",
+                busy_targets=sorted(missing),
+            )
+            if self.active_operation == operation_id:
+                self.active_operation = None
+            await self._hand_back_after_abort(
+                operation_id, recorded, stop_targets, handles
+            )
+            return False
         if stop_targets:
             deadline = time.monotonic() + REBOOT_FORCE_STOP_CONFIRM_SECONDS
             while True:
@@ -657,58 +672,25 @@ class RebootManager:
                         self.active_operation = None
                     # Whatever did stop goes back into the queue that still serves.
                     await self._hand_back_after_abort(
-                        operation_id, before, stop_targets, handles
+                        operation_id, recorded, stop_targets, handles
                     )
                     return False
                 await asyncio.sleep(REBOOT_FORCE_STOP_POLL_SECONDS)
-        # A confirmed /stop records the interrupted turn only afterwards, so read
-        # it back here and keep only what this stop actually removed: entries that
-        # left the queue, delayed messages that were cancelled, and snapshots whose
-        # identity was not already present before the stop.
-        restored_work: dict[str, dict[str, list]] = {}
-        for name in stop_targets:
-            handle = handles.get(name)
-            if handle is None:
-                continue
-            before_payload = before.get(name) or {}
-            try:
-                after = dict(await handle.capture_reboot_state() or {})
-            except Exception:
-                bridge_logger.warning(
-                    "Reboot force: post-stop capture failed, keeping the pre-stop "
-                    "capture | operation=%s agent=%s",
-                    operation_id,
-                    name,
-                )
-                restored_work[name] = {
-                    "pending": [
-                        dict(item) for item in (before_payload.get("pending") or ())
-                    ],
-                    "delayed": [
-                        dict(item) for item in (before_payload.get("delayed") or ())
-                    ],
-                    "interrupted": [],
-                }
-                continue
-            restored_work[name] = _verified_stop_removal(before_payload, after)
-        restored_work = {
-            name: payload for name, payload in restored_work.items() if any(payload.values())
-        }
         try:
             manifest = self._write_resume_manifest(
-                operation_id, restored_work, phase="stopped"
+                operation_id, recorded, phase="stopped"
             )
         except OSError:
             bridge_logger.warning(
-                "Reboot force: verified capture not stored, cutover abandoned | "
+                "Reboot force: stop record not stored, cutover abandoned | "
                 "operation=%s",
                 operation_id,
             )
             self._finish(record, "rejected", reason="force_manifest_unavailable")
             if self.active_operation == operation_id:
                 self.active_operation = None
-            await self._resume_agents(
-                operation_id, restored_work, handles=handles, discard_when_done=True
+            await self._hand_back_after_abort(
+                operation_id, recorded, stop_targets, handles
             )
             return False
         request = {
@@ -763,17 +745,35 @@ class RebootManager:
                     if isinstance(interrupted, (list, tuple))
                     else []
                 ),
+                "unconfirmed": [
+                    dict(item)
+                    for item in (payload.get("unconfirmed") or ())
+                    if isinstance(item, Mapping)
+                ],
             }
         return agents
 
     def _discard_resume_manifest(self, operation_id: str) -> None:
         path = self._resume_manifest_path(operation_id)
-        if path is None:
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        self._discard_capture_files(operation_id)
+
+    def _discard_capture_files(self, operation_id: str) -> None:
+        """Drop the per-target stop records once the manifest carries them."""
+        bridge_home = getattr(getattr(self.kernel, "paths", None), "bridge_home", None)
+        directory = reboot_capture.capture_directory(bridge_home)
+        if directory is None:
             return
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        prefix = f"capture-{reboot_capture.safe_name(operation_id)}-"
+        for path in directory.glob(f"{prefix}*.json"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def _write_resume_manifest(
         self,
@@ -838,6 +838,19 @@ class RebootManager:
             pending = list(payload.get("pending") or ())
             delayed = list(payload.get("delayed") or ())
             interrupted = list(payload.get("interrupted") or ())
+            # The stop already knows it could not confirm these; they are work we
+            # cannot prove anything about, so they are kept and reported.
+            unconfirmed = [
+                dict(item)
+                for item in (payload.get("unconfirmed") or ())
+                if isinstance(item, Mapping)
+            ]
+            if not (pending or delayed or interrupted):
+                # The stop took nothing this Agent can be asked to put back.
+                if unconfirmed:
+                    remaining[name] = {"unconfirmed": unconfirmed}
+                    totals["unconfirmed"] += len(unconfirmed)
+                continue
             handle = handles.get(name)
             result: dict[str, Any] = {}
             failed = handle is None
@@ -860,16 +873,28 @@ class RebootManager:
                     )
                     failed = True
                     result = {}
-            totals["pending"] += int(result.get("pending_resumed") or 0)
-            totals["delayed"] += int(result.get("delayed_resumed") or 0)
-            totals["turns"] += int(result.get("turns_resumed") or 0)
-            bucket = {"pending": [], "delayed": [], "interrupted": []}
+            confirmed = {
+                "pending": int(result.get("pending_resumed") or 0),
+                "delayed": int(result.get("delayed_resumed") or 0),
+                "interrupted": int(result.get("turns_resumed") or 0),
+            }
+            totals["pending"] += confirmed["pending"]
+            totals["delayed"] += confirmed["delayed"]
+            totals["turns"] += confirmed["interrupted"]
+            bucket: dict[str, list[dict[str, Any]]] = {
+                "pending": [],
+                "delayed": [],
+                "interrupted": [],
+                "unconfirmed": unconfirmed,
+            }
             if failed:
-                bucket = {
-                    "pending": pending,
-                    "delayed": delayed,
-                    "interrupted": interrupted,
-                }
+                bucket.update(
+                    {
+                        "pending": pending,
+                        "delayed": delayed,
+                        "interrupted": interrupted,
+                    }
+                )
             else:
                 for item in result.get("unconfirmed") or ():
                     if not isinstance(item, Mapping):
@@ -881,9 +906,36 @@ class RebootManager:
                         str(item.get("kind") or ""), "interrupted"
                     )
                     bucket[kind].append(dict(entry))
+                # Work the Agent neither restored nor explained is unknown, never
+                # restored: it stays recorded and shows up in the receipt.
+                for kind, submitted in (
+                    ("pending", pending),
+                    ("delayed", delayed),
+                    ("interrupted", interrupted),
+                ):
+                    explained = len(bucket[kind])
+                    unknown = len(submitted) - confirmed[kind] - explained
+                    if unknown <= 0:
+                        continue
+                    seen_markers = {
+                        json.dumps(entry, sort_keys=True, default=str)
+                        for entry in bucket[kind]
+                    }
+                    for entry in submitted:
+                        if unknown <= 0:
+                            break
+                        marker = json.dumps(entry, sort_keys=True, default=str)
+                        if marker in seen_markers:
+                            continue
+                        seen_markers.add(marker)
+                        bucket[kind].append(dict(entry))
+                        unknown -= 1
             if any(bucket.values()):
                 remaining[name] = bucket
-                totals["unconfirmed"] += sum(len(value) for value in bucket.values())
+                totals["unconfirmed"] += len(unconfirmed) + sum(
+                    len(bucket[kind])
+                    for kind in ("pending", "delayed", "interrupted")
+                )
         if remaining:
             # Work that is not confirmed stays recorded: never deleted, never
             # reported as restored.
@@ -956,25 +1008,38 @@ class RebootManager:
     async def _hand_back_after_abort(
         self,
         operation_id: str,
-        before: Mapping[str, Mapping[str, Any]],
+        recorded: Mapping[str, Mapping[str, Any]],
         stop_targets: list[str],
         handles: Mapping[str, AgentRuntimeHandle],
     ) -> None:
-        """Give stopped work back to the instance that is still serving."""
+        """Give stopped work back to the instance that is still serving.
+
+        ``recorded`` is what the stops wrote, so it is handed back exactly. A
+        target with no record is unknown, never empty: it stays named in the
+        manifest instead of being dropped on the floor.
+        """
         restored: dict[str, dict[str, list[dict[str, Any]]]] = {}
         for name in stop_targets:
             handle = handles.get(name)
+            payload = recorded.get(name)
             if handle is None:
                 continue
-            try:
-                after = dict(await handle.capture_reboot_state() or {})
-            except Exception:
-                continue
-            restored[name] = _verified_stop_removal(before.get(name) or {}, after)
-        restored = {
-            name: payload for name, payload in restored.items() if any(payload.values())
-        }
-        await self._resume_agents(operation_id, restored, handles=handles)
+            restored[name] = {
+                "pending": [dict(item) for item in (payload or {}).get("pending") or ()],
+                "delayed": [dict(item) for item in (payload or {}).get("delayed") or ()],
+                "interrupted": [
+                    dict(item) for item in (payload or {}).get("interrupted") or ()
+                ],
+                "unconfirmed": [
+                    dict(item) for item in (payload or {}).get("unconfirmed") or ()
+                ],
+            }
+        totals = await self._resume_agents(
+            operation_id, restored, handles=handles, discard_when_done=False
+        )
+        if not totals.get("unconfirmed"):
+            # Everything the stop took is provably back in the queue.
+            self._discard_capture_files(operation_id)
 
     def latest(
         self,

@@ -1165,10 +1165,17 @@ class AgentRuntimeHandle:
             "request_id": request_id, "reason": reason,
         }, timeout=12) or {})
 
-    async def capture_reboot_state(self, *, timeout: float = 12) -> dict[str, Any]:
-        """Read-only snapshot of queued requests and any interrupted turn."""
+    async def arm_reboot_capture(
+        self, operation_id: str, *, timeout: float = 12
+    ) -> dict[str, Any]:
+        """Let this operation's stop record exactly what it removes."""
         return dict(
-            await self._route("runtime.reboot_capture", {}, timeout=timeout) or {}
+            await self._route(
+                "runtime.reboot_capture_arm",
+                {"operation_id": str(operation_id)},
+                timeout=timeout,
+            )
+            or {}
         )
 
     async def resume_after_reboot(

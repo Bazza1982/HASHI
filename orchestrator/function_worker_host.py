@@ -29,6 +29,7 @@ from orchestrator.function_worker_protocol import (
     json_value,
 )
 from orchestrator.pathing import build_bridge_paths
+from orchestrator import reboot_capture
 from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
 from orchestrator import runtime_background_status
 from orchestrator.runtime_contract import (
@@ -51,108 +52,6 @@ MENU_SYNC_RETRY_MAX_SECONDS = 60.0
 # A forced reboot manifest carries prompts, never attachments. Every queued
 # request is recorded: a truncated manifest silently drops work on the floor.
 _REBOOT_RESUME_KEY = "reboot_resume_operation_id"
-
-
-def _reboot_resume_entry(item: Any) -> dict[str, Any] | None:
-    """Map one ready QueuedRequest onto the existing admission parameters.
-
-    The stable identity fields travel with the entry so a later stop can prove
-    which queued requests it actually removed, instead of guessing.
-    """
-    chat_id = getattr(item, "chat_id", None)
-    prompt = getattr(item, "prompt", None)
-    if chat_id is None or not prompt:
-        return None
-    return {
-        "request_id": str(getattr(item, "request_id", "") or ""),
-        "session_id": str(getattr(item, "session_id", "") or "") or None,
-        "context_generation": getattr(item, "context_generation", None),
-        "chat_id": int(chat_id),
-        "prompt": str(prompt),
-        "source": str(getattr(item, "source", "") or "api"),
-        "summary": str(getattr(item, "summary", "") or ""),
-        "silent": bool(getattr(item, "silent", False)),
-        "is_retry": bool(getattr(item, "is_retry", False)),
-        "deliver_to_telegram": bool(getattr(item, "deliver_to_telegram", True)),
-        "skip_memory_injection": bool(
-            getattr(item, "skip_memory_injection", False)
-        ),
-        "habit_learning_eligible": bool(
-            getattr(item, "habit_learning_eligible", True)
-        ),
-        "skill_id": getattr(item, "skill_id", None),
-        "scheduler_context": getattr(item, "scheduler_context", None),
-        "request_metadata": getattr(item, "request_metadata", None),
-        "request_content": getattr(item, "request_content", None),
-    }
-
-
-def _reboot_delayed_entry(record: Any) -> dict[str, Any] | None:
-    """Map one scheduled delayed message onto the existing scheduler parameters."""
-    if not isinstance(record, Mapping):
-        return None
-    prompt = str(record.get("prompt") or "").strip()
-    if not prompt:
-        return None
-    try:
-        due_at = float(record.get("due_at") or 0.0)
-    except (TypeError, ValueError):
-        due_at = 0.0
-    return {
-        "id": str(record.get("id") or ""),
-        "chat_id": record.get("chat_id"),
-        "prompt": prompt,
-        "due_at": due_at,
-        "deliver_to_telegram": bool(record.get("deliver_to_telegram", True)),
-        "request_metadata": dict(record.get("request_metadata") or {}),
-    }
-
-
-def _reboot_restore_marker(payload: Mapping[str, Any]) -> str:
-    """Identity of one /stop snapshot: a Session plus the request it interrupted."""
-    return "{0}|{1}".format(
-        str(payload.get("session_id") or ""),
-        str(payload.get("request_id") or ""),
-    )
-
-
-def _interrupted_task_payloads(runtime: Any, runtime_retry: Any) -> list[Any]:
-    """Every /stop snapshot this Agent holds, scoped sessions included."""
-    found: list[Any] = []
-    seen: set[str] = set()
-    scoped = getattr(runtime, "_interrupted_tasks", None)
-    session_ids = [str(key) for key in scoped] if isinstance(scoped, dict) else []
-    for session_id in runtime_retry.interrupted_session_ids(runtime):
-        if session_id not in session_ids:
-            session_ids.append(session_id)
-    for session_id in session_ids:
-        snapshot = runtime_retry.capture_interrupted_task(
-            runtime, session_id=str(session_id)
-        )
-        if snapshot is None:
-            continue
-        marker = str(getattr(snapshot, "request_id", "") or "")
-        if marker in seen:
-            continue
-        seen.add(marker)
-        found.append(snapshot)
-    snapshot = runtime_retry.capture_interrupted_task(runtime)
-    if snapshot is not None:
-        marker = str(getattr(snapshot, "request_id", "") or "")
-        if marker not in seen:
-            found.append(snapshot)
-    return found
-
-
-def _snapshot_payload(snapshot: Any) -> dict[str, Any]:
-    payload = getattr(snapshot, "as_dict", None)
-    if callable(payload):
-        return dict(payload())
-    if hasattr(snapshot, "__dataclass_fields__"):
-        from dataclasses import asdict
-
-        return asdict(snapshot)
-    return {"prompt": str(getattr(snapshot, "prompt", "") or "")}
 
 
 class FunctionWorkerStateError(RuntimeError):
@@ -1091,55 +990,125 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError("Agent runtime is not prepared")
         return self.runtime
 
-    async def _capture_reboot_state(self, runtime: Any) -> dict[str, Any]:
-        """Read-only snapshot of every piece of work a forced stop would remove.
+    def _arm_reboot_capture(self, runtime: Any, operation_id: str) -> dict[str, Any]:
+        """Let this operation's stop record exactly what it removes.
 
-        Ready requests, FUTURE delayed messages and the /stop snapshots already
-        held by this Agent are all listed, each with the identity needed to prove
-        later what the stop actually removed.
+        Armed before ``/stop`` is sent: the record is written by the stop itself,
+        at the point of removal, so no queue difference has to be interpreted
+        afterwards.
         """
-        from orchestrator import runtime_pending, runtime_retry
-
-        items = runtime_pending.ready_items(runtime)
-        pending = [
-            entry for entry in (_reboot_resume_entry(item) for item in items) if entry
-        ]
-        records = await self.scheduler.list_delayed_messages(self.agent_name)
-        delayed = [
-            entry
-            for entry in (_reboot_delayed_entry(record) for record in records or ())
-            if entry
-        ]
-        interrupted = [
-            _snapshot_payload(snapshot)
-            for snapshot in _interrupted_task_payloads(runtime, runtime_retry)
-        ]
+        capture = reboot_capture.arm(runtime, operation_id)
         return {
-            "pending": pending,
-            "pending_total": len(items),
-            "delayed": delayed,
-            "delayed_total": len(delayed),
-            "interrupted": interrupted,
+            "armed": True,
+            "operation_id": capture.operation_id,
+            "durable": capture.path is not None,
         }
+
+    def _canonical_binding(
+        self, runtime: Any, entry: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        """Owner, session generation and delivery route from the frozen records.
+
+        The captured payload only holds what the stop could see. The canonical
+        Session/Run rows say who the work belongs to and which context
+        generation it was accepted in, so a resumed item is either re-admitted
+        with its real binding or reported instead of being migrated silently.
+        """
+        binding: dict[str, Any] = {}
+        request_id = str(entry.get("request_id") or "").strip()
+        session_id = str(entry.get("session_id") or "").strip()
+        agent_id = str(getattr(runtime, "name", "") or "")
+        store = getattr(runtime, "session_store", None)
+        if store is None:
+            return binding, None
+        run: dict[str, Any] = {}
+        if request_id:
+            try:
+                run = dict(
+                    store.get_run_by_request(request_id, agent_id=agent_id) or {}
+                )
+            except Exception:
+                run = {}
+        if run:
+            state = str(run.get("state") or "")
+            if state in {"completed", "failed"}:
+                # It finished on its own during the stop: never run it again.
+                return binding, "already_finished"
+            session_id = str(run.get("session_id") or session_id)
+            try:
+                generation = int(run.get("context_generation") or 0)
+            except (TypeError, ValueError):
+                generation = 0
+            if generation:
+                binding["session_context_generation"] = generation
+            route = run.get("delivery_route")
+            if isinstance(route, Mapping) and route:
+                # The frozen delivery binding: where the original turn was meant
+                # to answer. Attachments are not replayed from here.
+                binding["_run_delivery_route"] = dict(route)
+        if not session_id:
+            return binding, None
+        binding["session_id"] = session_id
+        session: dict[str, Any] = {}
+        try:
+            session = dict(store.get_session(session_id, agent_id=agent_id) or {})
+        except Exception:
+            session = {}
+        if session:
+            owner = str(session.get("owner_id") or "")
+            if owner:
+                binding["owner_id"] = owner
+            try:
+                current = int(session.get("context_generation") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            expected = int(binding.get("session_context_generation") or 0)
+            if current and expected and current != expected:
+                # The session started a fresh context after this work was
+                # accepted; submitting it here would silently migrate it.
+                return binding, "context_generation_changed"
+        return binding, None
 
     @staticmethod
     def _resume_metadata(
-        entry: Mapping[str, Any], *, stop_epoch: int, operation_id: str
+        entry: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        *,
+        stop_epoch: int,
+        operation_id: str,
     ) -> dict[str, Any]:
         """Metadata for a re-admission this operation is explicitly allowed to make."""
         metadata = dict(entry.get("request_metadata") or {})
+        # The canonical binding wins: it is the record the turn was accepted with.
+        metadata.update(dict(binding))
+        for captured in ("owner_id", "session_surface", "session_channel_key"):
+            value = entry.get(captured)
+            if value and not metadata.get(captured):
+                metadata[captured] = value
         session_id = str(
             entry.get("session_id") or metadata.get("session_id") or ""
         ).strip()
         if session_id:
             metadata["session_id"] = session_id
-        # The stop that produced this manifest advanced the durable fence, so the
+        if "session_context_generation" not in metadata:
+            try:
+                captured_generation = int(entry.get("context_generation") or 0)
+            except (TypeError, ValueError):
+                captured_generation = 0
+            if captured_generation:
+                metadata["session_context_generation"] = captured_generation
+        # The stop that produced this record advanced the durable fence, so the
         # captured epoch is stale by construction. This operation re-admits its
         # own captured work against the current epoch; every other request keeps
         # meeting the unchanged fence.
         metadata["agent_stop_epoch"] = int(stop_epoch)
         metadata[_REBOOT_RESUME_KEY] = operation_id
         return metadata
+
+    @staticmethod
+    def _resume_idempotency_key(operation_id: str, marker: str) -> str:
+        """One original request keeps one key, whether it was queued or a turn."""
+        return f"reboot-resume:{operation_id}:{marker}"
 
     @staticmethod
     def _admission_kwargs(
@@ -1179,9 +1148,11 @@ class FunctionWorkerHost:
         """
         from orchestrator import runtime_pending
         from orchestrator.agent_stop_fence import current_runtime_epoch
-        from orchestrator.scheduler import MAX_DELAY_MINUTES
 
         operation_id = str(params.get("operation_id") or "")
+        # The stop this record belongs to is over; later stops must not write
+        # into it.
+        reboot_capture.disarm(runtime)
         stop_epoch = current_runtime_epoch(runtime)
         pending = [
             dict(item)
@@ -1204,24 +1175,36 @@ class FunctionWorkerHost:
         }
 
         unconfirmed: list[dict[str, Any]] = []
+        # One original request is handed back once, whether it was queued work or
+        # the turn the stop interrupted.
+        handled: set[str] = set()
 
         pending_resumed = 0
         for entry in pending:
             request_id = str(entry.get("request_id") or "")
+            marker = request_id or f"pending:{str(entry.get('prompt') or '')[:80]}"
             if request_id and request_id in queued_ids:
                 # It survived the stop: re-queueing it would run it twice.
                 continue
+            if marker in handled:
+                continue
+            handled.add(marker)
+            binding, conflict = self._canonical_binding(runtime, entry)
+            if conflict:
+                unconfirmed.append(
+                    {"kind": "pending", "entry": entry, "reason": conflict}
+                )
+                continue
             metadata = self._resume_metadata(
-                entry, stop_epoch=stop_epoch, operation_id=operation_id
+                entry, binding, stop_epoch=stop_epoch, operation_id=operation_id
             )
             kwargs = self._admission_kwargs(entry, metadata)
             receipt = None
             try:
                 receipt = await runtime.enqueue_request(
                     **kwargs,
-                    idempotency_key=(
-                        f"reboot-resume:{operation_id}:"
-                        f"{request_id or str(entry.get('prompt') or '')[:40]}"
+                    idempotency_key=self._resume_idempotency_key(
+                        operation_id, marker
                     ),
                 )
             except Exception:
@@ -1235,13 +1218,27 @@ class FunctionWorkerHost:
 
         turns_resumed = 0
         for payload in interrupted:
+            request_id = str(payload.get("request_id") or "")
+            marker = request_id or "turn:{0}:{1}".format(
+                str(payload.get("session_id") or ""),
+                str(payload.get("prompt") or "")[:80],
+            )
+            if marker in handled:
+                continue
+            handled.add(marker)
             chat_id = payload.get("chat_id")
             prompt = str(payload.get("prompt") or "")
             if chat_id is None or not prompt:
                 unconfirmed.append({"kind": "turn", "entry": payload})
                 continue
+            binding, conflict = self._canonical_binding(runtime, payload)
+            if conflict:
+                unconfirmed.append(
+                    {"kind": "turn", "entry": payload, "reason": conflict}
+                )
+                continue
             metadata = self._resume_metadata(
-                payload, stop_epoch=stop_epoch, operation_id=operation_id
+                payload, binding, stop_epoch=stop_epoch, operation_id=operation_id
             )
             metadata["resumed_interrupted_task"] = dict(payload)
             receipt = None
@@ -1253,10 +1250,8 @@ class FunctionWorkerHost:
                     str(payload.get("summary") or "Resumed after reboot"),
                     request_metadata=metadata,
                     request_content=payload.get("request_content") or None,
-                    idempotency_key=(
-                        "reboot-resume:"
-                        f"{operation_id}:turn:"
-                        f"{payload.get('request_id') or payload.get('session_id') or ''}"
+                    idempotency_key=self._resume_idempotency_key(
+                        operation_id, marker
                     ),
                 )
             except Exception:
@@ -1269,82 +1264,57 @@ class FunctionWorkerHost:
             turns_resumed += 1
 
         delayed_resumed = 0
-        now = time.time()
-        scheduled_restores: set[str] = set()
         scheduled_ids: set[str] = set()
         if delayed:
             try:
                 for record in (
                     await self.scheduler.list_delayed_messages(self.agent_name) or ()
                 ):
-                    if not isinstance(record, Mapping):
-                        continue
-                    scheduled_ids.add(str(record.get("id") or ""))
-                    marker = str(
-                        (record.get("request_metadata") or {}).get(
-                            "reboot_resume_delay_id"
-                        )
-                        or ""
-                    )
-                    if marker:
-                        scheduled_restores.add(marker)
+                    if isinstance(record, Mapping):
+                        scheduled_ids.add(str(record.get("id") or ""))
             except Exception:
                 logger.warning(
                     "Delayed messages could not be listed before restoring for %s",
                     self.agent_name,
                 )
+        restore_delayed = getattr(self.scheduler, "restore_delayed_message", None)
         for entry in delayed:
-            chat_id = entry.get("chat_id")
-            prompt = str(entry.get("prompt") or "")
             delay_id = str(entry.get("id") or "")
-            if chat_id is None or not prompt:
-                unconfirmed.append({"kind": "delayed", "entry": entry})
+            record = entry.get("record")
+            if not isinstance(record, Mapping):
+                unconfirmed.append(
+                    {"kind": "delayed", "entry": entry, "reason": "record_missing"}
+                )
                 continue
-            if delay_id and (delay_id in scheduled_ids or delay_id in scheduled_restores):
-                # Still scheduled: it survived the stop, re-scheduling would repeat it.
+            if delay_id and delay_id in scheduled_ids:
+                # Still scheduled: it survived the stop, re-adding would repeat it.
                 continue
-            metadata = self._resume_metadata(
-                entry, stop_epoch=stop_epoch, operation_id=operation_id
-            )
-            metadata.setdefault("reboot_resume_delay_id", delay_id)
-            idempotency_key = (
-                f"reboot-resume:{operation_id}:delay:{delay_id or prompt[:40]}"
-            )
+            if not callable(restore_delayed):
+                unconfirmed.append(
+                    {
+                        "kind": "delayed",
+                        "entry": entry,
+                        "reason": "restore_unsupported",
+                    }
+                )
+                continue
+            # Put the persisted record back as it was: same id, same due time,
+            # same creation time. Only the reopened fence is restamped.
+            restored = dict(record)
+            restored["agent"] = str(restored.get("agent") or self.agent_name)
+            metadata = dict(restored.get("request_metadata") or {})
+            metadata["agent_stop_epoch"] = int(stop_epoch)
+            metadata[_REBOOT_RESUME_KEY] = operation_id
+            restored["request_metadata"] = metadata
             try:
-                remaining = float(entry.get("due_at") or 0.0) - now
-                if remaining <= 0:
-                    # Already due while the reboot ran: admit it rather than drop it.
-                    receipt = await runtime.enqueue_request(
-                        int(chat_id),
-                        prompt,
-                        "reboot_force",
-                        "",
-                        request_metadata=metadata,
-                        idempotency_key=idempotency_key,
-                    )
-                    if not receipt:
-                        raise RuntimeError("delayed message was not admitted")
-                else:
-                    minutes = max(
-                        1,
-                        int(remaining / 60.0) + (1 if remaining % 60 else 0),
-                    )
-                    await self.scheduler.schedule_delayed_message(
-                        agent_name=self.agent_name,
-                        chat_id=int(chat_id),
-                        prompt=prompt,
-                        delay_minutes=min(minutes, MAX_DELAY_MINUTES),
-                        idempotency_key=idempotency_key,
-                        request_metadata=metadata,
-                        deliver_to_telegram=bool(
-                            entry.get("deliver_to_telegram", True)
-                        ),
-                    )
+                await restore_delayed(restored)
             except Exception:
                 logger.warning(
                     "Delayed message could not be restored for %s", self.agent_name
                 )
-                unconfirmed.append({"kind": "delayed", "entry": entry})
+                unconfirmed.append(
+                    {"kind": "delayed", "entry": entry, "reason": "restore_failed"}
+                )
                 continue
             delayed_resumed += 1
 
@@ -2142,8 +2112,10 @@ class FunctionWorkerHost:
                 )
             await self.emit_metadata()
             return request_id
-        if method == "runtime.reboot_capture":
-            return await self._capture_reboot_state(runtime)
+        if method == "runtime.reboot_capture_arm":
+            return self._arm_reboot_capture(
+                runtime, str(params.get("operation_id") or "")
+            )
         if method == "runtime.reboot_resume":
             return await self._resume_after_reboot(runtime, params)
         if method == "runtime.telegram_update":

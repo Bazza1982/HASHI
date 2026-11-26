@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from orchestrator import (
+    reboot_capture,
     runtime_execution,
     runtime_pending,
     runtime_retry,
@@ -802,6 +803,17 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
                 )
             if interrupted is not None:
                 interrupted_tasks.append(interrupted)
+    # A forced reboot records the turns this stop interrupted, before the queue
+    # is drained, so the record cannot describe work it never removed.
+    reboot_record = reboot_capture.armed(runtime)
+    if reboot_record is not None and interrupted_tasks:
+        try:
+            reboot_record.record_interrupted(interrupted_tasks)
+        except OSError:
+            runtime.logger.warning(
+                "Reboot capture: interrupted turns not recorded for %s",
+                runtime.name,
+            )
     # Mark every foreground and detached request before cancelling work so each
     # terminal callback suppresses the expected backend exit independently.
     if active_metas:
@@ -844,6 +856,7 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             runtime,
             session_id=None,
             before_agent_stop_epoch=fence.epoch,
+            capture=reboot_record,
         ),
         _cancel_managed_background_jobs(
             runtime,
@@ -1912,3 +1925,4 @@ async def callback_retry_toggle(runtime: Any, query: Any, value: str) -> None:
         message=query.message,
     )
     await cmd_retry(runtime, update, SimpleNamespace(args=[]))
+# HASHI-Fingerprint: hfp_48733e91cbc144f092f1a98ce5b0f137
