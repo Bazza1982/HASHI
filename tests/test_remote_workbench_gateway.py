@@ -84,6 +84,31 @@ def _gateway_events(caplog, event: str | None = None):
     return [row for row in rows if event is None or row["event"] == event]
 
 
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [("SOME-OTHER-SOURCE", "HASHI1"), ("WORKBENCH", "SOME-OTHER-TARGET")],
+)
+def test_hal_peer_rejects_wrong_source_or_target_before_forwarding(tmp_path, monkeypatch, source, target):
+    client, token = _client(tmp_path)
+    path = "/workbench/v1/proxy/api/v1/hal/peer"
+    body = json.dumps({"source_instance": source, "target_instance": target}).encode()
+    headers = _signed_headers(token, method="POST", path=path, body=body)
+
+    def must_not_forward(**_kwargs):
+        pytest.fail("incorrect HAL peer identity reached the local API")
+
+    monkeypatch.setattr(remote_server, "_forward_workbench_gateway_request", must_not_forward)
+    response = client.post(path, content=body, headers=headers)
+    assert response.status_code == 403
+    payload = response.json()
+    auth = payload.pop("response_auth")
+    assert payload["error_code"] == "hal_peer_identity_mismatch"
+    assert verify_response_auth(
+        shared_token=token, request_nonce=headers[HEADER_NONCE],
+        payload=payload, response_auth=auth,
+    )
+
+
 def test_gateway_status_requires_shared_token_even_in_lan_mode(tmp_path, monkeypatch):
     client, token = _client(tmp_path, lan_mode=True)
     monkeypatch.setattr(
