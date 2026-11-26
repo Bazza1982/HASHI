@@ -620,7 +620,13 @@ class RebootManager:
             if handle is None:
                 continue
             try:
-                await handle.execute_slash_command("/stop", source_channel="reboot")
+                await handle.execute_slash_command(
+                    "/stop",
+                    source_channel="reboot",
+                    # The stop binds to this operation's record and to nothing
+                    # else, so a later user /stop cannot claim it.
+                    session_metadata={"_hashi_reboot_operation_id": operation_id},
+                )
             except Exception:
                 bridge_logger.warning(
                     "Reboot force: stop request failed | operation=%s agent=%s",

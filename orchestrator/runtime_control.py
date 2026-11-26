@@ -804,8 +804,19 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
             if interrupted is not None:
                 interrupted_tasks.append(interrupted)
     # A forced reboot records the turns this stop interrupted, before the queue
-    # is drained, so the record cannot describe work it never removed.
-    reboot_record = reboot_capture.armed(runtime)
+    # is drained, so the record cannot describe work it never removed. Only the
+    # stop issued by that operation may touch its record: an ordinary /stop
+    # reads nothing, so it can neither swallow nor finish an armed capture.
+    reboot_operation_id = ""
+    if str(getattr(context, "source_channel", "") or "").strip().lower() == "reboot":
+        reboot_operation_id = str(
+            getattr(context, "_hashi_reboot_operation_id", "") or ""
+        ).strip()
+    reboot_record = (
+        reboot_capture.armed(runtime, reboot_operation_id)
+        if reboot_operation_id
+        else None
+    )
     if reboot_record is not None and interrupted_tasks:
         try:
             reboot_record.record_interrupted(interrupted_tasks)
@@ -865,8 +876,11 @@ async def cmd_stop(runtime: Any, update: Any, context: Any) -> None:
     )
     dropped = removed.total
     # Everything this stop removed is recorded by now. Finish the record before
-    # replying, so it either says it is usable or it says it is not.
-    reboot_capture.complete(runtime, reboot_record)
+    # replying, so it either says it is usable or it says it is not. Without a
+    # record this stop never looked for, nothing is finished here: complete()
+    # with no capture would find (and close) an armed force capture itself.
+    if reboot_record is not None:
+        reboot_capture.complete(runtime, reboot_record)
 
     unconfirmed = await asyncio.to_thread(
         _unconfirmed_stopped_requests, runtime, stopped_request_ids

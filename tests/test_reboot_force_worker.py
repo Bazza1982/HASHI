@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestrator import reboot_capture, runtime_pending
+from orchestrator import reboot_capture, runtime_control, runtime_pending
 from orchestrator.agent_stop_fence import current_runtime_epoch, store_for_runtime
 from orchestrator.function_worker_host import FunctionWorkerHost
 from orchestrator.runtime_common import QueuedRequest
@@ -550,4 +550,130 @@ async def test_a_record_that_could_not_be_written_says_so(tmp_path, monkeypatch)
     reboot_capture.complete(runtime, capture)
     assert capture.phase == "incomplete"
     assert reboot_capture.is_complete(capture.payload()) is False
+
+def _stop_runtime(bridge_home):
+    """The stop path as the Worker runs it, with a durable home for its record."""
+
+    async def _reply(_update, _text, **_kwargs):
+        return None
+
+    return SimpleNamespace(
+        name="zelda",
+        global_config=SimpleNamespace(bridge_home=str(bridge_home), authorized_id=42),
+        config=SimpleNamespace(active_backend="her-v2", engine="her-v2"),
+        logger=SimpleNamespace(
+            warning=lambda *a, **k: None, info=lambda *a, **k: None
+        ),
+        queue=asyncio.Queue(),
+        backend_manager=SimpleNamespace(current_backend=None),
+        orchestrator=SimpleNamespace(scheduler=None),
+        current_request_meta={
+            "request_id": "req-busy",
+            "session_id": "s1",
+            "chat_id": 42,
+            "prompt": "long task",
+            "source": "telegram",
+            "summary": "long task",
+        },
+        last_prompt=None,
+        is_generating=True,
+        _is_authorized_user=lambda _user_id: True,
+        _reply_text=_reply,
+    )
+
+
+def _stop_update():
+    message = SimpleNamespace(text="/stop", chat=SimpleNamespace(id=42))
+    return SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=42),
+        effective_message=message,
+        message=message,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_user_stop_never_consumes_an_armed_force_capture(tmp_path):
+    """Regression: /stop typed between arm and force must read nothing at all."""
+    runtime = _stop_runtime(tmp_path)
+    capture = reboot_capture.arm(runtime, "op-20")
+
+    await runtime_control.cmd_stop(runtime, _stop_update(), SimpleNamespace(args=[]))
+
+    assert reboot_capture.armed(runtime) is capture, "the force record stays armed"
+    assert capture.completed is False, "an ordinary stop never finishes it"
+    assert not capture.path.exists(), "an ordinary stop writes nothing into it"
+    assert capture.interrupted == [] and capture.pending == []
+
+
+@pytest.mark.asyncio
+async def test_only_the_operation_that_armed_the_capture_can_fill_it(tmp_path):
+    runtime = _stop_runtime(tmp_path)
+    capture = reboot_capture.arm(runtime, "op-21")
+
+    await runtime_control.cmd_stop(
+        runtime,
+        _stop_update(),
+        SimpleNamespace(
+            args=[],
+            source_channel="reboot",
+            _hashi_reboot_operation_id="op-other",
+        ),
+    )
+
+    assert reboot_capture.armed(runtime) is capture
+    assert not capture.path.exists(), "another operation's stop cannot claim it"
+
+    await runtime_control.cmd_stop(
+        runtime,
+        _stop_update(),
+        SimpleNamespace(
+            args=[],
+            source_channel="reboot",
+            _hashi_reboot_operation_id="op-21",
+        ),
+    )
+
+    payload = json.loads(capture.path.read_text(encoding="utf-8"))
+    assert payload["phase"] == "stopped"
+    assert [item["request_id"] for item in payload["interrupted"]] == ["req-busy"]
+    assert reboot_capture.armed(runtime) is None
+
+
+@pytest.mark.asyncio
+async def test_the_force_stop_carries_its_operation_to_the_worker(tmp_path, monkeypatch):
+    """The bound id has to travel with the stop command, not be guessed."""
+    from tests.test_reboot_force import _setup, _write_capture
+
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+    seen: list[dict] = []
+
+    async def arm(operation_id, **_kwargs):
+        return {"armed": True, "operation_id": str(operation_id), "durable": True}
+
+    async def execute(text, *, source_channel, session_metadata=None, **_kwargs):
+        operation_id = str((session_metadata or {}).get("_hashi_reboot_operation_id"))
+        seen.append(
+            {
+                "text": text,
+                "source_channel": source_channel,
+                "operation_id": operation_id,
+            }
+        )
+        handle.client.metadata["is_generating"] = False
+        handle.client.metadata["queue_depth"] = 0
+        _write_capture(tmp_path, operation_id, handle.name, {})
+        return {"ok": True}
+
+    handle.arm_reboot_capture = arm
+    handle.execute_slash_command = execute
+
+    accepted = manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+
+    operation_id = accepted["record"]["id"]
+    assert seen and seen[0]["text"] == "/stop"
+    assert seen[0]["operation_id"] == operation_id
 # HASHI-Fingerprint: hfp_14ad2738c68841b893afa64e3b1c853e

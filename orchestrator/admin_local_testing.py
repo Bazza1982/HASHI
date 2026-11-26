@@ -677,6 +677,9 @@ async def execute_local_command(
             frontend_connector_id=frontend_boundary["connector_id"],
             reply_reference=local_session_metadata.get("reply_reference"),
             _hashi_question_stop_id=local_session_metadata.get("_hashi_question_stop_id"),
+            _hashi_reboot_operation_id=local_session_metadata.get(
+                "_hashi_reboot_operation_id"
+            ),
         )
 
         lock = getattr(runtime, "_local_admin_lock", None)
