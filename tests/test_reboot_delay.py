@@ -208,6 +208,9 @@ def test_reboot_request_parser_accepts_delay_only_as_a_known_modifier():
     assert parse_request("3 delay") == ("3", {"delay_seconds": 1800.0})
     assert parse_request("max delay=0") == (None, {})
     assert parse_request("max delay=abc") == (None, {})
-    assert parse_request("max force") == (None, {})
+    # `force` became a known modifier with the forced reboot; anything else
+    # still has to fail loudly.
+    assert parse_request("max force") == ("max", {"force": True})
+    assert parse_request("max now") == (None, {})
     assert parse_request("cancel") == ("cancel", {})
 # HASHI-Fingerprint: hfp_2e68cec687f24f76b6f7e207aea77a72

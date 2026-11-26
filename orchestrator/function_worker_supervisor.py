@@ -11,7 +11,7 @@ import os
 import shutil
 import stat
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1164,6 +1164,54 @@ class AgentRuntimeHandle:
             "owner_id": owner_id, "session_id": session_id, "run_id": run_id,
             "request_id": request_id, "reason": reason,
         }, timeout=12) or {})
+
+    async def arm_reboot_capture(
+        self, operation_id: str, *, timeout: float = 12
+    ) -> dict[str, Any]:
+        """Let this operation's stop record exactly what it removes."""
+        return dict(
+            await self._route(
+                "runtime.reboot_capture_arm",
+                {"operation_id": str(operation_id)},
+                timeout=timeout,
+            )
+            or {}
+        )
+
+    async def disarm_reboot_capture(
+        self, operation_id: str, *, timeout: float = 12
+    ) -> dict[str, Any]:
+        """Drop the record of an operation that will not cut over."""
+        return dict(
+            await self._route(
+                "runtime.reboot_capture_disarm",
+                {"operation_id": str(operation_id)},
+                timeout=timeout,
+            )
+            or {}
+        )
+
+    async def resume_after_reboot(
+        self,
+        pending: Sequence[Mapping[str, Any]] = (),
+        *,
+        interrupted: Sequence[Mapping[str, Any]] = (),
+        operation_id: str = "",
+        timeout: float = 60,
+    ) -> dict[str, Any]:
+        """Re-admit the exact work an operation's stop removed."""
+        return dict(
+            await self._route(
+                "runtime.reboot_resume",
+                {
+                    "pending": [dict(item) for item in pending],
+                    "interrupted": [dict(item) for item in interrupted],
+                    "operation_id": str(operation_id),
+                },
+                timeout=timeout,
+            )
+            or {}
+        )
 
     async def execute_slash_command(
         self,
@@ -2639,6 +2687,7 @@ class FunctionWorkerSupervisor:
                     "request_key",
                     "delay_seconds",
                     "cancel",
+                    "force",
                 )
                 if key in params
             }

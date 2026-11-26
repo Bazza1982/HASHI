@@ -663,6 +663,39 @@ class TaskScheduler:
                 delay_ids=delay_ids,
             )
 
+    async def restore_delayed_message(
+        self,
+        record: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Put a cancelled delayed message back exactly as it was persisted.
+
+        The original id, due time and creation time are kept: a reboot hands
+        back the record it removed instead of rebuilding a copy from a rounded
+        remaining time. An id that is already scheduled is left untouched.
+        """
+        item = dict(record or {})
+        delay_id = str(item.get("id") or "").strip()
+        agent = str(item.get("agent") or "").strip()
+        if not delay_id or not agent:
+            raise ValueError("delayed message record needs an id and an agent")
+        async with self._delay_lock:
+            records = self._delayed_message_records()
+            existing = records.get(delay_id)
+            if isinstance(existing, dict):
+                return dict(existing)
+            records[delay_id] = item
+            if not self._save_state():
+                records.pop(delay_id, None)
+                raise RuntimeError("Could not persist delayed message state.")
+            self.wake()
+            scheduler_logger.info(
+                "Restored delayed message %s for %s (due at %s).",
+                delay_id,
+                agent,
+                item.get("due_at"),
+            )
+            return dict(item)
+
     def cancel_delayed_messages_now(
         self,
         agent_name: str,

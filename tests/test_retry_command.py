@@ -409,6 +409,37 @@ def test_natural_continuation_does_not_bind_or_clear_stopped_task(tmp_path):
     assert state["unfinished_task"]["request_id"] == "req-original"
 
 
+def test_resumed_reboot_turn_clears_its_snapshot_through_request_metadata(tmp_path):
+    runtime = SimpleNamespace(
+        workspace_dir=tmp_path,
+        logger=_Logger(),
+        current_request_meta=None,
+    )
+    payload = {
+        "prompt": "finish the deploy",
+        "request_id": "req-resumed",
+        "session_id": "ses_resumed",
+        "source": "text",
+        "summary": "Deploy",
+        "interrupted_at": 1795664072.2,
+    }
+    runtime_retry.remember_interrupted_task(runtime, payload)
+    assert runtime_retry.interrupted_session_ids(runtime) == ["ses_resumed"]
+
+    item = SimpleNamespace(
+        request_id="req-resumed-continuation",
+        chat_id=42,
+        prompt=payload["prompt"],
+        source="text",
+        summary=payload["summary"],
+        request_metadata={"resumed_interrupted_task": payload},
+    )
+
+    assert runtime_retry.clear_completed_interrupted_task(runtime, item) is True
+    assert runtime_retry.interrupted_session_ids(runtime) == []
+    assert runtime_retry.capture_interrupted_task(runtime, session_id="ses_resumed") is None
+
+
 def test_fresh_boundary_prevents_old_interrupted_task_from_rebinding(tmp_path):
     from orchestrator.fresh_context import start_boundary
 
@@ -652,3 +683,4 @@ def test_retry_handoff_control_turns_are_excluded_from_future_handoffs(tmp_path)
     assert "Normal user request" in context
     assert "Normal answer" in context
     assert "INTERNAL RETRY HANDOFF" not in context
+# HASHI-Fingerprint: hfp_03b4a932e2f344718510c658133adf9e

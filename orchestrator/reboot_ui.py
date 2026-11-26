@@ -187,6 +187,16 @@ def render_notice(
         )
     if broad and status in {"online", "succeeded", "succeeded_with_warning"}:
         text += "\n" + ui_language.tr("reboot.notice.remote_scope", locale=language)
+    resume = record.get("resume") or {}
+    if resume and not starting:
+        text += "\n" + ui_language.tr(
+            "reboot.resume_summary",
+            locale=language,
+            pending=int(resume.get("pending") or 0),
+            turns=int(resume.get("turns") or 0),
+            delayed=int(resume.get("delayed") or 0),
+            unconfirmed=int(resume.get("unconfirmed") or 0),
+        )
     warning_keys = {
         "connectors_unavailable",
         "old_worker_exit_pending",

@@ -1,4 +1,4 @@
-"""Operational host for one isolated HASHI Agent Function Worker.
+﻿"""Operational host for one isolated HASHI Agent Function Worker.
 
 This module is imported only inside a spawned worker process.  The stable Core
 communicates with it through ``function_worker_protocol`` and never imports an
@@ -29,6 +29,7 @@ from orchestrator.function_worker_protocol import (
     json_value,
 )
 from orchestrator.pathing import build_bridge_paths
+from orchestrator import reboot_capture
 from orchestrator.reboot_adoption_bridge import bridge_legacy_broad_reboot
 from orchestrator import runtime_background_status
 from orchestrator.runtime_contract import (
@@ -48,6 +49,9 @@ WORKER_DRAIN_TIMEOUT_SECONDS = 120.0
 LOCAL_MODE_TOKEN = "WORKBENCH_ONLY_NO_TOKEN"
 MENU_SYNC_RETRY_INITIAL_SECONDS = 5.0
 MENU_SYNC_RETRY_MAX_SECONDS = 60.0
+# A forced reboot manifest carries prompts, never attachments. Every queued
+# request is recorded: a truncated manifest silently drops work on the floor.
+_REBOOT_RESUME_KEY = "reboot_resume_operation_id"
 
 
 class FunctionWorkerStateError(RuntimeError):
@@ -986,6 +990,302 @@ class FunctionWorkerHost:
             raise FunctionWorkerStateError("Agent runtime is not prepared")
         return self.runtime
 
+    def _disarm_reboot_capture(self, runtime: Any, operation_id: str) -> dict[str, Any]:
+        """Drop the capture of an operation that will not cut over."""
+        if not operation_id:
+            return {"disarmed": False, "operation_id": ""}
+        reboot_capture.disarm(runtime, operation_id)
+        return {"disarmed": True, "operation_id": operation_id}
+
+    def _arm_reboot_capture(self, runtime: Any, operation_id: str) -> dict[str, Any]:
+        """Let this operation's stop record exactly what it removes.
+
+        Armed before ``/stop`` is sent: the record is written by the stop itself,
+        at the point of removal, so no queue difference has to be interpreted
+        afterwards.
+        """
+        capture = reboot_capture.arm(runtime, operation_id)
+        return {
+            "armed": True,
+            "operation_id": capture.operation_id,
+            "durable": capture.path is not None,
+        }
+
+    def _canonical_binding(
+        self, runtime: Any, entry: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        """Owner, session generation and delivery route from the frozen records.
+
+        The captured payload only holds what the stop could see. The canonical
+        Session/Run rows say who the work belongs to and which context
+        generation it was accepted in, so a resumed item is either re-admitted
+        with its real binding or reported instead of being migrated silently.
+        """
+        binding: dict[str, Any] = {}
+        request_id = str(entry.get("request_id") or "").strip()
+        session_id = str(entry.get("session_id") or "").strip()
+        agent_id = str(getattr(runtime, "name", "") or "")
+        store = getattr(runtime, "session_store", None)
+        if store is None:
+            return binding, None
+        run: dict[str, Any] = {}
+        if request_id:
+            try:
+                run = dict(
+                    store.get_run_by_request(request_id, agent_id=agent_id) or {}
+                )
+            except Exception:
+                run = {}
+        if run:
+            state = str(run.get("state") or "")
+            if state in {"completed", "failed"}:
+                # It finished on its own during the stop: never run it again.
+                return binding, "already_finished"
+            session_id = str(run.get("session_id") or session_id)
+            try:
+                generation = int(run.get("context_generation") or 0)
+            except (TypeError, ValueError):
+                generation = 0
+            if generation:
+                binding["session_context_generation"] = generation
+            route = run.get("delivery_route")
+            destination = None
+            if isinstance(route, Mapping):
+                primary = route.get("primary")
+                destination = primary if isinstance(primary, Mapping) else route
+            if isinstance(destination, Mapping):
+                # Admission rebuilds the delivery route from the accepted source
+                # channel, so hand it that channel rather than a frozen route
+                # object it would replace. Connector checks still apply.
+                surface = str(destination.get("surface") or "").strip()
+                channel_key = str(destination.get("channel_key") or "").strip()
+                if surface and surface != "unknown":
+                    binding["session_surface"] = surface
+                if channel_key:
+                    binding["session_channel_key"] = channel_key
+        if not session_id:
+            return binding, None
+        binding["session_id"] = session_id
+        session: dict[str, Any] = {}
+        try:
+            session = dict(store.get_session(session_id, agent_id=agent_id) or {})
+        except Exception:
+            session = {}
+        if session:
+            owner = str(session.get("owner_id") or "")
+            if owner:
+                binding["owner_id"] = owner
+            try:
+                current = int(session.get("context_generation") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            expected = int(binding.get("session_context_generation") or 0)
+            if current and expected and current != expected:
+                # The session started a fresh context after this work was
+                # accepted; submitting it here would silently migrate it.
+                return binding, "context_generation_changed"
+        return binding, None
+
+    @staticmethod
+    def _resume_metadata(
+        entry: Mapping[str, Any],
+        binding: Mapping[str, Any],
+        *,
+        stop_epoch: int,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """Metadata for a re-admission this operation is explicitly allowed to make."""
+        metadata = dict(entry.get("request_metadata") or {})
+        # The canonical binding wins: it is the record the turn was accepted with.
+        metadata.update(dict(binding))
+        for captured in ("owner_id", "session_surface", "session_channel_key"):
+            value = entry.get(captured)
+            if value and not metadata.get(captured):
+                metadata[captured] = value
+        session_id = str(
+            entry.get("session_id") or metadata.get("session_id") or ""
+        ).strip()
+        if session_id:
+            metadata["session_id"] = session_id
+        if "session_context_generation" not in metadata:
+            try:
+                captured_generation = int(entry.get("context_generation") or 0)
+            except (TypeError, ValueError):
+                captured_generation = 0
+            if captured_generation:
+                metadata["session_context_generation"] = captured_generation
+        # The stop that produced this record advanced the durable fence, so the
+        # captured epoch is stale by construction. This operation re-admits its
+        # own captured work against the current epoch; every other request keeps
+        # meeting the unchanged fence.
+        metadata["agent_stop_epoch"] = int(stop_epoch)
+        metadata[_REBOOT_RESUME_KEY] = operation_id
+        return metadata
+
+    @staticmethod
+    def _resume_idempotency_key(operation_id: str, marker: str) -> str:
+        """One original request keeps one key, whether it was queued or a turn."""
+        return f"reboot-resume:{operation_id}:{marker}"
+
+    @staticmethod
+    def _admission_kwargs(
+        entry: Mapping[str, Any], metadata: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            key: entry[key]
+            for key in (
+                "chat_id",
+                "prompt",
+                "source",
+                "summary",
+                "silent",
+                "is_retry",
+                "deliver_to_telegram",
+                "skip_memory_injection",
+                "habit_learning_eligible",
+                "skill_id",
+                "scheduler_context",
+                "request_content",
+            )
+            if key in entry
+        }
+        kwargs.setdefault("source", "reboot_force")
+        kwargs.setdefault("summary", "")
+        kwargs["request_metadata"] = dict(metadata)
+        return kwargs
+
+    async def _resume_after_reboot(
+        self, runtime: Any, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Re-admit exactly the work this operation's stop removed.
+
+        Nothing is rediscovered from history: every item carries the identity the
+        manifest recorded before the destructive stop, and an item only counts as
+        restored once admission returns a real request id.
+        """
+        from orchestrator import runtime_pending
+        from orchestrator.agent_stop_fence import current_runtime_epoch
+
+        operation_id = str(params.get("operation_id") or "")
+        # The stop this record belongs to is over; later stops must not write
+        # into it.
+        reboot_capture.disarm(runtime)
+        stop_epoch = current_runtime_epoch(runtime)
+        pending = [
+            dict(item)
+            for item in (params.get("pending") or ())
+            if isinstance(item, Mapping)
+        ]
+        interrupted = [
+            dict(item)
+            for item in (params.get("interrupted") or ())
+            if isinstance(item, Mapping)
+        ]
+        queued_ids = {
+            str(getattr(item, "request_id", "") or "")
+            for item in runtime_pending.ready_items(runtime)
+        }
+
+        unconfirmed: list[dict[str, Any]] = []
+        # One original request is handed back once, whether it was queued work or
+        # the turn the stop interrupted.
+        handled: set[str] = set()
+
+        pending_resumed = 0
+        for entry in pending:
+            request_id = str(entry.get("request_id") or "")
+            marker = request_id or f"pending:{str(entry.get('prompt') or '')[:80]}"
+            if request_id and request_id in queued_ids:
+                # It survived the stop: re-queueing it would run it twice.
+                continue
+            if marker in handled:
+                continue
+            handled.add(marker)
+            binding, conflict = self._canonical_binding(runtime, entry)
+            if conflict:
+                unconfirmed.append(
+                    {"kind": "pending", "entry": entry, "reason": conflict}
+                )
+                continue
+            metadata = self._resume_metadata(
+                entry, binding, stop_epoch=stop_epoch, operation_id=operation_id
+            )
+            kwargs = self._admission_kwargs(entry, metadata)
+            receipt = None
+            try:
+                receipt = await runtime.enqueue_request(
+                    **kwargs,
+                    idempotency_key=self._resume_idempotency_key(
+                        operation_id, marker
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "Captured request could not be resumed for %s", self.agent_name
+                )
+            if not receipt:
+                unconfirmed.append({"kind": "pending", "entry": entry})
+                continue
+            pending_resumed += 1
+
+        turns_resumed = 0
+        for payload in interrupted:
+            request_id = str(payload.get("request_id") or "")
+            marker = request_id or "turn:{0}:{1}".format(
+                str(payload.get("session_id") or ""),
+                str(payload.get("prompt") or "")[:80],
+            )
+            if marker in handled:
+                continue
+            handled.add(marker)
+            chat_id = payload.get("chat_id")
+            prompt = str(payload.get("prompt") or "")
+            if chat_id is None or not prompt:
+                unconfirmed.append({"kind": "turn", "entry": payload})
+                continue
+            binding, conflict = self._canonical_binding(runtime, payload)
+            if conflict:
+                unconfirmed.append(
+                    {"kind": "turn", "entry": payload, "reason": conflict}
+                )
+                continue
+            metadata = self._resume_metadata(
+                payload, binding, stop_epoch=stop_epoch, operation_id=operation_id
+            )
+            metadata["resumed_interrupted_task"] = dict(payload)
+            receipt = None
+            try:
+                receipt = await runtime.enqueue_request(
+                    int(chat_id),
+                    prompt,
+                    str(payload.get("source") or "reboot_force"),
+                    str(payload.get("summary") or "Resumed after reboot"),
+                    request_metadata=metadata,
+                    request_content=payload.get("request_content") or None,
+                    idempotency_key=self._resume_idempotency_key(
+                        operation_id, marker
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "Interrupted turn could not be resumed for %s", self.agent_name
+                )
+            if not receipt:
+                unconfirmed.append({"kind": "turn", "entry": payload})
+                continue
+            turns_resumed += 1
+
+        # Delayed messages are owned by Core's Scheduler, not by the Worker, so
+        # this Agent only re-admits queue entries and interrupted turns.
+        return {
+            "pending_resumed": pending_resumed,
+            "pending_total": len(pending),
+            "turns_resumed": turns_resumed,
+            "turn_resumed": turns_resumed > 0,
+            "turns_total": len(interrupted),
+            "unconfirmed": unconfirmed,
+        }
+
     def metadata(self) -> dict[str, Any]:
         runtime = self._require_runtime()
         from orchestrator.agent_incarnation import lifecycle_id_from_config
@@ -1769,6 +2069,16 @@ class FunctionWorkerHost:
                 )
             await self.emit_metadata()
             return request_id
+        if method == "runtime.reboot_capture_arm":
+            return self._arm_reboot_capture(
+                runtime, str(params.get("operation_id") or "")
+            )
+        if method == "runtime.reboot_capture_disarm":
+            return self._disarm_reboot_capture(
+                runtime, str(params.get("operation_id") or "")
+            )
+        if method == "runtime.reboot_resume":
+            return await self._resume_after_reboot(runtime, params)
         if method == "runtime.telegram_update":
             from telegram import Update
 
