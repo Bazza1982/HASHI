@@ -3041,7 +3041,7 @@
     "reboot.notice.waiting": "⏳ 重启已排队（{scope}：{agents}）。正在等待实例空闲，最多等 {minutes} 分钟，尚未重启任何服务。发送 /reboot cancel 可停止等待。",
     "reboot.wait_cancelled": "✅ 已停止等待重启，没有重启任何服务。",
     "reboot.force_stopping": "⏹️ 正在停止忙碌的代理，随后重启。",
-    "reboot.resume_summary": "↩️ 已恢复：{pending} 个排队任务，{turns} 个被中断的回合。被中断的回合是从头重跑，不是断点续传。",
+    "reboot.resume_summary": "↩️ 已恢复：{pending} 个排队任务，{turns} 个被中断的回合，{delayed} 条延迟消息，未确认 {unconfirmed} 个。被中断的回合是从头重跑，不是断点续传。",
     "reboot.notice.starting_single": "🔄 开始热重启。通常会在10秒内完成。",
     "reboot.notice.candidate_rejected": "❌ 热重启未执行，{agents}保持原状态。",
     "reboot.notice.source_update_incomplete": "❌ 热重启未执行：程序更新尚未完成。",

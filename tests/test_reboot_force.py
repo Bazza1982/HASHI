@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator import ui_language
 from orchestrator.agent_stop_fence import AgentStopFenceStore, stop_fence_path
 from orchestrator.reboot_manager import RebootManager
 from orchestrator.reboot_ui import render_notice
@@ -310,6 +311,60 @@ async def test_force_reboot_stops_nothing_when_capture_cannot_be_armed(
 
 
 @pytest.mark.asyncio
+async def test_an_armed_agent_is_disarmed_when_a_later_arm_fails(
+    tmp_path, monkeypatch
+):
+    kernel = _Kernel(names=("zelda", "sunny"))
+    kernel.paths = SimpleNamespace(bridge_home=tmp_path)
+    kernel.shutdown_event = asyncio.Event()
+    kernel._restart_request = None
+    manager = RebootManager(kernel, None)
+    first, second = kernel.runtimes
+    for handle in (first, second):
+        handle.client.metadata["is_generating"] = True
+    seen: list[str] = []
+    disarmed: list[tuple[str, str]] = []
+
+    async def arm(operation_id, **_kwargs):
+        return {"armed": True, "operation_id": str(operation_id), "durable": True}
+
+    async def disarm(operation_id, **_kwargs):
+        disarmed.append((first.name, str(operation_id)))
+        return {"disarmed": True}
+
+    async def arm_too_late(*_args, **_kwargs):
+        raise TimeoutError("worker did not answer")
+
+    first.arm_reboot_capture = arm
+    first.disarm_reboot_capture = disarm
+    first.execute_slash_command = _stop_clears_busy(first, seen)
+    second.arm_reboot_capture = arm_too_late
+    second.execute_slash_command = _stop_clears_busy(second, seen)
+
+    accepted = manager.submit(
+        {
+            "mode": "max",
+            "force": True,
+            "request_key": "force-2",
+            "origin": {"chat_id": 42, "actor_id": "42", "thread_id": 7},
+            "locale": "en",
+        }
+    )
+    await asyncio.sleep(0.25)
+
+    record = manager.receipts.get(accepted["record"]["id"])
+    assert record["status"] == "rejected"
+    assert record["reason"] == "force_capture_failed"
+    # The Agent that armed first must give its record back: left armed, a later
+    # plain /stop would be filed as work this reboot removed.
+    assert [name for name, _ in disarmed] == [first.name]
+    assert seen == []
+    assert not kernel.shutdown_event.is_set()
+    assert _manifests(tmp_path) == []
+    assert list((tmp_path / "state" / "reboot_resume").glob("capture-*")) == []
+
+
+@pytest.mark.asyncio
 async def test_a_missing_record_stops_the_cutover_and_keeps_what_exists(
     tmp_path, monkeypatch
 ):
@@ -550,6 +605,58 @@ async def test_a_delayed_message_the_scheduler_rejects_stays_unconfirmed(
     assert totals == {"pending": 0, "turns": 0, "delayed": 0, "unconfirmed": 1}
     written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
     assert written["agents"]["zelda"]["delayed"] == [entry]
+
+
+@pytest.mark.asyncio
+async def test_only_the_rejected_delayed_message_stays_unconfirmed(
+    tmp_path, monkeypatch
+):
+    kernel, manager, request = _setup(tmp_path, monkeypatch)
+    handle = kernel.runtimes[0]
+    handle.client.metadata["is_generating"] = True
+
+    class _PartialScheduler:
+        """Accepts the first delayed record and refuses the second."""
+
+        def __init__(self):
+            self.restored: list[str] = []
+
+        async def restore_delayed_message(self, record):
+            if record.get("id") != "d1":
+                return None
+            self.restored.append(str(record.get("id")))
+            return dict(record)
+
+    scheduler = _PartialScheduler()
+    kernel.scheduler = scheduler
+    restored = {"id": "d1", "prompt": "still due", "due_at": 1_900_000_000.0, "record": {}}
+    refused = {"id": "d2", "prompt": "later", "due_at": 1_900_000_100.0, "record": {}}
+    _worker(handle, tmp_path, {"delayed": [restored, refused]})
+    _resuming(handle)
+
+    accepted = manager.submit({**request, "force": True})
+    await asyncio.sleep(0.25)
+    totals = await manager.resume_restored_work(kernel._restart_request)
+
+    # One delayed message came back, one did not: exactly one is unconfirmed,
+    # and only the one that did not come back stays recorded.
+    assert totals == {"pending": 0, "turns": 0, "delayed": 1, "unconfirmed": 1}
+    reply = manager.receipts.get(accepted["record"]["id"])
+    assert reply["resume"] == {
+        "pending": 0,
+        "turns": 0,
+        "delayed": 1,
+        "unconfirmed": 1,
+    }
+    # The final notice reports all four numbers off that same receipt.
+    summary = ui_language.tr("reboot.resume_summary", locale="en", **reply["resume"])
+    assert "1 delayed message(s)" in summary
+    assert "1 unconfirmed" in summary
+    assert scheduler.restored == ["d1"]
+    written = json.loads(_manifests(tmp_path)[0].read_text(encoding="utf-8"))
+    agent = written["agents"]["zelda"]
+    assert agent["delayed"] == [refused]
+    assert agent["unconfirmed"] == []
 
 
 @pytest.mark.asyncio

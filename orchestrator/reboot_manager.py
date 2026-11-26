@@ -583,6 +583,7 @@ class RebootManager:
         # difference is interpreted afterwards, which is the only way to tell a
         # finished request from a removed one and to see work enqueued after the
         # arm. An Agent that cannot be armed is not stopped at all.
+        armed_targets: list[str] = []
         for name in stop_targets:
             handle = handles.get(name)
             if handle is None:
@@ -598,6 +599,12 @@ class RebootManager:
                     operation_id,
                     name,
                 )
+                # Nothing is stopped here, so no target may keep this
+                # operation's capture: an armed record would swallow a later
+                # user /stop as work this reboot removed.
+                await self._disarm_captures(
+                    operation_id, [*armed_targets, name], handles
+                )
                 self._finish(
                     record,
                     "rejected",
@@ -607,6 +614,7 @@ class RebootManager:
                 if self.active_operation == operation_id:
                     self.active_operation = None
                 return False
+            armed_targets.append(name)
         for name in stop_targets:
             handle = handles.get(name)
             if handle is None:
@@ -857,9 +865,6 @@ class RebootManager:
                     remaining[name] = {
                         "unconfirmed": unconfirmed + delayed_unconfirmed
                     }
-                    totals["unconfirmed"] += len(unconfirmed) + len(
-                        delayed_unconfirmed
-                    )
                 continue
             handle = handles.get(name)
             result: dict[str, Any] = {}
@@ -890,11 +895,25 @@ class RebootManager:
             totals["pending"] += confirmed["pending"]
             totals["delayed"] += confirmed["delayed"]
             totals["turns"] += confirmed["interrupted"]
+            if delayed_unconfirmed:
+                bridge_logger.warning(
+                    "Reboot force: delayed messages not restored | operation=%s "
+                    "agent=%s reasons=%s",
+                    operation_id,
+                    name,
+                    [str(item.get("reason") or "") for item in delayed_unconfirmed],
+                )
+            # One bucket per kind: work that could not be put back is kept once,
+            # where the next resume would retry it, never in two buckets.
             bucket: dict[str, list[dict[str, Any]]] = {
                 "pending": [],
-                "delayed": [],
+                "delayed": [
+                    dict(item["entry"])
+                    for item in delayed_unconfirmed
+                    if isinstance(item.get("entry"), Mapping)
+                ],
                 "interrupted": [],
-                "unconfirmed": unconfirmed + delayed_unconfirmed,
+                "unconfirmed": unconfirmed,
             }
             if failed:
                 bucket.update(
@@ -940,10 +959,14 @@ class RebootManager:
                         unknown -= 1
             if any(bucket.values()):
                 remaining[name] = bucket
-                totals["unconfirmed"] += len(unconfirmed) + sum(
-                    len(bucket[kind])
-                    for kind in ("pending", "delayed", "interrupted")
-                )
+        # What is still recorded is exactly what is unconfirmed: count it from
+        # the records that stay behind, so no item is counted twice and nothing
+        # retained goes unreported.
+        totals["unconfirmed"] = sum(
+            len(entries)
+            for payload in remaining.values()
+            for entries in payload.values()
+        )
         if remaining:
             # Work that is not confirmed stays recorded: never deleted, never
             # reported as restored.
@@ -1077,6 +1100,31 @@ class RebootManager:
             )
         return resumed, unconfirmed
 
+    async def _disarm_captures(
+        self,
+        operation_id: str,
+        names: Sequence[str],
+        handles: Mapping[str, AgentRuntimeHandle],
+    ) -> None:
+        """Drop this operation's capture wherever it was left armed.
+
+        Only a stop armed with this operation's id records into it, so a plain
+        user ``/stop`` is never folded into a force recovery.
+        """
+        for name in dict.fromkeys(names):
+            handle = handles.get(name)
+            disarm = getattr(handle, "disarm_reboot_capture", None)
+            if not callable(disarm):
+                continue
+            try:
+                await disarm(operation_id)
+            except Exception:
+                bridge_logger.warning(
+                    "Reboot force: capture disarm failed | operation=%s agent=%s",
+                    operation_id,
+                    name,
+                )
+
     async def _hand_back_after_abort(
         self,
         operation_id: str,
@@ -1091,20 +1139,10 @@ class RebootManager:
         manifest instead of being dropped on the floor.
         """
         restored: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        # This operation is over: its record must not arm a later stop.
+        await self._disarm_captures(operation_id, stop_targets, handles)
         for name in stop_targets:
-            handle = handles.get(name)
             payload = recorded.get(name)
-            disarm = getattr(handle, "disarm_reboot_capture", None)
-            if callable(disarm):
-                # This operation is over; its record must not arm a later stop.
-                try:
-                    await disarm(operation_id)
-                except Exception:
-                    bridge_logger.warning(
-                        "Reboot force: capture disarm failed | operation=%s agent=%s",
-                        operation_id,
-                        name,
-                    )
             unconfirmed = [
                 dict(item) for item in (payload or {}).get("unconfirmed") or ()
             ]

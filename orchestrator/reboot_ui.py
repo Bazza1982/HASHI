@@ -194,6 +194,8 @@ def render_notice(
             locale=language,
             pending=int(resume.get("pending") or 0),
             turns=int(resume.get("turns") or 0),
+            delayed=int(resume.get("delayed") or 0),
+            unconfirmed=int(resume.get("unconfirmed") or 0),
         )
     warning_keys = {
         "connectors_unavailable",
