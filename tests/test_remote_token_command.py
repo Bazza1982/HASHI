@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,17 +53,53 @@ class FakeRuntime:
         return None
 
 
-def update(text: str = "", *, reply_to: int | None = None, user_id: int = 7, chat_id: int = 11):
+class IngressRuntime(FakeRuntime):
+    """Enough of a runtime to drive the real Telegram ingress paths."""
+
+    name = "kqs"
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.workspace_dir = root / "workspace"
+        self.workspace_dir.mkdir()
+        self.global_config.authorized_id = 7
+        self.logger = logging.getLogger("test.remote-token-ingress")
+        from orchestrator.session_store import SessionStore
+
+        self.session_store = SessionStore(
+            root / "state" / "sessions.sqlite3", instance_id="HASHI4"
+        )
+
+    def _record_active_chat(self, _update):
+        return None
+
+    def _should_redirect_after_transfer(self):
+        return False
+
+
+def update(
+    text: str = "",
+    *,
+    reply_to: int | None = None,
+    user_id: int = 7,
+    chat_id: int = 11,
+    update_id: int = 900,
+    on_delete=None,
+):
     message = SimpleNamespace(
         text=text,
         message_id=500,
+        date=datetime.now(timezone.utc),
         reply_to_message=SimpleNamespace(message_id=reply_to) if reply_to is not None else None,
-        delete=_async_noop,
+        delete=on_delete or _async_noop,
     )
     return SimpleNamespace(
+        update_id=update_id,
         message=message,
+        effective_message=message,
         effective_user=SimpleNamespace(id=user_id),
         effective_chat=SimpleNamespace(id=chat_id),
+        callback_query=None,
     )
 
 
@@ -123,14 +161,139 @@ def test_unknown_token_subcommand_shows_usage(tmp_path: Path):
 # --- credential handling ------------------------------------------------------
 
 
-def test_inline_token_is_refused_so_it_never_enters_command_history(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_inline_token_is_rejected_before_audit_history_or_invocation(
+    tmp_path: Path, monkeypatch
+):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.slash_command_audit import default_audit_path
+
     seed(tmp_path, {})
-    runtime = FakeRuntime(tmp_path)
-    run(cmd_remote(runtime, update(), args("token", "set", TOKEN)))
+    runtime = IngressRuntime(tmp_path)
+    executed: list[str] = []
+
+    async def handler(_update, _context):
+        executed.append("ran")
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    wrapped = FlexibleAgentRuntime._wrap_cmd(runtime, "remote", handler)
+    await wrapped(update(f"/remote token set {TOKEN}"), args("token", "set", TOKEN))
+
+    # The handler is never reached, so nothing can write the credential.
+    assert executed == []
     assert TOKEN not in "\n".join(runtime.replies)
     assert "not accepted" in runtime.replies[0].lower() or "history" in runtime.replies[0].lower()
-    assert getattr(runtime, remote_command.PENDING_ATTRIBUTE, None) is None
+    audit = default_audit_path(runtime.workspace_dir).read_text(encoding="utf-8")
+    assert TOKEN not in audit
+    assert "[redacted]" in audit
+    assert "inline_token_rejected" in audit
+    # Audit, session history, delayed-confirmation records and invocation
+    # payloads all live under this root; none of them may hold the value.
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            assert TOKEN.encode() not in path.read_bytes(), path
+    assert runtime.enqueued == []
     assert "hashi_remote_shared_token" not in read_config_json(tmp_path / "secrets.json")
+
+
+@pytest.mark.asyncio
+async def test_pending_reply_is_consumed_before_the_freshness_gate(
+    tmp_path: Path, monkeypatch
+):
+    from orchestrator import telegram_freshness_gate
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+    from orchestrator.ingress_confirmation import IngressConfirmationService
+
+    seed(tmp_path, {})
+    runtime = IngressRuntime(tmp_path)
+    await cmd_remote(runtime, update(), args("token", "set"))
+    pending = getattr(runtime, remote_command.PENDING_ATTRIBUTE)
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    gate_calls: list[str] = []
+
+    async def fake_gate(_runtime, _update, **kwargs):
+        gate_calls.append(str(kwargs.get("handler_kind")))
+        return True
+
+    monkeypatch.setattr(
+        telegram_freshness_gate, "check_telegram_message_freshness", fake_gate
+    )
+    deleted: list[bool] = []
+
+    async def on_delete():
+        deleted.append(True)
+
+    await FlexibleAgentRuntime.handle_message(
+        runtime,
+        update(TOKEN, reply_to=pending["prompt_message_id"], on_delete=on_delete),
+        SimpleNamespace(),
+    )
+
+    # The gate, which would persist the raw update and its preview, never ran.
+    assert gate_calls == []
+    assert remote_token.effective_token(tmp_path, env={}) == ("secrets", TOKEN)
+    assert getattr(runtime, remote_command.PENDING_ATTRIBUTE, None) is None
+    assert deleted == [True]
+    assert runtime.enqueued == []
+    assert TOKEN not in "\n".join(runtime.replies)
+    records = IngressConfirmationService(runtime.session_store).list_for_connector(
+        agent_id=runtime.name, connector_id="telegram"
+    )
+    assert records == []
+    assert (
+        TOKEN.encode()
+        not in (tmp_path / "state" / "sessions.sqlite3").read_bytes()
+    )
+
+
+@pytest.mark.asyncio
+async def test_ordinary_messages_keep_the_freshness_gate_while_a_prompt_is_open(
+    tmp_path: Path, monkeypatch
+):
+    from orchestrator import telegram_freshness_gate
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    seed(tmp_path, {"hashi_remote_shared_token": TOKEN})
+    runtime = IngressRuntime(tmp_path)
+    await cmd_remote(runtime, update(), args("token", "set"))
+    pending = dict(getattr(runtime, remote_command.PENDING_ATTRIBUTE))
+
+    async def allow_channel(self, _update, *, source_channel):
+        return True
+
+    monkeypatch.setattr(FlexibleAgentRuntime, "_telegram_channel_allowed", allow_channel)
+    gate_calls: list[str] = []
+
+    async def fake_gate(_runtime, _update, **kwargs):
+        gate_calls.append(str(kwargs.get("handler_kind")))
+        return True  # stale/delayed: the ordinary message is intercepted
+
+    monkeypatch.setattr(
+        telegram_freshness_gate, "check_telegram_message_freshness", fake_gate
+    )
+    deleted: list[bool] = []
+
+    async def on_delete():
+        deleted.append(True)
+
+    await FlexibleAgentRuntime.handle_message(
+        runtime,
+        update("how is the build going?", on_delete=on_delete),
+        SimpleNamespace(),
+    )
+
+    assert gate_calls == ["text"]
+    assert deleted == []
+    assert getattr(runtime, remote_command.PENDING_ATTRIBUTE) == pending
+    assert remote_token.effective_token(tmp_path, env={}) == ("secrets", TOKEN)
+    assert runtime.enqueued == []
 
 
 def test_prompt_reply_rotates_the_token_and_never_becomes_a_chat_message(tmp_path: Path):

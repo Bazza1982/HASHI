@@ -23,6 +23,63 @@ from orchestrator import remote_token, ui_language
 PROMPT_TTL_SECONDS = 300
 PENDING_ATTRIBUTE = "_remote_token_pending"
 CANCEL_WORDS = frozenset({"cancel", "取消", "取消设置"})
+REDACTED_INLINE_VALUE = "[redacted]"
+
+
+def inline_token_attempt(command_name: str, args: list[str] | None) -> bool:
+    """True when ingress carries `/remote token set <value>` inline."""
+
+    if str(command_name or "").casefold() != "remote":
+        return False
+    words = [str(value) for value in (args or [])]
+    if len(words) < 3:
+        return False
+    if words[0].casefold() != "token" or words[1].casefold() != "set":
+        return False
+    return any(value.strip() for value in words[2:])
+
+
+def redact_inline_token_args(command_name: str, args: list[str] | None) -> list[str]:
+    """Return command args that are safe to persist.
+
+    The credential is replaced before the audit record, frontend projection or
+    command invocation payload is written, rather than after the handler has
+    already refused it.
+    """
+
+    words = [str(value) for value in (args or [])]
+    if not inline_token_attempt(command_name, words):
+        return words
+    return words[:2] + [REDACTED_INLINE_VALUE]
+
+
+def is_pending_prompt_reply(runtime: Any, update: Any) -> bool:
+    """Is this update an answer to *our* open token prompt?
+
+    This is an identity check only: it never consumes, clears or deletes
+    anything, so ingress can route the reply before ordinary message
+    persistence without changing the prompt lifecycle.
+    """
+
+    pending = getattr(runtime, PENDING_ATTRIBUTE, None)
+    if not isinstance(pending, dict):
+        return False
+    message = getattr(update, "message", None)
+    if message is None:
+        return False
+    reply_to = getattr(message, "reply_to_message", None)
+    prompt_id = getattr(reply_to, "message_id", None)
+    # Only a reply to *this* prompt is a credential. An unrelated message
+    # arriving while the prompt is open must keep its normal ingress path.
+    if prompt_id is None or prompt_id != pending.get("prompt_message_id"):
+        return False
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    if pending.get("user_id") is not None and user_id != pending.get("user_id"):
+        return False
+    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+    if pending.get("chat_id") is not None and chat_id != pending.get("chat_id"):
+        return False
+    return True
 
 
 def _paths(runtime: Any) -> tuple[Path, Path]:
@@ -239,25 +296,10 @@ async def handle_pending_reply(runtime: Any, update: Any) -> bool:
     Runs before any history, queue or agent dispatch, so the credential never
     becomes a normal chat message or an agent task.
     """
+    if not is_pending_prompt_reply(runtime, update):
+        return False
     pending = getattr(runtime, PENDING_ATTRIBUTE, None)
-    if not isinstance(pending, dict):
-        return False
     message = getattr(update, "message", None)
-    if message is None:
-        return False
-    reply_to = getattr(message, "reply_to_message", None)
-    prompt_id = getattr(reply_to, "message_id", None)
-    # Only a reply to *this* prompt is a credential. An unrelated message that
-    # happens to arrive while the prompt is open must not be swallowed or
-    # mistaken for the token; `/remote token cancel` covers the rest.
-    if prompt_id is None or prompt_id != pending.get("prompt_message_id"):
-        return False
-    user_id = getattr(getattr(update, "effective_user", None), "id", None)
-    if pending.get("user_id") is not None and user_id != pending.get("user_id"):
-        return False
-    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-    if pending.get("chat_id") is not None and chat_id != pending.get("chat_id"):
-        return False
 
     if float(pending.get("expires_at") or 0) < _now():
         _clear_pending(runtime)

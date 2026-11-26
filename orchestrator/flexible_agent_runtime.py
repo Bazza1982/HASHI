@@ -846,13 +846,23 @@ class FlexibleAgentRuntime:
                 else list(getattr(context, "args", None) or [])
             )
             setattr(context, "args", args)
+            from orchestrator.commands.remote import (
+                inline_token_attempt,
+                redact_inline_token_args,
+            )
+
+            # The credential must be redacted before the audit record, the
+            # frontend projection or the invocation payload exists. Rejecting
+            # inside the handler is too late: all three already hold the text.
+            inline_token = inline_token_attempt(cmd, args)
+            audit_args = redact_inline_token_args(cmd, args)
             actor_id = getattr(getattr(update, "effective_user", None), "id", None)
             chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
             session = SlashCommandAuditSession(
                 audit_path=default_audit_path(self.workspace_dir),
                 agent=self.name,
                 command_name=cmd,
-                args=args,
+                args=audit_args,
                 source_channel="telegram",
                 handler_kind=resolve_handler_kind(self, cmd),
                 actor_id=actor_id,
@@ -870,13 +880,22 @@ class FlexibleAgentRuntime:
                     ):
                         session.block("channel_denied")
                         return
+                    if inline_token:
+                        # Refuse before the freshness gate can persist the raw
+                        # update and before any session or invocation record.
+                        session.block("inline_token_rejected")
+                        await self._reply_text(
+                            update,
+                            ui_language.tr("remote.token.inline_removed"),
+                        )
+                        return
                     from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
                     if await check_telegram_message_freshness(
                         self,
                         update,
                         handler_kind="command",
                         command_name=cmd,
-                        args=args,
+                        args=audit_args,
                     ):
                         session.block("stale_confirmation_required")
                         return
@@ -12496,6 +12515,16 @@ class FlexibleAgentRuntime:
             return
         if not await FlexibleAgentRuntime._telegram_channel_allowed(self, update, source_channel="telegram"):
             return
+        from orchestrator.commands.remote import (
+            handle_pending_reply as handle_remote_token_reply,
+        )
+
+        # A recognized credential reply is consumed before the freshness gate,
+        # which would otherwise persist the raw token and its preview. The
+        # handler still enforces prompt identity, owner/chat and expiry, and
+        # every other message keeps the normal freshness path below.
+        if await handle_remote_token_reply(self, update):
+            return
         from orchestrator.telegram_freshness_gate import check_telegram_message_freshness
         if await check_telegram_message_freshness(self, update, handler_kind="text"):
             return
@@ -12508,9 +12537,6 @@ class FlexibleAgentRuntime:
         if await handle_text_reply(self, update):
             return
         if await runtime_workzone.handle_pending_path_reply(self, update):
-            return
-        from orchestrator.commands.remote import handle_pending_reply as handle_remote_token_reply
-        if await handle_remote_token_reply(self, update):
             return
         # /long is scoped to the chat that started it.
         if runtime_long.collect_text(self, update.effective_chat.id, text):
