@@ -5,16 +5,101 @@ import json
 import httpx
 import pytest
 
+from types import SimpleNamespace
+
 from adapters.base import BackendResponse
+from adapters.deepseek_api import DeepSeekAdapter
+from adapters.her_v2_provider import _EvidenceRecordingToolRegistry
 from adapters.openrouter_api import _APIResult
 from adapters.stream_events import KIND_TEXT_DELTA, StreamEvent
+from orchestrator.her_v2.audit import DurableAuditLog
+from orchestrator.her_v2.models import Effort, Stage, StageRequest
 from tests.test_hashi_api import _adapter
-from tests.test_herv3_fallback_consumers import (
-    _adapter as _deepseek_adapter,
-    _checkpoint_registry,
-    _request,
-    _ScriptedPort,
-)
+from tools.registry import ToolRegistry
+
+
+def _deepseek_adapter(tmp_path, *, model="deepseek-v4-flash", engine="deepseek-api"):
+    cfg = SimpleNamespace(
+        name="ying",
+        engine=engine,
+        model=model,
+        workspace_dir=tmp_path,
+        system_md=None,
+        extra={},
+    )
+    adapter = DeepSeekAdapter(cfg, SimpleNamespace(), api_key="test-key")
+    adapter.tool_registry = None
+    return adapter
+
+
+def _request(request_ref: str = "req-fallback") -> StageRequest:
+    return StageRequest(
+        turn_id="turn-fallback",
+        request_ref=request_ref,
+        invocation_id="invocation-fallback",
+        stage=Stage.EXECUTION,
+        role="primary",
+        attempt=1,
+        goal="Exercise fallback.",
+        classification=None,
+        effort=Effort.HIGH,
+        allow_tools=True,
+    )
+
+
+def _checkpoint_registry(tmp_path, request):
+    base = ToolRegistry(
+        ["file_write"],
+        tmp_path,
+        tmp_path,
+        {},
+        audit_context={"request_id": request.request_ref},
+    )
+    return _EvidenceRecordingToolRegistry(
+        base,
+        request,
+        audit_log=DurableAuditLog(
+            tmp_path / "recovery.jsonl", tmp_path / "fallback.jsonl"
+        ),
+    )
+
+
+class _ScriptedPort:
+    """Deterministic consumer stand-in that still drives a real target adapter."""
+
+    def __init__(self, target_adapter, *, allowed=True, disposition=None, reason=None):
+        self.target_adapter = target_adapter
+        self.evaluations = []
+        self.target_calls = []
+        self.allowed = allowed
+        self.disposition = disposition or ("ready" if allowed else "disabled")
+        self.reason = reason if reason is not None else (None if allowed else "disabled")
+
+    def evaluate_provider_fallback(self, **kwargs):
+        self.evaluations.append(kwargs)
+        return {
+            "allowed": self.allowed,
+            "disposition": self.disposition,
+            "reason": self.reason,
+            "target_label": "openrouter-api/deepseek/deepseek-v4-flash",
+            "mode": "auto",
+            "additional_calls_limit": 1,
+            "additional_calls_used": 0,
+        }
+
+    async def continue_on_target(
+        self, target_label, *, messages, request_id, on_stream_event, **kwargs
+    ):
+        self.target_calls.append(
+            {
+                "target": target_label,
+                "messages": json.dumps(messages, sort_keys=True, default=str),
+                "request_id": request_id,
+            }
+        )
+        return await self.target_adapter.continue_generation(
+            messages, request_id, on_stream_event=on_stream_event
+        )
 
 
 class _CrossEnginePolicy:
@@ -275,3 +360,4 @@ async def test_hashi_api_reports_real_completed_write_to_fallback_policy(monkeyp
     assert response.is_success is False
     assert attempts == 2
     await adapter.shutdown()
+# HASHI-Fingerprint: hfp_b757741c271248df808439b53ef77401
