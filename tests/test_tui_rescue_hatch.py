@@ -123,6 +123,71 @@ def test_diagnose_reads_the_instance_identity(tmp_path, monkeypatch):
     assert checks["secrets.json"]["status"] == rescue_cli.CHECK_OK
 
 
+def test_diagnose_keeps_health_unconfirmed_when_the_identity_is_broken(tmp_path, monkeypatch):
+    """A stranger answering on the fallback port is not this instance being up."""
+
+    _stub_core_runtime(monkeypatch)
+    home = tmp_path / "instance"
+    home.mkdir()
+    (home / "agents.json").write_text("{not json", encoding="utf-8")
+    probed: list[str] = []
+
+    def _urlopen(url, timeout=0):
+        probed.append(url)
+        return _FakeResponse({"ok": True, "instance_id": "HASHI"})
+
+    monkeypatch.setattr(rescue_cli.urllib.request, "urlopen", _urlopen)
+
+    checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
+    assert checks["local backend"]["status"] == rescue_cli.CHECK_WARN
+    assert "unconfirmed" in checks["local backend"]["detail"]
+    assert probed == []
+
+
+def test_diagnose_keeps_the_legacy_default_identity(tmp_path, monkeypatch):
+    """A first install / pre-identity config is legal: default HASHI on 18800."""
+
+    _stub_core_runtime(monkeypatch)
+    home = tmp_path / "instance"
+    home.mkdir()
+    (home / "agents.json").write_text(json.dumps({"global": {}}), encoding="utf-8")
+    seen: list[tuple[int, str | None]] = []
+
+    def _fake_health(port, timeout=0, expected_instance=None):
+        seen.append((port, expected_instance))
+        return rescue_cli.CHECK_OK, "ok"
+
+    monkeypatch.setattr(rescue_cli, "_health", _fake_health)
+
+    checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
+    assert seen == [(rescue_cli.DEFAULT_PORT, "HASHI")]
+    assert checks["local backend"]["status"] == rescue_cli.CHECK_OK
+
+
+def test_diagnose_refuses_an_out_of_range_port(tmp_path, monkeypatch):
+    """The TUI refuses that port, so diagnosis must not pretend to probe it."""
+
+    _stub_core_runtime(monkeypatch)
+    home = tmp_path / "instance"
+    home.mkdir()
+    (home / "agents.json").write_text(
+        json.dumps({"global": {"instance_id": "HASHI9", "workbench_port": 70000}}),
+        encoding="utf-8",
+    )
+    probed: list[str] = []
+    monkeypatch.setattr(
+        rescue_cli.urllib.request,
+        "urlopen",
+        lambda url, timeout=0: probed.append(url) or _FakeResponse({"ok": True}),
+    )
+
+    checks = {check["label"]: check for check in rescue_cli.diagnose(ROOT, home)}
+    assert checks["agents.json"]["status"] == rescue_cli.CHECK_WARN
+    assert "out of range" in checks["agents.json"]["detail"]
+    assert checks["local backend"]["status"] == rescue_cli.CHECK_WARN
+    assert probed == []
+
+
 def test_logs_tail_explains_when_nothing_was_logged(tmp_path):
     home = tmp_path / "instance"
     home.mkdir()

@@ -64,6 +64,10 @@ def instance_identity(home: Path) -> tuple[str, int, str]:
         port = int(global_cfg.get("workbench_port") or DEFAULT_PORT)
     except (TypeError, ValueError):
         return instance_id, DEFAULT_PORT, "workbench_port is not a number"
+    if not 1 <= port <= 65535:
+        # The TUI refuses to launch with this port; diagnosis must not treat it
+        # as a probeable endpoint either.
+        return instance_id, DEFAULT_PORT, f"workbench_port is out of range ({port})"
     return instance_id, port, ""
 
 
@@ -180,13 +184,22 @@ def diagnose(root: Path, home: Path) -> list[dict]:
         _doc, error = _read_json(secrets_path)
         add("secrets.json", CHECK_FAIL if error else CHECK_OK, error or "present and parseable")
 
-    # The identity check is always applied: whatever answers on this port must
-    # name this installation, otherwise another instance would be reported as
-    # this one being healthy. An unreadable port falls back to the documented
-    # default and is still identity-checked; ``agents.json`` already warns.
-    instance_id, port, _port_error = instance_identity(home)
-    status, detail = _health(port, expected_instance=instance_id)
-    add("local backend", status, detail)
+    # Health is only meaningful once the identity is known. When the config is
+    # unreadable the fallback HASHI/18800 may well belong to a different
+    # installation, so the port is never probed and the result stays
+    # unconfirmed - a stranger's healthy answer must not be reported as this
+    # instance being up. A verified identity keeps the existing identity check.
+    instance_id, port, port_error = instance_identity(home)
+    if port_error:
+        add(
+            "local backend",
+            CHECK_WARN,
+            f"health unconfirmed: {port_error}; nothing on a port can be attributed "
+            "to this installation until its identity is readable",
+        )
+    else:
+        status, detail = _health(port, expected_instance=instance_id)
+        add("local backend", status, detail)
 
     log_files = sorted(
         (Path(root) / "windows" / "logs").glob("*.log"),
