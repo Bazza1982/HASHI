@@ -483,6 +483,21 @@ def initialize_runtime_sessions(runtime: Any) -> dict[str, Any]:
     return default
 
 
+def _usable_channel_key(value: Any) -> str:
+    """Return a real channel key; zero and blank are unresolved sentinels.
+
+    Runtime admission fills ``chat_id`` from the Agent's durable primary
+    Telegram route.  A Workbench-only Agent has no such route, so the lookup
+    yields ``0``.  That must mean "no channel", exactly like ``None``, and
+    must never become a Telegram binding named "0".
+    """
+
+    if value is None or isinstance(value, bool):
+        return ""
+    text = str(value).strip()
+    return "" if text == "0" else text
+
+
 def _surface_and_channel(
     runtime: Any,
     *,
@@ -493,7 +508,8 @@ def _surface_and_channel(
     del runtime
     metadata = dict(metadata or {})
     explicit_surface = str(metadata.get("session_surface") or "").strip().lower()
-    explicit_channel = str(metadata.get("session_channel_key") or "").strip()
+    explicit_channel = _usable_channel_key(metadata.get("session_channel_key"))
+    resolved_channel = _usable_channel_key(chat_id)
     normalized = str(source or "").strip().lower()
     if normalized == scheduler_recovery.RECOVERY_CONVERSATION_SOURCE:
         return (
@@ -506,7 +522,7 @@ def _surface_and_channel(
     if explicit_surface:
         return explicit_surface, explicit_channel or "default", False
     if "whatsapp" in normalized or normalized.startswith("wa:"):
-        return "whatsapp", explicit_channel or str(chat_id), False
+        return "whatsapp", explicit_channel or resolved_channel or "default", False
     if normalized in {
         "text",
         "photo",
@@ -517,16 +533,23 @@ def _surface_and_channel(
         "sticker",
         "multimodal",
     }:
-        return "telegram", explicit_channel or str(chat_id), False
+        channel = explicit_channel or resolved_channel
+        if channel:
+            return "telegram", channel, False
+        return "workbench", "default", False
     if normalized.startswith(("bridge:", "bridge-transfer:", "bridge-fork:")):
         return "bridge", explicit_channel or "default", True
     if normalized.startswith(("api", "browser", "workbench", "session-api")):
         return "workbench", explicit_channel or "default", False
     # Telegram command-generated sources include skill:, wiki:, handoff,
     # park-load, retry-handoff, and voice_transcript. They carry the Telegram
-    # chat ID even though their source is not a media handler name.
+    # chat ID even though their source is not a media handler name. An
+    # unresolved 0/blank key carries no channel, so the request belongs to the
+    # shared Workbench Session instead of a Telegram route named "0".
     if chat_id is not None:
-        return "telegram", explicit_channel or str(chat_id), False
+        channel = explicit_channel or resolved_channel
+        if channel:
+            return "telegram", channel, False
     return "workbench", explicit_channel or "default", False
 
 
