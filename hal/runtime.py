@@ -175,6 +175,8 @@ def plan_for_trigger(
     execs: Sequence[Mapping[str, Any]],
     receipts: Sequence[Mapping[str, Any]],
     consumed: set[tuple[str, str]],
+    *,
+    current_instance: str | None = None,
 ) -> tuple[list[CreateIntent], list[AdvanceIntent], list[Hint]]:
     """Compute deterministic intents for one trigger. No side effects."""
     creates: list[CreateIntent] = []
@@ -201,7 +203,11 @@ def plan_for_trigger(
             program = rule_row["program"]
             for workflow_index, workflow in enumerate(program.workflows):
                 entry = workflow[0]
-                if not entry_matches(entry, _trigger_as_hal_event(trigger)):
+                if not entry_matches(
+                    entry,
+                    _trigger_as_hal_event(trigger),
+                    current_instance=current_instance,
+                ):
                     continue
                 if trigger.event == EVENT_SYSTEM_IDLE and entry.source_agent is not None:
                     continue  # compiler guarantees this, but stay explicit
@@ -266,7 +272,11 @@ def plan_for_trigger(
         if trigger.event in _AGENT_EVENTS:
             if not _correlates_with_previous_stage(exec_row, stage, trigger, receipt_by_exec_stage):
                 continue
-            if not _dependent_source_matches(rule, trigger):
+            if not _dependent_source_matches(
+                rule,
+                trigger,
+                current_instance=current_instance,
+            ):
                 continue
         else:
             # System events carry no per-workflow correlation evidence; an
@@ -393,13 +403,22 @@ def _correlates_with_previous_stage(
     return True
 
 
-def _dependent_source_matches(rule, trigger: HalTrigger) -> bool:
+def _dependent_source_matches(
+    rule,
+    trigger: HalTrigger,
+    *,
+    current_instance: str | None = None,
+) -> bool:
     """A dependent stage's declared source Agent must match the correlated run.
 
     A declared source uses the same matching rules as an entry stage.
     The caller independently verifies the previous stage's correlation key.
     """
-    return source_matches(rule.source_agent, trigger.agent_identity)
+    return source_matches(
+        rule.source_agent,
+        trigger.agent_identity,
+        current_instance=current_instance,
+    )
 
 
 def stage_after_dispatch(stage: int, workflow_length: int) -> tuple[int, str]:

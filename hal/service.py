@@ -463,6 +463,7 @@ class HalService:
             list(execs_by_id.values()),
             list(receipts.values()),
             _flatten_consumed(consumed),
+            current_instance=self._current_instance_id() or None,
         )
         # A rule disabled concurrently (between the rule load and this dispatch)
         # must not fire again. Re-check the store's enabled state for exactly the

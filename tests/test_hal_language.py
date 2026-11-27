@@ -20,12 +20,30 @@ def test_wildcard_bound_prompt_and_quote_punctuation():
     assert not entry_matches(rule, HALEvent("#turn_error", "@lily@hashi4"))
 
 
-@pytest.mark.parametrize(("source", "matches"), [
-    ("@lily", True), ("@LILY@hashi4", True), ("@lily@HASHI5", False), ("@temp", False),
+@pytest.mark.parametrize(("source", "event_identity", "current_instance", "matches"), [
+    ("@lily", "@lily@HASHI4", "HASHI4", True),
+    ("@lily", "@lily@HASHI5", "HASHI4", False),
+    ("@lily", "@lily@HASHI4", None, False),
+    ("@lily", "@lily", None, True),
+    ("@LILY@hashi4", "@lily@HASHI4", "HASHI4", True),
+    ("@lily@HASHI5", "@lily@HASHI5", "HASHI4", True),
+    ("@lily@HASHI5", "@lily@HASHI4", "HASHI4", False),
+    ("@temp", "@lily@HASHI4", "HASHI4", False),
+    ("@agent_any", "@lily@HASHI5", "HASHI4", True),
+    ("@agent_any", None, "HASHI4", False),
 ])
-def test_source_names_match_local_event_without_losing_instance_fence(source, matches):
+def test_source_names_match_local_event_without_losing_instance_fence(
+    source, event_identity, current_instance, matches
+):
     program = compile_hal(f'if {source} #turn_finish then @temp $prompt "hi".')
-    assert entry_matches(program.workflows[0][0], HALEvent("#turn_finish", "@lily@HASHI4")) is matches
+    assert (
+        entry_matches(
+            program.workflows[0][0],
+            HALEvent("#turn_finish", event_identity),
+            current_instance=current_instance,
+        )
+        is matches
+    )
 
 
 def test_dependent_rules_do_not_become_independent_entries():

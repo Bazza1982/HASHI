@@ -140,7 +140,12 @@ def compile_hal(source: str) -> HALProgram:
     return HALProgram(tuple(chains))
 
 
-def entry_matches(rule: HALRule, event: HALEvent) -> bool:
+def entry_matches(
+    rule: HALRule,
+    event: HALEvent,
+    *,
+    current_instance: str | None = None,
+) -> bool:
     """Pure event condition matcher; caller MUST pass an entry-stage rule only.
 
     No polling, command dispatch, side effects, or chain auto-advancement.
@@ -148,11 +153,26 @@ def entry_matches(rule: HALRule, event: HALEvent) -> bool:
     """
     if rule.event != event.name:
         return False
-    return source_matches(rule.source_agent, event.agent_identity)
+    return source_matches(
+        rule.source_agent,
+        event.agent_identity,
+        current_instance=current_instance,
+    )
 
 
-def source_matches(source: str | None, identity: str | None) -> bool:
-    """Match against a canonical identity from the local instance's event feed."""
+def source_matches(
+    source: str | None,
+    identity: str | None,
+    *,
+    current_instance: str | None = None,
+) -> bool:
+    """Match a declared HAL source against a canonical @name@instance identity.
+
+    - Bare ``@name`` matches only the same-name Agent on ``current_instance``
+      (never a remote instance's same-name Agent).
+    - Qualified ``@name@instance`` matches that exact Agent and instance.
+    - ``@agent_any`` matches any non-empty Agent identity.
+    """
     if source is None:
         return True
     if not identity:
@@ -162,7 +182,10 @@ def source_matches(source: str | None, identity: str | None) -> bool:
         return True
     identity = identity.casefold()
     if "@" not in source[1:]:
-        return source == "@" + identity.lstrip("@").split("@", 1)[0]
+        local = str(current_instance or "").strip().casefold()
+        if local:
+            return identity == f"{source}@{local}"
+        return source == identity
     return source == identity
 
 
