@@ -235,6 +235,54 @@ async def test_confirmed_hchat_request_executes_exactly_one_run(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["mkdir", "resolve"])
+async def test_protocol_native_audio_directory_denial_is_a_retryable_storage_failure(
+    tmp_path, monkeypatch, caplog, operation,
+):
+    from remote.protocol_manager import ProtocolManager
+
+    manager = ProtocolManager(
+        hashi_root=tmp_path, instance_info={"instance_id": "HASHI1", "platform": "windows"},
+        peer_registry=None, workbench_port=18800,
+    )
+    manager.get_local_agents_snapshot = lambda: [{"agent_name": "lily", "is_active": True}]
+    manager._enqueue_local_prompt = AsyncMock()
+
+    files_root = tmp_path / "state" / "native_audio_assets" / "files"
+    original = getattr(Path, operation)
+
+    def fail_audio_directory(self, *args, **kwargs):
+        if self == files_root:
+            raise PermissionError(13, "access denied", "private-audio-path")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, operation, fail_audio_directory)
+    code, result = await manager.handle_protocol_message({
+        "message_type": "agent_message", "message_id": "msg-storage-001",
+        "idempotency_key": "hchat:msg-storage-001", "conversation_id": "conv-001",
+        "from_instance": "HASHI2", "from_agent": "rain", "to_instance": "HASHI1",
+        "to_agent": "lily", "originated_at": _make_utc_iso(seconds_ago=1),
+        "body": {"text": "test storage failure"}, "ttl": 5, "route_trace": ["HASHI2"],
+    })
+    assert code == 503
+    assert result["ok"] is False and result["message_type"] == "error"
+    assert result["body"] == {
+        "code": "protocol_storage_unavailable",
+        "message": "Message storage is temporarily unavailable",
+        "retryable": True,
+        "failed_message_id": "msg-storage-001",
+        "conversation_id": "conv-001",
+        "from_instance": "HASHI2", "from_agent": "rain",
+        "to_instance": "HASHI1", "to_agent": "lily",
+        "details": {},
+    }
+    assert "cause_type=PermissionError errno=13" in caplog.text
+    assert "private-audio-path" not in caplog.text
+    assert "msg-storage-001" not in manager._inflight
+    manager._enqueue_local_prompt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_protocol_manager_stale_message_requires_confirmation(tmp_path: Path):
     """ProtocolManager.handle_protocol_message gates stale messages."""
     from remote.protocol_manager import ProtocolManager

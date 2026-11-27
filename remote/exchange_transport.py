@@ -96,6 +96,7 @@ class ExchangeTransport:
         self._request_waiters: dict[str, asyncio.Future] = {}
         self._receipt_waiters: dict[str, asyncio.Future] = {}
         self._last_error_code: str | None = None
+        self._connection_phase = "configuration"
         self._connected_at: float | None = None
         self._last_outbox_purge = 0.0
         self._negotiated_capabilities: set[str] = set()
@@ -204,8 +205,15 @@ class ExchangeTransport:
                 raise
             except Exception as exc:
                 self._last_error_code = self._safe_error_code(exc)
+                cause = exc.__cause__ or exc
+                socket_error = getattr(cause, "os_error", None) or cause
                 logger.warning(
-                    "Exchange connection ended (%s)", self._last_error_code
+                    "Exchange connection ended (%s) phase=%s error_type=%s cause_type=%s "
+                    "errno=%s winerror=%s http_status=%s ws_close_code=%s",
+                    self._last_error_code, self._connection_phase, type(exc).__name__,
+                    type(cause).__name__, getattr(socket_error, "errno", None),
+                    getattr(socket_error, "winerror", None), getattr(cause, "status", None),
+                    getattr(self._ws, "close_code", None),
                 )
             finally:
                 self._ready_event.clear()
@@ -254,6 +262,7 @@ class ExchangeTransport:
         raise ExchangeTransportError("REDIRECT_REJECTED")
 
     async def _connect_once(self) -> None:
+        self._connection_phase = "configuration"
         config, credential = self._current_config_and_token()
         if (
             self._config is not None
@@ -271,6 +280,7 @@ class ExchangeTransport:
             timeout=timeout,
             trace_configs=[trace_config],
         ) as session:
+            self._connection_phase = "websocket_upgrade"
             async with session.ws_connect(
                 str(config.url),
                 headers=headers,
@@ -279,6 +289,7 @@ class ExchangeTransport:
                 autoclose=True,
                 max_msg_size=65536,
             ) as ws:
+                self._connection_phase = "hello"
                 if ws.protocol != SUBPROTOCOL:
                     raise ExchangeTransportError("SUBPROTOCOL_REJECTED")
                 self._ws = ws
@@ -305,6 +316,7 @@ class ExchangeTransport:
                 )
                 if len(records) > max_agents:
                     raise ExchangeTransportError("PUBLISH_LIMIT_EXCEEDED")
+                self._connection_phase = "publish"
                 self._publication_revision = 1
                 request_id = self._new_id("pub")
                 await self._send_frame(
@@ -324,6 +336,7 @@ class ExchangeTransport:
                     or published.get("revision") != self._publication_revision
                 ):
                     raise ExchangeTransportError("PUBLISH_REJECTED")
+                self._connection_phase = "stream"
                 self._welcome = welcome
                 self._config = config
                 self._credential_digest = credential_digest
@@ -422,7 +435,7 @@ class ExchangeTransport:
         }:
             raise ExchangeTransportError("CONNECTION_CLOSED", retryable=True)
         if message.type == aiohttp.WSMsgType.ERROR:
-            raise ExchangeTransportError("CONNECTION_FAILED", retryable=True)
+            raise ExchangeTransportError("CONNECTION_FAILED", retryable=True) from ws.exception()
         raise ExchangeTransportError("BINARY_FRAME_REJECTED")
 
     async def _send_frame(

@@ -9,6 +9,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 import shutil
 import time
@@ -1045,10 +1046,26 @@ class DshCLIAdapter(BaseBackend):
             if fut is not None and not fut.done():
                 if "error" in msg and msg["error"] is not None:
                     err = msg["error"] if isinstance(msg["error"], Mapping) else {}
+                    rpc_message = str(err.get("message", "unknown ACP error"))
+                    if "DeepSeek Messages SSE event type mismatch" in rpc_message:
+                        details = err.get("data")
+                        details = details if isinstance(details, Mapping) else {}
+                        event_name = details.get("event_name")
+                        payload_type = details.get("payload_type")
+                        frame_index = details.get("frame_index")
+                        self.logger.warning(
+                            "DSH malformed SSE response acp_code=%s upstream_event=%s "
+                            "upstream_type=%s upstream_frame=%s upstream_details_available=%s",
+                            err.get("code"),
+                            event_name if isinstance(event_name, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", event_name) else None,
+                            payload_type if isinstance(payload_type, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", payload_type) else None,
+                            frame_index if type(frame_index) is int and frame_index >= 0 else None,
+                            bool(details),
+                        )
                     fut.set_exception(
                         _AcpRpcError(
                             int(err.get("code", -32000)),
-                            str(err.get("message", "unknown ACP error")),
+                            rpc_message,
                             err.get("data"),
                         )
                     )

@@ -91,6 +91,23 @@ def _noisy_history_row(seq: int, user_text: str, assistant_text: str) -> dict:
     }
 
 
+def test_meditation_update_keeps_the_native_history_prefix():
+    pcm = _sample_pcm(
+        request_text="Continue the investigation", timestamp="2026-11-27 17:44:00",
+        request_id="req-next", history=[_noisy_history_row(1, "Start", "Collected data")],
+    )
+    system, history, user = compile_main_turn(
+        pcm_input=pcm, fallback_request="fallback", context={"habit_catalogue": ["Old habit"]},
+    )
+    next_system, next_history, next_user = compile_main_turn(
+        pcm_input=pcm, fallback_request="fallback", context={"habit_catalogue": ["Updated habit"]},
+    )
+    assert (next_system, next_history) == (system, history)
+    assert "Old habit" in user
+    assert "Updated habit" in next_user and "Old habit" not in next_user
+    assert next_user.endswith("Current user request:\nContinue the investigation")
+
+
 def test_prefix_stability_across_consecutive_turns_and_noise_stripping():
     ctx = {
         "habit_catalogue": ["Habit A: verify tests before claiming done."],

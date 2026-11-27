@@ -524,7 +524,7 @@ def compile_main_turn(
     )
 
     static_refs: dict[str, object] = {}
-    for key in ("advisory_habits", "available_skills", "optional_strategy_cards"):
+    for key in ("available_skills", "optional_strategy_cards"):
         val = advisory_blocks.get(key)
         if val:
             static_refs[key] = val
@@ -553,6 +553,10 @@ def compile_main_turn(
             cleaned_volatile.append(item)
 
     volatile_refs: dict[str, object] = {}
+    # Meditation can revise the catalogue between otherwise identical turns.
+    # Project the current advice after the settled native history.
+    if habits := advisory_blocks.get("advisory_habits"):
+        volatile_refs["advisory_habits"] = habits
     if cleaned_volatile:
         volatile_refs["turn_context_only"] = cleaned_volatile
     cleaned_runtime = _clean_runtime_context(pcm_input.get("runtime_context") or {})

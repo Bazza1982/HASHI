@@ -66,6 +66,9 @@ class ConsoleWriteFailure:
     error_type: str
     errno: int | None = None
     winerror: int | None = None
+    encoding: str | None = None
+    encoding_reason: str | None = None
+    first_codepoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,11 +205,22 @@ def _nonnegative_int(value: object) -> int:
 def _write_failure(sink: str, exc: BaseException) -> ConsoleWriteFailure:
     """Reduce an exception to non-content-bearing diagnostic fields."""
 
+    facts = {}
+    if isinstance(exc, UnicodeEncodeError):
+        facts["encoding"] = safe_identifier(exc.encoding, fallback="unknown")
+        reason = exc.reason
+        facts["encoding_reason"] = reason if reason in {
+            "character maps to <undefined>", "surrogates not allowed",
+            "ordinal not in range(128)", "ordinal not in range(256)", "illegal multibyte sequence",
+        } else "other"
+        if 0 <= exc.start < len(exc.object):
+            facts["first_codepoint"] = f"U+{ord(exc.object[exc.start]):04X}"
     return ConsoleWriteFailure(
         sink=sink,
         error_type=type(exc).__name__,
         errno=getattr(exc, "errno", None),
         winerror=getattr(exc, "winerror", None),
+        **facts,
     )
 
 
@@ -235,6 +249,11 @@ def _persist_output_diagnostic(
                 "error_type": failure.error_type,
                 "errno": failure.errno,
                 "winerror": failure.winerror,
+                **({
+                    "encoding": failure.encoding,
+                    "encoding_reason": failure.encoding_reason,
+                    "first_codepoint": failure.first_codepoint,
+                } if failure.encoding is not None else {}),
             }
             for failure in result.failures
         ],

@@ -10,7 +10,7 @@ to the shared Workbench Session.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 from hal.dispatch import GatewayDispatchAdapter
 from orchestrator import runtime_session
@@ -89,12 +89,56 @@ def test_hal_prompt_does_not_force_telegram_for_a_workbench_only_agent(monkeypat
     )
 
     assert result.accepted is True
-    assert runtime.calls[0]["chat_id"] is None
+    assert runtime.calls[0]["chat_id"] == 0
     assert runtime.calls[0]["deliver_to_telegram"] is False
+
+
+def test_hal_prompt_uses_workbench_when_the_agents_old_telegram_binding_is_offline(monkeypatch):
+    runtime = _RecordingRuntime()
+    runtime.telegram_connected = False
+    monkeypatch.setattr(runtime_session, "primary_telegram_chat_id", lambda _runtime: 424242)
+
+    result = asyncio.run(GatewayDispatchAdapter(_Server(runtime)).dispatch_prompt(
+        target_agent="wren", text="daily check", idempotency_key="hal:exec:3",
+        exec_id="exec-3", stage=0,
+    ))
+
+    assert result.accepted is True
+    assert runtime.calls[0]["chat_id"] == 0
+    assert runtime.calls[0]["deliver_to_telegram"] is False
+
+
+def test_hal_workbench_route_survives_the_workers_legacy_chat_id_default(tmp_path, monkeypatch):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    runtime = _workbench_only_runtime(tmp_path)
+    runtime.telegram_connected = False
+    runtime._should_redirect_after_transfer = lambda: False
+    runtime._primary_chat_id = lambda: 424242
+    runtime.enqueue_api_text = MethodType(FlexibleAgentRuntime.enqueue_api_text, runtime)
+    admitted_routes = []
+
+    async def enqueue_request(chat_id, _text, source, _summary, **kwargs):
+        _, _, surface, channel = runtime_session.resolve_request_session(
+            runtime, source=source, chat_id=chat_id, metadata=kwargs["request_metadata"],
+        )
+        admitted_routes.append((surface, channel, kwargs["deliver_to_telegram"]))
+        return "request-test"
+
+    runtime.enqueue_request = enqueue_request
+    monkeypatch.setattr(runtime_session, "primary_telegram_chat_id", lambda _runtime: 424242)
+    result = asyncio.run(GatewayDispatchAdapter(_Server(runtime)).dispatch_prompt(
+        target_agent="wren", text="daily check", idempotency_key="hal:exec:4",
+        exec_id="exec-4", stage=0,
+    ))
+
+    assert result.accepted is True
+    assert admitted_routes == [("workbench", "default", False)]
 
 
 def test_hal_prompt_keeps_the_agents_own_telegram_route(monkeypatch):
     runtime = _RecordingRuntime()
+    runtime.telegram_connected = True
     monkeypatch.setattr(
         runtime_session, "primary_telegram_chat_id", lambda _runtime: 424242
     )

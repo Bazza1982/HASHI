@@ -1850,8 +1850,26 @@ class ProtocolManager:
             text=str(body.get("text") or ""),
             attachment_binding=attachments or [],
         )
+        from orchestrator.audio_assets import AudioAssetError
+
+        try:
+            frontend_store = self._frontend_session_store()
+        except (AudioAssetError, OSError) as exc:
+            cause = exc.__cause__ or exc
+            logger.warning(
+                "Protocol message storage unavailable stage=session_store_init instance=%s "
+                "cause_type=%s errno=%s winerror=%s",
+                local_instance, type(cause).__name__,
+                getattr(cause, "errno", None), getattr(cause, "winerror", None),
+            )
+            return 503, self._error_payload(
+                "protocol_storage_unavailable",
+                "Message storage is temporarily unavailable",
+                retryable=True,
+                payload=payload,
+            )
         is_fresh, conf = check_hchat_freshness_and_register(
-            store=self._frontend_session_store(),
+            store=frontend_store,
             originated_at=originated_at,
             is_remote=True,
             to_agent=to_agent,

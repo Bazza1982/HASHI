@@ -57,6 +57,37 @@ def test_gateway_caps_large_body_and_preserves_full_digest():
     assert evidence['body_sha256'] == hashlib.sha256(body).hexdigest()
 
 
+def test_vector_dependency_warning_is_attributed_and_sampled(tmp_path, monkeypatch, caplog):
+    import builtins
+    import os
+
+    from orchestrator import bridge_memory
+
+    (tmp_path / "model.onnx").touch()
+    original_import = builtins.__import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "numpy":
+            raise ModuleNotFoundError("PRIVATE-IMPORT-ERROR", name="numpy")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    monkeypatch.setattr(bridge_memory, "_BGE_DIAGNOSTIC_TIMES", {})
+    request_id = "request-20261127"
+    for _ in range(2):
+        encoder = bridge_memory.BgeM3Encoder.cached(
+            model_dir=tmp_path, diagnostic_workspace="test-workspace"
+        )
+        assert encoder.ready is False
+    warnings = [x.message for x in caplog.records if x.name == "hashi.bridge_memory"]
+    assert len(warnings) == 1
+    assert f"pid={os.getpid()}" in warnings[0]
+    assert f"workspace=test-workspace request_id={request_id}" in warnings[0]
+    assert "dependency=numpy" in warnings[0]
+    assert "test_vector_dependency_warning_is_attributed_and_sampled" in warnings[0]
+    assert "PRIVATE-IMPORT-ERROR" not in warnings[0]
+
+
 def test_old_restart_projects_a_terminal_unconfirmed_result():
     record = {
         'restart_id': 'rst_20261115T135747Z_93c38ad2a401',
@@ -70,7 +101,7 @@ def test_old_restart_projects_a_terminal_unconfirmed_result():
     projected = project_restart(record, instance_id='HASHI4', owner_id='owner', agent_id='arale')
     assert projected['terminal'] is True
     assert projected['status'] == 'failed'
-    assert projected['reason'] == 'restart_unconfirmed'
+    assert projected['reason'] == 'restart_observation_expired'
     assert projected['latest_sequence'] == 6
     assert record['state'] == 'verifying'
 

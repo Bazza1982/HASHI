@@ -404,8 +404,11 @@ class CapabilityBroker(ManualDesktopBroker):
             if not hmac.compare_digest(stored_token, str(worker_token or "")):
                 raise CapabilityBrokerError("capability heartbeat authentication failed")
             self._verify_identity(registration, identity)
+        started = time.monotonic()
+        phase = "probe"
         try:
             health = self._registration_probe(registration, stored_token)
+            phase = "validate_health"
             self._validate_health(registration, health)
         except Exception as exc:
             removed = False
@@ -426,7 +429,11 @@ class CapabilityBroker(ManualDesktopBroker):
                     "capability_unhealthy",
                     capability_id=registration.capability_id,
                     capability_kind=registration.capability_kind,
+                    phase=phase,
+                    duration_ms=round((time.monotonic() - started) * 1000, 1),
                     error_type=type(exc).__name__,
+                    cause_type=type(exc.__cause__).__name__ if exc.__cause__ is not None else None,
+                    os_error=getattr(exc.__cause__ or exc, "errno", None),
                 )
             raise CapabilityBrokerError(
                 f"capability heartbeat health check failed: {exc}"

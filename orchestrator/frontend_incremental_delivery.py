@@ -240,11 +240,37 @@ async def dispatch_pending_telegram_deliverables(
         store = ensure_store(runtime)
         from orchestrator.run_questions import RunQuestions
         questions = RunQuestions(store)
-        questions.refresh_pending(agent_id=runtime.name, busy_timeout_ms=100)
-        candidates = questions.pending_telegram_deliveries(
-            agent_id=runtime.name, limit=limit, busy_timeout_ms=100)
-        candidates.extend(store.pending_incremental_telegram_deliveries(
-            agent_id=runtime.name, limit=limit))
+        timings = {}
+
+        def measure(phase, operation, **kwargs):
+            started = time.monotonic()
+            try:
+                return operation(**kwargs)
+            except Exception as exc:
+                runtime.logger.warning(
+                    "Telegram scan failed agent=%s phase=%s duration_ms=%.1f "
+                    "error_type=%s sqlite_errorcode=%s sqlite_errorname=%s",
+                    runtime.name, phase, (time.monotonic() - started) * 1000,
+                    type(exc).__name__, getattr(exc, "sqlite_errorcode", None),
+                    getattr(exc, "sqlite_errorname", None),
+                )
+                raise
+            finally:
+                timings[phase] = (time.monotonic() - started) * 1000
+
+        measure("refresh_pending", questions.refresh_pending,
+                agent_id=runtime.name, busy_timeout_ms=100)
+        candidates = measure("question_candidates", questions.pending_telegram_deliveries,
+                             agent_id=runtime.name, limit=limit, busy_timeout_ms=100)
+        candidates.extend(measure("incremental_candidates", store.pending_incremental_telegram_deliveries,
+                                  agent_id=runtime.name, limit=limit))
+        if sum(timings.values()) >= 500:
+            runtime.logger.warning(
+                "Telegram scan phases agent=%s refresh_pending_ms=%.1f "
+                "question_candidates_ms=%.1f incremental_candidates_ms=%.1f candidates=%s",
+                runtime.name, timings["refresh_pending"], timings["question_candidates"],
+                timings["incremental_candidates"], len(candidates),
+            )
         return store, candidates
     store, candidates = await run_database_work(scan, _db_role='worker',
                                                  _db_instance=getattr(runtime.global_config, 'instance_id', 'unknown'),
