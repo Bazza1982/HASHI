@@ -31,14 +31,18 @@ SEVERE_DB_WARN_SECONDS = 0.5
 SUSTAINED_SLOW_WINDOW_SECONDS = 60.0
 SUSTAINED_SLOW_COUNT_THRESHOLD = 5
 HIGH_DUTY_CYCLE_THRESHOLD = 0.05  # >= 5% of wall clock spent in one DB op over 60s
-ZERO_PROGRESS_SPIN_STREAK_THRESHOLD = 5
-ZERO_PROGRESS_SPIN_AVG_SECONDS = 0.05
+# Zero-progress loop spin is a duty-cycle question, not a per-scan latency one:
+# a loop that scans slowly but then sleeps is idle, while a tight loop that
+# never yields burns wall clock.  Both directions were previously misjudged.
+ZERO_PROGRESS_SPIN_DUTY_CYCLE_THRESHOLD = 0.8
+ZERO_PROGRESS_SPIN_MIN_BUSY_SECONDS = 1.0
+ZERO_PROGRESS_SPIN_MIN_ITERATIONS = 3
 ALERT_LOG_COOLDOWN_SECONDS = 60.0
 
 _METRICS_LOCK = threading.Lock()
 # Per-operation deque of (monotonic_ts, duration_s, queued_s, instance, role)
 _OP_SAMPLES: dict[str, deque[tuple[float, float, float, str, str]]] = {}
-# Per-operation zero-progress loop state: {"streak": int, "total_s": float, "last_ts": float, "instance": str, "role": str}
+# Per-operation zero-progress loop state: {"streak": int, "busy_s": float, "window_start_ts": float, "last_ts": float, "instance": str, "role": str}
 _LOOP_SPIN: dict[str, dict[str, Any]] = {}
 # Rate-limiting for WARNING log emissions: (operation, code) -> last_warn_monotonic
 _LAST_ALERT_LOG: dict[tuple[str, str], float] = {}
@@ -208,7 +212,13 @@ def record_loop_zero_progress(
     items_processed: int,
     now: float | None = None,
 ) -> None:
-    """Detect background scan loops burning time repeatedly with zero progress."""
+    """Detect background scan loops burning wall clock without progress.
+
+    Each iteration is judged by how much of the elapsed wall clock it occupied.
+    A loop that finishes quickly and then waits between iterations is idle even
+    when a single scan was slow (queueing, cold cache), and a tight loop that
+    never yields is reported as soon as it has burned enough wall clock.
+    """
     ts = time.monotonic() if now is None else float(now)
     dur = max(0.0, float(duration_s))
     with _METRICS_LOCK:
@@ -219,24 +229,48 @@ def record_loop_zero_progress(
             )
         else:
             entry = _LOOP_SPIN.get(operation)
-            if entry is None or (ts - float(entry["last_ts"])) > SUSTAINED_SLOW_WINDOW_SECONDS:
+            if entry is None:
                 entry = {
                     "streak": 0,
-                    "total_s": 0.0,
+                    "busy_s": 0.0,
+                    "window_start_ts": ts,
                     "last_ts": ts,
                     "instance": instance,
                     "role": role,
                 }
                 _LOOP_SPIN[operation] = entry
-            entry["streak"] += 1
-            entry["total_s"] += dur
-            entry["last_ts"] = ts
-            entry["instance"] = instance
-            entry["role"] = role
-            avg_s = entry["total_s"] / max(1, entry["streak"])
+            else:
+                gap_s = ts - float(entry["last_ts"])
+                if gap_s > SUSTAINED_SLOW_WINDOW_SECONDS:
+                    # The loop went quiet long enough to be considered idle:
+                    # start a fresh observation window instead of carrying a
+                    # stale streak across the sleep.
+                    entry["streak"] = 0
+                    entry["busy_s"] = 0.0
+                    entry["window_start_ts"] = ts
+                else:
+                    occupied_s = max(gap_s, dur)
+                    iteration_duty = dur / occupied_s if occupied_s > 0 else 1.0
+                    if iteration_duty >= ZERO_PROGRESS_SPIN_DUTY_CYCLE_THRESHOLD:
+                        entry["streak"] += 1
+                        entry["busy_s"] += dur
+                    else:
+                        # A real wait broke the streak; this iteration becomes
+                        # the baseline of a new window.
+                        entry["streak"] = 0
+                        entry["busy_s"] = 0.0
+                        entry["window_start_ts"] = ts
+                entry["last_ts"] = ts
+                entry["instance"] = instance
+                entry["role"] = role
+            streak = int(entry["streak"])
+            busy_s = float(entry["busy_s"])
+            wall_s = max(0.0, ts - float(entry["window_start_ts"]))
+            duty_cycle = busy_s / wall_s if wall_s > 0 else 0.0
             if (
-                entry["streak"] >= ZERO_PROGRESS_SPIN_STREAK_THRESHOLD
-                and avg_s >= ZERO_PROGRESS_SPIN_AVG_SECONDS
+                streak >= ZERO_PROGRESS_SPIN_MIN_ITERATIONS
+                and busy_s >= ZERO_PROGRESS_SPIN_MIN_BUSY_SECONDS
+                and duty_cycle >= ZERO_PROGRESS_SPIN_DUTY_CYCLE_THRESHOLD
             ):
                 _maybe_warn_locked(
                     now=ts,
@@ -244,15 +278,20 @@ def record_loop_zero_progress(
                     code="idle_loop_spin",
                     message=(
                         "Resource alert [idle_loop_spin]: operation=%s instance=%s pid=%s "
-                        "role=%s zero_progress_streak=%d avg_ms=%.1f"
+                        "role=%s zero_progress_iterations=%d busy_s=%.2f wall_s=%.2f "
+                        "duty_cycle=%.1f%% (threshold=%.0f%%): the scan loop covered "
+                        "most of its wall clock with zero deliveries"
                     ),
                     args=(
                         operation,
                         instance,
                         os.getpid(),
                         role,
-                        entry["streak"],
-                        avg_s * 1000.0,
+                        streak,
+                        busy_s,
+                        wall_s,
+                        duty_cycle * 100.0,
+                        ZERO_PROGRESS_SPIN_DUTY_CYCLE_THRESHOLD * 100.0,
                     ),
                 )
             notify_listeners, alerts_snapshot = _detect_alert_transition_locked(
@@ -337,8 +376,14 @@ def _collect_alerts_locked(ts: float, *, wall_now: float) -> list[dict[str, Any]
         if age_s > SUSTAINED_SLOW_WINDOW_SECONDS:
             continue
         streak = int(entry["streak"])
-        avg_s = float(entry["total_s"]) / max(1, streak)
-        if streak >= ZERO_PROGRESS_SPIN_STREAK_THRESHOLD and avg_s >= ZERO_PROGRESS_SPIN_AVG_SECONDS:
+        busy_s = float(entry["busy_s"])
+        wall_s = max(0.0, float(entry["last_ts"]) - float(entry["window_start_ts"]))
+        duty_cycle = busy_s / wall_s if wall_s > 0 else 0.0
+        if (
+            streak >= ZERO_PROGRESS_SPIN_MIN_ITERATIONS
+            and busy_s >= ZERO_PROGRESS_SPIN_MIN_BUSY_SECONDS
+            and duty_cycle >= ZERO_PROGRESS_SPIN_DUTY_CYCLE_THRESHOLD
+        ):
             remaining_ttl_s = max(1.0, SUSTAINED_SLOW_WINDOW_SECONDS - max(0.0, age_s))
             alerts.append(
                 {
@@ -353,13 +398,21 @@ def _collect_alerts_locked(ts: float, *, wall_now: float) -> list[dict[str, Any]
                     "observed_at": round(wall_now, 3),
                     "expires_at": round(wall_now + remaining_ttl_s, 3),
                     "summary": (
-                        f"Zero-progress background loop spin on {operation} "
-                        f"(streak={streak}, avg_ms={avg_s * 1000.0:.1f})."
+                        f"Zero-progress loop spin on {operation} "
+                        f"({duty_cycle * 100.0:.1f}% of {wall_s:.1f}s wall clock busy "
+                        f"across {streak} zero-result iterations)."
                     ),
                     "details": {
                         "operation": operation,
                         "zero_progress_streak": streak,
-                        "avg_ms": round(avg_s * 1000.0, 1),
+                        "zero_progress_iterations": streak,
+                        "busy_s": round(busy_s, 3),
+                        "wall_s": round(wall_s, 3),
+                        "duty_cycle_pct": round(duty_cycle * 100.0, 1),
+                        "threshold_pct": round(
+                            ZERO_PROGRESS_SPIN_DUTY_CYCLE_THRESHOLD * 100.0, 1
+                        ),
+                        "avg_ms": round((busy_s / max(1, streak)) * 1000.0, 1),
                     },
                 }
             )
