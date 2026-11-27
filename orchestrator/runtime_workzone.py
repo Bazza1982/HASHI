@@ -17,6 +17,7 @@ from orchestrator.agent_slot_transfer import (
     source_slots_from_records,
 )
 from orchestrator.command_ui import card_title, confirm_card, selected_label, status_label
+from orchestrator.pathing import resolve_path_value
 from orchestrator.session_store import SessionConflict
 
 _PATH_REPLY_TTL_SECONDS = 300.0
@@ -478,6 +479,19 @@ async def activate_backend_state(runtime: Any) -> bool:
     return True
 
 
+def supports_local_activation(runtime: Any) -> bool:
+    """True only for a runtime that owns an in-process Workzone profile.
+
+    A Worker-side ``RemoteRuntimeReference`` exposes a sibling Agent's metadata
+    but has neither a local backend session nor the adoption hooks, so writing
+    through it must stay a stored-profile-only change.
+    """
+
+    return callable(getattr(runtime, "_backend_busy", None)) and callable(
+        getattr(runtime, "_sync_workzone_to_backend_config", None)
+    )
+
+
 async def _activate_state(
     runtime: Any,
     before: Mapping[str, Any],
@@ -485,6 +499,10 @@ async def _activate_state(
     *,
     force_reload: bool = False,
 ) -> bool:
+    if not supports_local_activation(runtime):
+        # The stored profile is authoritative; the Agent adopts it on its next
+        # request, exactly like a stopped Agent.
+        return True
     if runtime._backend_busy():
         return True
     before_topology = _active_topology(before)
@@ -952,7 +970,9 @@ def sibling_agent_names(runtime: Any) -> list[str]:
     return names
 
 
-def _configured_agent_names_from_json(runtime: Any) -> list[str]:
+def agent_rows_from_json(runtime: Any) -> list[dict[str, Any]]:
+    """Return the configured Agent rows without starting any Agent."""
+
     import json
 
     home = getattr(runtime.global_config, "bridge_home", None)
@@ -963,10 +983,14 @@ def _configured_agent_names_from_json(runtime: Any) -> list[str]:
     except (OSError, ValueError):
         return []
     rows = document.get("agents") if isinstance(document, dict) else None
+    return [dict(row) for row in rows or () if isinstance(row, dict)]
+
+
+def _configured_agent_names_from_json(runtime: Any) -> list[str]:
     return [
         str(row.get("name"))
-        for row in rows or ()
-        if isinstance(row, dict) and row.get("name")
+        for row in agent_rows_from_json(runtime)
+        if row.get("name")
     ]
 
 
@@ -983,6 +1007,48 @@ def runtime_for_agent(runtime: Any, agent_name: str) -> Any | None:
         return None
 
 
+def agent_workspace_dir(runtime: Any, agent_name: str) -> Path:
+    """Resolve one sibling Agent's workspace without starting it.
+
+    A running Agent reports its own directory. A stopped Agent is resolved from
+    its configured ``workspace_dir``; assuming ``<bridge_home>/workspaces/<name>``
+    reads and writes the wrong Agent home whenever that Agent uses a custom
+    directory.
+    """
+
+    live = runtime_for_agent(runtime, agent_name)
+    workspace = getattr(live, "workspace_dir", None) if live is not None else None
+    if workspace:
+        return Path(workspace)
+    row = next(
+        (
+            item
+            for item in agent_rows_from_json(runtime)
+            if str(item.get("name") or "").casefold() == str(agent_name).casefold()
+        ),
+        None,
+    )
+    if row is not None:
+        global_config = getattr(runtime, "global_config", None)
+        bridge_home = getattr(global_config, "bridge_home", None)
+        config_path = getattr(global_config, "config_path", None)
+        if bridge_home:
+            try:
+                resolved = resolve_path_value(
+                    row.get("workspace_dir"),
+                    config_dir=Path(config_path).parent if config_path else Path(bridge_home),
+                    bridge_home=Path(bridge_home),
+                )
+            except (OSError, ValueError):
+                resolved = None
+            if resolved is not None:
+                return resolved
+    home = getattr(getattr(runtime, "global_config", None), "bridge_home", None)
+    if home:
+        return Path(home) / "workspaces" / str(agent_name)
+    return Path(runtime.workspace_dir).parent / str(agent_name)
+
+
 def _resolve_transfer_agent(runtime: Any, raw_name: str) -> str:
     wanted = str(raw_name or "").strip()
     if not wanted:
@@ -994,6 +1060,17 @@ def _resolve_transfer_agent(runtime: Any, raw_name: str) -> str:
     return resolved
 
 
+def _rejected_reason_text(reason: str) -> str:
+    """Translate a typed path failure; keep unknown strings as they came."""
+
+    code = str(reason or "").strip()
+    if not code:
+        return ""
+    key = f"operation.failure.reason.{code}"
+    text = ui_language.tr(key)
+    return code if text == key else text
+
+
 def _transfer_receipt_text(
     *,
     verb: str,
@@ -1001,6 +1078,9 @@ def _transfer_receipt_text(
     target_agent: str,
     plan: list[SlotTransfer],
     deferred: bool,
+    applied: list[SlotTransfer] | None = None,
+    rejected: list[tuple[SlotTransfer, str]] | None = None,
+    conflict: str | None = None,
 ) -> str:
     title = ui_language.tr(
         "workzone.transfer.title_copy"
@@ -1010,7 +1090,11 @@ def _transfer_receipt_text(
         target=target_agent,
     )
     lines = [f"<b>{html.escape(title)}</b>"]
-    copied = [item for item in plan if item.outcome == "copied"]
+    copied = (
+        list(applied)
+        if applied is not None
+        else [item for item in plan if item.outcome == "copied"]
+    )
     for item in copied:
         lines.append(
             ui_language.tr(
@@ -1037,6 +1121,20 @@ def _transfer_receipt_text(
                     agent=target_agent,
                 )
             )
+    for item, reason in rejected or ():
+        lines.append(
+            ui_language.tr(
+                "workzone.transfer.rejected",
+                slot=f"<code>{html.escape(item.source_slot)}</code>",
+                reason=html.escape(_rejected_reason_text(reason)),
+            )
+        )
+    if conflict:
+        lines.append(
+            ui_language.tr(
+                "workzone.transfer.conflict", agent=target_agent, reason=html.escape(conflict)
+            )
+        )
     if not copied:
         lines.append(ui_language.tr("workzone.transfer.nothing_copied", agent=target_agent))
     if deferred:
@@ -1145,21 +1243,58 @@ async def _workzone_transfer(
     )
 
     store = runtime_session.ensure_store(runtime)
+    target_workspace = agent_workspace_dir(runtime, target_agent)
+    project_root = runtime.global_config.project_root
+    revision = int(target_state.get("revision") or 0)
+    applied: list[SlotTransfer] = []
+    rejected: list[tuple[SlotTransfer, str]] = []
+    conflict: str | None = None
+    after = normalize_workzone_state(target_state)
     for item in plan:
         if item.outcome != "copied":
             continue
-        store.set_agent_workzone_slot(
-            owner_id=str(owner_id),
-            agent_id=target_agent,
-            slot_id=str(item.target_slot),
-            path=str(item.value),
-            enabled=bool(item.enabled),
-            source=f"workzone_{verb}",
-        )
-
-    after = normalize_workzone_state(
-        store.get_agent_workzone_set(owner_id=str(owner_id), agent_id=target_agent)
-    )
+        if conflict is not None:
+            rejected.append(
+                (item, ui_language.tr("workzone.transfer.not_applied", agent=target_agent))
+            )
+            continue
+        # The source profile was read elsewhere; the receiving Agent's own home
+        # and directory rules are what decide whether this path is usable.
+        try:
+            _slot, resolved_path = validate_workzone_path(
+                state=after,
+                slot_id=str(item.target_slot),
+                raw_path=str(item.value),
+                project_root=project_root,
+                workspace_dir=target_workspace,
+            )
+        except workzone_module.WorkzonePathError as exc:
+            rejected.append((item, str(getattr(exc, "reason", "") or exc)))
+            continue
+        except ValueError as exc:
+            rejected.append((item, str(exc)))
+            continue
+        try:
+            updated = store.set_agent_workzone_slot(
+                owner_id=str(owner_id),
+                agent_id=target_agent,
+                slot_id=str(item.target_slot),
+                path=str(resolved_path),
+                enabled=bool(item.enabled),
+                expected_revision=revision,
+                source=f"workzone_{verb}",
+            )
+        except SessionConflict as exc:
+            # Another writer changed the target profile after it was planned;
+            # stop instead of overwriting their slots, and report what landed.
+            conflict = str(exc)
+            rejected.append(
+                (item, ui_language.tr("workzone.transfer.not_applied", agent=target_agent))
+            )
+            continue
+        after = normalize_workzone_state(updated)
+        revision = int(after.get("revision") or revision)
+        applied.append(item)
     target_runtime = runtime_for_agent(runtime, target_agent)
     if target_runtime is None:
         # The Agent is not running: the profile is stored and adopted at start.
@@ -1174,6 +1309,9 @@ async def _workzone_transfer(
             target_agent=target_agent,
             plan=plan,
             deferred=deferred,
+            applied=applied,
+            rejected=rejected,
+            conflict=conflict,
         ),
         parse_mode="HTML",
     )

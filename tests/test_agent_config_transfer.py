@@ -1,6 +1,9 @@
+import json
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from orchestrator import runtime_workzone as workzone_runtime
 from orchestrator.agent_slot_transfer import (
@@ -9,7 +12,9 @@ from orchestrator.agent_slot_transfer import (
     source_slots_from_records,
 )
 from orchestrator.bridge_memory import SysPromptManager
+from orchestrator.function_worker_host import RemoteRuntimeReference
 from orchestrator.runtime_sys_prompts import cmd_sys
+from orchestrator.workbench_api import WorkbenchApiServer
 
 WORKZONE_ORDER = ("main", "1", "2", "3", "4", "5", "6", "7", "8", "9")
 
@@ -448,4 +453,331 @@ async def test_sys_transfer_refuses_the_global_scope_and_unknown_agents(tmp_path
 
     await cmd_sys(runtime, _sys_update("/sys copy agent"), _context())
     assert "nothing to copy" in runtime.replies[-1]["text"]
+
+
+# ── review regressions: real receiving topology, concurrency, directories ────
+
+
+@pytest.mark.asyncio
+async def test_workzone_copy_defers_for_a_running_worker_view(tmp_path):
+    """A Worker-side view of a running Agent has no local adoption hooks."""
+
+    runtime = _runtime(tmp_path)
+    _set_slot(runtime, "main", runtime.zone)
+    remote = RemoteRuntimeReference(
+        SimpleNamespace(),
+        {
+            "name": "helper",
+            "workspace_dir": str(
+                runtime.global_config.project_root / "workspaces" / "helper"
+            ),
+            "online": True,
+        },
+    )
+    runtime.orchestrator._runtime_map = lambda: {"agent": runtime, "helper": remote}
+
+    await workzone_runtime.cmd_workzone(runtime, _update(), _context("copy", "helper"))
+
+    assert _paths(_workzone_state(runtime, "helper"))["main"] == str(runtime.zone.resolve())
+    assert "next request" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_workzone_copy_rejects_a_source_directory_that_vanished(tmp_path):
+    runtime = _runtime(tmp_path)
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    _set_slot(runtime, "main", gone)
+    gone.rmdir()
+
+    await workzone_runtime.cmd_workzone(runtime, _update(), _context("copy", "helper"))
+
+    assert _workzone_state(runtime, "helper")["slots"] == []
+    assert "Not copied" in runtime.replies[-1]["text"]
+    assert "does not exist" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_workzone_copy_rejects_the_receiving_agent_home(tmp_path):
+    runtime = _runtime(tmp_path)
+    helper_home = runtime.global_config.project_root / "workspaces" / "helper"
+    _set_slot(runtime, "main", helper_home)
+
+    await workzone_runtime.cmd_workzone(runtime, _update(), _context("copy", "helper"))
+
+    assert _workzone_state(runtime, "helper")["slots"] == []
+    assert "Agent home workspace" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_workzone_copy_reports_a_concurrent_writer_without_overwriting(
+    tmp_path, monkeypatch
+):
+    runtime = _runtime(tmp_path)
+    other = runtime.global_config.project_root / "other"
+    other.mkdir()
+    _set_slot(runtime, "main", runtime.zone)
+    store = _store(runtime)
+    original = store.set_agent_workzone_slot
+
+    def concurrent(
+        *, owner_id, agent_id, slot_id, path=None, enabled=None, label=None,
+        expected_revision=None, source="telegram",
+    ):
+        if slot_id == "main":
+            # Another writer lands a slot after the target profile was observed.
+            original(
+                owner_id=owner_id, agent_id=agent_id, slot_id="5",
+                path=str(other), enabled=True,
+            )
+        return original(
+            owner_id=owner_id, agent_id=agent_id, slot_id=slot_id, path=path,
+            enabled=enabled, label=label, expected_revision=expected_revision,
+            source=source,
+        )
+
+    monkeypatch.setattr(store, "set_agent_workzone_slot", concurrent)
+
+    await workzone_runtime.cmd_workzone(runtime, _update(), _context("copy", "helper"))
+
+    assert _paths(_workzone_state(runtime, "helper")) == {"5": str(other.resolve())}
+    assert "changed while this transfer was running" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_sys_copy_uses_a_stopped_agents_configured_workspace(tmp_path):
+    runtime = _runtime(tmp_path)
+    project = runtime.global_config.project_root
+    custom = project / "custom-helper"
+    custom.mkdir()
+    (project / "agents.json").write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {"name": "agent", "workspace_dir": "workspaces/agent"},
+                    {"name": "helper", "workspace_dir": "custom-helper"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime.sys_prompt_manager.save("2", "second")
+
+    await cmd_sys(runtime, _sys_update("/sys copy helper"), _context())
+
+    configured = SysPromptManager(state_path=custom / "sys_prompts.json")
+    assert _texts(configured) == {"2": "second"}
+    assumed = SysPromptManager(
+        state_path=project / "workspaces" / "helper" / "sys_prompts.json"
+    )
+    assert _texts(assumed) == {}
+
+
+@pytest.mark.asyncio
+async def test_sys_clear_keeps_a_slot_rewritten_after_it_was_listed(tmp_path):
+    runtime = _runtime(tmp_path)
+    manager = runtime.sys_prompt_manager
+    manager.save("1", "first")
+    manager.save("2", "second")
+    original_delete = manager.delete
+
+    def concurrent_delete(slot, **kwargs):
+        if slot == "1":
+            SysPromptManager(state_path=manager.state_path).replace("1", "rewritten")
+        return original_delete(slot, **kwargs)
+
+    manager.delete = concurrent_delete
+
+    await cmd_sys(runtime, _sys_update("/sys clear"), _context())
+
+    texts = _texts(SysPromptManager(state_path=manager.state_path))
+    assert texts == {"1": "rewritten"}
+    assert "Cleared 1 local /sys slot(s)" in runtime.replies[-1]["text"]
+    assert "left untouched" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_sys_copy_reports_a_target_slot_filled_after_planning(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    runtime.sys_prompt_manager.save("1", "one")
+    original_save = SysPromptManager.save
+
+    def concurrent_save(self, slot, text, *, expected_slot=None):
+        if slot == "1" and expected_slot is not None and not expected_slot.get("text"):
+            SysPromptManager(state_path=self.state_path).save("1", "someone else")
+        return original_save(self, slot, text, expected_slot=expected_slot)
+
+    monkeypatch.setattr(SysPromptManager, "save", concurrent_save)
+
+    await cmd_sys(runtime, _sys_update("/sys copy helper"), _context())
+
+    helper = _helper_manager(runtime)
+    assert _texts(helper) == {"1": "someone else"}
+    assert "changed after the slots were listed" in runtime.replies[-1]["text"]
+
+
+# ── governed Agent-management gate for cross-Agent transfers ─────────────────
+
+
+class _GovernedIdentity:
+    def get_session_user(self, token):
+        return SimpleNamespace(id=token) if token in {"admin", "member", "outside"} else None
+
+    def list_project_memberships(self, *, user_id):
+        if user_id == "admin":
+            return [{"role": "org_admin", "project_id": "p1"}]
+        if user_id == "member":
+            return [{"role": "member", "project_id": "p1"}]
+        return [{"role": "member", "project_id": "p2"}]
+
+
+@pytest.fixture
+def governed_api():
+    # Guard-only server: the full bootstrap imports the governed approval stack,
+    # which is not part of this behaviour and needs an extra dependency.
+    server = WorkbenchApiServer.__new__(WorkbenchApiServer)
+    server.global_config = SimpleNamespace(deployment_profile="governed")
+    server.identity_service = _GovernedIdentity()
+    server._load_agent_rows = lambda **_: [
+        {"name": "agent", "project_id": "p1"},
+        {"name": "helper", "project_id": "p1"},
+    ]
+    return server
+
+
+def test_transfer_command_names_cover_all_six_verbs():
+    names = WorkbenchApiServer._config_transfer_agent_names
+    assert names("workzone", ["copy", "helper"]) == ("helper",)
+    assert names("workzone", ["import", "helper", "3"]) == ("helper",)
+    assert names("workzone", ["clear"]) == ()
+    assert names("sys", ["copy", "helper"]) == ("helper",)
+    assert names("sys", ["local", "import", "helper"]) == ("helper",)
+    assert names("sys", ["global", "copy", "helper"]) == ()
+    assert names("sys", ["clear"]) == ()
+    assert names("sys", ["3", "on"]) == ()
+    assert names("model", ["copy", "helper"]) == ()
+    assert names("sys", ["copy"]) == ()
+
+
+@pytest.mark.asyncio
+async def test_governed_command_invocation_gates_cross_agent_transfers(
+    tmp_path, monkeypatch
+):
+    """A member's session command cannot reach /sys copy on another Agent."""
+
+    import sys
+
+    from orchestrator import admin_local_testing, command_interaction_bridge
+
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.permissions.human_approval",
+        SimpleNamespace(register_human_approval=lambda *a, **k: None),
+    )
+    workspace = tmp_path / "workspaces" / "agent"
+    workspace.mkdir(parents=True)
+    config = tmp_path / "agents.json"
+    config.write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {"name": "agent", "project_id": "p1"},
+                    {"name": "helper", "project_id": "p1"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(name="agent", workspace_dir=workspace)
+    settings = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        deployment_profile="governed",
+        authorized_id=1,
+        instance_id="HASHI1",
+        workbench_port=18800,
+        persistent_session_v1=True,
+    )
+    server = WorkbenchApiServer(
+        config_path=config,
+        global_config=settings,
+        orchestrator=SimpleNamespace(
+            runtimes=[runtime], scheduler=SimpleNamespace(state={})
+        ),
+        secrets={"workbench_admin_token": "test-owner-token"},
+        reconcile_session_runs=False,
+    )
+    server.identity_service = _GovernedIdentity()
+    monkeypatch.setattr(
+        admin_local_testing, "supported_commands", lambda _runtime: {"sys"}
+    )
+
+    dispatched: list[str] = []
+
+    async def fake_dispatch(_runtime, _operation, metadata, **_kwargs):
+        dispatched.append(str(metadata.get("owner_id")))
+        return {"ok": True, "accepted": True}
+
+    monkeypatch.setattr(
+        command_interaction_bridge, "dispatch_command_interaction", fake_dispatch
+    )
+    async with TestClient(TestServer(server.app)) as client:
+        for token in ("member", "admin"):
+            session = server.session_store.create_session(
+                owner_id=f"enterprise:{token}", agent_id="agent"
+            )
+            body = {
+                "command": "sys",
+                "arguments": ["copy", "helper"],
+                "client_id": f"client-{token}-0001",
+                "request_id": f"request-{token}-0001",
+                "ui_locale": "en",
+                "context_generation": int(session["context_generation"] or 1),
+            }
+            response = await client.post(
+                f"/api/v1/sessions/{session['session_id']}/commands",
+                headers={"Authorization": f"Bearer {token}"},
+                json=body,
+            )
+            if token == "member":
+                assert response.status == 403
+            else:
+                assert response.status in {200, 202}
+
+    assert dispatched == ["enterprise:admin"]
+
+
+@pytest.mark.asyncio
+async def test_governed_member_cannot_transfer_another_agents_config(governed_api):
+    server = governed_api
+
+    async def probe(request):
+        denied = server._guard_config_transfer_access(request, "agent", ("helper",))
+        if denied is not None:
+            return denied
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_get("/probe", probe)
+    async with TestClient(TestServer(app)) as client:
+        assert (await client.get("/probe")).status == 401
+        member = await client.get(
+            "/probe", headers={"Authorization": "Bearer member"}
+        )
+        assert member.status == 403
+        outside = await client.get(
+            "/probe", headers={"Authorization": "Bearer outside"}
+        )
+        assert outside.status == 404
+        admin = await client.get("/probe", headers={"Authorization": "Bearer admin"})
+        assert admin.status == 200
+        # An unknown Agent is reported by the command, not by the gate.
+        assert server._guard_config_transfer_access(
+            _Request("admin"), "agent", ("ghost",)
+        ) is None
+
+
+class _Request:
+    def __init__(self, token):
+        self.headers = {"Authorization": f"Bearer {token}"}
 # HASHI-Fingerprint: hfp_0828c557fceb4507977fdbcd97891213

@@ -6706,6 +6706,48 @@ class WorkbenchApiServer:
         return None
 
     @staticmethod
+    def _config_transfer_agent_names(command: str, arguments: list[str]) -> tuple[str, ...]:
+        """Return the named Agents a cross-Agent config transfer would touch."""
+
+        if command not in {"sys", "workzone"}:
+            return ()
+        values = [str(item) for item in arguments]
+        if command == "sys" and values:
+            scope = values[0].casefold()
+            if scope in {"global", "g"}:
+                # The handler rejects global-scope transfers itself.
+                return ()
+            if scope in {"local", "l"}:
+                values = values[1:]
+        if not values:
+            return ()
+        verb = values[0].casefold()
+        if verb not in {"copy", "import"}:
+            return ()
+        if len(values) < 2:
+            return ()
+        return (values[1],)
+
+    def _guard_config_transfer_access(self, request, session_agent: str, names):
+        """Apply the governed Agent-management rule to every Agent involved."""
+
+        rows = self._load_agent_rows()
+        canonical = {
+            str(row.get("name") or "").casefold(): str(row.get("name") or "")
+            for row in rows
+            if row.get("name")
+        }
+        for name in (session_agent, *names):
+            resolved = canonical.get(str(name or "").casefold())
+            if resolved is None:
+                # Unknown Agents are reported by the command itself.
+                continue
+            denied = self._guard_agent_management_access(request, resolved)
+            if denied is not None:
+                return denied
+        return None
+
+    @staticmethod
     def _workzone_profile_ready(runtime, metadata: dict) -> bool:
         return bool(
             runtime is not None and metadata.get("online") is True
@@ -10388,6 +10430,15 @@ class WorkbenchApiServer:
                 raise SessionNotFound("agent runtime not found")
             if command == "forget":
                 denied = self._guard_agent_management_access(request, str(session["agent_id"]))
+                if denied is not None:
+                    return denied
+            transfer_names = self._config_transfer_agent_names(command, arguments)
+            if transfer_names:
+                # A session the caller may open does not grant management rights
+                # over another project's Agent configuration.
+                denied = self._guard_config_transfer_access(
+                    request, str(session["agent_id"]), transfer_names
+                )
                 if denied is not None:
                     return denied
 

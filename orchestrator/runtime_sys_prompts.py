@@ -380,18 +380,11 @@ def sibling_agent_names(runtime: Any) -> list[str]:
 
 
 def agent_workspace_dir(runtime: Any, agent_name: str) -> Path:
-    """Resolve one sibling Agent's workspace without starting it."""
+    """Resolve one sibling Agent's workspace from its configured directory."""
 
     from orchestrator import runtime_workzone
 
-    live = runtime_workzone.runtime_for_agent(runtime, agent_name)
-    workspace = getattr(live, "workspace_dir", None) if live is not None else None
-    if workspace:
-        return Path(workspace)
-    home = getattr(runtime.global_config, "bridge_home", None)
-    if home:
-        return Path(home) / "workspaces" / str(agent_name)
-    return Path(runtime.workspace_dir).parent / str(agent_name)
+    return runtime_workzone.agent_workspace_dir(runtime, agent_name)
 
 
 def local_manager_for(runtime: Any, agent_name: str) -> SysPromptManager:
@@ -420,6 +413,8 @@ def _sys_transfer_receipt_text(
     source_agent: str,
     target_agent: str,
     plan: list[SlotTransfer],
+    applied: list[SlotTransfer] | None = None,
+    conflicts: list[str] | None = None,
 ) -> str:
     title = ui_language.tr(
         "sys.transfer.title_copy" if verb == "copy" else "sys.transfer.title_import",
@@ -427,19 +422,24 @@ def _sys_transfer_receipt_text(
         target=target_agent,
     )
     lines = [f"<b>{html.escape(title)}</b>"]
-    for item in plan:
-        if item.outcome == "copied":
-            lines.append(
-                ui_language.tr(
-                    "sys.transfer.mapping",
-                    source=f"<code>{html.escape(item.source_slot)}</code>",
-                    target=f"<code>{html.escape(str(item.target_slot))}</code>",
-                    state=ui_language.tr(
-                        "sys.active_suffix" if item.enabled else "sys.inactive_suffix"
-                    ),
-                )
+    written = (
+        list(applied)
+        if applied is not None
+        else [item for item in plan if item.outcome == "copied"]
+    )
+    for item in written:
+        lines.append(
+            ui_language.tr(
+                "sys.transfer.mapping",
+                source=f"<code>{html.escape(item.source_slot)}</code>",
+                target=f"<code>{html.escape(str(item.target_slot))}</code>",
+                state=ui_language.tr(
+                    "sys.active_suffix" if item.enabled else "sys.inactive_suffix"
+                ),
             )
-        elif item.outcome == "duplicate":
+        )
+    for item in plan:
+        if item.outcome == "duplicate":
             lines.append(
                 ui_language.tr(
                     "sys.transfer.duplicate",
@@ -455,7 +455,15 @@ def _sys_transfer_receipt_text(
                     agent=target_agent,
                 )
             )
-    if not any(item.outcome == "copied" for item in plan):
+    for source_slot in conflicts or ():
+        lines.append(
+            ui_language.tr(
+                "sys.transfer.conflict",
+                slot=f"<code>{html.escape(source_slot)}</code>",
+                agent=target_agent,
+            )
+        )
+    if not written:
         lines.append(ui_language.tr("sys.transfer.nothing_copied", agent=target_agent))
     return "\n".join(lines)
 
@@ -482,27 +490,42 @@ async def _cmd_sys_transfer(
                 runtime, update, "sys_transfer_usage", ui_language.tr("sys.transfer.usage")
             )
         manager = runtime.sys_prompt_manager
-        configured = [
-            slot
+        observed = {
+            slot: dict(manager.get_slot(slot))
             for slot in SysPromptManager.SLOTS
             if str(manager.get_slot(slot).get("text") or "").strip()
-        ]
-        if not configured:
+        }
+        if not observed:
             await _reply(
                 runtime,
                 update,
                 ui_language.tr("sys.clear.empty", agent=str(runtime.name)),
             )
             return None
-        for slot in configured:
-            manager.delete(slot)
-        await _reply(
-            runtime,
-            update,
-            ui_language.tr(
-                "sys.clear.done", count=len(configured), agent=str(runtime.name)
-            ),
+        cleared = 0
+        changed: list[str] = []
+        for slot, snapshot in observed.items():
+            # Clear only the text that was enumerated; a slot rewritten after
+            # this observation must survive instead of being deleted blindly.
+            try:
+                manager.delete(slot, expected_slot=snapshot)
+            except SysPromptSemanticConflict:
+                changed.append(slot)
+            else:
+                cleared += 1
+        message = ui_language.tr(
+            "sys.clear.done", count=cleared, agent=str(runtime.name)
         )
+        if changed:
+            message = "\n".join(
+                [
+                    message,
+                    ui_language.tr(
+                        "sys.clear.changed", slots=", ".join(sorted(changed))
+                    ),
+                ]
+            )
+        await _reply(runtime, update, message)
         return None
 
     if len(args) < 2 or len(args) > 3:
@@ -567,12 +590,32 @@ async def _cmd_sys_transfer(
         order=SysPromptManager.SLOTS,
         slot=slot,
     )
+    applied: list[SlotTransfer] = []
+    conflicts: list[str] = []
     for item in plan:
         if item.outcome != "copied":
             continue
-        target_manager.save(str(item.target_slot), str(item.value))
+        target_slot = str(item.target_slot)
+        # Save and activate from the same observation: a slot filled by another
+        # writer after the plan is reported instead of being overwritten.
+        observed = dict(target_manager.get_slot(target_slot))
+        try:
+            target_manager.save(
+                target_slot, str(item.value), expected_slot=observed
+            )
+        except SysPromptSemanticConflict:
+            conflicts.append(str(item.source_slot))
+            continue
         if item.enabled:
-            target_manager.activate(str(item.target_slot))
+            try:
+                target_manager.activate(
+                    target_slot,
+                    expected_slot={"text": str(item.value), "active": False},
+                )
+            except SysPromptSemanticConflict:
+                conflicts.append(str(item.source_slot))
+                continue
+        applied.append(item)
     await _reply(
         runtime,
         update,
@@ -581,6 +624,8 @@ async def _cmd_sys_transfer(
             source_agent=source_agent,
             target_agent=target_agent,
             plan=plan,
+            applied=applied,
+            conflicts=conflicts,
         ),
         parse_mode="HTML",
     )
