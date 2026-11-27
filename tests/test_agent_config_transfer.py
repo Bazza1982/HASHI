@@ -879,6 +879,108 @@ async def test_structured_entry_gates_the_command_line_it_executes(
 
 
 @pytest.mark.asyncio
+async def test_oversized_arguments_are_refused_before_any_formatting(
+    tmp_path, monkeypatch
+):
+    """A refused payload must be rejected before it is serialized and re-parsed.
+
+    The structured command entry point runs on the shared API event loop, so the
+    existing argument-length bound has to stay ahead of the command-text
+    formatting the cross-Agent authorization gate needs.
+    """
+
+    import sys
+
+    from orchestrator import (
+        admin_local_testing,
+        command_interaction_bridge,
+        workbench_api,
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.permissions.human_approval",
+        SimpleNamespace(register_human_approval=lambda *a, **k: None),
+    )
+    workspace = tmp_path / "workspaces" / "agent"
+    workspace.mkdir(parents=True)
+    config = tmp_path / "agents.json"
+    config.write_text(
+        json.dumps(
+            {"agents": [{"name": "agent", "project_id": "p1"}]},
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(name="agent", workspace_dir=workspace)
+    settings = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        deployment_profile="governed",
+        authorized_id=1,
+        instance_id="HASHI1",
+        workbench_port=18800,
+        persistent_session_v1=True,
+    )
+    server = WorkbenchApiServer(
+        config_path=config,
+        global_config=settings,
+        orchestrator=SimpleNamespace(
+            runtimes=[runtime], scheduler=SimpleNamespace(state={})
+        ),
+        secrets={"workbench_admin_token": "test-owner-token"},
+        reconcile_session_runs=False,
+    )
+    server.identity_service = _ScopedTransferIdentity()
+    monkeypatch.setattr(
+        admin_local_testing, "supported_commands", lambda _runtime: {"workzone"}
+    )
+
+    async def fake_dispatch(_runtime, _operation, metadata, **_kwargs):
+        return {"ok": True, "accepted": True}
+
+    monkeypatch.setattr(
+        command_interaction_bridge, "dispatch_command_interaction", fake_dispatch
+    )
+
+    reached: list[str] = []
+
+    def _record_format(*_args, **_kwargs):
+        reached.append("format")
+        raise AssertionError("oversized arguments reached the command formatter")
+
+    def _record_parse(*_args, **_kwargs):
+        reached.append("parse")
+        raise AssertionError("oversized arguments reached the command parser")
+
+    monkeypatch.setattr(
+        admin_local_testing, "_format_slash_command_line", _record_format
+    )
+    monkeypatch.setattr(workbench_api, "parse_slash_command_text", _record_parse)
+
+    session = server.session_store.create_session(
+        owner_id="enterprise:orgadmin", agent_id="agent"
+    )
+    body = {
+        "command": "workzone",
+        "arguments": ["copy", "x" * 5000],
+        "client_id": "client-oversized",
+        "request_id": "request-oversized",
+        "ui_locale": "en",
+        "context_generation": int(session["context_generation"] or 1),
+    }
+    async with TestClient(TestServer(server.app)) as client:
+        response = await client.post(
+            f"/api/v1/sessions/{session['session_id']}/commands",
+            headers={"Authorization": "Bearer orgadmin"},
+            json=body,
+        )
+
+    # Refused by the argument bound itself, before any command text exists.
+    assert response.status == 400, response.status
+    assert reached == []
+
+
+@pytest.mark.asyncio
 async def test_governed_member_cannot_transfer_another_agents_config(governed_api):
     server = governed_api
 

@@ -10415,6 +10415,15 @@ class WorkbenchApiServer:
             evidence_arguments = list(arguments)
             if command == "sys":
                 arguments = normalize_sys_arguments(arguments)
+            if command != "sys" and (
+                len(arguments) > 64
+                or any(len(argument) > 4096 for argument in arguments)
+            ):
+                # Bound the payload before any formatting or parsing work.  This
+                # handler runs on the shared API event loop, so an oversized
+                # argument must be refused cheaply instead of being serialized
+                # and re-parsed first.
+                raise ValueError("command arguments are invalid")
             # Authorization must judge the exact command the handler executes.
             # This endpoint re-serializes the arguments into one slash command
             # line that the executor parses again, so gate on that re-parsed
@@ -10424,11 +10433,6 @@ class WorkbenchApiServer:
 
             command_line = _format_slash_command_line(command, arguments)
             gated_command, gated_arguments = parse_slash_command_text(command_line)
-            if command != "sys" and (
-                len(arguments) > 64
-                or any(len(argument) > 4096 for argument in arguments)
-            ):
-                raise ValueError("command arguments are invalid")
             if not ID_PATTERN.fullmatch(client_id) or not ID_PATTERN.fullmatch(
                 request_id
             ):
