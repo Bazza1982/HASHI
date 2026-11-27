@@ -122,6 +122,19 @@ def _runtime(tmp_path):
     workspace.mkdir(parents=True)
     zone.mkdir()
     (project / "workspaces" / "helper").mkdir(parents=True)
+    # A real instance always has the Agent configuration on disk; a stopped
+    # Agent is resolved from it instead of from a naming convention.
+    (project / "agents.json").write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {"name": "agent", "workspace_dir": "workspaces/agent"},
+                    {"name": "helper", "workspace_dir": "workspaces/helper"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     backend = SimpleNamespace(
         config=SimpleNamespace(extra={}, resolve_access_root=lambda: project),
         capabilities=SimpleNamespace(supports_files=True, supports_sessions=False),
@@ -775,6 +788,240 @@ async def test_governed_member_cannot_transfer_another_agents_config(governed_ap
         assert server._guard_config_transfer_access(
             _Request("admin"), "agent", ("ghost",)
         ) is None
+
+
+# ── review round 2: entry coverage, clear races, effective config, planning ──
+
+
+@pytest.mark.asyncio
+async def test_governed_chat_text_entry_gates_cross_agent_transfers(
+    tmp_path, monkeypatch
+):
+    """A member typing the command into the chat box cannot reach another Agent."""
+
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.permissions.human_approval",
+        SimpleNamespace(register_human_approval=lambda *a, **k: None),
+    )
+    workspace = tmp_path / "workspaces" / "agent"
+    workspace.mkdir(parents=True)
+    (tmp_path / "workspaces" / "helper").mkdir(parents=True)
+    config = tmp_path / "agents.json"
+    config.write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {
+                        "name": "agent",
+                        "workspace_dir": "workspaces/agent",
+                        "project_id": "p1",
+                    },
+                    {
+                        "name": "helper",
+                        "workspace_dir": "workspaces/helper",
+                        "project_id": "p1",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(name="agent", workspace_dir=workspace)
+    settings = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        deployment_profile="governed",
+        authorized_id=1,
+        instance_id="HASHI1",
+        workbench_port=18800,
+        persistent_session_v1=True,
+    )
+    server = WorkbenchApiServer(
+        config_path=config,
+        global_config=settings,
+        orchestrator=SimpleNamespace(
+            runtimes=[runtime], scheduler=SimpleNamespace(state={})
+        ),
+        secrets={"workbench_admin_token": "test-owner-token"},
+        reconcile_session_runs=False,
+    )
+    server.identity_service = _GovernedIdentity()
+
+    async with TestClient(TestServer(server.app)) as client:
+        for text in ("/sys copy helper", "/workzone import helper"):
+            member = await client.post(
+                "/api/chat",
+                headers={"Authorization": "Bearer member"},
+                json={"agent": "agent", "text": text, "source": "api"},
+            )
+            assert member.status == 403
+            body = await member.json()
+            assert body["error"] == "management access required"
+            # The administrator clears the gate; this harness has no live Agent
+            # runtime, so admission fails afterwards with a non-authorization error.
+            admin = await client.post(
+                "/api/chat",
+                headers={"Authorization": "Bearer admin"},
+                json={"agent": "agent", "text": text, "source": "api"},
+            )
+            assert admin.status != 403
+
+
+@pytest.mark.asyncio
+async def test_workzone_clear_keeps_slots_rewritten_during_the_clear(
+    tmp_path, monkeypatch
+):
+    """A slot written after the clear enumerated the profile must survive."""
+
+    runtime = _runtime(tmp_path)
+    _set_slot(runtime, "main", runtime.zone)
+    _set_slot(runtime, "2", runtime.zone)
+    other = runtime.global_config.project_root / "other"
+    other.mkdir()
+    store = _store(runtime)
+    original = store.delete_agent_workzone_slot
+    calls = {"n": 0}
+
+    def concurrent(
+        *, owner_id, agent_id, slot_id, expected_revision=None, source="telegram"
+    ):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # A normal edit lands after the profile was enumerated: slot "2" is
+            # now a different directory than the one this clear observed.
+            store.set_agent_workzone_slot(
+                owner_id=owner_id,
+                agent_id=agent_id,
+                slot_id="2",
+                path=str(other),
+                enabled=True,
+            )
+        return original(
+            owner_id=owner_id,
+            agent_id=agent_id,
+            slot_id=slot_id,
+            expected_revision=expected_revision,
+            source=source,
+        )
+
+    monkeypatch.setattr(store, "delete_agent_workzone_slot", concurrent)
+
+    await workzone_runtime.cmd_workzone(runtime, _update(), _context("clear"))
+
+    assert _paths(_workzone_state(runtime)) == {
+        "main": str(runtime.zone.resolve()),
+        "2": str(other.resolve()),
+    }
+    assert "Cleared 0" in runtime.replies[-1]["text"]
+    assert "changed while this clear was running" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_sys_clear_deletes_only_the_text_it_enumerated(tmp_path):
+    """Each slot is read once: a write landing between two reads must survive."""
+
+    runtime = _runtime(tmp_path)
+    manager = runtime.sys_prompt_manager
+    manager.save("1", "first")
+    manager.save("2", "second")
+    original_get = manager.get_slot
+    state = {"rewritten": False}
+
+    def raced_get(slot):
+        snapshot = original_get(slot)
+        if slot == "1" and not state["rewritten"]:
+            state["rewritten"] = True
+            SysPromptManager(state_path=manager.state_path).replace("1", "rewritten")
+        return snapshot
+
+    manager.get_slot = raced_get
+
+    await cmd_sys(runtime, _sys_update("/sys clear"), _context())
+
+    texts = _texts(SysPromptManager(state_path=manager.state_path))
+    assert texts == {"1": "rewritten"}
+    assert "left untouched" in runtime.replies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_sys_copy_reads_the_effective_config_when_it_lives_elsewhere(tmp_path):
+    """The configured workspace wins over <bridge_home>/workspaces/<name>."""
+
+    runtime = _runtime(tmp_path)
+    config_dir = tmp_path / "instance-config"
+    config_dir.mkdir()
+    helper_home = config_dir / "helper-home"
+    helper_home.mkdir()
+    (config_dir / "agent-home").mkdir()
+    config = config_dir / "agents.json"
+    config.write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {"name": "agent", "workspace_dir": "agent-home"},
+                    {"name": "helper", "workspace_dir": "helper-home"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime.global_config.config_path = config
+    runtime.sys_prompt_manager.save("1", "one")
+
+    await cmd_sys(runtime, _sys_update("/sys copy helper"), _context())
+
+    assert _texts(SysPromptManager(state_path=helper_home / "sys_prompts.json")) == {
+        "1": "one"
+    }
+    guessed = (
+        runtime.global_config.bridge_home / "workspaces" / "helper" / "sys_prompts.json"
+    )
+    assert _texts(SysPromptManager(state_path=guessed)) == {}
+
+
+@pytest.mark.asyncio
+async def test_workzone_copy_validates_directories_before_choosing_slots(tmp_path):
+    """An unusable source directory must not consume the last free slot."""
+
+    runtime = _runtime(tmp_path)
+    project = runtime.global_config.project_root
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    _set_slot(runtime, "main", gone)
+    gone.rmdir()
+    _set_slot(runtime, "1", runtime.zone)
+    for slot in ("main", "1", "2", "3", "4", "5", "6", "7", "8"):
+        target_dir = project / f"helper-{slot}"
+        target_dir.mkdir()
+        _set_slot(runtime, slot, target_dir, agent="helper")
+
+    await workzone_runtime.cmd_workzone(runtime, _update(), _context("copy", "helper"))
+
+    assert _paths(_workzone_state(runtime, "helper"))["9"] == str(
+        runtime.zone.resolve()
+    )
+    assert "no free Workzone slot" not in runtime.replies[-1]["text"]
+    assert "does not exist" in runtime.replies[-1]["text"]
+
+
+def test_config_transfer_parser_matches_the_handler_grammar():
+    from orchestrator.sys_command_contract import config_transfer_target_agent
+
+    assert config_transfer_target_agent("workzone", ["copy", "helper"]) == "helper"
+    assert config_transfer_target_agent("workzone", ["import", "helper", "3"]) == "helper"
+    # The handler drops blank arguments before parsing its verb.
+    assert (
+        config_transfer_target_agent("workzone", ["copy", "", "helper"]) == "helper"
+    )
+    assert config_transfer_target_agent("sys", ["local", "copy", "helper"]) == "helper"
+    assert config_transfer_target_agent("sys", ["L", "import", "helper"]) == "helper"
+    assert config_transfer_target_agent("sys", ["global", "copy", "helper"]) is None
+    assert config_transfer_target_agent("sys", ["clear"]) is None
+    assert config_transfer_target_agent("workzone", ["clear"]) is None
+    assert config_transfer_target_agent("model", ["copy", "helper"]) is None
 
 
 class _Request:

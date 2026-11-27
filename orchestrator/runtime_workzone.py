@@ -970,16 +970,46 @@ def sibling_agent_names(runtime: Any) -> list[str]:
     return names
 
 
+class AgentWorkspaceUnavailable(ValueError):
+    """A sibling Agent's configured workspace could not be resolved."""
+
+
+def _agent_config_document_path(runtime: Any) -> Path | None:
+    """Return the Agent configuration actually in effect for this instance.
+
+    ``bridge_home`` and the configuration file can live in different
+    directories (``pathing.resolve_home_file`` supports that layout). Reading
+    ``bridge_home/agents.json`` unconditionally resolves a stopped Agent to the
+    wrong home whenever the effective configuration sits somewhere else.
+    """
+
+    global_config = getattr(runtime, "global_config", None)
+    candidates: list[Path] = []
+    config_path = getattr(global_config, "config_path", None)
+    if config_path:
+        candidates.append(Path(config_path))
+    bridge_home = getattr(global_config, "bridge_home", None)
+    if bridge_home:
+        candidates.append(Path(bridge_home) / "agents.json")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def agent_rows_from_json(runtime: Any) -> list[dict[str, Any]]:
     """Return the configured Agent rows without starting any Agent."""
 
     import json
 
-    home = getattr(runtime.global_config, "bridge_home", None)
-    if not home:
+    path = _agent_config_document_path(runtime)
+    if path is None:
         return []
     try:
-        document = json.loads((Path(home) / "agents.json").read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return []
     rows = document.get("agents") if isinstance(document, dict) else None
@@ -1028,25 +1058,48 @@ def agent_workspace_dir(runtime: Any, agent_name: str) -> Path:
         ),
         None,
     )
-    if row is not None:
-        global_config = getattr(runtime, "global_config", None)
-        bridge_home = getattr(global_config, "bridge_home", None)
-        config_path = getattr(global_config, "config_path", None)
-        if bridge_home:
-            try:
-                resolved = resolve_path_value(
-                    row.get("workspace_dir"),
-                    config_dir=Path(config_path).parent if config_path else Path(bridge_home),
-                    bridge_home=Path(bridge_home),
-                )
-            except (OSError, ValueError):
-                resolved = None
-            if resolved is not None:
-                return resolved
-    home = getattr(getattr(runtime, "global_config", None), "bridge_home", None)
-    if home:
-        return Path(home) / "workspaces" / str(agent_name)
-    return Path(runtime.workspace_dir).parent / str(agent_name)
+    global_config = getattr(runtime, "global_config", None)
+    bridge_home = getattr(global_config, "bridge_home", None)
+    config_path = getattr(global_config, "config_path", None)
+    if row is None:
+        # No configured row means the home is unknown. Returning a conventional
+        # guess here writes another Agent's prompts into the wrong directory and
+        # reports success, so stop instead.
+        raise AgentWorkspaceUnavailable(
+            ui_language.tr(
+                "workzone.transfer.workspace_unresolved", agent=str(agent_name)
+            )
+        )
+    try:
+        resolved = resolve_path_value(
+            row.get("workspace_dir"),
+            config_dir=Path(config_path).parent if config_path else Path(bridge_home),
+            bridge_home=Path(bridge_home),
+        )
+    except (OSError, ValueError):
+        resolved = None
+    if resolved is not None:
+        return resolved
+    if bridge_home:
+        # The documented default for an Agent without workspace_dir.
+        return Path(bridge_home) / "workspaces" / str(agent_name)
+    raise AgentWorkspaceUnavailable(
+        ui_language.tr(
+            "workzone.transfer.workspace_unresolved", agent=str(agent_name)
+        )
+    )
+
+
+def _rejected_transfer(entry: SourceSlot) -> SlotTransfer:
+    """Represent a source slot dropped before any placement was chosen."""
+
+    return SlotTransfer(
+        source_slot=entry.slot,
+        target_slot=None,
+        value=entry.value,
+        enabled=entry.enabled,
+        outcome="rejected",
+    )
 
 
 def _resolve_transfer_agent(runtime: Any, raw_name: str) -> str:
@@ -1165,26 +1218,44 @@ async def _workzone_transfer(
             return
         store = runtime_session.ensure_store(runtime)
         after = normalize_workzone_state(state)
+        revision = int(after.get("revision") or 0)
+        cleared = 0
+        conflict: str | None = None
         for slot in configured:
-            after = normalize_workzone_state(
-                store.delete_agent_workzone_slot(
+            try:
+                updated = store.delete_agent_workzone_slot(
                     owner_id=str(owner_id),
                     agent_id=runtime.name,
                     slot_id=slot,
+                    # Delete only the profile revision this command enumerated;
+                    # a concurrent write keeps its slots instead of being erased.
+                    expected_revision=revision,
                     source="workzone_clear",
                 )
+            except SessionConflict as exc:
+                conflict = str(exc)
+                break
+            after = normalize_workzone_state(updated)
+            revision = int(after.get("revision") or revision)
+            cleared += 1
+        notice = ui_language.tr(
+            "workzone.clear.done", count=cleared, agent=runtime.name
+        )
+        if conflict is not None:
+            notice = "\n".join(
+                [
+                    notice,
+                    ui_language.tr(
+                        "workzone.clear.conflict", agent=runtime.name, reason=conflict
+                    ),
+                ]
             )
         deferred = await _activate_state(runtime, state, after)
         await _reply_overview(
             runtime,
             update,
             after,
-            notice=_mutation_notice(
-                ui_language.tr(
-                    "workzone.clear.done", count=len(configured), agent=runtime.name
-                ),
-                deferred=deferred,
-            ),
+            notice=_mutation_notice(notice, deferred=deferred),
         )
         return
 
@@ -1233,8 +1304,30 @@ async def _workzone_transfer(
         if target_agent == runtime.name
         else agent_state_for(runtime, owner_id=owner_id, agent_id=target_agent)
     )
+    project_root = runtime.global_config.project_root
+    try:
+        target_workspace = agent_workspace_dir(runtime, target_agent)
+    except AgentWorkspaceUnavailable as exc:
+        raise ValueError(str(exc)) from exc
+    # Resolve every source directory against the receiving Agent before a slot
+    # is chosen: an unusable directory must not consume a free target slot and
+    # then be reported as "target full".
+    usable: list[SourceSlot] = []
+    pre_rejected: list[tuple[SlotTransfer, str]] = []
+    for entry in entries:
+        try:
+            resolve_workzone_input(str(entry.value), project_root, target_workspace)
+        except workzone_module.WorkzonePathError as exc:
+            pre_rejected.append(
+                (_rejected_transfer(entry), str(getattr(exc, "reason", "") or exc))
+            )
+            continue
+        except (OSError, ValueError) as exc:
+            pre_rejected.append((_rejected_transfer(entry), str(exc)))
+            continue
+        usable.append(entry)
     plan = plan_slot_transfer(
-        source_slots=entries,
+        source_slots=usable,
         target_slot_ids=[item["slot_id"] for item in target_state["slots"]],
         target_values=[item["path"] for item in target_state["slots"]],
         order=_workzone_slot_ids(),
@@ -1243,11 +1336,9 @@ async def _workzone_transfer(
     )
 
     store = runtime_session.ensure_store(runtime)
-    target_workspace = agent_workspace_dir(runtime, target_agent)
-    project_root = runtime.global_config.project_root
     revision = int(target_state.get("revision") or 0)
     applied: list[SlotTransfer] = []
-    rejected: list[tuple[SlotTransfer, str]] = []
+    rejected: list[tuple[SlotTransfer, str]] = list(pre_rejected)
     conflict: str | None = None
     after = normalize_workzone_state(target_state)
     for item in plan:

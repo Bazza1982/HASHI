@@ -1556,6 +1556,8 @@
     "workzone.transfer.deferred": "{agent} is applying this on its next request and keeps its current Workzones until then.",
     "workzone.clear.done": "Cleared {count} Workzone slot(s) from {agent}. No directory or file on disk was deleted.",
     "workzone.clear.empty": "{agent} has no configured Workzone slots.",
+    "workzone.clear.conflict": "{agent} changed while this clear was running; the remaining slots were left untouched ({reason}).",
+    "workzone.transfer.workspace_unresolved": "Cannot resolve the configured workspace of {agent}, so no configuration was changed.",
     "memory.button.today": "View today",
     "memory.button.carryover": "View carryover",
     "memory.button.history": "History",

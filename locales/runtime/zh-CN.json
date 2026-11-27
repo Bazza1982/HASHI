@@ -1556,6 +1556,8 @@
     "workzone.transfer.deferred": "{agent} 正在运行，将在下一个请求时启用，之前仍使用现有 Workzone。",
     "workzone.clear.done": "已清空 {agent} 的 {count} 个 Workzone 槽位配置；磁盘上的目录和文件没有任何删除。",
     "workzone.clear.empty": "{agent} 没有已配置的 Workzone 槽位。",
+    "workzone.clear.conflict": "{agent} 在清空过程中被修改，其余槽位未被删除（{reason}）。",
+    "workzone.transfer.workspace_unresolved": "无法确定 {agent} 配置的工作目录，因此没有修改任何配置。",
     "memory.button.today": "查看今日记录",
     "memory.button.carryover": "查看待续事项",
     "memory.button.history": "历史",

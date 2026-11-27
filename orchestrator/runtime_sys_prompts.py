@@ -30,12 +30,15 @@ from orchestrator.slash_command_audit import (
     parse_slash_command_text,
 )
 from orchestrator.sys_command_contract import (
+    SYS_GLOBAL_SCOPE_ALIASES,
+    SYS_LOCAL_SCOPE_ALIASES,
     SysCommandContractError,
     normalize_sys_arguments,
 )
 
-GLOBAL_SCOPE_ALIASES = frozenset({"global", "g"})
-LOCAL_SCOPE_ALIASES = frozenset({"local", "l"})
+# One definition, shared with the authorization gate in the API layer.
+GLOBAL_SCOPE_ALIASES = SYS_GLOBAL_SCOPE_ALIASES
+LOCAL_SCOPE_ALIASES = SYS_LOCAL_SCOPE_ALIASES
 logger = logging.getLogger("BridgeU.SysPrompt")
 
 
@@ -490,11 +493,14 @@ async def _cmd_sys_transfer(
                 runtime, update, "sys_transfer_usage", ui_language.tr("sys.transfer.usage")
             )
         manager = runtime.sys_prompt_manager
-        observed = {
-            slot: dict(manager.get_slot(slot))
-            for slot in SysPromptManager.SLOTS
-            if str(manager.get_slot(slot).get("text") or "").strip()
-        }
+        observed: dict[str, dict[str, object]] = {}
+        for slot in SysPromptManager.SLOTS:
+            # Read each slot exactly once: the snapshot used to decide what to
+            # delete must be the same read, or a write landing between two reads
+            # would be deleted as if it had been enumerated.
+            snapshot = dict(manager.get_slot(slot))
+            if str(snapshot.get("text") or "").strip():
+                observed[slot] = snapshot
         if not observed:
             await _reply(
                 runtime,
@@ -558,8 +564,16 @@ async def _cmd_sys_transfer(
             ui_language.tr("sys.transfer.same_agent", agent=source_agent),
         )
 
-    source_manager = local_manager_for(runtime, source_agent)
-    target_manager = local_manager_for(runtime, target_agent)
+    from orchestrator.runtime_workzone import AgentWorkspaceUnavailable
+
+    try:
+        source_manager = local_manager_for(runtime, source_agent)
+        target_manager = local_manager_for(runtime, target_agent)
+    except AgentWorkspaceUnavailable as exc:
+        # Never fall back to a guessed directory: report and change nothing.
+        return await _reject(
+            runtime, update, "sys_transfer_workspace_unresolved", str(exc)
+        )
     entries = [
         SourceSlot(
             slot=str(item["slot"]),

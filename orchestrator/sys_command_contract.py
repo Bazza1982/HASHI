@@ -12,7 +12,14 @@ from collections.abc import Iterable
 MAX_SYS_PROMPT_CHARS = 65_536
 MAX_SYS_COMMAND_CHARS = MAX_SYS_PROMPT_CHARS + 256
 SYS_TEXT_ACTIONS = frozenset({"save", "replace"})
-SYS_SCOPE_ALIASES = frozenset({"global", "g", "local", "l"})
+SYS_GLOBAL_SCOPE_ALIASES = frozenset({"global", "g"})
+SYS_LOCAL_SCOPE_ALIASES = frozenset({"local", "l"})
+SYS_SCOPE_ALIASES = SYS_GLOBAL_SCOPE_ALIASES | SYS_LOCAL_SCOPE_ALIASES
+
+# Commands that can move another Agent's configuration, and the verbs that do it.
+# `clear` never names a second Agent, so it needs no cross-Agent authorization.
+CONFIG_TRANSFER_COMMANDS = frozenset({"sys", "workzone"})
+CONFIG_TRANSFER_VERBS = frozenset({"copy", "import"})
 
 
 class SysCommandContractError(ValueError):
@@ -136,6 +143,42 @@ def normalize_sys_arguments(arguments: Iterable[object]) -> list[str]:
     return [*prefix, _validate_prompt_text(body)]
 
 
+def config_transfer_target_agent(
+    command: str, arguments: Iterable[str] | None
+) -> str | None:
+    """Return the sibling Agent a cross-Agent config transfer names.
+
+    One parser serves both the authorization gate and the command handlers, so a
+    permission check can never inspect a different Agent than the one the
+    handler will read or write. ``None`` means the command touches no other
+    Agent (or is malformed, which the handler rejects on its own).
+    """
+
+    name = str(command or "").casefold()
+    if name not in CONFIG_TRANSFER_COMMANDS:
+        return None
+    values = [str(item) for item in arguments or ()]
+    if name == "sys":
+        try:
+            values = normalize_sys_arguments(values)
+        except SysCommandContractError:
+            # The handler reports this typed failure itself; it is not a transfer.
+            return None
+        if values and values[0].casefold() in SYS_GLOBAL_SCOPE_ALIASES:
+            # `/sys global` is refused by the handler itself.
+            return None
+        if values and values[0].casefold() in SYS_LOCAL_SCOPE_ALIASES:
+            values = values[1:]
+    else:
+        # `/workzone` drops blank arguments before it parses its verb.
+        values = [item.strip() for item in values if item.strip()]
+    if len(values) < 2:
+        return None
+    if values[0].casefold() not in CONFIG_TRANSFER_VERBS:
+        return None
+    return values[1]
+
+
 def is_sys_command_line(command_line: str) -> bool:
     match = re.match(r"^\s*/([^\s]+)", str(command_line or ""))
     return bool(match and match.group(1).split("@", 1)[0].casefold() == "sys")
@@ -165,12 +208,18 @@ def validate_command_line_length(command_line: str, *, default: int = 16_384) ->
 
 
 __all__ = [
+    "CONFIG_TRANSFER_COMMANDS",
+    "CONFIG_TRANSFER_VERBS",
     "MAX_SYS_COMMAND_CHARS",
     "MAX_SYS_PROMPT_CHARS",
+    "SYS_GLOBAL_SCOPE_ALIASES",
+    "SYS_LOCAL_SCOPE_ALIASES",
     "SysCommandContractError",
     "command_line_limit",
+    "config_transfer_target_agent",
     "is_sys_command_line",
     "normalize_sys_arguments",
     "parse_sys_command_arguments",
     "validate_command_line_length",
 ]
+# HASHI-Fingerprint: hfp_535bd45326c54db5bbdcb9b4d655636c
