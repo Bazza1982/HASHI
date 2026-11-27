@@ -590,6 +590,160 @@ async def test_slow_db_and_spin_alerting_escalates_warning_and_surfaces_in_healt
         frontend_database.reset_database_work_metrics()
 
 
+def _drive_zero_progress_loop(
+    *, iterations: int, duration_s: float, gap_s: float, start: float = 1000.0
+) -> float:
+    """Feed the real production predicate with synthetic zero-progress iterations."""
+    now = start
+    for index in range(iterations):
+        if index:
+            now += gap_s
+        frontend_database.record_loop_zero_progress(
+            operation="telegram.scan",
+            instance="HASHI_EFF_TEST",
+            role="worker",
+            duration_s=duration_s,
+            items_processed=0,
+            now=now,
+        )
+    return now
+
+
+def test_idle_backoff_and_slow_scan_with_real_wait_never_raise_spin_alert(caplog):
+    """A scan that is merely slow is idle when the loop really waits afterwards."""
+    frontend_database.reset_database_work_metrics()
+    try:
+        with caplog.at_level(logging.WARNING, logger=frontend_database.logger.name):
+            # Realistic active-agent cadence: 76ms scan, 15s between sweeps.
+            last = _drive_zero_progress_loop(iterations=40, duration_s=0.076, gap_s=15.0)
+            assert frontend_database.resource_alerts(now=last + 0.001) == []
+            # Idle worker at the 60s backoff ceiling.
+            last = _drive_zero_progress_loop(
+                iterations=10, duration_s=0.080, gap_s=60.0, start=last + 61.0
+            )
+            assert frontend_database.resource_alerts(now=last + 0.001) == []
+            # A genuinely slow scan followed by a 32s real wait is not a spin either.
+            last = _drive_zero_progress_loop(
+                iterations=5, duration_s=0.060, gap_s=32.0, start=last + 61.0
+            )
+            assert frontend_database.resource_alerts(now=last + 0.001) == []
+        assert not [
+            record
+            for record in caplog.records
+            if "idle_loop_spin" in record.getMessage()
+        ], "Slow scans followed by real waits must never emit a spin warning"
+    finally:
+        frontend_database.reset_database_work_metrics()
+
+
+def test_tight_zero_progress_loop_raises_structured_spin_alert(caplog):
+    """A loop that never waits is reported even when every scan is very fast."""
+    frontend_database.reset_database_work_metrics()
+    try:
+        with caplog.at_level(logging.WARNING, logger=frontend_database.logger.name):
+            last = _drive_zero_progress_loop(iterations=600, duration_s=0.003, gap_s=0.003)
+        alerts = [
+            alert
+            for alert in frontend_database.resource_alerts(now=last + 0.001)
+            if alert["code"] == "idle_loop_spin"
+        ]
+        assert len(alerts) == 1, alerts
+        alert = alerts[0]
+        assert alert["operation"] == "telegram.scan"
+        assert alert["component"] == "background_loop"
+        assert alert["details"]["duty_cycle_pct"] >= 99.0
+        assert alert["details"]["busy_s"] >= 1.0
+        assert alert["details"]["zero_progress_iterations"] >= 300
+        assert "zero-result iterations" in alert["summary"]
+
+        snapshot = frontend_database.database_work_health_snapshot(now=last + 0.001)
+        assert any(
+            entry["code"] == "idle_loop_spin" for entry in snapshot["alerts"]
+        ), "The spin must surface through the read-only health projection"
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if "idle_loop_spin" in record.getMessage()
+        ]
+        assert warnings, "The spin must escalate to a WARNING log"
+        assert "operation=telegram.scan" in warnings[0]
+        assert "duty_cycle=100.0%" in warnings[0]
+        assert "threshold=80%" in warnings[0]
+        assert "zero deliveries" in warnings[0]
+
+        # The alert is not sticky: a quiet loop retires it.
+        assert frontend_database.resource_alerts(now=last + 61.0) == []
+    finally:
+        frontend_database.reset_database_work_metrics()
+
+
+def test_zero_progress_spin_alert_clears_as_soon_as_the_loop_delivers():
+    frontend_database.reset_database_work_metrics()
+    try:
+        last = _drive_zero_progress_loop(iterations=600, duration_s=0.003, gap_s=0.003)
+        assert any(
+            alert["code"] == "idle_loop_spin"
+            for alert in frontend_database.resource_alerts(now=last + 0.001)
+        )
+        frontend_database.record_loop_zero_progress(
+            operation="telegram.scan",
+            instance="HASHI_EFF_TEST",
+            role="worker",
+            duration_s=0.004,
+            items_processed=1,
+            now=last + 0.004,
+        )
+        assert frontend_database.resource_alerts(now=last + 0.005) == []
+    finally:
+        frontend_database.reset_database_work_metrics()
+
+
+def test_single_slow_scan_is_not_enough_evidence_for_a_spin_alert():
+    frontend_database.reset_database_work_metrics()
+    try:
+        now = 1000.0
+        frontend_database.record_loop_zero_progress(
+            operation="telegram.scan",
+            instance="HASHI_EFF_TEST",
+            role="worker",
+            duration_s=0.65,
+            items_processed=0,
+            now=now,
+        )
+        assert frontend_database.resource_alerts(now=now + 0.001) == [], (
+            "One sample has no wall-clock gap and therefore no duty-cycle evidence"
+        )
+        now += 2.0
+        frontend_database.record_loop_zero_progress(
+            operation="telegram.scan",
+            instance="HASHI_EFF_TEST",
+            role="worker",
+            duration_s=0.65,
+            items_processed=0,
+            now=now,
+        )
+        assert frontend_database.resource_alerts(now=now + 0.001) == [], (
+            "A 650ms scan followed by a 2s wait is 24% duty cycle, not a spin"
+        )
+    finally:
+        frontend_database.reset_database_work_metrics()
+
+
+def test_quiet_gap_resets_the_spin_window_instead_of_accumulating_stale_busy_time():
+    frontend_database.reset_database_work_metrics()
+    try:
+        last = _drive_zero_progress_loop(iterations=2, duration_s=0.6, gap_s=0.6)
+        assert frontend_database.resource_alerts(now=last + 0.001) == []
+        # 120s quiet gap: the previous 0.6s of busy time must not count again.
+        last = _drive_zero_progress_loop(
+            iterations=2, duration_s=0.6, gap_s=0.6, start=last + 120.0
+        )
+        assert frontend_database.resource_alerts(now=last + 0.001) == []
+    finally:
+        frontend_database.reset_database_work_metrics()
+
+
 # ---------------------------------------------------------------------------
 # 9. P2 Multi-Agent SQLite scan isolation across 6 stress/correctness scenarios
 # ---------------------------------------------------------------------------
@@ -1560,3 +1714,4 @@ def test_worker_activate_decorator_placement_and_timing_tag():
         for cell in (activate_fn.__closure__ or ())
     ]
     assert "worker.activate" in closure_values, f"Expected 'worker.activate' timing label, got {closure_values}"
+# HASHI-Fingerprint: hfp_49f94ad495c74c2baa49168a9e189b75
