@@ -329,6 +329,10 @@ class HalService:
 
     async def _process_owner(self, owner_id: str) -> bool:
         """One bounded feed check + deterministic planning + idempotent apply."""
+        # The API can listen before the shared Function generation commits its
+        # Worker routes. Keep the cursor intact until those routes are ready.
+        if not self.dispatch.ready_for_events():
+            return False
         activity = False
         try:
             cursor = await asyncio.to_thread(self.store.get_cursor, owner_id)
@@ -459,6 +463,7 @@ class HalService:
             list(execs_by_id.values()),
             list(receipts.values()),
             _flatten_consumed(consumed),
+            current_instance=self._current_instance_id() or None,
         )
         # A rule disabled concurrently (between the rule load and this dispatch)
         # must not fire again. Re-check the store's enabled state for exactly the

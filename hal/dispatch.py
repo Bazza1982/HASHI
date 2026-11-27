@@ -123,6 +123,9 @@ class DispatchResult:
 class DispatchAdapter:
     """Abstract adapter; the service only depends on this surface."""
 
+    def ready_for_events(self) -> bool:
+        return True
+
     async def dispatch_prompt(
         self,
         *,
@@ -186,6 +189,12 @@ class GatewayDispatchAdapter(DispatchAdapter):
         self._server = server
         self._logger = logger or getattr(server, "logger", None) or logging.getLogger("hal.dispatch")
 
+    def ready_for_events(self) -> bool:
+        application = getattr(self._server, "orchestrator", None)
+        return bool(getattr(application, "_shared_committed", True)) and not getattr(
+            application, "_handoff_draining", False
+        )
+
     def _runtime_for(self, agent_name: str | None):
         runtimes = self._server._runtime_map()
         if not runtimes:
@@ -211,11 +220,13 @@ class GatewayDispatchAdapter(DispatchAdapter):
     ) -> DispatchResult:
         runtime = self._runtime_for(target_agent)
         if runtime is None:
-            return DispatchResult(
-                accepted=False,
-                transient=False,
-                detail=f"prompt target @{target_agent} has no live runtime on this instance",
+            application = getattr(self._server, "orchestrator", None)
+            starting = target_agent.casefold() in getattr(application, "_startup_tasks", {})
+            detail = (
+                f"prompt target @{target_agent} is starting" if starting
+                else f"prompt target @{target_agent} has no live runtime on this instance"
             )
+            return DispatchResult(accepted=False, transient=starting, detail=detail)
         # Delivery follows the target Agent's own durable binding. A
         # Workbench-only Agent has no Telegram route, and HAL must neither
         # invent one nor pass the unresolved 0 sentinel as a channel.

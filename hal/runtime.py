@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from hal import compile_hal, entry_matches, HALSyntaxError
+from hal.language import source_matches
 from hal.event_source import (
     EVENT_SYSTEM_IDLE,
     HalTrigger,
@@ -120,23 +121,6 @@ def validate_script(script: str) -> dict[str, Any]:
                     "event_source": reason,
                 }
             )
-            if (
-                rule.source_agent
-                and rule.source_agent != "@agent_any"
-                and "@" not in rule.source_agent[1:]
-            ):
-                diagnostics.append(
-                    {
-                        "workflow": index,
-                        "kind": "bare_source_name",
-                        "stage": stage_index,
-                        "message": (
-                            f"source {rule.source_agent} has no instance qualifier; "
-                            "canonical event identities are @name@instance, so this "
-                            "rule may never match"
-                        ),
-                    }
-                )
         entry_ok = stages[0]["event_available"]
         if not entry_ok:
             diagnostics.append(
@@ -191,6 +175,8 @@ def plan_for_trigger(
     execs: Sequence[Mapping[str, Any]],
     receipts: Sequence[Mapping[str, Any]],
     consumed: set[tuple[str, str]],
+    *,
+    current_instance: str | None = None,
 ) -> tuple[list[CreateIntent], list[AdvanceIntent], list[Hint]]:
     """Compute deterministic intents for one trigger. No side effects."""
     creates: list[CreateIntent] = []
@@ -217,7 +203,11 @@ def plan_for_trigger(
             program = rule_row["program"]
             for workflow_index, workflow in enumerate(program.workflows):
                 entry = workflow[0]
-                if not entry_matches(entry, _trigger_as_hal_event(trigger)):
+                if not entry_matches(
+                    entry,
+                    _trigger_as_hal_event(trigger),
+                    current_instance=current_instance,
+                ):
                     continue
                 if trigger.event == EVENT_SYSTEM_IDLE and entry.source_agent is not None:
                     continue  # compiler guarantees this, but stay explicit
@@ -282,7 +272,11 @@ def plan_for_trigger(
         if trigger.event in _AGENT_EVENTS:
             if not _correlates_with_previous_stage(exec_row, stage, trigger, receipt_by_exec_stage):
                 continue
-            if not _dependent_source_matches(rule, trigger):
+            if not _dependent_source_matches(
+                rule,
+                trigger,
+                current_instance=current_instance,
+            ):
                 continue
         else:
             # System events carry no per-workflow correlation evidence; an
@@ -409,20 +403,22 @@ def _correlates_with_previous_stage(
     return True
 
 
-def _dependent_source_matches(rule, trigger: HalTrigger) -> bool:
+def _dependent_source_matches(
+    rule,
+    trigger: HalTrigger,
+    *,
+    current_instance: str | None = None,
+) -> bool:
     """A dependent stage's declared source Agent must match the correlated run.
 
-    Mirrors the entry-rule source semantics: an unrelated Agent carrying the
-    same correlation key must never advance (or fail-hint) the workflow. A
-    missing declaration means "any source" only for stage 0 entry rules; for a
-    dependent stage the correlation key alone is not sufficient proof of origin.
+    A declared source uses the same matching rules as an entry stage.
+    The caller independently verifies the previous stage's correlation key.
     """
-    source_agent = getattr(rule, "source_agent", None)
-    if source_agent is None:
-        return True
-    if source_agent == "@agent_any":
-        return bool(trigger.agent_identity)
-    return source_agent == trigger.agent_identity
+    return source_matches(
+        rule.source_agent,
+        trigger.agent_identity,
+        current_instance=current_instance,
+    )
 
 
 def stage_after_dispatch(stage: int, workflow_length: int) -> tuple[int, str]:

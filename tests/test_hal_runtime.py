@@ -102,6 +102,96 @@ def test_specific_source_requires_matching_agent():
     assert len(creates) == 1
 
 
+def test_bare_source_matches_only_current_instance_for_entry_and_dependent_stage():
+    entry_rule = _enabled_rule('if @lily #turn_finish then @bob $prompt "go".')
+    local_evt = HalTrigger(
+        event="#turn_finish",
+        agent_identity="@lily@hashi4",
+        feed_event_id="evt-local",
+        feed_kind="run.completed",
+        run_idempotency_key=None,
+        automation_origin=False,
+    )
+    remote_evt = HalTrigger(
+        event="#turn_finish",
+        agent_identity="@lily@hashi5",
+        feed_event_id="evt-remote",
+        feed_kind="run.completed",
+        run_idempotency_key=None,
+        automation_origin=False,
+    )
+    creates_local, _, _ = plan_for_trigger(
+        local_evt, [entry_rule], [], [], set(), current_instance="HASHI4"
+    )
+    creates_remote, _, _ = plan_for_trigger(
+        remote_evt, [entry_rule], [], [], set(), current_instance="HASHI4"
+    )
+    assert len(creates_local) == 1
+    assert creates_remote == []
+
+    # Dependent stages: bare @lily only matches local @lily@HASHI4, never remote @lily@HASHI5;
+    # qualified @lily@HASHI5 matches remote @lily@HASHI5; @agent_any matches either.
+    bare_program = compile_hal(
+        'if @agent_any #turn_finish then @lily@HASHI5 $prompt "start"; '
+        'if @lily #turn_finish then @bob $prompt "next".'
+    )
+    exec_row = _exec(stage=1, program=bare_program)
+    receipt = {"exec_id": "hx1", "stage": 0, "idempotency_key": "hal:hx1:0"}
+
+    remote_correlated = HalTrigger(
+        event="#turn_finish",
+        agent_identity="@lily@HASHI5",
+        feed_event_id="evt-peer",
+        feed_kind="run.completed",
+        run_idempotency_key="hal:hx1:0",
+        automation_origin=True,
+    )
+    local_correlated = HalTrigger(
+        event="#turn_finish",
+        agent_identity="@lily@HASHI4",
+        feed_event_id="evt-loc",
+        feed_kind="run.completed",
+        run_idempotency_key="hal:hx1:0",
+        automation_origin=True,
+    )
+    _, adv_remote_bare, _ = plan_for_trigger(
+        remote_correlated, [], [exec_row], [receipt], set(), current_instance="HASHI4"
+    )
+    assert adv_remote_bare == []
+    _, adv_local_bare, _ = plan_for_trigger(
+        local_correlated, [], [exec_row], [receipt], set(), current_instance="HASHI4"
+    )
+    assert len(adv_local_bare) == 1
+
+    qualified_program = compile_hal(
+        'if @agent_any #turn_finish then @lily@HASHI5 $prompt "start"; '
+        'if @lily@HASHI5 #turn_finish then @bob $prompt "next".'
+    )
+    _, adv_remote_qualified, _ = plan_for_trigger(
+        remote_correlated,
+        [],
+        [_exec(stage=1, program=qualified_program)],
+        [receipt],
+        set(),
+        current_instance="HASHI4",
+    )
+    assert len(adv_remote_qualified) == 1
+
+    any_program = compile_hal(
+        'if @agent_any #turn_finish then @lily@HASHI5 $prompt "start"; '
+        'if @agent_any #turn_finish then @bob $prompt "next".'
+    )
+    _, adv_remote_any, _ = plan_for_trigger(
+        remote_correlated,
+        [],
+        [_exec(stage=1, program=any_program)],
+        [receipt],
+        set(),
+        current_instance="HASHI4",
+    )
+    assert len(adv_remote_any) == 1
+
+
 def test_disabled_rules_never_match():
     rule = _enabled_rule('if @agent_any #turn_finish then @lily $prompt "hi".')
     rule["enabled"] = False
