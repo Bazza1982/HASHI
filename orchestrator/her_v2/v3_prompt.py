@@ -249,6 +249,53 @@ def _clean_message_context_text(text: str) -> str:
     return "\n".join(lines)
 
 
+# Minimal identity and authorised reference fields preserved for historical
+# attachments so same-filename items remain distinguishable without restoring
+# SQLite operational metadata or expanding resource access permissions.
+_HISTORY_ATTACHMENT_FIELDS = (
+    "attachment_id",
+    "asset_id",
+    "item_index",
+    "modality",
+    "kind",
+    "mime_type",
+    "filename",
+    "name",
+    "local_ref",
+    "path",
+    "size_bytes",
+    "sha256",
+)
+
+
+def _clean_history_attachments(attachments: object) -> list[dict[str, object]]:
+    """Project only minimal identity and authorised reference fields per attachment."""
+    if not isinstance(attachments, (list, tuple)) or not attachments:
+        return []
+    cleaned: list[dict[str, object]] = []
+    for item in attachments:
+        if not isinstance(item, Mapping):
+            continue
+        entry: dict[str, object] = {}
+        for key in _HISTORY_ATTACHMENT_FIELDS:
+            if key not in item:
+                continue
+            value = item[key]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            entry[key] = value.strip() if isinstance(value, str) else value
+        if not entry:
+            continue
+        if "filename" in entry and entry.get("name") == entry["filename"]:
+            entry.pop("name", None)
+        if "modality" in entry and entry.get("kind") == entry["modality"]:
+            entry.pop("kind", None)
+        if "local_ref" in entry and entry.get("path") == entry["local_ref"]:
+            entry.pop("path", None)
+        cleaned.append(entry)
+    return cleaned
+
+
 def _clean_history_entry(row: object) -> object:
     """Drop internal SQLite/routing metadata from settled session history rows."""
     if not isinstance(row, Mapping):
@@ -268,6 +315,8 @@ def _clean_history_entry(row: object) -> object:
         if key not in row:
             continue
         value = row[key]
+        if key == "resource_attachments":
+            value = _clean_history_attachments(value)
         if key in {"error_text", "resource_attachments"} and not value:
             continue
         cleaned[key] = value
@@ -290,26 +339,14 @@ def _clean_runtime_context(runtime_ctx: object) -> object:
 
 
 def _format_attachment_note(attachments: object) -> str:
-    if not isinstance(attachments, (list, tuple)) or not attachments:
+    cleaned = _clean_history_attachments(attachments)
+    if not cleaned:
         return ""
-    parts: list[str] = []
-    for item in attachments:
-        if not isinstance(item, Mapping):
-            continue
-        label = str(
-            item.get("filename")
-            or item.get("name")
-            or item.get("path")
-            or item.get("attachment_id")
-            or item.get("modality")
-            or ""
-        ).strip()
-        modality = str(item.get("modality") or item.get("kind") or "").strip()
-        if label and modality and modality not in label:
-            parts.append(f"{modality}:{label}")
-        elif label:
-            parts.append(label)
-    return f"[Attachments: {', '.join(parts)}]" if parts else ""
+    return (
+        "[Historical attachments (context only, not current; no new permissions): "
+        + json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+        + "]"
+    )
 
 
 def _history_to_messages(
