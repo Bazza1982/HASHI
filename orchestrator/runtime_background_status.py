@@ -348,6 +348,10 @@ async def _deliver(
             await _delete_placeholder(runtime, item, placeholder)
             return
 
+        if suppressed(runtime):
+            # The render above awaits; a cut armed meanwhile stops this notice
+            # before the placeholder is edited or a new message is created.
+            return
         delivered = False
         if placeholder is not None:
             try:

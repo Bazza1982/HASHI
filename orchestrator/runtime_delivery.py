@@ -420,7 +420,8 @@ async def _send_standard_event_media_to_telegram(
     if suppressed(runtime):
         # Media is an outbound send: a safety silence stops it like text.
         if outbox_outcome is not None:
-            outbox_outcome["status"] = "suppressed"
+            prior = int(outbox_outcome.get("accepted_effect_count") or 0)
+            outbox_outcome["status"] = "unknown" if prior else "suppressed"
         return [], 0
     detail = claim.get("detail")
     message_id = (
@@ -433,9 +434,21 @@ async def _send_standard_event_media_to_telegram(
 
     accepted_ids: list[str] = []
     accepted_count = 0
+
+    def _mark_cut() -> None:
+        # Nothing sent is a suppression; a partly delivered batch is unknown,
+        # never complete. Either way the accepted receipts stay intact.
+        if outbox_outcome is None:
+            return
+        prior = int(outbox_outcome.get("accepted_effect_count") or 0)
+        outbox_outcome["status"] = (
+            "unknown" if (prior + accepted_count) else "suppressed"
+        )
+
     for index, media_ref in enumerate(media_refs, start=1):
         if suppressed(runtime):
             # Stop the remaining attachments of an already-started batch.
+            _mark_cut()
             break
         attachment_id = str(media_ref.get("attachment_id") or "").strip()
         if not attachment_id:
@@ -518,6 +531,15 @@ async def _send_standard_event_media_to_telegram(
         else:
             method = runtime.app.bot.send_document
             field = "document"
+        if suppressed(runtime):
+            # The attachment lookup and any audio conversion above are
+            # asynchronous, so the cut may be armed after the batch entry
+            # check. Nothing new is submitted from here on.
+            if derivative is not None:
+                derivative.unlink(missing_ok=True)
+                derivative = None
+            _mark_cut()
+            break
         try:
             from orchestrator.telegram_actor_scope import delivery_allowed, explicit_telegram_purpose
 
@@ -1620,6 +1642,29 @@ async def dispatch_claimed_telegram_event(
         message_ids.extend(media_message_ids)
         accepted_effects += media_count
         chunks += media_count
+        cut_status = str(outcome.get("status") or "")
+        if cut_status in {"suppressed", "unknown"}:
+            # A silence armed mid-batch stopped the remaining attachments. The
+            # batch is never reported complete; real receipts are preserved and
+            # already delivered attachments are never replayed.
+            await run_database_work(_record_standard_telegram_receipt,
+                store,
+                session_id=str(claim["session_id"]),
+                owner_id=str(frontend_owner_id),
+                event_id=str(claim["event_id"]),
+                endpoint_id=str(claim["endpoint_id"]),
+                status="skipped" if cut_status == "suppressed" else "unknown",
+                message_ids=message_ids,
+                attachment_receipts=list(outcome.get("attachment_receipts") or ()),
+            )
+            await run_database_work(store.complete_delivery_outbox,
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status=cut_status,
+                error_code="telegram_silenced",
+            )
+            claim_terminal = True
+            return max(0.0, monotonic() - send_started), chunks
         receipt_status = (
             "delivered"
             if message_ids and len(message_ids) == accepted_effects

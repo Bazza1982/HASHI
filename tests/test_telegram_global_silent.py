@@ -547,6 +547,181 @@ async def test_media_stops_mid_batch_when_the_cut_is_armed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_media_cut_armed_during_attachment_preparation_stops_the_send(tmp_path):
+    from orchestrator.connector_delivery_preferences import set_instance_preference
+
+    config_path = _write_instance(tmp_path)
+    image = tmp_path / "pic.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    sent: list[str] = []
+
+    class _Store:
+        def visible_message_attachment(
+            self, _session_id, *, owner_id, message_id, attachment_id
+        ):
+            # The lookup is asynchronous in production: the cut lands after the
+            # batch entry check and before the transport call.
+            set_instance_preference(tmp_path, "telegram", "silent", True)
+            return {
+                "local_ref": str(image),
+                "mime_type": "image/png",
+                "role": "image",
+            }
+
+    class _Bot:
+        async def send_photo(self, **_kwargs):
+            sent.append("photo")
+            return NS(message_id=1)
+
+    runtime = NS(
+        name="alpha",
+        global_config=NS(bridge_home=tmp_path, config_path=str(config_path)),
+        app=NS(bot=_Bot()),
+        telegram_connected=True,
+        telegram_logger=_Logger(),
+        error_logger=_Logger(),
+        logger=_Logger(),
+        media_dir=tmp_path,
+    )
+    event = {
+        "content_blocks": [{"type": "media_ref", "attachment_id": "a1", "role": "image"}]
+    }
+    outcome: dict[str, object] = {"status": "requested"}
+
+    ids, count = await runtime_delivery._send_standard_event_media_to_telegram(
+        runtime,
+        chat_id=7,
+        store=_Store(),
+        claim={"session_id": "s1", "detail": {"message_id": "m1"}},
+        owner_id="user:123",
+        event=event,
+        request_id="req-media-prep",
+        # Explicit notification bypasses the mirror policy, so only the
+        # pre-submit recheck can stop this attachment.
+        purpose="explicit-notification",
+        delivery_mode="final_delivery",
+        outbox_outcome=outcome,
+    )
+
+    assert sent == []
+    assert (ids, count) == ([], 0)
+    assert outcome["status"] == "suppressed"
+
+
+@pytest.mark.asyncio
+async def test_partly_delivered_media_batch_is_never_reported_complete(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    import orchestrator.frontend_connector_registry as connector
+    import orchestrator.frontend_dispatch as dispatch
+    import orchestrator.frontend_run_questions as questions
+    import orchestrator.frontend_telegram_replay as replay
+    import orchestrator.telegram_actor_scope as actor_scope
+    from orchestrator.connector_delivery_preferences import set_instance_preference
+
+    config_path = _write_instance(tmp_path)
+    image = tmp_path / "image.png"
+    image.write_bytes(b"image")
+    sent: list[str] = []
+    completions: list[dict] = []
+    receipts: list[dict] = []
+
+    class _Bot:
+        async def send_photo(self, **_kwargs):
+            sent.append("photo")
+            # The cut lands right after the first attachment of the batch.
+            set_instance_preference(tmp_path, "telegram", "silent", True)
+            return NS(message_id=len(sent))
+
+    runtime = NS(
+        name="alpha",
+        global_config=NS(
+            bridge_home=tmp_path,
+            config_path=str(config_path),
+            instance_id="SILENT_TEST",
+        ),
+        config=NS(extra={}),
+        app=NS(bot=_Bot()),
+        telegram_connected=True,
+        logger=_Logger(),
+        telegram_logger=_Logger(),
+        error_logger=_Logger(),
+        media_dir=tmp_path,
+    )
+    store = NS(
+        visible_message_attachment=lambda *_a, **_k: {
+            "local_ref": str(image),
+            "mime_type": "image/png",
+            "role": "image",
+        },
+        complete_delivery_outbox=lambda **entry: completions.append(entry),
+    )
+    event = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "content_blocks": [
+            {"type": "media_ref", "attachment_id": "a1", "role": "image"},
+            {"type": "media_ref", "attachment_id": "a2", "role": "image"},
+        ],
+    }
+    monkeypatch.setattr(
+        runtime_delivery.runtime_delivery_order, "wait_for_turn", AsyncMock()
+    )
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover,
+        "handle_blocked_send",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(connector, "require_connector_event", lambda *_a: None)
+    monkeypatch.setattr(dispatch, "project_claimed_frontend_event", lambda *_a, **_k: event)
+    monkeypatch.setattr(questions, "question_identity", lambda _event: None)
+    monkeypatch.setattr(
+        actor_scope, "delivery_allowed", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(
+        replay, "telegram_replay_decision", lambda *_a, **_k: NS(state="send", is_replay=False)
+    )
+    monkeypatch.setattr(
+        runtime_delivery, "_render_standard_event_for_telegram", lambda _event: ("", None)
+    )
+    monkeypatch.setattr(
+        runtime_delivery, "telegram_reply_markup_for_event", lambda *_a: None
+    )
+    monkeypatch.setattr(
+        runtime_delivery,
+        "_record_standard_telegram_receipt",
+        lambda *_a, **kw: receipts.append(kw),
+    )
+    claim = {
+        "outbox_id": "ob",
+        "lease_token": "lease",
+        "session_id": "s",
+        "event_id": "event",
+        "endpoint_id": "ep",
+        "detail": {"message_id": "m"},
+    }
+
+    await runtime_delivery.dispatch_claimed_telegram_event(
+        runtime,
+        chat_id=7,
+        store=store,
+        claim=claim,
+        frontend_owner_id="user:123",
+        request_id="req-partial",
+        purpose="response",
+    )
+
+    # Only the first attachment left, and the outbox never says complete.
+    assert sent == ["photo"]
+    assert completions and completions[-1]["status"] == "unknown"
+    assert completions[-1]["error_code"] == "telegram_silenced"
+    assert receipts[-1]["status"] == "unknown"
+    assert receipts[-1]["message_ids"] == ["1"]
+
+
+@pytest.mark.asyncio
 async def test_escalating_placeholder_loop_exits_while_silenced(tmp_path):
     import asyncio
 

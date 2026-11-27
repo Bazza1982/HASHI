@@ -2356,6 +2356,26 @@ class FlexibleAgentRuntime:
                         }
                     )
                     return None
+                if suppressed(self):
+                    # Recheck at the real submit boundary: the publication, the
+                    # outbox claim and the retry sleeps above are asynchronous,
+                    # so the cut may be armed after the entry check.
+                    if claim is not None:
+                        self.session_store.complete_delivery_outbox(
+                            outbox_id=str(claim["outbox_id"]),
+                            lease_token=str(claim["lease_token"]),
+                            status="suppressed",
+                            error_code="telegram_silenced",
+                        )
+                    runtime_control.record_reply_delivery_outcome(
+                        {
+                            "status": "suppressed",
+                            "sent": False,
+                            "transport_message_id": None,
+                            "error_code": "telegram_silenced",
+                        }
+                    )
+                    return None
                 send_not_submitted = False
                 try:
                     sent = await update.message.reply_text(send_text, **send_kwargs)
@@ -2714,6 +2734,25 @@ class FlexibleAgentRuntime:
                         status="suppressed",
                         error_code="telegram_mirror_disabled",
                     )
+                return None
+            if suppressed(self):
+                # The publication and the outbox claim above are asynchronous:
+                # recheck immediately before the transport call.
+                if claim is not None:
+                    self.session_store.complete_delivery_outbox(
+                        outbox_id=str(claim["outbox_id"]),
+                        lease_token=str(claim["lease_token"]),
+                        status="suppressed",
+                        error_code="telegram_silenced",
+                    )
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": "suppressed",
+                        "sent": False,
+                        "transport_message_id": None,
+                        "error_code": "telegram_silenced",
+                    }
+                )
                 return None
             sent = await self.app.bot.send_message(
                 chat_id=chat_id,
