@@ -376,7 +376,7 @@ async def test_allow_tools_false_still_passes_native_media_to_stage_backend():
 
     result = await provider.invoke(
         _profile(),
-        _request(Stage.TRIAGE, content, allow_tools=False),
+        _request(Stage.DIRECT, content, allow_tools=False),
     )
 
     assert backend.calls[0]["request_content"] == content
@@ -511,7 +511,7 @@ async def test_direct_uses_existing_local_media_fallback_when_quick_is_text_only
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stage",
-    [Stage.PLANNING, Stage.EXECUTION, Stage.REPLANNING, Stage.REVIEW],
+    [Stage.DIRECT, Stage.EXECUTION, Stage.DIRECT, Stage.DIRECT],
 )
 async def test_later_stages_keep_authorized_attachment_reference_for_local_fallback(
     stage,
@@ -662,7 +662,7 @@ async def test_typed_modality_failure_gets_one_safe_text_only_replay():
 
     result = await provider.invoke(
         _profile(),
-        _request(Stage.TRIAGE, content, allow_tools=True),
+        _request(Stage.DIRECT, content, allow_tools=True),
     )
 
     assert len(backend.calls) == 2
@@ -699,7 +699,7 @@ async def test_typed_modality_failure_after_tool_activity_is_not_replayed():
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             _profile(),
-            _request(Stage.TRIAGE, content, allow_tools=True),
+            _request(Stage.DIRECT, content, allow_tools=True),
         )
 
     assert captured.value.code is ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED
@@ -731,7 +731,7 @@ async def test_typed_modality_failure_after_text_activity_is_not_replayed():
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             _profile(),
-            _request(Stage.TRIAGE, content, allow_tools=True),
+            _request(Stage.DIRECT, content, allow_tools=True),
         )
 
     assert captured.value.code is ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED
@@ -754,7 +754,7 @@ async def test_tool_free_stage_fails_instead_of_silently_dropping_unsupported_me
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             _profile(),
-            _request(Stage.TRIAGE, content, allow_tools=False),
+            _request(Stage.DIRECT, content, allow_tools=False),
         )
 
     assert captured.value.code is ProviderFailureCode.MODEL_MODALITY_UNSUPPORTED
@@ -810,7 +810,7 @@ async def test_text_only_model_temporarily_uses_same_provider_visual_model_with_
 
     result = await provider.invoke(
         ProviderProfile("test", "fake-api", "text-only-model"),
-        _request(Stage.TRIAGE, content),
+        _request(Stage.DIRECT, content),
     )
 
     assert text_backend.calls == []
@@ -879,11 +879,11 @@ async def test_provider_without_visual_model_projects_image_through_lan_compute_
 
     result = await provider.invoke(
         ProviderProfile("test", "fake-api", "text-only-model"),
-        _request(Stage.TRIAGE, content),
+        _request(Stage.DIRECT, content),
     )
     repeated = await provider.invoke(
         ProviderProfile("test", "fake-api", "text-only-model"),
-        _request(Stage.TRIAGE, content),
+        _request(Stage.DIRECT, content),
     )
 
     assert len(projector.calls) == 1
@@ -928,7 +928,7 @@ async def test_visual_fallback_stops_before_provider_when_required_warning_is_re
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             ProviderProfile("test", "fake-api", "text-only-model"),
-            _request(Stage.TRIAGE, content),
+            _request(Stage.DIRECT, content),
         )
 
     assert captured.value.code is ProviderFailureCode.MEDIA_FALLBACK_UNAVAILABLE
@@ -959,7 +959,7 @@ async def test_lan_vision_failure_preserves_typed_modality_error_without_provide
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             ProviderProfile("test", "fake-api", "text-only-model"),
-            _request(Stage.TRIAGE, content),
+            _request(Stage.DIRECT, content),
         )
 
     assert captured.value.code is ProviderFailureCode.MODEL_MODALITY_UNSUPPORTED
@@ -1006,7 +1006,7 @@ async def test_adapter_media_fallback_is_not_replayed_again_by_her():
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             _profile(),
-            _request(Stage.TRIAGE, content, allow_tools=True),
+            _request(Stage.DIRECT, content, allow_tools=True),
         )
 
     assert captured.value.code is ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED
@@ -1039,7 +1039,7 @@ async def test_retry_after_typed_drift_stays_on_local_route_without_resending_me
     result = await provider.invoke(
         _profile(),
         _request(
-            Stage.TRIAGE,
+            Stage.DIRECT,
             content,
             allow_tools=True,
             force_local_media_fallback=True,
@@ -1058,8 +1058,8 @@ async def test_retry_after_typed_drift_stays_on_local_route_without_resending_me
     ("stage", "error_code"),
     [
         (Stage.IMMEDIATE_RESPONSE, ProviderFailureCode.PROVIDER_MODALITY_UNSUPPORTED),
-        (Stage.TRIAGE, ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED),
-        (Stage.TRIAGE, ProviderFailureCode.PROVIDER_RATE_LIMITED),
+        (Stage.DIRECT, ProviderFailureCode.PROVIDER_AUTHENTICATION_FAILED),
+        (Stage.DIRECT, ProviderFailureCode.PROVIDER_RATE_LIMITED),
     ],
 )
 async def test_unsafe_or_unrelated_provider_failures_do_not_trigger_media_replay(
@@ -1345,44 +1345,6 @@ def test_her_ingress_admits_configured_lan_visual_fallback(
     assert result["fallback_type"] == "lan_compute_vision"
 
 
-@pytest.mark.asyncio
-async def test_native_voice_triage_uses_exact_model_failure_code():
-    content = canonical_request_content(
-        [
-            {
-                "type": "media",
-                "item_index": 1,
-                "attachment_id": "attachment-voice",
-                "modality": "audio",
-                "kind": "voice",
-                "semantic_role": "voice_message",
-                "mime_type": "audio/ogg",
-                "filename": "voice.ogg",
-                "caption": "",
-                "local_ref": "/authorized/voice.ogg",
-                "size_bytes": 12,
-                "sha256": "3" * 64,
-                "transport": {"message_id": 3},
-            }
-        ]
-    )
-    backend = _Backend([])
-    provider = HashiStageProvider(backend_manager=_Manager(backend))
-
-    with pytest.raises(StageInvocationError) as captured:
-        await provider.invoke(
-            ProviderProfile(
-                "test",
-                "fake-api",
-                "native-image-model",
-                options={"_voice_triage_input_policy": "native"},
-            ),
-            _request(Stage.TRIAGE, content),
-        )
-
-    assert captured.value.code is ProviderFailureCode.MODEL_MODALITY_UNSUPPORTED
-    assert captured.value.details["model"] == "native-image-model"
-    assert captured.value.details["modality"] == "audio"
 
 
 @pytest.mark.asyncio
@@ -1405,7 +1367,7 @@ async def test_declared_native_route_without_request_content_parameter_is_adapte
     with pytest.raises(StageInvocationError) as captured:
         await provider.invoke(
             _profile(),
-            _request(Stage.TRIAGE, _content()),
+            _request(Stage.DIRECT, _content()),
         )
 
     assert captured.value.code is ProviderFailureCode.ADAPTER_MEDIA_ROUTE_UNIMPLEMENTED

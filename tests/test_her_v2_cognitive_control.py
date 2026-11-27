@@ -323,11 +323,11 @@ def test_semantic_arguments_preserve_target_ids_and_time_ranges():
     "stage",
     [
         Stage.DIRECT,
-        Stage.TRIAGE,
-        Stage.PLANNING,
+        Stage.DIRECT,
+        Stage.DIRECT,
         Stage.EXECUTION,
-        Stage.REPLANNING,
-        Stage.REVIEW,
+        Stage.DIRECT,
+        Stage.DIRECT,
     ],
 )
 def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
@@ -370,7 +370,7 @@ def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
 
 def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
     controller = StageCognitiveController(
-        stage=Stage.PLANNING.value,
+        stage=Stage.DIRECT.value,
         goal="Summarise the completed background job",
     )
     interrupt = None
@@ -406,11 +406,11 @@ def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
     "stage",
     [
         Stage.DIRECT,
-        Stage.TRIAGE,
-        Stage.PLANNING,
+        Stage.DIRECT,
+        Stage.DIRECT,
         Stage.EXECUTION,
-        Stage.REPLANNING,
-        Stage.REVIEW,
+        Stage.DIRECT,
+        Stage.DIRECT,
     ],
 )
 @pytest.mark.asyncio
@@ -535,7 +535,7 @@ async def test_legacy_inline_task_delta_is_accepted_stripped_and_evidence_bound(
     base = _Registry(("probe_a", "probe_b"))
     registry = _CognitiveControlToolRegistry(
         base,
-        _request(Stage.PLANNING, task_state=task_state),
+        _request(Stage.DIRECT, task_state=task_state),
     )
 
     parameters = registry.get_tool_definitions()[0]["function"]["parameters"]
@@ -732,7 +732,7 @@ async def test_evidence_progress_resets_stall_before_later_stagnation():
 @pytest.mark.asyncio
 async def test_revised_direction_reopens_only_named_tools_and_repeat_escalates():
     base = _Registry()
-    registry = _CognitiveControlToolRegistry(base, _request(Stage.PLANNING))
+    registry = _CognitiveControlToolRegistry(base, _request(Stage.DIRECT))
 
     for cycle in range(3):
         for index, name in enumerate(_TOOLS):
@@ -1103,7 +1103,7 @@ async def test_tool_free_stage_receives_same_task_state_without_control_tool():
         tool_registry=_Registry(),
     )
     request = replace(
-        _request(Stage.TRIAGE, task_state=task_state),
+        _request(Stage.DIRECT, task_state=task_state),
         allow_tools=False,
         allow_side_effects=False,
     )

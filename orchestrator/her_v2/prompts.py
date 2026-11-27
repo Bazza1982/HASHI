@@ -12,102 +12,6 @@ from .models import Stage, StageRequest
 from .prompt_catalog import load_prompt_asset, render_prompt_asset
 
 _SCHEMAS = {
-    Stage.TRIAGE: {
-        "classification": (
-            "DIRECT_RESPONSE | SIMPLE_TASK | COMPLEX_TASK | "
-            "HIGH_VOLUME_TASK | CONFIRMATION_REQUIRED"
-        ),
-        "real_goal": (
-            "concise resolved operational goal; null only when "
-            "CONFIRMATION_REQUIRED because the goal cannot be resolved reliably"
-        ),
-        "selected_strategy_cards": [
-            "exact Strategy Card ID selected from the supplied Playbook"
-        ],
-        "relevant_habits": [
-            "exact unchanged entry selected from the supplied habit_catalogue"
-        ],
-        "execution_brief": {
-            "strategy": "overall strategic approach; empty for non-work paths",
-            "stages": ["major strategic stage"],
-            "dependencies": ["important sequence, prerequisite, or parallelism"],
-            "verification": ["verification approach or evidence standard"],
-            "success_criteria": ["observable completion condition"],
-            "replan_conditions": ["condition that should trigger replanning"],
-        },
-        "clarification": (
-            "a concrete question required only for CONFIRMATION_REQUIRED; otherwise "
-            "null"
-        ),
-        "commentary": (
-            "one concise user-facing Strategy milestone for work classifications, "
-            "written directly in the active PCM presentation Persona and grounded "
-            "only in this Strategy result; null for DIRECT_RESPONSE or "
-            "CONFIRMATION_REQUIRED"
-        ),
-    },
-    Stage.PLANNING: {
-        "plan": ["ordered, concrete action"],
-        "success_criteria": ["observable criterion"],
-        "parallel_groups": [["assignment IDs in one concurrent execution wave"]],
-        "sub_agents": [
-            {
-                "id": "unique bounded assignment id",
-                "task": "bounded task",
-                "profile": "configured execution profile",
-                "tools": [],
-                "attachment_ids": [
-                    "only attachment_id values required and explicitly delegated"
-                ],
-                "allow_side_effects": False,
-            }
-        ],
-        "commentary": (
-            "one concise user-facing Planning milestone written directly in the "
-            "active PCM presentation Persona and grounded only in this completed "
-            "Planning result; omit only when no useful downstream work remains"
-        ),
-    },
-    Stage.REPLANNING: {
-        "plan": [
-            "complete active plan for the next version; preserve the prior steps "
-            "when current evidence does not require a change"
-        ],
-        "success_criteria": [
-            "observable criterion tied to the authoritative user goal"
-        ],
-        "completion_percent": "integer from 0 through 100",
-        "completion_basis": (
-            "evidence-based comparison with the original goal, authority, and "
-            "success criteria"
-        ),
-        "plan_changed": True,
-        "change_reason": (
-            "concrete new evidence or condition requiring the change; null when "
-            "plan_changed is false"
-        ),
-        "next_step": (
-            "next authorised action, or Review/Finalisation when completion is 100"
-        ),
-        "parallel_groups": [["assignment IDs in one concurrent execution wave"]],
-        "sub_agents": [
-            {
-                "id": "unique bounded assignment id",
-                "task": "bounded task",
-                "profile": "configured execution profile",
-                "tools": [],
-                "attachment_ids": [
-                    "only attachment_id values required and explicitly delegated"
-                ],
-                "allow_side_effects": False,
-            }
-        ],
-        "commentary": (
-            "required concise neutral update stating completion percentage, whether "
-            "the plan changed, why when changed, and the next step; Runtime creates "
-            "a deterministic fallback from validated fields if omitted"
-        ),
-    },
     Stage.EXECUTION: {
         "disposition": (
             "COMPLETED | COMPLETED_WITH_LIMITATIONS | FAILED | USER_INPUT_REQUIRED"
@@ -122,13 +26,6 @@ _SCHEMAS = {
         "commentary": (
             "optional concise neutral user-facing update based only on this "
             "completed stage result; omit when no useful update exists"
-        ),
-    },
-    Stage.REVIEW: {
-        "status": "PASS | CONDITIONAL_PASS | FAIL",
-        "reason": "reason for the review decision",
-        "conditions": (
-            "material conditions for CONDITIONAL_PASS; null for PASS or FAIL"
         ),
     },
     Stage.MEDITATION: {"actions": []},
@@ -213,16 +110,6 @@ def _compact_tool_catalogue(
     return compact
 
 
-_JSON_REPAIR_STAGES = frozenset(
-    {
-        Stage.TRIAGE,
-        Stage.PLANNING,
-        Stage.REPLANNING,
-        Stage.REVIEW,
-    }
-)
-
-
 def json_repair_schema_for_stage(
     stage: Stage,
     *,
@@ -230,8 +117,6 @@ def json_repair_schema_for_stage(
 ) -> Mapping[str, Any] | None:
     """Return the frozen schema for stages whose model answer must be JSON."""
 
-    if stage in _JSON_REPAIR_STAGES:
-        return copy.deepcopy(_SCHEMAS[stage])
     if stage is Stage.EXECUTION and str(role).startswith("sub_agent:"):
         return copy.deepcopy(_SCHEMAS[Stage.EXECUTION])
     return None
@@ -297,59 +182,6 @@ def _immediate_response_goal(goal: str) -> str:
         if not omitting:
             rendered.append(line)
     return "\n".join(rendered).strip()
-
-
-def _strategy_stage_tool_policy(request: StageRequest) -> str:
-    if not request.allow_tools:
-        return (
-            "The Strategist has no tool access. Perform only goal resolution, "
-            "classification, Strategy Card and Habit selection, and strategic "
-            "direction from the supplied request, context, catalogues, and resource "
-            "manifest. Do not call, simulate, or claim to have called a tool, inspect "
-            "the workspace, apply a fix, or create the requested deliverable. Pass "
-            "all execution work to downstream Planning and Execution."
-        )
-    if not request.allow_side_effects:
-        return (
-            "The Strategist may use only the read-only tools exposed by HASHI when "
-            "they materially improve a strategic decision. Do not modify artifacts "
-            "or perform the downstream execution task. Tool access does not transfer "
-            "primary execution ownership to Strategy."
-        )
-    return (
-        "The Strategist receives the normal tools and skills available to this "
-        "request through HASHI. It may call them, including with authorised side "
-        "effects, when doing so materially improves its understanding of the real "
-        "work or the quality of the overall strategy. Tool access does not transfer "
-        "primary execution ownership to Strategy."
-    )
-
-
-def _planning_stage_tool_policy(request: StageRequest) -> str:
-    if not request.allow_tools:
-        return (
-            "Planning itself has no tools and must reason only from the supplied "
-            "Strategy handoff and context. Do not call, simulate, or claim to have "
-            "called a tool. Produce the plan and pass all investigation and execution "
-            "work to Execution."
-        )
-    if not request.allow_side_effects:
-        return (
-            "Planning may freely choose and call the read-only tools actually exposed "
-            "by HASHI when current evidence materially improves the plan. Use tools "
-            "only to inspect or validate planning assumptions. Do not modify artifacts, "
-            "apply fixes, generate requested deliverables, or otherwise perform "
-            "Execution's work. Return a plan, not a completed implementation."
-        )
-    return (
-        "Planning may freely choose and call any registered tool actually exposed by "
-        "HASHI when current evidence materially improves the plan, including tools "
-        "whose interface can produce side effects. This access does not transfer the "
-        "downstream execution task to Planning: use tools only to investigate or "
-        "validate planning assumptions. Do not edit artifacts, apply fixes, generate "
-        "requested deliverables, change services, or otherwise perform Execution's "
-        "work. Return a plan, not a completed implementation."
-    )
 
 
 def render_execution_environment_contract(value: Any) -> str:
@@ -456,128 +288,6 @@ def render_stage_prompt(request: StageRequest) -> str:
         # Direct's complete contract, tools, advisory catalogues, Persona, and
         # authoritative goal live in one isolated system prompt.
         return request.goal
-    if request.stage is Stage.TRIAGE:
-        raw_catalogue = request.context.get("habit_catalogue")
-        habit_catalogue = (
-            [str(item) for item in raw_catalogue if str(item).strip()]
-            if isinstance(raw_catalogue, (list, tuple))
-            else []
-        )
-        return render_prompt_asset(
-            "system_strategy",
-            goal=request.goal,
-            strategy_cards=json.dumps(
-                request.context.get("strategy_cards") or {},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            habit_catalogue=json.dumps(
-                habit_catalogue, ensure_ascii=False, indent=2
-            ),
-            execution_capabilities=json.dumps(
-                request.context.get("execution_capabilities") or {},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            request_resources=json.dumps(
-                request.context.get("request_resources") or {},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            schema_v3=json.dumps(
-                commentary_schema_for(
-                    Stage.TRIAGE, request.context.get("commentary_mode")
-                ),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            stage_tool_policy=_strategy_stage_tool_policy(request),
-        )
-    if request.stage is Stage.PLANNING:
-        raw_habits = request.context.get("relevant_habits")
-        habits = (
-            [str(item) for item in raw_habits if str(item).strip()]
-            if isinstance(raw_habits, (list, tuple))
-            else []
-        )
-        return render_prompt_asset(
-            "system_planning",
-            goal=request.goal,
-            classification=(
-                request.classification.value if request.classification else ""
-            ),
-            strategy_handoff=json.dumps(
-                request.context.get("strategy_handoff") or {},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            relevant_habits=json.dumps(habits, ensure_ascii=False, indent=2),
-            available_execution_tools=json.dumps(
-                _compact_tool_catalogue(
-                    request.context.get("available_execution_tools") or []
-                ),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            available_sub_agent_profiles=json.dumps(
-                request.context.get("available_sub_agent_profiles") or [],
-                ensure_ascii=False,
-            ),
-            schema=json.dumps(
-                commentary_schema_for(
-                    Stage.PLANNING, request.context.get("commentary_mode")
-                ),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            stage_tool_policy=_planning_stage_tool_policy(request),
-        )
-    if request.stage is Stage.REPLANNING:
-        return render_prompt_asset(
-            "system_replanning",
-            goal=request.goal,
-            classification=(
-                request.classification.value if request.classification else ""
-            ),
-            active_plan=json.dumps(
-                request.context.get("active_plan") or {},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            plan_edit_history=json.dumps(
-                request.context.get("plan_edit_history") or [],
-                ensure_ascii=False,
-                indent=2,
-            ),
-            workflow_state_and_evidence=json.dumps(
-                request.context.get("workflow_state_and_evidence") or {},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            relevant_habits=json.dumps(
-                request.context.get("relevant_habits") or [],
-                ensure_ascii=False,
-                indent=2,
-            ),
-            available_execution_tools=json.dumps(
-                _compact_tool_catalogue(
-                    request.context.get("available_execution_tools") or []
-                ),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            available_sub_agent_profiles=json.dumps(
-                request.context.get("available_sub_agent_profiles") or [],
-                ensure_ascii=False,
-            ),
-            schema=json.dumps(
-                commentary_schema_for(
-                    Stage.REPLANNING, request.context.get("commentary_mode")
-                ),
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
     if request.stage is Stage.EXECUTION:
         if not request.role.startswith("sub_agent:"):
             # Primary Execution owns a natural-language user response.  Its
@@ -587,14 +297,6 @@ def render_stage_prompt(request: StageRequest) -> str:
         # The complete bounded contract is installed from system_sub_agent.txt.
         # Keep the user turn as data only so there is a single prompt document
         # defining sub-agent behaviour.
-        return request.goal
-    if request.stage is Stage.REVIEW:
-        # system_review.txt owns the complete Reviewer contract and every
-        # invocation-specific Review input.  The user turn is data only.
-        return request.goal
-    if request.stage is Stage.FINALISATION:
-        # The complete Finalisation contract and all evidence are rendered in
-        # the isolated system prompt.  The raw goal is the backend's user turn.
         return request.goal
     raise ValueError(f"unsupported HER v2 stage: {request.stage!r}")
 
@@ -606,16 +308,7 @@ _SYSTEM_PROMPT_ASSETS = {
     Stage.JSON_REPAIR: "system_json_repair",
 }
 
-_COMPLETE_SYSTEM_PROMPT_STAGES = frozenset(
-    {
-        Stage.DIRECT,
-        Stage.TRIAGE,
-        Stage.PLANNING,
-        Stage.REPLANNING,
-        Stage.REVIEW,
-        Stage.FINALISATION,
-    }
-)
+_COMPLETE_SYSTEM_PROMPT_STAGES = frozenset({Stage.DIRECT})
 
 
 def uses_complete_system_prompt(stage: Stage) -> bool:
@@ -710,14 +403,9 @@ def render_internal_stage_system_prompt(request: StageRequest) -> str | None:
         )
     if request.stage is Stage.DREAM and request.context.get("dream_role") == "report":
         return load_prompt_asset("system_dream_report")
-    if request.stage in {
-        Stage.DIRECT,
-        Stage.EXECUTION,
-        Stage.REVIEW,
-        Stage.FINALISATION,
-    }:
-        # Direct, primary Execution, Review, and Finalisation are rendered
-        # dynamically after the adapter has assembled invocation-specific inputs.
+    if request.stage in {Stage.DIRECT, Stage.EXECUTION}:
+        # Direct and primary Execution are rendered dynamically after the
+        # adapter has assembled invocation-specific inputs.
         return None
     if uses_complete_system_prompt(request.stage):
         return render_stage_prompt(request)
@@ -733,43 +421,6 @@ def _persona_guidance(*, guidance: str, display_name: str, usable: bool) -> str:
         "Use the configured default language and a respectful tone."
     )
 
-
-def render_finalisation_system_prompt(
-    *,
-    goal: str,
-    relevant_habits: Sequence[str],
-    draft_response: str,
-    reviewer_findings: Mapping[str, Any] | None,
-    completion_evidence: Mapping[str, Any],
-    guidance: str,
-    display_name: str,
-    usable: bool,
-    persona_block_begin: str,
-    persona_block_end: str,
-) -> str:
-    return render_prompt_asset(
-        "system_finalisation",
-        goal=goal,
-        relevant_habits=json.dumps(
-            list(relevant_habits), ensure_ascii=False, indent=2
-        ),
-        draft_response=(
-            str(draft_response).strip() or "No execution draft response was produced."
-        ),
-        reviewer_findings=(
-            json.dumps(reviewer_findings, ensure_ascii=False, indent=2)
-            if reviewer_findings is not None
-            else "No Review findings were supplied."
-        ),
-        completion_evidence=json.dumps(
-            dict(completion_evidence), ensure_ascii=False, indent=2
-        ),
-        persona_block_begin=persona_block_begin,
-        persona_guidance=_persona_guidance(
-            guidance=guidance, display_name=display_name, usable=usable
-        ),
-        persona_block_end=persona_block_end,
-    )
 
 
 def render_direct_system_prompt(
@@ -931,62 +582,6 @@ def render_execution_system_prompt(
     )
 
 
-def render_review_system_prompt(
-    *,
-    goal: str,
-    relevant_habits: Sequence[str],
-    active_plan_id: str | None,
-    active_plan: Mapping[str, Any] | None,
-    draft_response: str,
-    execution_record: Mapping[str, Any] | None,
-    evidence_refs: Sequence[str],
-    review_kind: str,
-    findings_to_close: Sequence[str],
-    available_review_tools: Sequence[Mapping[str, Any]],
-) -> str:
-    """Render the complete independent Review contract as one system prompt."""
-
-    return render_prompt_asset(
-        "system_review",
-        available_review_tools=(
-            json.dumps(
-                _compact_tool_catalogue(available_review_tools),
-                ensure_ascii=False,
-                indent=2,
-            )
-            if available_review_tools
-            else "No review tools are available for this invocation."
-        ),
-        review_context=json.dumps(
-            {
-                "review_kind": str(review_kind or "").strip() or "independent",
-                "active_plan_id": str(active_plan_id or "").strip() or None,
-                "findings_to_close": [
-                    str(item) for item in findings_to_close if str(item).strip()
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        goal=goal,
-        draft_response=(
-            str(draft_response).strip()
-            or "The execution agent returned no draft response."
-        ),
-        execution_evidence=json.dumps(
-            {
-                "execution_record": (
-                    dict(execution_record) if execution_record is not None else None
-                ),
-                "evidence_refs": [
-                    str(item) for item in evidence_refs if str(item).strip()
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-    )
-
 
 def render_persona_commentary_system_prompt(
     *,
@@ -1009,3 +604,4 @@ def render_final_style_system_prompt() -> str:
     """Return the tool-free presentation-only final answer contract."""
 
     return load_prompt_asset("system_final_style") + "\n"
+# HASHI-Fingerprint: hfp_6a5cf8a083fa4727ac9c74a91c000d53

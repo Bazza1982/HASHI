@@ -250,10 +250,10 @@ async def test_model_findings_newest_supersedes_at_the_next_window_without_repet
 def test_commentary_schema_describes_each_mode():
     from orchestrator.her_v2.prompts import commentary_schema_for
 
-    original = commentary_schema_for(Stage.PLANNING, "original")
-    raw = commentary_schema_for(Stage.PLANNING, "raw")
-    packaged = commentary_schema_for(Stage.PLANNING, "packaged")
-    off = commentary_schema_for(Stage.PLANNING, "off")
+    original = commentary_schema_for(Stage.EXECUTION, "original")
+    raw = commentary_schema_for(Stage.EXECUTION, "raw")
+    packaged = commentary_schema_for(Stage.EXECUTION, "packaged")
+    off = commentary_schema_for(Stage.EXECUTION, "off")
 
     assert "Persona" in original["commentary"]
     assert "objective" in raw["commentary"]
@@ -400,13 +400,13 @@ async def test_stage_authored_persona_commentary_bypasses_second_model_call():
         packager=packager,
         delivery=delivery,
         stage_authored_persona_stages=frozenset(
-            {Stage.TRIAGE, Stage.PLANNING}
+            {Stage.DIRECT, Stage.DIRECT}
         ),
     )
     commentary = NeutralCommentary(
         event_id="turn:commentary:triage:1:1",
         turn_id="turn",
-        stage=Stage.TRIAGE,
+        stage=Stage.DIRECT,
         attempt=1,
         text="Captain, the strategy is selected; planning comes next.",
     )
@@ -484,46 +484,12 @@ def test_optional_commentary_extraction_is_bounded_and_stage_scoped():
     assert commentary is not None
     assert commentary.text == "A neutral update."
     assert commentary.event_id == "turn:commentary:execution:2:1"
-    strategy_commentary = commentary_from_stage_response(
-        response,
-        turn_id="turn",
-        stage=Stage.TRIAGE,
-        invocation=1,
-        attempt=1,
-    )
-    assert strategy_commentary is not None
-    assert strategy_commentary.stage is Stage.TRIAGE
-    assert (
-        commentary_from_stage_response(
-            StageResponse(
-                text="",
-                data={
-                    "classification": "DIRECT_RESPONSE",
-                    "commentary": "This must not duplicate the direct response.",
-                },
-            ),
-            turn_id="turn",
-            stage=Stage.TRIAGE,
-            invocation=1,
-            attempt=1,
-        )
-        is None
-    )
-    assert (
-        commentary_from_stage_response(
-            response,
-            turn_id="turn",
-            stage=Stage.FINALISATION,
-            invocation=3,
-            attempt=1,
-        )
-        is None
-    )
+
     with pytest.raises(CommentaryValidationError, match="must be a string"):
         commentary_from_stage_response(
             StageResponse(text="", data={"commentary": ["invalid"]}),
             turn_id="turn",
-            stage=Stage.PLANNING,
+            stage=Stage.DIRECT,
             invocation=1,
             attempt=1,
         )
@@ -713,7 +679,7 @@ async def test_non_sentinel_persona_response_is_not_classified_as_failure():
     commentary = NeutralCommentary(
         event_id="turn:execution-cycle:1:checkpoint:1:commentary",
         turn_id="turn",
-        stage=Stage.REPLANNING,
+        stage=Stage.DIRECT,
         attempt=1,
         text=(
             "Progress is 60%. The plan is unchanged. "
@@ -749,7 +715,7 @@ async def test_replan_commentary_always_uses_persona_packager_when_available():
     commentary = NeutralCommentary(
         event_id="turn:execution-cycle:1:checkpoint:1:commentary",
         turn_id="turn",
-        stage=Stage.REPLANNING,
+        stage=Stage.DIRECT,
         attempt=1,
         text=(
             "Progress is 60%. The plan is unchanged. "
@@ -965,3 +931,4 @@ def test_herv3_presentation_models_do_not_impose_text_ceiling():
     assert style_request.draft_text == text
     assert style_result.text == text
     assert rendered.text == text
+# HASHI-Fingerprint: hfp_41a6c423e61f4623af342ebf4da9cd64

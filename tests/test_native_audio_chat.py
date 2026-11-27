@@ -1813,7 +1813,7 @@ async def test_audio_only_immediate_crosses_adapter_delivery_boundary():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", [Stage.TRIAGE, Stage.EXECUTION, Stage.DIRECT])
+@pytest.mark.parametrize("stage", [Stage.EXECUTION, Stage.DIRECT])
 @pytest.mark.parametrize("sibling_image", [False, True])
 @pytest.mark.parametrize("her_v3", [False, True])
 async def test_text_voice_stage_waits_for_and_uses_released_local_transcript(

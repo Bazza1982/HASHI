@@ -89,12 +89,10 @@ from orchestrator.her_v2.prompts import (
     render_execution_environment_contract,
     render_execution_system_prompt,
     render_final_style_system_prompt,
-    render_finalisation_system_prompt,
     render_immediate_response_system_prompt,
     render_internal_stage_system_prompt,
     render_persona_commentary_system_prompt,
     render_request_attachments_contract,
-    render_review_system_prompt,
     render_stage_prompt,
     uses_complete_system_prompt,
 )
@@ -729,6 +727,15 @@ def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
     return False
 
 
+def _retired_stage_error(stage: str) -> RuntimeError:
+    """Fail loudly if a retired HER v2 stage is ever invoked again."""
+
+    return RuntimeError(
+        f"HER v2 stage {stage!r} is retired: HERV3 runs one direct loop. "
+        "Remove the caller instead of restoring the retired prompt contract."
+    )
+
+
 def _internal_stage_system_prompt(request: StageRequest) -> str | None:
     return render_internal_stage_system_prompt(request)
 
@@ -742,18 +749,7 @@ def _finalisation_system_prompt(
     reviewer_findings: Mapping[str, Any] | None,
     completion_evidence: Mapping[str, Any],
 ) -> str:
-    return render_finalisation_system_prompt(
-        goal=goal,
-        relevant_habits=relevant_habits,
-        draft_response=draft_response,
-        reviewer_findings=reviewer_findings,
-        completion_evidence=completion_evidence,
-        guidance=source.guidance,
-        display_name=source.display_name,
-        usable=source.usable,
-        persona_block_begin=her_persona.PERSONA_BLOCK_BEGIN,
-        persona_block_end=her_persona.PERSONA_BLOCK_END,
-    )
+    raise _retired_stage_error("finalisation")
 
 
 def _immediate_response_system_prompt(
@@ -836,18 +832,7 @@ def _review_system_prompt(
     findings_to_close: Sequence[str],
     available_review_tools: list[Mapping[str, Any]],
 ) -> str:
-    return render_review_system_prompt(
-        goal=goal,
-        relevant_habits=relevant_habits,
-        active_plan_id=active_plan_id,
-        active_plan=active_plan,
-        draft_response=draft_response,
-        execution_record=execution_record,
-        evidence_refs=evidence_refs,
-        review_kind=review_kind,
-        findings_to_close=findings_to_close,
-        available_review_tools=available_review_tools,
-    )
+    raise _retired_stage_error("review")
 
 
 class _DelegatedToolRegistry:

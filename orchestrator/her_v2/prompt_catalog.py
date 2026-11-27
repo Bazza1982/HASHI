@@ -47,18 +47,6 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "tool_catalogue",
         }
     ),
-    "system_finalisation": frozenset(
-        {
-            "completion_evidence",
-            "draft_response",
-            "goal",
-            "persona_block_begin",
-            "persona_block_end",
-            "persona_guidance",
-            "relevant_habits",
-            "reviewer_findings",
-        }
-    ),
     "system_final_style": frozenset(),
     "system_immediate_response": frozenset(
         {"goal", "persona_block_begin", "persona_block_end", "persona_guidance"}
@@ -68,40 +56,6 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
     "system_persona_commentary": frozenset(
         {"persona_block_begin", "persona_block_end", "persona_guidance"}
     ),
-    "system_planning": frozenset(
-        {
-            "available_execution_tools",
-            "available_sub_agent_profiles",
-            "classification",
-            "goal",
-            "relevant_habits",
-            "schema",
-            "stage_tool_policy",
-            "strategy_handoff",
-        }
-    ),
-    "system_replanning": frozenset(
-        {
-            "active_plan",
-            "available_execution_tools",
-            "available_sub_agent_profiles",
-            "classification",
-            "goal",
-            "plan_edit_history",
-            "relevant_habits",
-            "schema",
-            "workflow_state_and_evidence",
-        }
-    ),
-    "system_review": frozenset(
-        {
-            "available_review_tools",
-            "draft_response",
-            "execution_evidence",
-            "goal",
-            "review_context",
-        }
-    ),
     "system_sub_agent": frozenset(
         {
             "active_plan",
@@ -110,18 +64,6 @@ PROMPT_ASSET_FIELDS: Mapping[str, frozenset[str]] = {
             "relevant_habits",
             "schema",
             "sub_agent_results",
-        }
-    ),
-    "system_triage": frozenset({"goal", "habit_catalogue", "schema_v2"}),
-    "system_strategy": frozenset(
-        {
-            "execution_capabilities",
-            "goal",
-            "habit_catalogue",
-            "request_resources",
-            "schema_v3",
-            "stage_tool_policy",
-            "strategy_cards",
         }
     ),
 }

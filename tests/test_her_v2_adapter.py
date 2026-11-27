@@ -4171,89 +4171,6 @@ async def test_persona_packaging_retries_once_with_a_fresh_backend(tmp_path):
     assert "attempt_timeout_s" not in completed["payload"]
 
 
-@pytest.mark.asyncio
-async def test_strategy_receives_complete_policy_and_minimal_turn_prompt():
-    manager = _FakeManager()
-    provider = HashiStageProvider(backend_manager=manager)
-    profile = ProviderProfile(
-        "triage",
-        "openrouter-api",
-        "configured/model",
-        reasoning="provider-low",
-    )
-    request = _stage_request(
-        Stage.TRIAGE,
-        allow_tools=False,
-        allow_side_effects=False,
-    )
-    request = StageRequest(
-        **{
-            **request.__dict__,
-            "goal": "Earlier context already contains the result. Please check it.",
-        }
-    )
-
-    await provider.invoke(profile, request)
-
-    backend = manager.backends[-1]
-    assert "You are the task strategist" in backend.sys_prompt
-    assert "configured agent persona" not in backend.sys_prompt
-    assert "Original user request and context" in backend.sys_prompt
-    assert "Earlier context already contains the result. Please check it." in (
-        backend.sys_prompt
-    )
-    assert backend.prompt == request.goal
-    assert "Choose one and only one classification" in backend.sys_prompt
-    for classification in (
-        "DIRECT_RESPONSE",
-        "SIMPLE_TASK",
-        "COMPLEX_TASK",
-        "HIGH_VOLUME_TASK",
-        "CONFIRMATION_REQUIRED",
-    ):
-        assert classification in backend.sys_prompt
-    for decision_boundary in (
-        "A bounded and straightforward execution step is required",
-        "multiple dependent steps, discovery, comparison, validation",
-        "substantial execution volume or many independent items",
-        "goal, target, scope, required choice, or authority is materially unclear",
-    ):
-        assert decision_boundary in backend.sys_prompt
-    assert "Return exactly one valid JSON object" in backend.sys_prompt
-    assert '"real_goal"' in backend.sys_prompt
-    assert '"selected_strategy_cards"' in backend.sys_prompt
-    assert '"execution_brief"' in backend.sys_prompt
-    assert '"relevant_habits"' in backend.sys_prompt
-    assert "checkpoint_policy" not in backend.sys_prompt
-    assert "checkpoint_reason" not in backend.sys_prompt
-    assert "For Planning, Execution, Replanning, and Review" not in backend.sys_prompt
-    assert "her_effort" not in backend.sys_prompt
-    assert "tools_authorised_for_this_stage" not in backend.sys_prompt
-    assert "external_side_effects_authorised_for_this_stage" not in backend.sys_prompt
-    assert "invocation_role" not in backend.sys_prompt
-    assert "turn_id" not in backend.sys_prompt
-    assert "request_ref" not in backend.sys_prompt
-
-    retry_request = StageRequest(
-        **{
-            **request.__dict__,
-            "attempt": 2,
-            "context": {
-                "previous_structure_error": {
-                    "attempt": 1,
-                    "error_type": "StructuredOutputError",
-                    "error": "provider returned an empty structured response",
-                },
-                "retry_instruction": "legacy generic instruction",
-            },
-        }
-    )
-
-    await provider.invoke(profile, retry_request)
-
-    retry_backend = manager.backends[-1]
-    assert retry_backend.prompt == backend.prompt
-    assert retry_backend.sys_prompt == backend.sys_prompt
 
 
 @pytest.mark.asyncio
@@ -4396,17 +4313,6 @@ async def test_hashi_stage_provider_emits_typed_preview_only_for_visible_stage_t
     assert all(event.provenance == "provider_visible_text_delta" for event in forwarded)
     assert manager.backends[-1].preview_deliveries == [True, True]
 
-    forwarded.clear()
-    await provider.invoke(
-        profile,
-        _stage_request(
-            Stage.TRIAGE,
-            allow_tools=False,
-            allow_side_effects=False,
-        ),
-    )
-    assert forwarded == []
-    assert manager.backends[-1].preview_deliveries == [False, False]
 
 
 @pytest.mark.asyncio
@@ -4489,135 +4395,8 @@ async def test_hashi_stage_provider_enforces_tool_gateway_and_provider_reasoning
     assert backend.shutdown_called is True
     assert any(event.kind == KIND_TOOL_START for event in events)
 
-    await provider.invoke(
-        profile,
-        _stage_request(Stage.REVIEW, allow_tools=False, allow_side_effects=False),
-    )
-    reviewer_backend = manager.backends[-1]
-    assert reviewer_backend.tool_registry is None
-    assert reviewer_backend.sys_prompt.startswith(
-        "You are an independent reviewer agent for an agentic workflow"
-    )
-    assert "No review tools are available" in reviewer_backend.sys_prompt
-    assert "Return exactly one valid JSON object" in reviewer_backend.sys_prompt
-    assert reviewer_backend.prompt == "Do the requested work"
-
-    for stage in (Stage.PLANNING, Stage.REPLANNING):
-        await provider.invoke(
-            profile,
-            _stage_request(stage, allow_tools=False, allow_side_effects=False),
-        )
-        planning_backend = manager.backends[-1]
-        assert planning_backend.prompt == "Do the requested work"
-        assert "configured agent persona" not in planning_backend.sys_prompt
-        assert '"name": "file_read"' in planning_backend.sys_prompt
-        assert '"name": "file_write"' in planning_backend.sys_prompt
-        assert '"hashi_read_only": true' in planning_backend.sys_prompt
-        assert "Never invent a tool or capability name" in planning_backend.sys_prompt
-        if stage is Stage.PLANNING:
-            assert "planning agent for an agentic workflow" in (
-                planning_backend.sys_prompt
-            )
-        else:
-            assert "replanning agent in an agentic workflow" in (
-                planning_backend.sys_prompt
-            )
-            assert '"completion_percent"' in planning_backend.sys_prompt
-
-    await provider.invoke(
-        profile,
-        _stage_request(
-            Stage.FINALISATION,
-            allow_tools=False,
-            allow_side_effects=False,
-        ),
-    )
-    finalisation_backend = manager.backends[-1]
-    assert finalisation_backend.tool_registry is None
-    assert finalisation_backend.sys_prompt.startswith(
-        "You are the finalisation agent in an agentic workflow"
-    )
-    assert "Return only the final user-facing response" in (
-        finalisation_backend.sys_prompt
-    )
-    assert "Agent display name: agent" in finalisation_backend.sys_prompt
-    assert "configured agent persona" not in finalisation_backend.sys_prompt
-    assert "Return exactly one JSON object" not in finalisation_backend.sys_prompt
-    assert finalisation_backend.prompt == "Do the requested work"
 
 
-@pytest.mark.asyncio
-async def test_review_system_prompt_receives_resolved_goal_evidence_and_real_tools():
-    class ReviewToolRegistry(_BaseToolRegistry):
-        def is_allowed(self, name):
-            return name in {"file_read", "verification_run"}
-
-        def allowed_tool_names(self):
-            return ("file_read", "verification_run")
-
-        def get_tool_definitions(self, tiers=None):
-            del tiers
-            return [
-                {"type": "function", "function": {"name": "file_read"}},
-                {
-                    "type": "function",
-                    "function": {"name": "verification_run"},
-                },
-            ]
-
-    manager = _FakeManager()
-    provider = HashiStageProvider(
-        backend_manager=manager,
-        tool_registry=ReviewToolRegistry(),
-    )
-    request = _stage_request(
-        Stage.REVIEW,
-        allow_tools=True,
-        allow_side_effects=True,
-    )
-    request = StageRequest(
-        **{
-            **request.__dict__,
-            "context": {
-                "active_plan": {
-                    "plan": ["implement"],
-                    "success_criteria": ["tests pass"],
-                },
-                "draft_response": "Implemented the requested change.",
-                "execution": {
-                    "disposition": "COMPLETED",
-                    "summary": "Implemented the requested change.",
-                },
-                "evidence_refs": ["receipt:execution:42"],
-                "review_kind": "closure",
-                "findings_to_close": ["The original test evidence was incomplete."],
-                "delegated_tools": ["file_read", "verification_run"],
-                "verification_run_policy": {
-                    "workspace": "authoritative_current_workspace"
-                },
-                "execution_elapsed_s": 10.0,
-            },
-        }
-    )
-
-    await provider.invoke(
-        ProviderProfile("reviewer", "openrouter-api", "configured/model"),
-        request,
-    )
-
-    backend = manager.backends[-1]
-    assert backend.prompt == request.goal
-    assert "Implemented the requested change." in backend.sys_prompt
-    assert "authoritative resolved goal" in backend.sys_prompt
-    assert "original request" not in backend.sys_prompt
-    assert '"tests pass"' not in backend.sys_prompt
-    assert '"review_kind": "closure"' in backend.sys_prompt
-    assert "The original test evidence was incomplete." in backend.sys_prompt
-    assert '"disposition": "COMPLETED"' in backend.sys_prompt
-    assert '"receipt:execution:42"' in backend.sys_prompt
-    assert '"name": "file_read"' in backend.sys_prompt
-    assert '"name": "verification_run"' in backend.sys_prompt
-    assert "configured agent persona" not in backend.sys_prompt
 
 
 @pytest.mark.asyncio
@@ -4691,7 +4470,7 @@ async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receip
         tool_registry=registry,
     )
     request = _stage_request(
-        Stage.REVIEW,
+        Stage.EXECUTION,
         allow_tools=True,
         allow_side_effects=False,
     )
@@ -4710,7 +4489,7 @@ async def test_hashi_stage_provider_records_exact_completed_tool_evidence_receip
 
     assert len(response.tool_receipts) == 1
     receipt = response.tool_receipts[0]
-    assert receipt.stage is Stage.REVIEW
+    assert receipt.stage is Stage.EXECUTION
     assert receipt.invocation_id == "turn-1:review:invocation:7"
     assert receipt.attempt == 1
     assert receipt.tool_call_id == "provider-call-42"
@@ -4986,96 +4765,6 @@ async def test_chat_only_model_rejects_stage_that_requires_tools():
     assert manager.backends[-1].shutdown_called is True
 
 
-@pytest.mark.asyncio
-async def test_review_verification_tool_injects_timeout_and_workspace_authority():
-    class VerificationToolRegistry(_BaseToolRegistry):
-        def is_allowed(self, name):
-            return name == "verification_run" or super().is_allowed(name)
-
-        def allowed_tool_names(self):
-            return (*super().allowed_tool_names(), "verification_run")
-
-        def get_tool_definitions(self, tiers=None):
-            return [
-                *super().get_tool_definitions(tiers=tiers),
-                {"type": "function", "function": {"name": "verification_run"}},
-            ]
-
-    class CallingVerificationBackend(_FakeBackend):
-        async def generate_response(
-            self,
-            prompt,
-            request_id,
-            is_retry=False,
-            silent=False,
-            on_stream_event=None,
-        ):
-            del request_id, is_retry, silent, on_stream_event
-            self.prompt = prompt
-            await self.tool_registry.execute(
-                "verification_run",
-                {
-                    "operation": "run",
-                    "argv": ["python", "-V"],
-                    "timeout_s": 60,
-                    "_hashi_verification_policy": {"execution_elapsed_s": 1},
-                },
-                "verification-call",
-            )
-            return BackendResponse(
-                text=('{"status":"PASS","reason":"policy captured","conditions":null}'),
-                duration_ms=1,
-                tool_call_count=1,
-                tool_loop_count=1,
-            )
-
-    class CallingVerificationManager(_FakeManager):
-        def create_ephemeral_backend(self, engine, target_model=None):
-            backend = CallingVerificationBackend(self.system_md)
-            self.backends.append(backend)
-            return backend
-
-    manager = CallingVerificationManager()
-    registry = VerificationToolRegistry()
-    provider = HashiStageProvider(backend_manager=manager, tool_registry=registry)
-    request = _stage_request(
-        Stage.REVIEW,
-        allow_tools=True,
-        allow_side_effects=True,
-    )
-    request = StageRequest(
-        **{
-            **request.__dict__,
-            "context": {
-                "delegated_tools": ["verification_run"],
-                "execution_elapsed_s": 3600,
-                "verification_run_policy": {
-                    "workspace": "authoritative_current_workspace",
-                    "environment": "inherited",
-                    "network": "inherited",
-                },
-            },
-        }
-    )
-
-    await provider.invoke(
-        ProviderProfile("reviewer", "openrouter-api", "configured/model"),
-        request,
-    )
-
-    _name, arguments, _call_id = registry.executed[-1]
-    assert arguments["timeout_s"] == 60
-    assert arguments["_hashi_verification_policy"] == {
-        "workspace": "authoritative_current_workspace",
-        "environment": "inherited",
-        "network": "inherited",
-        "execution_elapsed_s": 3600,
-    }
-    assert registry.execution_contexts[-1]["safety_mode"] == ("workspace_verification")
-    assert registry.execution_contexts[-1]["authority_mode"] == (
-        "her_v2_review_verification"
-    )
-    assert registry.execution_contexts[-1]["verification_execution_elapsed_s"] == 3600
 
 
 @pytest.mark.asyncio
@@ -5665,42 +5354,6 @@ Please scan Outlook.""",
     assert "tools_authorised_for_this_stage" not in immediate_backend.prompt
     assert "invocation_role" not in immediate_backend.prompt
 
-    finalisation_request = _stage_request(
-        Stage.FINALISATION,
-        allow_tools=False,
-        allow_side_effects=False,
-    )
-    finalisation_request = StageRequest(
-        **{
-            **finalisation_request.__dict__,
-            "context": {
-                "draft_response": "The requested work completed.",
-                "reviewer_findings": {
-                    "status": "PASS",
-                    "reason": "The completed work satisfies the request.",
-                    "conditions": None,
-                },
-                "completion_evidence": {
-                    "evidence_refs": ["receipt:42"],
-                    "limitations": [],
-                },
-            },
-        }
-    )
-
-    await provider.invoke(profile, finalisation_request)
-
-    finalisation_backend = manager.backends[-1]
-    assert "Use a warm voice and address the user as Captain." in (
-        finalisation_backend.sys_prompt
-    )
-    assert "FULL AGENT OPERATIONAL CONTENT" not in (finalisation_backend.sys_prompt)
-    assert "PRIVATE WORKFLOW INSTRUCTIONS" not in (finalisation_backend.sys_prompt)
-    assert "The requested work completed." in finalisation_backend.sys_prompt
-    assert '"status": "PASS"' in finalisation_backend.sys_prompt
-    assert '"evidence_refs"' in finalisation_backend.sys_prompt
-    assert finalisation_backend.prompt == finalisation_request.goal
-    assert "Return exactly one JSON object" not in finalisation_backend.sys_prompt
 
     rendered = await provider.package_persona_commentary(
         profile,
@@ -5771,12 +5424,6 @@ async def test_tool_enabled_direct_and_execution_package_provider_commentary_bef
     )
     profile = ProviderProfile("premium", "openrouter-api", "configured/model")
 
-    await provider.invoke(
-        profile,
-        _stage_request(Stage.REPLANNING, allow_tools=False),
-    )
-    assert events[-1].summary == "Raw provider progress"
-    assert events[-1].delivery_class == DELIVERY_INTERNAL
 
     await provider.invoke(
         profile,
@@ -5956,7 +5603,7 @@ async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
 
     result = await provider.invoke(
         ProviderProfile("reviewer", "new-provider", "model-safe"),
-        _stage_request(Stage.REVIEW, allow_tools=False),
+        _stage_request(Stage.EXECUTION, allow_tools=False),
     )
 
     assert result.text == ""
@@ -5965,7 +5612,7 @@ async def test_hashi_stage_provider_accepts_unknown_engine_by_safe_capability():
         "reason": "verified",
         "conditions": None,
     }
-    assert "independent reviewer agent" in manager.backends[0].sys_prompt
+    assert "execution agent for an agentic workflow" in manager.backends[0].sys_prompt
     assert manager.backends[0].prompt == "Do the requested work"
     assert manager.backends[0].shutdown_called is True
 
