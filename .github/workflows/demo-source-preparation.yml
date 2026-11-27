@@ -38,8 +38,11 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: 3.12.13
+    - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Install isolated test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]" ruff
+      run: uv pip install --system -r constraints/standard-py312.lock ".[test]" ruff
     - name: Protected Core guard
       shell: bash
       env:

@@ -89,7 +89,7 @@ jobs:
     - name: Install only for selected component tests
       if: ${{ steps.scope.outputs.architecture == 'true' || steps.scope.outputs.frontend == 'true' || steps.scope.outputs.telegram
         == 'true' || steps.scope.outputs.voice == 'true' }}
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      run: uv pip install --system -r constraints/standard-py312.lock ".[test]"
     - name: Run architecture contract tests
       run: python .github/ci_plan.py test architecture
       if: ${{ steps.scope.outputs.architecture == 'true' }}

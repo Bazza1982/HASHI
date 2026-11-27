@@ -68,6 +68,9 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+    - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Verify selection and failure contracts
       run: python -B -m unittest discover -s .github -p test_ci_plan.py -q
     - name: Select checks from actual impact
@@ -82,18 +85,17 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: 3.12.13
+    - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Install build tools
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install build pytest
+      run: uv pip install --system build pytest
     - name: Build package
       run: python -m build
     - name: Install built wheel
       run: |
-        python -m venv .venv-smoke
-        . .venv-smoke/bin/activate
-        python -m pip install --upgrade pip
-        python -m pip install "dist/$(basename dist/*.whl)[test]"
+        uv venv .venv-smoke
+        uv pip install --python .venv-smoke "dist/$(basename dist/*.whl)[test]"
     - name: CLI smoke run
       run: |
         . .venv-smoke/bin/activate
@@ -106,9 +108,7 @@ jobs:
         assert set(payload["completed_steps"]) == {"step_write", "step_check"}
         PY
     - name: Install locked standard runtime for integration contracts
-      run: |
-        . .venv-smoke/bin/activate
-        python -m pip install -r constraints/standard-py312.lock
+      run: uv pip install --python .venv-smoke -r constraints/standard-py312.lock
     - name: Contract tests
       run: |
         . .venv-smoke/bin/activate
