@@ -9,6 +9,7 @@ from typing import Any
 
 from orchestrator.connector_delivery_preferences import (
     DEFAULT_MIRROR,
+    INSTANCE_SCOPE_OWNER,
     LEGACY_STATE_FILENAME,
     STATE_FILENAME,
     get_connector_preference,
@@ -32,6 +33,9 @@ def load_state(bridge_home: Any) -> dict[str, Any]:
 def _legacy_owner_view(state: dict[str, Any]) -> dict[str, Any]:
     owners: dict[str, bool] = {}
     for owner, owner_entry in state["owners"].items():
+        if owner == INSTANCE_SCOPE_OWNER:
+            # The instance-wide switch is not an owner preference.
+            continue
         value = (
             owner_entry.get("connectors", {})
             .get("telegram", {})

@@ -574,6 +574,25 @@ def owner_mirror_for_admission(
         return default
 
 
+def instance_mirror_globally_off(state_root: Any | None) -> bool:
+    """Report whether the instance-wide switch suppresses every mirror.
+
+    An unreadable store keeps the historical behaviour (mirrors allowed) so a
+    damaged preference document cannot silently stop delivery on its own.
+    """
+
+    if state_root is None:
+        return False
+    try:
+        from orchestrator.connector_delivery_preferences import (
+            instance_telegram_mirror_enabled,
+        )
+
+        return not instance_telegram_mirror_enabled(state_root, default=True)
+    except Exception:
+        return False
+
+
 def configured_owner_mirror_destinations(
     *,
     request_metadata: Mapping[str, Any] | None,
@@ -626,13 +645,22 @@ def telegram_delivery_for_admission(
         default=True,
     )
     return _resolve_agent_telegram_mirror(
-        instance_enabled, agent_id=agent_id, agent_config_path=agent_config_path
+        instance_enabled,
+        agent_id=agent_id,
+        agent_config_path=agent_config_path,
+        instance_global_off=instance_mirror_globally_off(state_root),
     )
 
 
 def _resolve_agent_telegram_mirror(
-    instance_enabled: bool, *, agent_id: Any, agent_config_path: Any
+    instance_enabled: bool,
+    *,
+    agent_id: Any,
+    agent_config_path: Any,
+    instance_global_off: bool = False,
 ) -> bool:
+    if instance_global_off:
+        return False
     if agent_config_path is None or not str(agent_id or "").strip():
         return instance_enabled
     try:
@@ -642,7 +670,11 @@ def _resolve_agent_telegram_mirror(
         )
 
         policy = load_agent_telegram_mirror_policy(agent_config_path, agent_id)
-        return resolve_telegram_mirror_policy(policy, instance_enabled=instance_enabled)
+        return resolve_telegram_mirror_policy(
+            policy,
+            instance_enabled=instance_enabled,
+            instance_global_off=instance_global_off,
+        )
     except (OSError, TypeError, ValueError):
         # A missing/corrupt Agent policy must not accidentally enable a mirror.
         # Telegram-origin traffic was returned above and remains deliverable.
@@ -677,6 +709,9 @@ def telegram_mirror_allowed_for_run(
     global_config = getattr(runtime, "global_config", None)
     owner = str(owner_id or run.get("owner_id") or metadata.get("owner_id") or "").strip()
     state_root = getattr(global_config, "bridge_home", None)
+    # The instance-wide switch also stops mirrors this Run has not sent yet.
+    if instance_mirror_globally_off(state_root):
+        return False
     if state_root is None:
         # Legacy runtimes without an instance preference store retain their
         # admitted default; no persisted owner switch is available to read.

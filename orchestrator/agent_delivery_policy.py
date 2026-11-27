@@ -93,10 +93,18 @@ def update_agent_telegram_mirror_policy(
     return normalized
 
 
-def resolve_telegram_mirror_policy(policy: Any, *, instance_enabled: bool) -> bool:
-    """Combine the Agent tri-state with the owner/instance mirror switch."""
+def resolve_telegram_mirror_policy(
+    policy: Any, *, instance_enabled: bool, instance_global_off: bool = False
+) -> bool:
+    """Combine the Agent tri-state with the instance and owner mirror switches.
+
+    The instance-wide switch wins over every Agent policy, including an Agent
+    set to always on; clearing it restores the untouched per-Agent settings.
+    """
 
     normalized = normalize_telegram_mirror_policy(policy)
+    if instance_global_off:
+        return False
     if normalized == TELEGRAM_MIRROR_ALWAYS_ON:
         return True
     if normalized == TELEGRAM_MIRROR_ALWAYS_OFF:

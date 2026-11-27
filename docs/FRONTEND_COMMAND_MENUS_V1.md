@@ -118,6 +118,14 @@ Transport compatibility does not prove that every existing command has been
 qualified on this surface. Start with the supplied real `/notify` integration
 test and a read-only navigation canary.
 
+`/telegram off global` sets one instance-wide switch that suppresses every
+Agent's Telegram mirror in this instance, including Agents whose own policy is
+always on. `/telegram on global` clears it and each Agent returns to its
+untouched per-Agent setting; `/telegram global` reports the current state. The
+switch changes mirroring only: origin-platform replies, inbound messages, Bot
+Tokens and connections are unaffected, and it never applies to another
+instance.
+
 `/telegram` and `/whatsapp` control owner-scoped FC mirror preferences from any
 authenticated frontend. Their handlers and callbacks use the same persisted
 connector-delivery state and localized card contract. The `api_chat` text route

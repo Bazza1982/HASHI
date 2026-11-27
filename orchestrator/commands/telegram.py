@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,6 +44,116 @@ def _enabled(runtime: Any, update: Any, connector_id: str = "telegram") -> bool:
     )
 
 
+def _global_state(runtime: Any) -> bool | None:
+    """Read the instance-wide mirror switch, or None without a store."""
+
+    home = _bridge_home(runtime)
+    if home is None:
+        return None
+    from orchestrator.connector_delivery_preferences import (
+        instance_telegram_mirror_enabled,
+    )
+
+    return instance_telegram_mirror_enabled(home, default=True)
+
+
+def _global_state_label(enabled: bool) -> str:
+    return ui_language.tr(
+        "menu.telegram.global.state.on" if enabled
+        else "menu.telegram.global.state.off"
+    )
+
+
+def _instance_agent_counts(runtime: Any) -> tuple[int, int] | None:
+    """Count this instance's Agents and those pinned to always on."""
+
+    config_path = getattr(getattr(runtime, "global_config", None), "config_path", None)
+    if not config_path:
+        return None
+    try:
+        from orchestrator.config_json import read_config_json
+
+        document = read_config_json(config_path)
+        rows = document.get("agents") if isinstance(document, Mapping) else None
+        if not isinstance(rows, list):
+            return None
+        agents = [row for row in rows if isinstance(row, Mapping)]
+        always_on = sum(
+            1
+            for row in agents
+            if str(row.get("telegram_mirror_policy") or "").strip().casefold()
+            == "always_on"
+        )
+        return len(agents), always_on
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _global_scope_line(runtime: Any) -> str:
+    counts = _instance_agent_counts(runtime)
+    if counts is None:
+        return ui_language.tr("menu.telegram.global.scope_unknown")
+    agents, always_on = counts
+    return ui_language.tr(
+        "menu.telegram.global.scope", agents=agents, always_on=always_on
+    )
+
+
+def _global_status_text(runtime: Any) -> str:
+    current = _global_state(runtime)
+    if current is None:
+        return ui_language.tr("menu.telegram.unavailable")
+    return "\n\n".join(
+        [
+            ui_language.tr(
+                "menu.telegram.global.status", state=_global_state_label(current)
+            ),
+            _global_scope_line(runtime),
+            ui_language.tr("menu.telegram.global.unaffected"),
+            ui_language.tr("menu.telegram.global.usage"),
+        ]
+    )
+
+
+async def _global_mirror_command(runtime: Any, update: Any, *, enabled: bool) -> None:
+    """Set the instance-wide switch that overrides every Agent's mirror policy."""
+
+    home = _bridge_home(runtime)
+    if home is None:
+        await _send(runtime, update, ui_language.tr("menu.telegram.unavailable"))
+        return
+    from orchestrator.connector_delivery_preferences import set_instance_preference
+
+    try:
+        set_instance_preference(home, "telegram", "mirror", enabled)
+    except (OSError, TypeError, ValueError):
+        await _send(runtime, update, ui_language.tr("menu.telegram.global.failed"))
+        return
+    notice = ui_language.tr(
+        "menu.telegram.global.notice.on" if enabled
+        else "menu.telegram.global.notice.off"
+    )
+    await _send(
+        runtime,
+        update,
+        "\n\n".join(
+            [
+                f"✅ {notice}",
+                ui_language.tr(
+                    "menu.telegram.global.status",
+                    state=_global_state_label(enabled),
+                ),
+                _global_scope_line(runtime),
+                ui_language.tr("menu.telegram.global.unaffected"),
+                ui_language.tr(
+                    "menu.telegram.global.restore_on" if not enabled
+                    else "menu.telegram.global.restore_off"
+                ),
+            ]
+        ),
+    )
+
+
 def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", notice: str | None = None,
                summary: dict[str, Any] | None = None) -> str:
     enabled = _enabled(runtime, update, connector_id)
@@ -52,6 +163,14 @@ def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", not
         f"{ui_language.tr(prefix + '.scope')}"
     ]
     if connector_id == "telegram":
+        global_state = _global_state(runtime)
+        if global_state is not None:
+            facts.append(
+                ui_language.tr(
+                    "menu.telegram.global.menu_fact",
+                    state=_global_state_label(global_state),
+                )
+            )
         from orchestrator.telegram_status_presentation import summary_facts
         facts.extend(summary_facts(summary))
     if notice:
@@ -243,6 +362,12 @@ async def telegram_command(runtime: Any, update: Any, context: Any) -> None:
     if args and args[0] == "disconnect":
         await _disconnect_command(runtime, update, args)
         return
+    if len(args) == 2 and args[1] == "global" and args[0] in {"on", "off"}:
+        await _global_mirror_command(runtime, update, enabled=args[0] == "on")
+        return
+    if args == ["global"]:
+        await _send(runtime, update, _global_status_text(runtime))
+        return
     await _mirror_command(runtime, update, context, "telegram")
 
 
@@ -291,7 +416,11 @@ async def _mirror_callback(runtime: Any, update: Any, context: Any, connector_id
 COMMANDS = [
     RuntimeCommand(
         name="telegram",
-        description="Toggle Telegram mirror or disconnect a Bot token [on|off|disconnect [agent_id]]",
+        description=(
+            "Toggle the Telegram mirror for this owner, for the whole instance, "
+            "or disconnect a Bot token "
+            "[on|off [global]|disconnect [agent_id]|global]"
+        ),
         callback=telegram_command,
     ),
     RuntimeCommand(

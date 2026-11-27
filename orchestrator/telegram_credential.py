@@ -330,9 +330,17 @@ class TelegramCredentialService:
             "mirror",
             default=True,
         )
+        from orchestrator.connector_delivery_preferences import (
+            instance_telegram_mirror_enabled,
+        )
+
+        instance_global_mirror_enabled = instance_telegram_mirror_enabled(
+            self.state_root, default=True
+        )
         resolved_mirror_enabled = resolve_telegram_mirror_policy(
             context.mirror_policy,
             instance_enabled=instance_mirror_enabled,
+            instance_global_off=not instance_global_mirror_enabled,
         )
         return {
             "ok": True,
@@ -356,6 +364,7 @@ class TelegramCredentialService:
             "mirror_policy": context.mirror_policy,
             "mirror_policy_revision": context.mirror_policy_revision,
             "instance_mirror_enabled": instance_mirror_enabled,
+            "instance_mirror_global_enabled": instance_global_mirror_enabled,
             "resolved_mirror_enabled": resolved_mirror_enabled,
             "mirror_delivery_ready": outbound and context.authorized_user_configured,
         }
