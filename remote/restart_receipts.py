@@ -102,6 +102,14 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
         or not RESTART_ID_RE.fullmatch(str(record.get("restart_id") or ""))):
         return None
     state = record.get("state")
+    # A restart that has made no progress for a full day can no longer be
+    # reported as running. Keep the durable receipt intact and return an
+    # unconfirmed terminal projection to the client.
+    updated = _epoch(record.get("updated_at"))
+    if state not in {"completed", "failed", "rejected"} and updated is not None and time.time() - updated > 86400:
+        record = {**record, "state": "failed", "phase": "terminal_verification",
+                  "completed_at": record.get("updated_at"), "error": "restart_observation_expired"}
+        state = "failed"
     terminal = state in {"completed", "failed", "rejected"}
     succeeded = state == "completed" and verified_restart_receipt(record, expected_target=instance)[0]
     timing = record.get("lifecycle_timing") or {}

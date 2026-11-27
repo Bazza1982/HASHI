@@ -143,9 +143,16 @@ def _record_startup_presentation(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(record, ensure_ascii=True, sort_keys=True)
-        with _startup_record_lock, path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(encoded + "\n")
-            handle.flush()
+        with _startup_record_lock:
+            if path.is_file() and path.stat().st_size >= 16 * 1024 * 1024:
+                for index in range(3, 0, -1):
+                    source = path if index == 1 else path.with_name(f"{path.name}.{index - 1}")
+                    target = path.with_name(f"{path.name}.{index}")
+                    if source.exists():
+                        os.replace(source, target)
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded + "\n")
+                handle.flush()
     except Exception as exc:
         record_output_exception(
             purpose="startup_presentation_audit",

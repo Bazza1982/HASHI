@@ -140,19 +140,21 @@ def _gateway_audit_headers(headers: Any) -> dict[str, str]:
 
 
 def _gateway_body_evidence(payload: bytes) -> dict[str, Any]:
-    """Return a complete, untruncated representation of one HTTP body."""
+    """Retain a bounded body excerpt and a digest of the complete body."""
 
     raw = bytes(payload)
+    excerpt = raw[:16384]
     try:
-        body = raw.decode("utf-8")
+        body = excerpt.decode("utf-8")
         encoding = "utf-8"
     except UnicodeDecodeError:
-        body = base64.b64encode(raw).decode("ascii")
+        body = base64.b64encode(excerpt).decode("ascii")
         encoding = "base64"
     return {
         "body": body,
         "body_encoding": encoding,
         "body_bytes": len(raw),
+        "body_truncated": len(excerpt) < len(raw),
         "body_sha256": hashlib.sha256(raw).hexdigest(),
     }
 
@@ -1194,6 +1196,12 @@ class APIGatewayServer:
         for path in (self.observability_path, self.observability_fallback_path):
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
+                if path.is_file() and path.stat().st_size >= 16 * 1024 * 1024:
+                    for index in range(3, 0, -1):
+                        source = path if index == 1 else path.with_name(f"{path.name}.{index - 1}")
+                        target = path.with_name(f"{path.name}.{index}")
+                        if source.exists():
+                            os.replace(source, target)
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(encoded + "\n")
                     handle.flush()

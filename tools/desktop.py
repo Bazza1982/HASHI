@@ -74,6 +74,10 @@ def _find_usecomputer() -> str | None:
         logger.debug("usecomputer: env override → %s", found)
         return found
 
+    # The bundled usecomputer executable is a Linux ELF binary.
+    if os.name == "nt":
+        return shutil.which("usecomputer.exe")
+
     # 2. vendored alongside this module
     vendored = Path(__file__).parent / "bin" / "usecomputer"
     if vendored.is_file():
@@ -296,6 +300,8 @@ async def execute_desktop_screenshot(args: dict, *, typed_media: bool = False) -
     logger.info("desktop_screenshot display=%s annotate=%s", args.get("display"), args.get("annotate", False))
     uc = _find_usecomputer()
     if not uc:
+        if os.name == "nt":
+            return "Error: desktop_screenshot is unavailable on Windows without a compatible usecomputer.exe."
         return (
             "Error: usecomputer binary not found. "
             "Install with: npm install --prefix ~/ComputerUseTestWSL usecomputer"

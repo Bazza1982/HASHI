@@ -193,6 +193,25 @@ def get_flexible_picker_commands(runtime, *, locale: str | None = None) -> list[
     return commands
 
 
+TELEGRAM_BOT_COMMAND_MENU_LIMIT = 100
+
+
+def fit_telegram_bot_commands(
+    commands: list[BotCommand],
+    *,
+    limit: int = TELEGRAM_BOT_COMMAND_MENU_LIMIT,
+) -> list[BotCommand]:
+    """Bound only the Telegram setMyCommands payload to Telegram's 100-item limit."""
+    fitted = list(commands)
+    for alias in ("fresh", "start"):
+        if len(fitted) <= limit:
+            break
+        fitted = [command for command in fitted if command.command != alias]
+    if len(fitted) > limit:
+        fitted = fitted[:limit]
+    return fitted
+
+
 def get_flexible_bot_commands(runtime, *, locale: str | None = None) -> list[BotCommand]:
     selected = ui_language.normalize_locale(locale or ui_language.DEFAULT_LOCALE)
     commands = [
@@ -240,7 +259,9 @@ async def register_flexible_bot_commands(runtime) -> None:
 
     default_locale = ui_language.configured_default_locale(runtime)
     await runtime.app.bot.set_my_commands(
-        get_flexible_bot_commands(runtime, locale=default_locale)
+        fit_telegram_bot_commands(
+            get_flexible_bot_commands(runtime, locale=default_locale)
+        )
     )
     for actor_id, locale in ui_language.saved_user_locales(runtime).items():
         try:
@@ -248,7 +269,9 @@ async def register_flexible_bot_commands(runtime) -> None:
             if chat_id <= 0:
                 continue
             await runtime.app.bot.set_my_commands(
-                get_flexible_bot_commands(runtime, locale=locale),
+                fit_telegram_bot_commands(
+                    get_flexible_bot_commands(runtime, locale=locale)
+                ),
                 scope=BotCommandScopeChat(chat_id=chat_id),
             )
         except (TypeError, ValueError):
@@ -308,7 +331,9 @@ async def sync_user_command_menus(
         attempted += 1
         try:
             await bot.set_my_commands(
-                get_flexible_bot_commands(candidate, locale=locale),
+                fit_telegram_bot_commands(
+                    get_flexible_bot_commands(candidate, locale=locale)
+                ),
                 scope=BotCommandScopeChat(chat_id=numeric_chat_id),
             )
             succeeded += 1

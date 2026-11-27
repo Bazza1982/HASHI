@@ -223,11 +223,11 @@ class ExchangeTransport:
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
-                    timeout=min(30.0, delay + jitter),
+                    timeout=min(300.0, delay + jitter),
                 )
             except asyncio.TimeoutError:
                 pass
-            delay = min(30.0, delay * 2)
+            delay = min(300.0, delay * 2)
 
     @staticmethod
     def _safe_error_code(exc: Exception) -> str:
