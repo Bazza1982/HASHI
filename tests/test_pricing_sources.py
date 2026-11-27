@@ -199,6 +199,73 @@ def test_cache_only_usage_never_fetches_and_expired_fact_is_diagnostic_only(tmp_
     assert expired.output_per_unit is None
 
 
+def test_allow_stale_prices_the_refresh_window_with_the_last_known_rates(tmp_path):
+    cache = tmp_path / "pricing.json"
+    fact = pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _openrouter_response(),
+        now=NOW,
+    )
+
+    stale = pricing_sources.get_cached_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        now=NOW + timedelta(hours=25),
+        allow_stale=True,
+    )
+
+    assert stale.status == "known"
+    assert stale.input_per_unit == fact.input_per_unit
+    assert stale.output_per_unit == fact.output_per_unit
+    assert stale.source_revision == fact.source_revision
+    assert (
+        pricing_sources.is_fresh_pricing_fact(stale, now=NOW + timedelta(hours=25))
+        is False
+    )
+    assert pricing_sources.calculate_cost(
+        stale, input_tokens=1_000, output_tokens=100
+    ) == pricing_sources.calculate_cost(
+        fact, input_tokens=1_000, output_tokens=100
+    )
+
+
+def test_allow_stale_stops_at_the_grace_window(tmp_path):
+    cache = tmp_path / "pricing.json"
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _openrouter_response(),
+        now=NOW,
+    )
+
+    too_old = pricing_sources.get_cached_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        now=NOW + pricing_sources.STALE_GRACE + timedelta(hours=25),
+        allow_stale=True,
+    )
+    assert too_old.status == "unknown"
+    assert too_old.unknown_reason == "stale_cache"
+    assert too_old.input_per_unit is None
+
+    # A cached miss carries no rates to reuse, so allowing stale changes nothing.
+    assert (
+        pricing_sources.get_cached_pricing_fact(
+            "openrouter-api",
+            "vendor/never-seen",
+            cache_path=cache,
+            now=NOW,
+            allow_stale=True,
+        ).status
+        == "unknown"
+    )
+
+
 def test_openrouter_route_never_populates_a_direct_provider_key(tmp_path):
     cache = tmp_path / "pricing.json"
     pricing_sources.refresh_pricing_fact(

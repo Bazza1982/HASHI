@@ -202,16 +202,27 @@ def _static_model_has_pricing(model: str) -> bool:
     return bool(str(model or "").strip()) and _pricing_key(model) != "default"
 
 
-def _cached_dynamic_fact(engine: str, model: str):
+def _cached_dynamic_fact(engine: str, model: str, *, allow_stale: bool = False):
     if not str(engine or "").strip() or not str(model or "").strip():
         return None
     try:
         from tools.pricing_sources import get_cached_pricing_fact
 
-        fact = get_cached_pricing_fact(engine, model)
+        fact = get_cached_pricing_fact(engine, model, allow_stale=allow_stale)
     except Exception:
         return None
     return fact
+
+
+def _dynamic_fact_is_fresh(fact) -> bool:
+    """Report whether a cached fact is still inside its own TTL window."""
+
+    try:
+        from tools.pricing_sources import is_fresh_pricing_fact
+
+        return bool(is_fresh_pricing_fact(fact))
+    except Exception:
+        return False
 
 
 def model_has_pricing(model: str, *, engine: str = "") -> bool:
@@ -280,7 +291,11 @@ def resolve_usage_cost(
     if _is_local_engine(engine):
         return 0.0, "local_zero", "unknown"
 
-    fact = _cached_dynamic_fact(engine, model)
+    # A fact past its 24h TTL still carries the rates this model was last
+    # quoted at.  Finalizing inside that refresh window must not erase the
+    # turn's cost, so the last known rates price it and a background refresh
+    # replaces them for later calls.
+    fact = _cached_dynamic_fact(engine, model, allow_stale=True)
     if fact is not None and fact.status in {"known", "known_zero"}:
         try:
             from tools.pricing_sources import calculate_cost as calculate_dynamic_cost
@@ -296,6 +311,13 @@ def resolve_usage_cost(
         except Exception:
             dynamic_cost = None
         if dynamic_cost is not None:
+            if schedule_missing and not _dynamic_fact_is_fresh(fact):
+                try:
+                    from tools.pricing_sources import schedule_prewarm
+
+                    schedule_prewarm(engine, model)
+                except Exception:
+                    pass
             return (
                 dynamic_cost,
                 (

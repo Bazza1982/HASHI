@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -126,6 +126,19 @@ def test_deepseek_flash_vision_uses_flash_pricing():
     assert get_price("deepseek-v4-flash-vision-exp") == PRICING[
         "deepseek-v4-flash"
     ]
+
+
+def _dynamic_evidence_at(fetched_at):
+    """Return the same provider answer as if it had been fetched then."""
+
+    base = _dynamic_evidence()
+    return pricing_sources.HttpEvidence(
+        status=base.status,
+        content_type=base.content_type,
+        body=base.body,
+        fetched_at=fetched_at,
+        url=base.url,
+    )
 
 
 def _dynamic_evidence(model="vendor/new-model", *, cache_read="0.0000002"):
@@ -396,6 +409,72 @@ def test_usage_finalization_is_cache_only(tmp_path, monkeypatch):
         token_source="provider",
     )
     assert receipt.cost_usd is not None
+
+
+def test_expired_price_cache_still_values_the_turn_and_schedules_a_refresh(
+    tmp_path, monkeypatch
+):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    expired_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    fact = pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence_at(expired_at),
+        now=expired_at,
+    )
+    scheduled = []
+    monkeypatch.setattr(
+        pricing_sources,
+        "schedule_prewarm",
+        lambda engine, model, *, cache_path=None: scheduled.append(
+            (engine, model, cache_path)
+        ),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=1_000,
+        output_tokens=100,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd == 0.0026
+    assert receipt.dominant_cost_source() == "pricing_table"
+    assert receipt.pricing_revisions == (fact.source_revision,)
+    assert scheduled == [("openrouter-api", "vendor/new-model", None)]
+
+
+def test_price_older_than_the_stale_grace_window_stays_unknown(tmp_path, monkeypatch):
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    long_expired = datetime.now(timezone.utc) - (
+        pricing_sources.STALE_GRACE + timedelta(days=1)
+    )
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence_at(long_expired),
+        now=long_expired,
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=1_000,
+        output_tokens=100,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd is None
+    assert receipt.dominant_cost_source() == "unknown"
 
 
 def test_first_unknown_openrouter_usage_schedules_nonblocking_price_supplement(

@@ -29,6 +29,11 @@ CACHE_SCHEMA_VERSION = 3
 ADAPTER_REVISION = "openrouter-model-api.v4"
 SUCCESS_TTL = timedelta(hours=24)
 NEGATIVE_TTL = timedelta(minutes=15)
+# How long a known fact past its TTL may still price a valuation.  A response
+# that finalizes inside the refresh window keeps the last quoted rates instead
+# of collapsing to "cost unknown"; anything older than this is too stale to
+# present as a reference and falls back to the diagnostic placeholder.
+STALE_GRACE = timedelta(days=7)
 MAX_RESPONSE_BYTES = 64 * 1024
 CATALOG_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 CONNECT_TIMEOUT_SECONDS = 5.0
@@ -661,21 +666,58 @@ def _cached_fact(
     return fact if _valid_cached_fact(fact, engine, model) else None
 
 
+def _stale_fact_is_usable(fact: PricingFact, now: datetime) -> bool:
+    """Report whether an expired known fact may still price a valuation.
+
+    Only real rates survive a TTL miss: a negative (``unknown``) fact has
+    nothing to reuse, and a price last confirmed longer than
+    :data:`STALE_GRACE` ago is too old to present as a current reference.
+    """
+
+    if fact.status not in {"known", "known_zero"}:
+        return False
+    try:
+        fetched_at = _parse_time(fact.fetched_at)
+    except (TypeError, ValueError):
+        return False
+    return _utc(now) - fetched_at <= STALE_GRACE
+
+
+def is_fresh_pricing_fact(
+    fact: PricingFact,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Report whether *fact* is still inside its own validity window."""
+
+    return _fact_is_fresh(fact, _utc(now))
+
+
 def get_cached_pricing_fact(
     engine: str,
     model: str,
     *,
     cache_path: Path | str | None = None,
     now: datetime | None = None,
+    allow_stale: bool = False,
 ) -> PricingFact:
-    """Return a fresh cached fact without performing any network operation."""
+    """Return a cached fact without performing any network operation.
+
+    A fact past its TTL is downgraded to a diagnostic ``unknown`` placeholder,
+    which is right for callers that need a currently valid price.  Valuation
+    callers pass ``allow_stale`` so a turn that finalizes inside the refresh
+    window is still priced at the last known rates (bounded by
+    :data:`STALE_GRACE`); they own scheduling the refresh that follows.
+    """
 
     selected_now = _utc(now)
     payload = _read_cache(_selected_cache_path(cache_path))
     fact = _cached_fact(payload, _cache_key(engine, model), engine, model)
     if fact is None:
         return _unknown_fact(engine, model, reason="cache_miss", now=selected_now)
-    if _fact_is_fresh(fact, selected_now):
+    if _fact_is_fresh(fact, selected_now) or (
+        allow_stale and _stale_fact_is_usable(fact, selected_now)
+    ):
         return fact
     stale = _unknown_fact(
         engine,
