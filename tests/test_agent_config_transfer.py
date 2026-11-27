@@ -760,6 +760,124 @@ async def test_governed_command_invocation_gates_cross_agent_transfers(
     assert dispatched == ["enterprise:admin"]
 
 
+class _ScopedTransferIdentity:
+    """A team admin of p1 who can see p2 but cannot manage it."""
+
+    def get_session_user(self, token):
+        return SimpleNamespace(id=token) if token in {"teamlead", "orgadmin"} else None
+
+    def list_project_memberships(self, *, user_id):
+        if user_id == "orgadmin":
+            return [{"role": "org_admin", "project_id": "p1"}]
+        return [
+            {"role": "team_admin", "project_id": "p1"},
+            {"role": "member", "project_id": "p2"},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_structured_entry_gates_the_command_line_it_executes(
+    tmp_path, monkeypatch
+):
+    """Whitespace must not hide the sibling Agent from the authorization gate.
+
+    The command endpoint re-serializes its arguments into one slash command line
+    that the executor parses again.  Authorizing the raw argument list let
+    ``["copy", "   helper"]`` read as an unknown Agent while the handler resolved
+    ``helper`` and transferred its configuration.
+    """
+
+    import sys
+
+    from orchestrator import admin_local_testing, command_interaction_bridge
+
+    monkeypatch.setitem(
+        sys.modules,
+        "orchestrator.permissions.human_approval",
+        SimpleNamespace(register_human_approval=lambda *a, **k: None),
+    )
+    workspace = tmp_path / "workspaces" / "agent"
+    workspace.mkdir(parents=True)
+    config = tmp_path / "agents.json"
+    config.write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {"name": "agent", "project_id": "p1"},
+                    {"name": "helper", "project_id": "p2"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(name="agent", workspace_dir=workspace)
+    settings = SimpleNamespace(
+        bridge_home=tmp_path,
+        project_root=tmp_path,
+        deployment_profile="governed",
+        authorized_id=1,
+        instance_id="HASHI1",
+        workbench_port=18800,
+        persistent_session_v1=True,
+    )
+    server = WorkbenchApiServer(
+        config_path=config,
+        global_config=settings,
+        orchestrator=SimpleNamespace(
+            runtimes=[runtime], scheduler=SimpleNamespace(state={})
+        ),
+        secrets={"workbench_admin_token": "test-owner-token"},
+        reconcile_session_runs=False,
+    )
+    server.identity_service = _ScopedTransferIdentity()
+    monkeypatch.setattr(
+        admin_local_testing, "supported_commands", lambda _runtime: {"sys"}
+    )
+
+    dispatched: list[str] = []
+
+    async def fake_dispatch(_runtime, _operation, metadata, **_kwargs):
+        dispatched.append(str(metadata.get("owner_id")))
+        return {"ok": True, "accepted": True}
+
+    monkeypatch.setattr(
+        command_interaction_bridge, "dispatch_command_interaction", fake_dispatch
+    )
+
+    # The same transfer written four ways must reach the same verdict: neither
+    # the normal form nor any whitespace variant may slip past the gate.
+    variants = (
+        ["copy", "helper"],
+        ["copy", "   helper"],
+        ["local", "copy", " helper"],
+    )
+    async with TestClient(TestServer(server.app)) as client:
+        for index, arguments in enumerate(variants):
+            for token, allowed in (("teamlead", False), ("orgadmin", True)):
+                session = server.session_store.create_session(
+                    owner_id=f"enterprise:{token}", agent_id="agent"
+                )
+                body = {
+                    "command": "sys",
+                    "arguments": list(arguments),
+                    "client_id": f"client-{token}-{index:04d}",
+                    "request_id": f"request-{token}-{index:04d}",
+                    "ui_locale": "en",
+                    "context_generation": int(session["context_generation"] or 1),
+                }
+                response = await client.post(
+                    f"/api/v1/sessions/{session['session_id']}/commands",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=body,
+                )
+                if allowed:
+                    assert response.status in {200, 202}, (token, arguments)
+                else:
+                    assert response.status == 403, (token, arguments)
+
+    assert dispatched == ["enterprise:orgadmin"] * len(variants)
+
+
 @pytest.mark.asyncio
 async def test_governed_member_cannot_transfer_another_agents_config(governed_api):
     server = governed_api

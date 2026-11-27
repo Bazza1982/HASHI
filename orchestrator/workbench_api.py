@@ -10415,8 +10415,18 @@ class WorkbenchApiServer:
             evidence_arguments = list(arguments)
             if command == "sys":
                 arguments = normalize_sys_arguments(arguments)
-            elif len(arguments) > 64 or any(
-                len(argument) > 4096 for argument in arguments
+            # Authorization must judge the exact command the handler executes.
+            # This endpoint re-serializes the arguments into one slash command
+            # line that the executor parses again, so gate on that re-parsed
+            # form: whitespace a raw argument list hides must not reach the gate
+            # as "no target" while the handler resolves a real sibling Agent.
+            from orchestrator.admin_local_testing import _format_slash_command_line
+
+            command_line = _format_slash_command_line(command, arguments)
+            gated_command, gated_arguments = parse_slash_command_text(command_line)
+            if command != "sys" and (
+                len(arguments) > 64
+                or any(len(argument) > 4096 for argument in arguments)
             ):
                 raise ValueError("command arguments are invalid")
             if not ID_PATTERN.fullmatch(client_id) or not ID_PATTERN.fullmatch(
@@ -10448,7 +10458,10 @@ class WorkbenchApiServer:
                 if denied is not None:
                     return denied
             denied = self._guard_config_transfer_command(
-                request, str(session["agent_id"]), command, arguments
+                request,
+                str(session["agent_id"]),
+                gated_command or command,
+                gated_arguments,
             )
             if denied is not None:
                 return denied
@@ -10552,7 +10565,6 @@ class WorkbenchApiServer:
                     ValueError("command actor is not authorized"), status=403
                 )
             from orchestrator import command_interaction_bridge
-            from orchestrator.admin_local_testing import _format_slash_command_line
 
             instance_id = str(
                 getattr(self.global_config, "instance_id", "") or ""
@@ -10579,7 +10591,7 @@ class WorkbenchApiServer:
                 "client_id": client_id,
                 "request_id": request_id,
                 "ui_locale": ui_locale,
-                "command": _format_slash_command_line(command, arguments),
+                "command": command_line,
             }
             metadata = {
                 "actor_id": actor,
