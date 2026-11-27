@@ -323,11 +323,7 @@ def test_semantic_arguments_preserve_target_ids_and_time_ranges():
     "stage",
     [
         Stage.DIRECT,
-        Stage.DIRECT,
-        Stage.DIRECT,
         Stage.EXECUTION,
-        Stage.DIRECT,
-        Stage.DIRECT,
     ],
 )
 def test_a_b_c_d_e_cycle_is_detected_in_every_tool_stage(stage):
@@ -406,11 +402,7 @@ def test_incident_style_single_read_cycle_is_detected_after_three_repetitions():
     "stage",
     [
         Stage.DIRECT,
-        Stage.DIRECT,
-        Stage.DIRECT,
         Stage.EXECUTION,
-        Stage.DIRECT,
-        Stage.DIRECT,
     ],
 )
 @pytest.mark.asyncio
