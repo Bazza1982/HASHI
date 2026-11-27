@@ -604,7 +604,7 @@ Gateway observability retains up to 16 KiB of each request or response body with
 - A slow Telegram scan includes the three queue-discovery phase timings. Scan failures include SQLite error codes when available. An Exchange warning includes the connection phase and available socket, HTTP or WebSocket codes.
 - An unpriced usage entry records the pricing-cache status, expiry, revision and available request ID. A DSH SSE error records allowlisted ACP details if the harness supplies them. The event values remain absent when the harness only returns its error message.
 - Terminal encoding failures record the codec, classified reason and first unencodable codepoint. Device heartbeat errors record the failed phase, elapsed time and underlying error type when available.
-- Remote message admission returns a retryable 503 if the native audio store cannot initialize. It retains the underlying OS error in the service log.
+- If SessionStore initialization fails with an audio storage error or an OS error, Remote returns the standard retryable 503 before admitting the message. The service log records the underlying error type and OS error codes without private paths.
 - HAL selects an eligible Telegram route only while the Worker reports egress available. Otherwise the prompt uses the shared Workbench Session.
 - Legacy cold restart receipts with no progress for 24 hours expose `restart_observation_expired` and retain the unconfirmed notice.
 - Native HERV3 history stays identical when meditation revises the Habit catalogue. The next user message still carries the latest advisory Habits.

@@ -235,8 +235,10 @@ async def test_confirmed_hchat_request_executes_exactly_one_run(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_protocol_native_audio_directory_denial_is_a_retryable_storage_failure(tmp_path):
-    from orchestrator.audio_assets import AudioAssetError
+@pytest.mark.parametrize("operation", ["mkdir", "resolve"])
+async def test_protocol_native_audio_directory_denial_is_a_retryable_storage_failure(
+    tmp_path, monkeypatch, caplog, operation,
+):
     from remote.protocol_manager import ProtocolManager
 
     manager = ProtocolManager(
@@ -246,13 +248,15 @@ async def test_protocol_native_audio_directory_denial_is_a_retryable_storage_fai
     manager.get_local_agents_snapshot = lambda: [{"agent_name": "lily", "is_active": True}]
     manager._enqueue_local_prompt = AsyncMock()
 
-    def audio_root_unavailable():
-        try:
-            raise PermissionError(13, "private path")
-        except PermissionError as exc:
-            raise AudioAssetError("private storage detail") from exc
+    files_root = tmp_path / "state" / "native_audio_assets" / "files"
+    original = getattr(Path, operation)
 
-    manager._frontend_session_store = audio_root_unavailable
+    def fail_audio_directory(self, *args, **kwargs):
+        if self == files_root:
+            raise PermissionError(13, "access denied", "private-audio-path")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, operation, fail_audio_directory)
     code, result = await manager.handle_protocol_message({
         "message_type": "agent_message", "message_id": "msg-storage-001",
         "idempotency_key": "hchat:msg-storage-001", "conversation_id": "conv-001",
@@ -261,9 +265,20 @@ async def test_protocol_native_audio_directory_denial_is_a_retryable_storage_fai
         "body": {"text": "test storage failure"}, "ttl": 5, "route_trace": ["HASHI2"],
     })
     assert code == 503
-    assert result["body"]["code"] == "protocol_storage_unavailable"
-    assert result["body"]["retryable"] is True
-    assert "private" not in str(result)
+    assert result["ok"] is False and result["message_type"] == "error"
+    assert result["body"] == {
+        "code": "protocol_storage_unavailable",
+        "message": "Message storage is temporarily unavailable",
+        "retryable": True,
+        "failed_message_id": "msg-storage-001",
+        "conversation_id": "conv-001",
+        "from_instance": "HASHI2", "from_agent": "rain",
+        "to_instance": "HASHI1", "to_agent": "lily",
+        "details": {},
+    }
+    assert "cause_type=PermissionError errno=13" in caplog.text
+    assert "private-audio-path" not in caplog.text
+    assert "msg-storage-001" not in manager._inflight
     manager._enqueue_local_prompt.assert_not_awaited()
 
 

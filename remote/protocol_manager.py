@@ -1854,7 +1854,7 @@ class ProtocolManager:
 
         try:
             frontend_store = self._frontend_session_store()
-        except AudioAssetError as exc:
+        except (AudioAssetError, OSError) as exc:
             cause = exc.__cause__ or exc
             logger.warning(
                 "Protocol message storage unavailable stage=session_store_init instance=%s "
@@ -1862,14 +1862,12 @@ class ProtocolManager:
                 local_instance, type(cause).__name__,
                 getattr(cause, "errno", None), getattr(cause, "winerror", None),
             )
-            return 503, {
-                "ok": False, "message_type": "error",
-                "body": {
-                    "code": "protocol_storage_unavailable",
-                    "message": "Message storage is temporarily unavailable",
-                    "retryable": True,
-                },
-            }
+            return 503, self._error_payload(
+                "protocol_storage_unavailable",
+                "Message storage is temporarily unavailable",
+                retryable=True,
+                payload=payload,
+            )
         is_fresh, conf = check_hchat_freshness_and_register(
             store=frontend_store,
             originated_at=originated_at,
