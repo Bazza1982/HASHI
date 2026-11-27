@@ -244,7 +244,8 @@ class GatewayDispatchAdapter(DispatchAdapter):
             await runtime.enqueue_api_text(
                 text,
                 source="hal",
-                chat_id=telegram_chat_id,
+                # None lets the Worker fill in its legacy primary Telegram chat.
+                chat_id=telegram_chat_id if telegram_chat_id is not None else 0,
                 deliver_to_telegram=telegram_chat_id is not None,
                 idempotency_key=idempotency_key,
                 request_metadata={
