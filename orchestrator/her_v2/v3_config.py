@@ -280,8 +280,11 @@ def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     if new_warnings:
         import logging
 
-        logging.getLogger(__name__).warning(
-            "HERV3 config normalization recorded %d migration warning(s): %s",
+        # Retired HERV2 routing fields stay silently compatible: they are
+        # dropped into ``migration_warnings`` for diagnostics, but they are
+        # not an operational fault and must not spam the log on every load.
+        logging.getLogger(__name__).debug(
+            "HERV3 config normalization dropped %d retired field(s): %s",
             len(new_warnings),
             ", ".join(item["field"] for item in new_warnings),
         )
@@ -445,3 +448,4 @@ def build_v3_provider_options(
             }
         )
     return options
+# HASHI-Fingerprint: hfp_e861c2ecae9a44b58a81ace633eff273
