@@ -93,8 +93,24 @@ def test_hal_prompt_does_not_force_telegram_for_a_workbench_only_agent(monkeypat
     assert runtime.calls[0]["deliver_to_telegram"] is False
 
 
+def test_hal_prompt_uses_workbench_when_the_agents_old_telegram_binding_is_offline(monkeypatch):
+    runtime = _RecordingRuntime()
+    runtime.telegram_connected = False
+    monkeypatch.setattr(runtime_session, "primary_telegram_chat_id", lambda _runtime: 424242)
+
+    result = asyncio.run(GatewayDispatchAdapter(_Server(runtime)).dispatch_prompt(
+        target_agent="wren", text="daily check", idempotency_key="hal:exec:3",
+        exec_id="exec-3", stage=0,
+    ))
+
+    assert result.accepted is True
+    assert runtime.calls[0]["chat_id"] is None
+    assert runtime.calls[0]["deliver_to_telegram"] is False
+
+
 def test_hal_prompt_keeps_the_agents_own_telegram_route(monkeypatch):
     runtime = _RecordingRuntime()
+    runtime.telegram_connected = True
     monkeypatch.setattr(
         runtime_session, "primary_telegram_chat_id", lambda _runtime: 424242
     )

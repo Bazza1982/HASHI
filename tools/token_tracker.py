@@ -14,7 +14,11 @@ Estimation formula (industry standard):
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -202,6 +206,30 @@ def _static_model_has_pricing(model: str) -> bool:
     return bool(str(model or "").strip()) and _pricing_key(model) != "default"
 
 
+_PRICING_LOG_LOCK = threading.Lock()
+_PRICING_LOG_TIMES: OrderedDict[tuple[str, str, str], float] = OrderedDict()
+
+
+def _log_unpriced(engine, model, reason, fact=None, *, request_id=None):
+    key = (engine, model, reason)
+    now = time.monotonic()
+    with _PRICING_LOG_LOCK:
+        last = _PRICING_LOG_TIMES.get(key)
+        if last is not None and now - last < 60:
+            return
+        _PRICING_LOG_TIMES[key] = now
+        _PRICING_LOG_TIMES.move_to_end(key)
+        if len(_PRICING_LOG_TIMES) > 256:
+            _PRICING_LOG_TIMES.popitem(last=False)
+    safe_request = request_id if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,180}", request_id) else None
+    logging.getLogger(__name__).warning(
+        "Usage pricing unavailable engine=%s model=%s request_id=%s reason=%s "
+        "cache_status=%s expires_at=%s price_revision=%s",
+        engine, model, safe_request, reason, getattr(fact, "status", None),
+        getattr(fact, "expires_at", None), getattr(fact, "source_revision", None),
+    )
+
+
 def _cached_dynamic_fact(engine: str, model: str, *, allow_stale: bool = False):
     if not str(engine or "").strip() or not str(model or "").strip():
         return None
@@ -209,7 +237,8 @@ def _cached_dynamic_fact(engine: str, model: str, *, allow_stale: bool = False):
         from tools.pricing_sources import get_cached_pricing_fact
 
         fact = get_cached_pricing_fact(engine, model, allow_stale=allow_stale)
-    except Exception:
+    except Exception as exc:
+        _log_unpriced(engine, model, f"lookup_{type(exc).__name__}")
         return None
     return fact
 
@@ -276,6 +305,7 @@ def resolve_usage_cost(
     cached_tokens: int = 0,
     thinking_in_output: bool = False,
     schedule_missing: bool = False,
+    request_id: str | None = None,
 ) -> tuple[float | None, str, str]:
     """Resolve one immutable usage valuation and its exact price revision.
 
@@ -333,6 +363,7 @@ def resolve_usage_cost(
             )
         # A present exact fact with incomplete dimensions must remain unknown;
         # it must not silently fall through to a differently scoped old row.
+        _log_unpriced(engine, model, "incomplete_rate_dimensions", fact, request_id=request_id)
         return None, "unknown", "unknown"
 
     if (
@@ -356,6 +387,8 @@ def resolve_usage_cost(
             from tools.pricing_sources import has_exact_openrouter_mapping
 
             if has_exact_openrouter_mapping(engine, model):
+                reason = getattr(fact, "unknown_reason", None) or "cache_fact_unavailable"
+                _log_unpriced(engine, model, reason, fact, request_id=request_id)
                 return None, "unknown", "unknown"
         except Exception:
             return None, "unknown", "unknown"

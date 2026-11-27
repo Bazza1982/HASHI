@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import struct
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -82,6 +83,38 @@ def global_sys_prompt_state_path(global_config: Any) -> Path:
 
 _BGE_CACHE_LOCK = threading.Lock()
 _BGE_ENCODER_CACHE: dict[tuple[str, str], "BgeM3Encoder"] = {}
+_BGE_DIAGNOSTIC_LOCK = threading.Lock()
+_BGE_DIAGNOSTIC_TIMES: dict[tuple, float] = {}
+
+
+def _report_encoder_unavailable(exc: Exception, workspace: str | None) -> None:
+    frames = []
+    request_id = None
+    frame = sys._getframe(1)
+    while frame is not None and len(frames) < 12:
+        frames.append(f"{Path(frame.f_code.co_filename).name}:{frame.f_lineno}:{frame.f_code.co_name}")
+        candidate = frame.f_locals.get("request_id")
+        if request_id is None and isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", candidate):
+            request_id = candidate
+        frame = frame.f_back
+    module = getattr(exc, "name", None)
+    if not isinstance(module, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", module):
+        module = None
+    key = (workspace, tuple(frames[:7]), type(exc).__name__, module)
+    now = time.monotonic()
+    with _BGE_DIAGNOSTIC_LOCK:
+        last = _BGE_DIAGNOSTIC_TIMES.get(key)
+        if last is not None and now - last < 60:
+            return
+        if len(_BGE_DIAGNOSTIC_TIMES) >= 128 and key not in _BGE_DIAGNOSTIC_TIMES:
+            del _BGE_DIAGNOSTIC_TIMES[min(_BGE_DIAGNOSTIC_TIMES, key=_BGE_DIAGNOSTIC_TIMES.get)]
+        _BGE_DIAGNOSTIC_TIMES[key] = now
+    logging.getLogger("hashi.bridge_memory").warning(
+        "Semantic vector memory encoder unavailable; using the local-hash fallback "
+        "pid=%s workspace=%s request_id=%s error_type=%s dependency=%s caller_stack=%s",
+        os.getpid(), workspace or "-", request_id or "-", type(exc).__name__,
+        module or "-", " <- ".join(frames),
+    )
 
 # Conversational framing alone is not evidence that a memory is about a topic.
 # Keep the topic words (including one-character Chinese words such as 茶) for
@@ -152,7 +185,11 @@ class BgeM3Encoder:
     DEFAULT_MODEL_DIR = Path(os.environ.get("HASHI_BGE_M3_MODEL_DIR") or Path.home() / "hashi_models/bge-m3-int8")
     DEFAULT_TOKENIZER_ID = "BAAI/bge-m3"
 
-    def __init__(self, model_dir: str | Path | None = None, tokenizer_dir: str | Path | None = None):
+    def __init__(
+        self, model_dir: str | Path | None = None, tokenizer_dir: str | Path | None = None,
+        *, diagnostic_workspace: str | None = None,
+    ):
+        self._diagnostic_workspace = diagnostic_workspace
         self._fallback = LocalEmbeddingEncoder()
         self._ready = False
         self._error: str | None = None
@@ -193,6 +230,7 @@ class BgeM3Encoder:
         cls,
         model_dir: str | Path | None = None,
         tokenizer_dir: str | Path | None = None,
+        *, diagnostic_workspace: str | None = None,
     ) -> "BgeM3Encoder":
         resolved_model = str(
             Path(
@@ -213,7 +251,10 @@ class BgeM3Encoder:
             cached = _BGE_ENCODER_CACHE.get(key)
             if cached is not None and cached.ready:
                 return cached
-            instance = cls(model_dir=resolved_model, tokenizer_dir=resolved_tok)
+            instance = cls(
+                model_dir=resolved_model, tokenizer_dir=resolved_tok,
+                diagnostic_workspace=diagnostic_workspace,
+            )
             if instance.ready:
                 _BGE_ENCODER_CACHE[key] = instance
             return instance
@@ -252,12 +293,7 @@ class BgeM3Encoder:
             from transformers import AutoTokenizer
         except Exception as exc:
             self._error = f"dependencies unavailable: {exc}"
-            logging.getLogger("hashi.bridge_memory").warning(
-                "Semantic vector memory encoder unavailable (%s); using the "
-                "local-hash fallback encoder instead. Install the vector profile "
-                "for semantic embeddings: python -m pip install -e '.[vector]'",
-                exc,
-            )
+            _report_encoder_unavailable(exc, self._diagnostic_workspace)
             return
 
         tokenizer_candidates: list[str] = []
@@ -375,7 +411,7 @@ class BridgeMemoryStore:
         self._encoder_degraded_reason = None
         if not self._bge_requested:
             return LocalEmbeddingEncoder()
-        encoder = BgeM3Encoder.cached()
+        encoder = BgeM3Encoder.cached(diagnostic_workspace=self.workspace_dir.name)
         if not encoder.ready:
             self._encoder_degraded_reason = encoder.error or "BGE-M3 unavailable; degraded to multilingual hash fallback"
         return encoder

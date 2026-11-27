@@ -106,7 +106,8 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
     # reported as running. Keep the durable receipt intact and return an
     # unconfirmed terminal projection to the client.
     updated = _epoch(record.get("updated_at"))
-    if state not in {"completed", "failed", "rejected"} and updated is not None and time.time() - updated > 86400:
+    expired = state not in {"completed", "failed", "rejected"} and updated is not None and time.time() - updated > 86400
+    if expired:
         record = {**record, "state": "failed", "phase": "terminal_verification",
                   "completed_at": record.get("updated_at"), "error": "restart_observation_expired"}
         state = "failed"
@@ -123,6 +124,9 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
         if terminal and (state == "completed" or phase == "terminal_verification")
         else "failed" if terminal else "running"
     )
+    reason = "restart_observation_expired" if expired else (
+        "restart_unconfirmed" if notice_status == "unconfirmed" else None
+    )
     return {
         "notice": restart_notice(record, status=notice_status),
         "action": "restart", "kind": "cold", "mode": "cold",
@@ -130,8 +134,7 @@ def project_restart(record: dict, *, instance_id: str, owner_id: str, agent_id: 
         "instance_id": instance, "accepted": state != "rejected",
         "status": "succeeded" if succeeded else "failed" if terminal else "running",
         "terminal": terminal, "outcome": "succeeded" if succeeded else "failed" if terminal else "unknown",
-        "phase": phase, "reason": ("restart_unconfirmed" if terminal and not succeeded
-            and (state == "completed" or phase == "terminal_verification") else None),
+        "phase": phase, "reason": reason,
         "created_at": _epoch(record.get("started_at")), "finished_at": _epoch(record.get("completed_at")),
         "duration_ms": timing.get("total_ms"), "latest_sequence": sequence,
         "kernel_pid": evidence.get("new_pid") if succeeded else None,

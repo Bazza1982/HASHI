@@ -437,6 +437,31 @@ def test_windows_console_failure_falls_back_to_stderr_and_is_logged(
     assert "PRIVATE-CONSOLE-DETAIL" not in encoded
 
 
+def test_escaped_output_fallback_records_codec_without_message_text(monkeypatch, tmp_path):
+    class AsciiStream:
+        encoding = "ascii"
+
+        def write(self, value):
+            value.encode(self.encoding)
+
+        def flush(self):
+            pass
+
+    terminal_console.configure(tmp_path)
+    monkeypatch.setattr(terminal_console, "_should_use_windows_console", lambda: False)
+    monkeypatch.setattr(terminal_console.sys, "stdout", AsciiStream())
+    result = terminal_console.safe_print("PRIVATE-OUTPUT-\u2603")
+
+    assert result.success
+    assert result.sink == "stdout_escaped"
+    encoded = terminal_console.output_diagnostic_path().read_text(encoding="utf-8")
+    failure = json.loads(encoded)["attempts"][0]
+    assert failure["encoding"] == "ascii"
+    assert failure["encoding_reason"] == "ordinal not in range(128)"
+    assert failure["first_codepoint"] == "U+2603"
+    assert "PRIVATE-OUTPUT" not in encoded
+
+
 def test_total_output_failure_is_durable_and_contains_no_payload(
     monkeypatch,
     tmp_path,

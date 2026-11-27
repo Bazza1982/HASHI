@@ -4651,6 +4651,7 @@ class HashiStageProvider(StageProvider):
                     cached_tokens=prompt_cache_hit_tokens or 0,
                     thinking_in_output=thinking_in_output,
                     schedule_missing=True,
+                    request_id=call.get("provider_request_id") or parent_request_id,
                 )
             per_call = len(calls) > 1 or bool(raw_calls)
             call_identity = "|".join(

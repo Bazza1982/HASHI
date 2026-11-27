@@ -102,13 +102,13 @@ def inline_candidate(path: Path, data: bytes, artifact_id: str) -> bytes | None:
     try:
         # UTF-8/BOM only; other encoding declarations use a manifest.
         text = data.decode("utf-8-sig")
-        original = ast.dump(ast.parse(text), include_attributes=False)
+        original = ast.dump(ast.parse(text, filename=path.name), include_attributes=False)
         if re.search(r"coding[:=]\s*(?!utf-?8\b)[-\w.]+", text[:300], re.I):
             return None
         newline = b"\r\n" if b"\r\n" in data else b"\n"
         candidate = data + (b"" if not data or data.endswith((b"\n", b"\r")) else newline)
         candidate += b"# HASHI-Fingerprint: " + artifact_id.encode("ascii") + newline
-        if ast.dump(ast.parse(candidate.decode("utf-8-sig")), include_attributes=False) != original:
+        if ast.dump(ast.parse(candidate.decode("utf-8-sig"), filename=path.name), include_attributes=False) != original:
             return None
         return candidate
     except (SyntaxError, UnicodeError, ValueError):
