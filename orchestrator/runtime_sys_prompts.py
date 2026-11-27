@@ -9,7 +9,14 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from pathlib import Path
+
 from orchestrator import runtime_menu_views, ui_language
+from orchestrator.agent_slot_transfer import (
+    SourceSlot,
+    SlotTransfer,
+    plan_slot_transfer,
+)
 from orchestrator.bridge_memory import (
     SysPromptManager,
     SysPromptSemanticConflict,
@@ -363,6 +370,223 @@ async def _reply_confirmation(
     )
 
 
+_SYS_TRANSFER_VERBS = frozenset({"copy", "import", "clear"})
+
+
+def sibling_agent_names(runtime: Any) -> list[str]:
+    from orchestrator import runtime_workzone
+
+    return runtime_workzone.sibling_agent_names(runtime)
+
+
+def agent_workspace_dir(runtime: Any, agent_name: str) -> Path:
+    """Resolve one sibling Agent's workspace without starting it."""
+
+    from orchestrator import runtime_workzone
+
+    live = runtime_workzone.runtime_for_agent(runtime, agent_name)
+    workspace = getattr(live, "workspace_dir", None) if live is not None else None
+    if workspace:
+        return Path(workspace)
+    home = getattr(runtime.global_config, "bridge_home", None)
+    if home:
+        return Path(home) / "workspaces" / str(agent_name)
+    return Path(runtime.workspace_dir).parent / str(agent_name)
+
+
+def local_manager_for(runtime: Any, agent_name: str) -> SysPromptManager:
+    """Return the local (per-Agent) /sys manager for one Agent."""
+
+    if str(agent_name) == str(runtime.name):
+        return runtime.sys_prompt_manager
+    return SysPromptManager(
+        state_path=agent_workspace_dir(runtime, agent_name) / "sys_prompts.json",
+        scope="local",
+    )
+
+
+def _resolve_agent(runtime: Any, raw_name: str) -> str:
+    wanted = str(raw_name or "").strip()
+    known = {name.casefold(): name for name in sibling_agent_names(runtime)}
+    resolved = known.get(wanted.casefold()) if wanted else None
+    if resolved is None:
+        raise ValueError(ui_language.tr("sys.transfer.unknown_agent", agent=wanted))
+    return resolved
+
+
+def _sys_transfer_receipt_text(
+    *,
+    verb: str,
+    source_agent: str,
+    target_agent: str,
+    plan: list[SlotTransfer],
+) -> str:
+    title = ui_language.tr(
+        "sys.transfer.title_copy" if verb == "copy" else "sys.transfer.title_import",
+        source=source_agent,
+        target=target_agent,
+    )
+    lines = [f"<b>{html.escape(title)}</b>"]
+    for item in plan:
+        if item.outcome == "copied":
+            lines.append(
+                ui_language.tr(
+                    "sys.transfer.mapping",
+                    source=f"<code>{html.escape(item.source_slot)}</code>",
+                    target=f"<code>{html.escape(str(item.target_slot))}</code>",
+                    state=ui_language.tr(
+                        "sys.active_suffix" if item.enabled else "sys.inactive_suffix"
+                    ),
+                )
+            )
+        elif item.outcome == "duplicate":
+            lines.append(
+                ui_language.tr(
+                    "sys.transfer.duplicate",
+                    slot=f"<code>{html.escape(item.source_slot)}</code>",
+                    agent=target_agent,
+                )
+            )
+        elif item.outcome == "no_free_slot":
+            lines.append(
+                ui_language.tr(
+                    "sys.transfer.no_slot",
+                    slot=f"<code>{html.escape(item.source_slot)}</code>",
+                    agent=target_agent,
+                )
+            )
+    if not any(item.outcome == "copied" for item in plan):
+        lines.append(ui_language.tr("sys.transfer.nothing_copied", agent=target_agent))
+    return "\n".join(lines)
+
+
+async def _cmd_sys_transfer(
+    runtime: Any,
+    update: Any,
+    *,
+    scope: str,
+    args: list[str],
+    actor_id: int | None,
+) -> dict[str, Any] | None:
+    verb = args[0].lower()
+    if scope != "local":
+        return await _reject(
+            runtime,
+            update,
+            "sys_transfer_local_only",
+            ui_language.tr("sys.error.transfer_local_only"),
+        )
+    if verb == "clear":
+        if len(args) > 1:
+            return await _reject(
+                runtime, update, "sys_transfer_usage", ui_language.tr("sys.transfer.usage")
+            )
+        manager = runtime.sys_prompt_manager
+        configured = [
+            slot
+            for slot in SysPromptManager.SLOTS
+            if str(manager.get_slot(slot).get("text") or "").strip()
+        ]
+        if not configured:
+            await _reply(
+                runtime,
+                update,
+                ui_language.tr("sys.clear.empty", agent=str(runtime.name)),
+            )
+            return None
+        for slot in configured:
+            manager.delete(slot)
+        await _reply(
+            runtime,
+            update,
+            ui_language.tr(
+                "sys.clear.done", count=len(configured), agent=str(runtime.name)
+            ),
+        )
+        return None
+
+    if len(args) < 2 or len(args) > 3:
+        return await _reject(
+            runtime, update, "sys_transfer_usage", ui_language.tr("sys.transfer.usage")
+        )
+    slot: str | None = None
+    if len(args) == 3:
+        slot = str(args[2]).strip()
+        if slot not in SysPromptManager.SLOTS:
+            return await _reject(
+                runtime,
+                update,
+                "sys_slot_invalid",
+                ui_language.tr("sys.error.invalid_slot", slot=slot),
+            )
+    try:
+        other = _resolve_agent(runtime, args[1])
+    except ValueError as exc:
+        return await _reject(runtime, update, "sys_transfer_unknown_agent", str(exc))
+    if verb == "copy":
+        source_agent, target_agent = str(runtime.name), other
+    else:
+        source_agent, target_agent = other, str(runtime.name)
+    if source_agent == target_agent:
+        return await _reject(
+            runtime,
+            update,
+            "sys_transfer_same_agent",
+            ui_language.tr("sys.transfer.same_agent", agent=source_agent),
+        )
+
+    source_manager = local_manager_for(runtime, source_agent)
+    target_manager = local_manager_for(runtime, target_agent)
+    entries = [
+        SourceSlot(
+            slot=str(item["slot"]),
+            value=str(item.get("text") or ""),
+            enabled=bool(item.get("active")),
+        )
+        for item in source_manager.list_slots()
+        if str(item.get("text") or "").strip()
+    ]
+    if slot is not None and not any(entry.slot == slot for entry in entries):
+        return await _reject(
+            runtime,
+            update,
+            "sys_transfer_slot_missing",
+            ui_language.tr(
+                "sys.transfer.slot_missing", slot=slot, agent=source_agent
+            ),
+        )
+    target_slots = [
+        item
+        for item in target_manager.list_slots()
+        if str(item.get("text") or "").strip()
+    ]
+    plan = plan_slot_transfer(
+        source_slots=entries,
+        target_slot_ids=[str(item["slot"]) for item in target_slots],
+        target_values=[str(item.get("text") or "") for item in target_slots],
+        order=SysPromptManager.SLOTS,
+        slot=slot,
+    )
+    for item in plan:
+        if item.outcome != "copied":
+            continue
+        target_manager.save(str(item.target_slot), str(item.value))
+        if item.enabled:
+            target_manager.activate(str(item.target_slot))
+    await _reply(
+        runtime,
+        update,
+        _sys_transfer_receipt_text(
+            verb=verb,
+            source_agent=source_agent,
+            target_agent=target_agent,
+            plan=plan,
+        ),
+        parse_mode="HTML",
+    )
+    return None
+
+
 def _usage() -> str:
     return ui_language.tr("sys.usage.full")
 
@@ -448,6 +672,12 @@ async def cmd_sys(runtime: Any, update: Any, context: Any) -> dict[str, Any] | N
             runtime, update, exc.error_code, exc.error_message
         )
     scope, args = _resolve_scope(raw_args)
+
+    if args and args[0].lower() in _SYS_TRANSFER_VERBS:
+        return await _cmd_sys_transfer(
+            runtime, update, scope=scope, args=args, actor_id=user_id
+        )
+
     manager = _manager_for_scope(runtime, scope)
 
     if not args:
@@ -785,3 +1015,4 @@ async def callback_sys(runtime: Any, update: Any, context: Any) -> None:
         await query.answer(ui_language.tr("sys.error.invalid_action"), show_alert=True)
         return
     await query.answer()
+# HASHI-Fingerprint: hfp_f3504bb70f0f490886e6d172184a17dc

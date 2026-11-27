@@ -11,10 +11,16 @@ from telegram.error import BadRequest
 
 from orchestrator import ui_language
 from orchestrator import workzone as workzone_module
+from orchestrator.agent_slot_transfer import (
+    SlotTransfer,
+    plan_slot_transfer,
+    source_slots_from_records,
+)
 from orchestrator.command_ui import card_title, confirm_card, selected_label, status_label
 from orchestrator.session_store import SessionConflict
 
 _PATH_REPLY_TTL_SECONDS = 300.0
+_WORKZONE_TRANSFER_VERBS = frozenset({"copy", "import", "clear"})
 
 
 # These forwarding functions deliberately resolve the provider lazily.  On the
@@ -909,6 +915,270 @@ async def _reload_slots(
     return normalize_workzone_state(state)
 
 
+def agent_state_for(runtime: Any, *, owner_id: str, agent_id: str) -> dict[str, Any]:
+    """Read one sibling Agent's Workzone profile through the shared store."""
+
+    from orchestrator import runtime_session
+
+    store = runtime_session.ensure_store(runtime)
+    return normalize_workzone_state(
+        store.get_agent_workzone_set(owner_id=str(owner_id), agent_id=str(agent_id))
+    )
+
+
+def sibling_agent_names(runtime: Any) -> list[str]:
+    """Return the Agent names configured on this instance."""
+
+    names: list[str] = []
+    orchestrator = getattr(runtime, "orchestrator", None)
+    for attribute in ("configured_agent_names", "get_all_agents_raw"):
+        getter = getattr(orchestrator, attribute, None)
+        if not callable(getter):
+            continue
+        try:
+            raw = getter()
+        except Exception:  # noqa: BLE001 - a broken registry must not break /workzone
+            continue
+        for item in raw or []:
+            name = item.get("name") if isinstance(item, dict) else item
+            if name:
+                names.append(str(name))
+        if names:
+            break
+    if not names:
+        names = _configured_agent_names_from_json(runtime)
+    if runtime.name not in names:
+        names.append(str(runtime.name))
+    return names
+
+
+def _configured_agent_names_from_json(runtime: Any) -> list[str]:
+    import json
+
+    home = getattr(runtime.global_config, "bridge_home", None)
+    if not home:
+        return []
+    try:
+        document = json.loads((Path(home) / "agents.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = document.get("agents") if isinstance(document, dict) else None
+    return [
+        str(row.get("name"))
+        for row in rows or ()
+        if isinstance(row, dict) and row.get("name")
+    ]
+
+
+def runtime_for_agent(runtime: Any, agent_name: str) -> Any | None:
+    if str(agent_name) == str(runtime.name):
+        return runtime
+    orchestrator = getattr(runtime, "orchestrator", None)
+    mapper = getattr(orchestrator, "_runtime_map", None)
+    if not callable(mapper):
+        return None
+    try:
+        return dict(mapper() or {}).get(str(agent_name))
+    except Exception:  # noqa: BLE001 - registry shape is optional here
+        return None
+
+
+def _resolve_transfer_agent(runtime: Any, raw_name: str) -> str:
+    wanted = str(raw_name or "").strip()
+    if not wanted:
+        raise ValueError(ui_language.tr("workzone.transfer.usage"))
+    known = {name.casefold(): name for name in sibling_agent_names(runtime)}
+    resolved = known.get(wanted.casefold())
+    if resolved is None:
+        raise ValueError(ui_language.tr("workzone.transfer.unknown_agent", agent=wanted))
+    return resolved
+
+
+def _transfer_receipt_text(
+    *,
+    verb: str,
+    source_agent: str,
+    target_agent: str,
+    plan: list[SlotTransfer],
+    deferred: bool,
+) -> str:
+    title = ui_language.tr(
+        "workzone.transfer.title_copy"
+        if verb == "copy"
+        else "workzone.transfer.title_import",
+        source=source_agent,
+        target=target_agent,
+    )
+    lines = [f"<b>{html.escape(title)}</b>"]
+    copied = [item for item in plan if item.outcome == "copied"]
+    for item in copied:
+        lines.append(
+            ui_language.tr(
+                "workzone.transfer.mapping",
+                source=f"<code>{html.escape(item.source_slot)}</code>",
+                target=f"<code>{html.escape(str(item.target_slot))}</code>",
+                path=f"<code>{html.escape(display_workzone_path(item.value))}</code>",
+            )
+        )
+    for item in plan:
+        if item.outcome == "duplicate":
+            lines.append(
+                ui_language.tr(
+                    "workzone.transfer.duplicate",
+                    slot=f"<code>{html.escape(item.source_slot)}</code>",
+                    agent=target_agent,
+                )
+            )
+        elif item.outcome == "no_free_slot":
+            lines.append(
+                ui_language.tr(
+                    "workzone.transfer.no_slot",
+                    slot=f"<code>{html.escape(item.source_slot)}</code>",
+                    agent=target_agent,
+                )
+            )
+    if not copied:
+        lines.append(ui_language.tr("workzone.transfer.nothing_copied", agent=target_agent))
+    if deferred:
+        lines.append(ui_language.tr("workzone.transfer.deferred", agent=target_agent))
+    return "\n".join(line for line in lines if line)
+
+
+async def _workzone_transfer(
+    runtime: Any,
+    update: Any,
+    state: Mapping[str, Any],
+    *,
+    owner_id: str,
+    verb: str,
+    rest: list[str],
+) -> None:
+    from orchestrator import runtime_session
+
+    if verb == "clear":
+        if rest:
+            raise ValueError(ui_language.tr("workzone.transfer.usage"))
+        configured = [item["slot_id"] for item in state["slots"]]
+        if not configured:
+            await runtime._reply_text(
+                update,
+                ui_language.tr("workzone.clear.empty", agent=runtime.name),
+            )
+            return
+        store = runtime_session.ensure_store(runtime)
+        after = normalize_workzone_state(state)
+        for slot in configured:
+            after = normalize_workzone_state(
+                store.delete_agent_workzone_slot(
+                    owner_id=str(owner_id),
+                    agent_id=runtime.name,
+                    slot_id=slot,
+                    source="workzone_clear",
+                )
+            )
+        deferred = await _activate_state(runtime, state, after)
+        await _reply_overview(
+            runtime,
+            update,
+            after,
+            notice=_mutation_notice(
+                ui_language.tr(
+                    "workzone.clear.done", count=len(configured), agent=runtime.name
+                ),
+                deferred=deferred,
+            ),
+        )
+        return
+
+    if not rest or len(rest) > 2:
+        raise ValueError(ui_language.tr("workzone.transfer.usage"))
+    slot: str | None = None
+    if len(rest) == 2:
+        try:
+            slot = normalize_workzone_slot(rest[1])
+        except ValueError as exc:
+            raise ValueError(
+                ui_language.tr("workzone.transfer.slot_invalid", slot=str(rest[1]))
+            ) from exc
+
+    if verb == "copy":
+        source_agent = str(runtime.name)
+        target_agent = _resolve_transfer_agent(runtime, rest[0])
+        if target_agent == source_agent:
+            raise ValueError(
+                ui_language.tr("workzone.transfer.same_agent", agent=source_agent)
+            )
+        source_state = normalize_workzone_state(state)
+    else:
+        target_agent = str(runtime.name)
+        source_agent = _resolve_transfer_agent(runtime, rest[0])
+        if source_agent == target_agent:
+            raise ValueError(
+                ui_language.tr("workzone.transfer.same_agent", agent=source_agent)
+            )
+        source_state = agent_state_for(runtime, owner_id=owner_id, agent_id=source_agent)
+
+    entries = source_slots_from_records(
+        source_state["slots"],
+        slot_key="slot_id",
+        value_key="path",
+        enabled_key="enabled",
+    )
+    if slot is not None and not any(entry.slot == slot for entry in entries):
+        raise ValueError(
+            ui_language.tr(
+                "workzone.transfer.slot_missing", slot=slot, agent=source_agent
+            )
+        )
+    target_state = (
+        normalize_workzone_state(state)
+        if target_agent == runtime.name
+        else agent_state_for(runtime, owner_id=owner_id, agent_id=target_agent)
+    )
+    plan = plan_slot_transfer(
+        source_slots=entries,
+        target_slot_ids=[item["slot_id"] for item in target_state["slots"]],
+        target_values=[item["path"] for item in target_state["slots"]],
+        order=_workzone_slot_ids(),
+        slot=slot,
+        as_path=True,
+    )
+
+    store = runtime_session.ensure_store(runtime)
+    for item in plan:
+        if item.outcome != "copied":
+            continue
+        store.set_agent_workzone_slot(
+            owner_id=str(owner_id),
+            agent_id=target_agent,
+            slot_id=str(item.target_slot),
+            path=str(item.value),
+            enabled=bool(item.enabled),
+            source=f"workzone_{verb}",
+        )
+
+    after = normalize_workzone_state(
+        store.get_agent_workzone_set(owner_id=str(owner_id), agent_id=target_agent)
+    )
+    target_runtime = runtime_for_agent(runtime, target_agent)
+    if target_runtime is None:
+        # The Agent is not running: the profile is stored and adopted at start.
+        deferred = True
+    else:
+        deferred = await _activate_state(target_runtime, target_state, after)
+    await runtime._reply_text(
+        update,
+        _transfer_receipt_text(
+            verb=verb,
+            source_agent=source_agent,
+            target_agent=target_agent,
+            plan=plan,
+            deferred=deferred,
+        ),
+        parse_mode="HTML",
+    )
+
+
 async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
     if not runtime._is_authorized_user(update.effective_user.id):
         return
@@ -937,6 +1207,23 @@ async def cmd_workzone(runtime: Any, update: Any, context: Any) -> None:
             update,
             ui_language.tr("workzone.path_cancelled" if cleared else "workzone.path_none"),
         )
+        return
+    if args[0].lower() in _WORKZONE_TRANSFER_VERBS:
+        try:
+            await _workzone_transfer(
+                runtime,
+                update,
+                state,
+                owner_id=resolved_owner,
+                verb=args[0].lower(),
+                rest=args[1:],
+            )
+        except (ValueError, SessionConflict) as exc:
+            await runtime._reply_text(
+                update,
+                ui_language.tr("workzone.not_changed", reason=html.escape(str(exc))),
+                parse_mode="HTML",
+            )
         return
     if args[0].lower() == "all":
         action = args[1].lower() if len(args) > 1 else ""
@@ -1279,3 +1566,4 @@ async def callback_workzone(runtime: Any, update: Any, context: Any) -> None:
         await query.answer(str(exc), show_alert=True)
         return
     await query.answer()
+# HASHI-Fingerprint: hfp_1378def12a65455789faac73f4ed4d0e
