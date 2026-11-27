@@ -290,6 +290,328 @@ async def test_damaged_preference_document_does_not_silence_the_instance(
     assert target.read_text(encoding="utf-8") == "{not json"
 
 
+class _Logger:
+    def info(self, *_args, **_kwargs) -> None:
+        return None
+
+    warning = error = debug = info
+
+
+def _send_runtime(root: Path, config_path: Path, on_send=None) -> NS:
+    """Runtime with a recording Telegram transport for real send-path tests."""
+
+    sent: list[str] = []
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            sent.append(str(kwargs.get("text")))
+            if on_send is not None:
+                on_send(len(sent))
+            return NS(message_id=len(sent))
+
+        async def send_chat_action(self, **_kwargs):
+            sent.append("typing")
+            return True
+
+        async def edit_message_text(self, **_kwargs):
+            sent.append("edit")
+            return True
+
+        async def delete_message(self, **_kwargs):
+            sent.append("delete")
+            return True
+
+    runtime = NS(
+        name="alpha",
+        global_config=NS(
+            bridge_home=root,
+            config_path=str(config_path),
+            instance_id="SILENT_TEST",
+        ),
+        config=NS(extra={}, active_backend="hashi-api"),
+        app=NS(bot=_Bot()),
+        telegram_connected=True,
+        telegram_logger=_Logger(),
+        error_logger=_Logger(),
+        logger=_Logger(),
+        workspace_dir=root,
+        session_dir=root,
+        _notify_enabled=False,
+    )
+    runtime.sent = sent
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_silent_blocks_the_mirror_gate_before_any_route_short_circuit(
+    tmp_path,
+):
+    config_path = _write_instance(tmp_path)
+    runtime = _runtime(tmp_path, config_path, [])
+    primary = {
+        "type": RUN_DELIVERY_ROUTE_TYPE,
+        "version": RUN_DELIVERY_ROUTE_VERSION,
+        "scope": "run",
+        "primary": {"surface": "telegram", "channel_key": "7"},
+        "mirrors": [],
+        "automatic": True,
+    }
+    runtime._request_meta_by_id = {
+        "req-primary": {
+            "owner_id": "user:123",
+            "request_metadata": {RUN_DELIVERY_ROUTE_METADATA_KEY: primary},
+        },
+        "req-no-route": {"owner_id": "user:123", "request_metadata": {}},
+    }
+    # A Telegram primary and a Run admitted without a frozen route are mirror
+    # decisions, not exemptions: both answer True before the cut.
+    assert telegram_mirror_allowed_for_run(runtime, "req-primary") is True
+    assert telegram_mirror_allowed_for_run(runtime, "req-no-route") is True
+
+    await _run(runtime, ["silent", "global"])
+
+    assert telegram_mirror_allowed_for_run(runtime, "req-primary") is False
+    assert telegram_mirror_allowed_for_run(runtime, "req-no-route") is False
+
+
+@pytest.mark.asyncio
+async def test_send_text_stops_at_the_send_site(tmp_path):
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    config_path = _write_instance(tmp_path)
+    runtime = _send_runtime(tmp_path, config_path)
+    await _run(runtime, ["silent", "global"])
+
+    # An explicit notification purpose bypasses the mirror policy, so only the
+    # send-site guard can stop it.
+    result = await FlexibleAgentRuntime._send_text(
+        runtime, 7, "must not leave", _purpose="explicit-notification"
+    )
+
+    assert result is None
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_typing_loop_makes_no_telegram_call_while_silenced(tmp_path, monkeypatch):
+    import asyncio
+
+    from orchestrator import frontend_delivery
+
+    config_path = _write_instance(tmp_path)
+    runtime = _send_runtime(tmp_path, config_path)
+    await _run(runtime, ["silent", "global"])
+    # The mirror policy is not a safety gate: hold it open so the loop must
+    # stop on its own suppression check rather than borrowing that result.
+    monkeypatch.setattr(
+        frontend_delivery, "telegram_mirror_allowed_for_run", lambda *_a, **_k: True
+    )
+
+    await asyncio.wait_for(
+        runtime_delivery.typing_loop(
+            runtime, 7, asyncio.Event(), request_id="req-typing"
+        ),
+        timeout=2.0,
+    )
+
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_chunks_after_the_cut_is_armed_are_not_sent(tmp_path, monkeypatch):
+    from orchestrator.connector_delivery_preferences import set_instance_preference
+
+    config_path = _write_instance(tmp_path)
+
+    def arm(_count: int) -> None:
+        # The cut lands between the first chunk and the rest of the message.
+        set_instance_preference(tmp_path, "telegram", "silent", True)
+
+    runtime = _send_runtime(tmp_path, config_path, on_send=arm)
+
+    async def not_blocked(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(
+        runtime_delivery.telegram_delivery_failover, "handle_blocked_send", not_blocked
+    )
+    text = "第一段内容。" * 900  # 5400 characters: at least two chunks
+
+    _duration, chunks = await runtime_delivery.send_long_message(
+        runtime,
+        chat_id=7,
+        text=text,
+        request_id="req-chunks",
+        # Explicit notification bypasses the mirror policy; the per-chunk gate
+        # is the only thing that can stop the rest of a started message.
+        purpose="explicit-notification",
+    )
+
+    assert len(runtime.sent) == 1
+    assert chunks == 1
+
+
+@pytest.mark.asyncio
+async def test_media_batch_is_suppressed_without_reaching_the_transport(tmp_path):
+    config_path = _write_instance(tmp_path)
+    runtime = _send_runtime(tmp_path, config_path)
+    await _run(runtime, ["silent", "global"])
+    event = {
+        "content_blocks": [
+            {"type": "media_ref", "attachment_id": "att-1", "role": "image"},
+            {"type": "media_ref", "attachment_id": "att-2", "role": "document"},
+        ]
+    }
+    outcome: dict[str, object] = {"status": "requested"}
+
+    ids, count = await runtime_delivery._send_standard_event_media_to_telegram(
+        runtime,
+        chat_id=7,
+        store=None,
+        claim={"detail": {"message_id": "msg-1"}},
+        owner_id="user:123",
+        event=event,
+        request_id="req-media",
+        purpose="response",
+        delivery_mode="final_delivery",
+        outbox_outcome=outcome,
+    )
+
+    assert (ids, count) == ([], 0)
+    assert outcome["status"] == "suppressed"
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_media_stops_mid_batch_when_the_cut_is_armed(tmp_path):
+    from orchestrator.connector_delivery_preferences import set_instance_preference
+
+    config_path = _write_instance(tmp_path)
+    image = tmp_path / "pic.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    class _Store:
+        def visible_message_attachment(
+            self, _session_id, *, owner_id, message_id, attachment_id
+        ):
+            return {
+                "local_ref": str(image),
+                "mime_type": "image/png",
+                "role": "image",
+            }
+
+    sent: list[str] = []
+
+    class _Bot:
+        async def send_photo(self, **_kwargs):
+            sent.append("photo")
+            # The cut lands after the first attachment of a started batch.
+            set_instance_preference(tmp_path, "telegram", "silent", True)
+            return NS(message_id=len(sent))
+
+        async def send_document(self, **_kwargs):
+            sent.append("document")
+            return NS(message_id=len(sent))
+
+    runtime = NS(
+        name="alpha",
+        global_config=NS(bridge_home=tmp_path, config_path=str(config_path)),
+        app=NS(bot=_Bot()),
+        telegram_connected=True,
+        telegram_logger=_Logger(),
+        error_logger=_Logger(),
+        logger=_Logger(),
+        media_dir=tmp_path,
+    )
+    event = {
+        "content_blocks": [
+            {"type": "media_ref", "attachment_id": "a1", "role": "image"},
+            {"type": "media_ref", "attachment_id": "a2", "role": "image"},
+        ]
+    }
+
+    _ids, count = await runtime_delivery._send_standard_event_media_to_telegram(
+        runtime,
+        chat_id=7,
+        store=_Store(),
+        claim={"session_id": "s1", "detail": {"message_id": "m1"}},
+        owner_id="user:123",
+        event=event,
+        request_id="req-media-batch",
+        purpose="response",
+        delivery_mode="final_delivery",
+    )
+
+    assert sent == ["photo"]
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_escalating_placeholder_loop_exits_while_silenced(tmp_path):
+    import asyncio
+
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    config_path = _write_instance(tmp_path)
+    runtime = _send_runtime(tmp_path, config_path)
+    await _run(runtime, ["silent", "global"])
+
+    await asyncio.wait_for(
+        FlexibleAgentRuntime._escalating_placeholder_loop(
+            runtime, 7, NS(message_id=99), "req-placeholder", asyncio.Event()
+        ),
+        timeout=2.0,
+    )
+
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_background_status_delivery_is_suppressed(tmp_path):
+    import asyncio
+
+    from orchestrator import runtime_background_status
+
+    config_path = _write_instance(tmp_path)
+    runtime = _send_runtime(tmp_path, config_path)
+    await _run(runtime, ["silent", "global"])
+
+    generation = asyncio.create_task(asyncio.sleep(0))
+    await runtime_background_status._deliver(
+        runtime, NS(request_id="req-bg", chat_id=7), generation, NS(message_id=5)
+    )
+    await generation
+
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_question_cards_are_not_edited_while_silenced(tmp_path):
+    from orchestrator import frontend_run_questions
+
+    config_path = _write_instance(tmp_path)
+    runtime = _send_runtime(tmp_path, config_path)
+    await _run(runtime, ["silent", "global"])
+
+    # A store is never touched: the cut returns before any Telegram call.
+    await frontend_run_questions.refresh_telegram_question_renditions(runtime, None)
+
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+async def test_status_text_does_not_promise_conversations_during_silence(tmp_path):
+    config_path = _write_instance(tmp_path)
+    runtime = _runtime(tmp_path, config_path, [])
+
+    await _run(runtime, ["silent", "global"])
+    status = await _status(runtime)
+
+    assert "Safety silence: on (nothing in or out)" in status
+    assert "Only mirroring changes" not in status
+    assert "nothing is received" in status
+
+
 @pytest.mark.asyncio
 async def test_silent_status_reports_state_and_scope(tmp_path):
     config_path = _write_instance(tmp_path)

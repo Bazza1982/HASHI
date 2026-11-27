@@ -99,6 +99,16 @@ def _global_scope_line(runtime: Any) -> str:
     )
 
 
+def _unaffected_line(runtime: Any) -> str:
+    """Explain what stays unaffected without contradicting an active silence."""
+
+    if _silent_state(runtime):
+        # "off global" alone keeps conversations working; the safety silence
+        # does not, so never print the mirror-only reassurance under it.
+        return ui_language.tr("menu.telegram.silent.notice.on")
+    return ui_language.tr("menu.telegram.global.unaffected")
+
+
 def _global_status_text(runtime: Any) -> str:
     current = _global_state(runtime)
     if current is None:
@@ -111,7 +121,7 @@ def _global_status_text(runtime: Any) -> str:
             _global_scope_line(runtime),
             _silent_status_line(runtime),
             ui_language.tr("menu.telegram.silent.scope"),
-            ui_language.tr("menu.telegram.global.unaffected"),
+            _unaffected_line(runtime),
             ui_language.tr("menu.telegram.global.usage"),
         ]
     )
@@ -151,7 +161,7 @@ async def _global_mirror_command(runtime: Any, update: Any, *, enabled: bool) ->
                 ),
                 _global_scope_line(runtime),
                 _silent_status_line(runtime),
-                ui_language.tr("menu.telegram.global.unaffected"),
+                _unaffected_line(runtime),
                 ui_language.tr(
                     "menu.telegram.global.restore_on" if not enabled
                     else "menu.telegram.global.restore_off"

@@ -412,8 +412,15 @@ async def _send_standard_event_media_to_telegram(
 ) -> tuple[list[str], int]:
     """Render canonical media refs with Telegram's local presentation rules."""
 
+    from orchestrator.telegram_silent import suppressed
+
     media_refs = _standard_event_media_refs(event)
     if not media_refs:
+        return [], 0
+    if suppressed(runtime):
+        # Media is an outbound send: a safety silence stops it like text.
+        if outbox_outcome is not None:
+            outbox_outcome["status"] = "suppressed"
         return [], 0
     detail = claim.get("detail")
     message_id = (
@@ -427,6 +434,9 @@ async def _send_standard_event_media_to_telegram(
     accepted_ids: list[str] = []
     accepted_count = 0
     for index, media_ref in enumerate(media_refs, start=1):
+        if suppressed(runtime):
+            # Stop the remaining attachments of an already-started batch.
+            break
         attachment_id = str(media_ref.get("attachment_id") or "").strip()
         if not attachment_id:
             raise ValueError("canonical media reference has no attachment identity")
@@ -1008,6 +1018,17 @@ async def _send_long_message_transport(
         from orchestrator.telegram_actor_scope import (
             current_actor, delivery_allowed, explicit_telegram_purpose,
         )
+        from orchestrator.telegram_silent import suppressed
+
+        if suppressed(runtime):
+            # Rechecked per chunk: a cut armed mid-delivery must stop the
+            # remaining chunks instead of finishing the message.
+            await record_delivery("skipped", disposition="telegram_silenced")
+            if outbox_outcome is not None:
+                outbox_outcome["status"] = (
+                    "unknown" if accepted_message_ids else "suppressed"
+                )
+            return False
 
         actor = current_actor(runtime)
         effective_owner = frontend_owner_id or (actor.owner_id if actor else None)
@@ -1935,10 +1956,14 @@ async def typing_loop(
     runtime: Any, chat_id: int, stop_event: asyncio.Event, *, request_id: str | None = None
 ):
     from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+    from orchestrator.telegram_silent import suppressed
 
     if not runtime.telegram_connected:
         return
     while not stop_event.is_set():
+        if suppressed(runtime):
+            # A typing indicator is an outbound Telegram call like any other.
+            return
         if not telegram_mirror_allowed_for_run(runtime, request_id):
             return
         try:

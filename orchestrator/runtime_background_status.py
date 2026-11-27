@@ -296,6 +296,12 @@ async def _deliver(
     placeholder: Any | None,
 ) -> None:
     epoch = getattr(runtime, "_persona_background_status_epoch", 0)
+    from orchestrator.telegram_silent import suppressed
+
+    if suppressed(runtime):
+        # A transition notice is a Telegram send; the safety silence stops it
+        # before the placeholder is edited or a new message is created.
+        return
     try:
         status = None
         # Persona edits are meaningful progress, so they may trigger another
@@ -402,3 +408,4 @@ async def wait_for_delivery(item: Any) -> None:
         return
     with suppress(asyncio.CancelledError, Exception):
         await task
+# HASHI-Fingerprint: hfp_2cb4abab643743858aba743d0d284b7e

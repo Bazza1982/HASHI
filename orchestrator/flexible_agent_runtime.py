@@ -2553,6 +2553,20 @@ class FlexibleAgentRuntime:
             raise
 
     async def _send_text(self, chat_id: int, text: str, **kwargs):
+        from orchestrator.telegram_silent import suppressed
+
+        if suppressed(self):
+            # Every outbound path is gated at send time, including messages
+            # queued before the silence was armed. Never publish, never send.
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "suppressed",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_silenced",
+                }
+            )
+            return None
         apply_disable_notification_default(self, kwargs)
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "send")
@@ -12689,7 +12703,9 @@ class FlexibleAgentRuntime:
         Thresholds (seconds): 30 → 60 → 90 → 150
         Exits immediately if stop_event is set (task completed) or placeholder is None.
         """
-        if placeholder is None or not self.telegram_connected:
+        from orchestrator.telegram_silent import suppressed
+
+        if placeholder is None or not self.telegram_connected or suppressed(self):
             return
 
         # Read per-agent config from extra (with safe fallbacks).
@@ -12708,6 +12724,10 @@ class FlexibleAgentRuntime:
                 return  # task finished before this threshold
             except asyncio.TimeoutError:
                 elapsed = threshold
+
+            if suppressed(self):
+                # The cut may be armed while this loop is already running.
+                return
 
             # --- Build status text ---
             idle_s: Optional[int] = None

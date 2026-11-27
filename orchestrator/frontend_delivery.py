@@ -574,6 +574,25 @@ def owner_mirror_for_admission(
         return default
 
 
+def instance_safety_silenced(state_root: Any | None) -> bool:
+    """Report whether this instance is under the safety silence.
+
+    Reads fail open: a damaged preference document must never silence an
+    instance on its own, exactly like the mirror switch.
+    """
+
+    if state_root is None:
+        return False
+    try:
+        from orchestrator.connector_delivery_preferences import (
+            instance_telegram_silenced,
+        )
+
+        return instance_telegram_silenced(state_root, default=False)
+    except Exception:
+        return False
+
+
 def instance_mirror_globally_off(state_root: Any | None) -> bool:
     """Report whether the instance-wide switch suppresses every mirror.
 
@@ -586,14 +605,13 @@ def instance_mirror_globally_off(state_root: Any | None) -> bool:
 
     if state_root is None:
         return False
+    if instance_safety_silenced(state_root):
+        return True
     try:
         from orchestrator.connector_delivery_preferences import (
             instance_telegram_mirror_enabled,
-            instance_telegram_silenced,
         )
 
-        if instance_telegram_silenced(state_root, default=False):
-            return True
         return not instance_telegram_mirror_enabled(state_root, default=True)
     except Exception:
         return False
@@ -697,6 +715,14 @@ def telegram_mirror_allowed_for_run(
     """Recheck the current mirror policy for a Run's frozen Telegram destination."""
     from orchestrator.runtime_session import request_metadata
 
+    global_config = getattr(runtime, "global_config", None)
+    state_root = getattr(global_config, "bridge_home", None)
+    if instance_safety_silenced(state_root):
+        # The safety silence is not a mirror preference. It is decided before
+        # any route short-circuit, so a Telegram primary destination or a Run
+        # admitted without a frozen route cannot step around the cut.
+        return False
+
     run = request_metadata(runtime, request_id)
     metadata = run.get("request_metadata") if isinstance(run, Mapping) else None
     metadata = metadata if isinstance(metadata, Mapping) else {}
@@ -712,9 +738,7 @@ def telegram_mirror_allowed_for_run(
         return True
     if not any(destination.get("surface") == "telegram" for destination in route["mirrors"]):
         return False
-    global_config = getattr(runtime, "global_config", None)
     owner = str(owner_id or run.get("owner_id") or metadata.get("owner_id") or "").strip()
-    state_root = getattr(global_config, "bridge_home", None)
     # The instance-wide switch also stops mirrors this Run has not sent yet.
     if instance_mirror_globally_off(state_root):
         return False
