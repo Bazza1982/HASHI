@@ -1077,6 +1077,9 @@ class WorkbenchApiServer:
             async def hal_run_get(request):
                 return await hal_service.handle_hal_run_get(self, request)
 
+            async def hal_peer(request):
+                return await hal_service.handle_hal_peer(self, request)
+
             self.app.router.add_get(
                 "/api/v1/hal/status", session_handler(hal_status)
             )
@@ -1100,6 +1103,9 @@ class WorkbenchApiServer:
             )
             self.app.router.add_get(
                 "/api/v1/hal/runs/{exec_id}", session_handler(hal_run_get)
+            )
+            self.app.router.add_post(
+                "/api/v1/hal/peer", session_handler(hal_peer)
             )
         except Exception as exc:  # noqa: BLE001 — HAL absence must never break the gateway
             detail = (

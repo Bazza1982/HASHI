@@ -32,6 +32,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
     - name: Prepare the declared Python runtime
       shell: bash
       run: |
@@ -42,7 +44,7 @@ jobs:
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
         fi
     - name: Install package and test dependencies
-      run: python -m pip install -r constraints/standard-py312.lock ".[test]"
+      run: uv pip install --python .venv -r constraints/standard-py312.lock ".[test]"
     - name: Run vision and configuration regression tests
       run: python -m pytest -q tests/test_vision_inspect.py tests/test_her_v2_runtime_configuration.py
 concurrency:

@@ -4086,6 +4086,23 @@ def create_app(
                 "detail": "Shared request credentials are required." if reason == "auth_required"
                     else "Remote authentication failed. Check the connection credential, clock and signed request.",
             })
+        normalized_api_path = str(api_path or "").strip().strip("/")
+        if normalized_api_path == "v1/hal/peer":
+            try:
+                hal_peer_body = json.loads(body_bytes)
+            except (ValueError, UnicodeError):
+                hal_peer_body = None
+            if not isinstance(hal_peer_body, dict):
+                return _shared_token_response(
+                    request, {"ok": False, "error_code": "hal_peer_invalid"}, status_code=400,
+                )
+            source = str(hal_peer_body.get("source_instance") or "").strip().upper()
+            target = str(hal_peer_body.get("target_instance") or "").strip().upper()
+            local = str(_instance_info.get("instance_id") or "").strip().upper()
+            if not source or source != authenticated_instance or not local or target != local or source == local:
+                return _shared_token_response(
+                    request, {"ok": False, "error_code": "hal_peer_identity_mismatch"}, status_code=403,
+                )
         body_bytes = _with_remote_workbench_ingress_evidence(
             method=request.method,
             api_path=api_path,
@@ -4183,8 +4200,7 @@ def create_app(
             duration_ms=int((time.monotonic() - route_started) * 1000),
             response_producer="local_workbench",
         )
-        normalized_api_path = str(api_path or "").strip().strip("/")
-        if normalized_api_path in {"bridge/transfer", "bridge/fork"}:
+        if normalized_api_path in {"bridge/transfer", "bridge/fork", "v1/hal/peer"}:
             try:
                 payload = json.loads(content.decode("utf-8")) if content else {}
             except (UnicodeDecodeError, json.JSONDecodeError):

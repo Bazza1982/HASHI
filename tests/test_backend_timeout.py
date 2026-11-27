@@ -173,3 +173,42 @@ async def test_timeout_monitor_reports_kind_values_sources_and_activity_age(tmp_
     assert "hard_timeout" not in diagnostic
     assert "last_output_age_s=" in diagnostic
     assert "total_runtime_s=" in diagnostic
+
+
+def test_cold_start_activity_age_uses_started_monotonic_until_first_output(tmp_path):
+    backend = _backend(tmp_path)
+    assert backend.last_activity_monotonic == 0.0
+    assert backend.last_activity_at == 0.0
+
+    started = time.monotonic() - 12.5
+    cold_age = backend._last_activity_age(started_monotonic=started)
+    assert cold_age >= 12.0
+
+    # Once real output arrives, age switches to last_activity_monotonic.
+    backend._touch_activity()
+    assert backend.last_activity_monotonic > 0.0
+    warm_age = backend._last_activity_age(started_monotonic=started)
+    assert warm_age < 2.0
+
+
+@pytest.mark.asyncio
+async def test_cold_start_hang_with_zero_activity_times_out_cleanly(tmp_path):
+    backend = _backend(tmp_path, extra={IDLE_TIMEOUT_KEY: 1})
+    assert backend.last_activity_monotonic == 0.0
+
+    # Simulate a cold-start process that has been silent for 0.85s already.
+    started = time.monotonic() - 0.85
+    hanging_task = asyncio.create_task(asyncio.sleep(30))
+    t0 = time.monotonic()
+    try:
+        kind = await backend._wait_for_task_with_timeouts(
+            hanging_task,
+            started_monotonic=started,
+        )
+    finally:
+        hanging_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hanging_task
+
+    assert kind == "idle"
+    assert time.monotonic() - t0 < 3.0
