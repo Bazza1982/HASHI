@@ -297,6 +297,17 @@ def resolve_usage_cost(
     # replaces them for later calls.
     fact = _cached_dynamic_fact(engine, model, allow_stale=True)
     if fact is not None and fact.status in {"known", "known_zero"}:
+        # An expired fact is refreshed in the background whether or not this
+        # turn can be priced from it: a turnover missing one rate dimension
+        # (e.g. a cache hit against rates without a cache_read price) still
+        # proves the cached rates are stale and must not block the refresh.
+        if schedule_missing and not _dynamic_fact_is_fresh(fact):
+            try:
+                from tools.pricing_sources import schedule_prewarm
+
+                schedule_prewarm(engine, model)
+            except Exception:
+                pass
         try:
             from tools.pricing_sources import calculate_cost as calculate_dynamic_cost
 
@@ -311,13 +322,6 @@ def resolve_usage_cost(
         except Exception:
             dynamic_cost = None
         if dynamic_cost is not None:
-            if schedule_missing and not _dynamic_fact_is_fresh(fact):
-                try:
-                    from tools.pricing_sources import schedule_prewarm
-
-                    schedule_prewarm(engine, model)
-                except Exception:
-                    pass
             return (
                 dynamic_cost,
                 (

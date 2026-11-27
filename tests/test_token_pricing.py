@@ -128,10 +128,10 @@ def test_deepseek_flash_vision_uses_flash_pricing():
     ]
 
 
-def _dynamic_evidence_at(fetched_at):
+def _dynamic_evidence_at(fetched_at, *, cache_read="0.0000002"):
     """Return the same provider answer as if it had been fetched then."""
 
-    base = _dynamic_evidence()
+    base = _dynamic_evidence(cache_read=cache_read)
     return pricing_sources.HttpEvidence(
         status=base.status,
         content_type=base.content_type,
@@ -142,20 +142,16 @@ def _dynamic_evidence_at(fetched_at):
 
 
 def _dynamic_evidence(model="vendor/new-model", *, cache_read="0.0000002"):
+    pricing = {
+        "prompt": "0.000002",
+        "completion": "0.000006",
+        "request": "0",
+        "input_cache_write": "0.0000025",
+    }
+    if cache_read is not None:
+        pricing["input_cache_read"] = cache_read
     body = json.dumps(
-        {
-            "data": {
-                "id": model,
-                "canonical_slug": model,
-                "pricing": {
-                    "prompt": "0.000002",
-                    "completion": "0.000006",
-                    "request": "0",
-                    "input_cache_read": cache_read,
-                    "input_cache_write": "0.0000025",
-                },
-            }
-        }
+        {"data": {"id": model, "canonical_slug": model, "pricing": pricing}}
     ).encode()
     return pricing_sources.HttpEvidence(
         status=200,
@@ -475,6 +471,46 @@ def test_price_older_than_the_stale_grace_window_stays_unknown(tmp_path, monkeyp
 
     assert receipt.cost_usd is None
     assert receipt.dominant_cost_source() == "unknown"
+
+
+def test_stale_fact_missing_the_cache_rate_refreshes_even_when_unpriced(
+    tmp_path, monkeypatch
+):
+    """A cache hit the stale rates cannot price still proves they are stale."""
+
+    cache = tmp_path / "pricing-cache.json"
+    monkeypatch.setenv("HASHI_PRICING_CACHE_FILE", str(cache))
+    expired_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    pricing_sources.refresh_pricing_fact(
+        "openrouter-api",
+        "vendor/new-model",
+        cache_path=cache,
+        fetcher=lambda _url: _dynamic_evidence_at(expired_at, cache_read=None),
+        now=expired_at,
+    )
+    scheduled = []
+    monkeypatch.setattr(
+        pricing_sources,
+        "schedule_prewarm",
+        lambda engine, model, *, cache_path=None: scheduled.append(
+            (engine, model, cache_path)
+        ),
+    )
+
+    receipt = record_usage(
+        tmp_path,
+        model="vendor/new-model",
+        backend="openrouter-api",
+        engine="openrouter-api",
+        input_tokens=1_000,
+        output_tokens=100,
+        prompt_cache_hit_tokens=400,
+        token_source="provider",
+    )
+
+    assert receipt.cost_usd is None
+    assert receipt.dominant_cost_source() == "unknown"
+    assert scheduled == [("openrouter-api", "vendor/new-model", None)]
 
 
 def test_first_unknown_openrouter_usage_schedules_nonblocking_price_supplement(
