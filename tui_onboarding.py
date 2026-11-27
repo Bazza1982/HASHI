@@ -8,34 +8,42 @@ Runs the full first-run onboarding flow (language, disclaimer, wellbeing, API ke
 then transitions seamlessly into the normal TUI chat experience with Hashiko.
 
 If onboarding has already been completed, launches directly as a normal TUI.
+
+The TUI is the rescue hatch, so this entry point must never die on a missing
+package or an unreadable instance configuration. It therefore delegates to the
+``tui.py`` entry point, which resolves this instance's verified identity and
+falls through to the standard-library rescue shell instead of exiting.
 """
-import sys
+import importlib.util
 import os
-import json
+import sys
+from pathlib import Path
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from tui.app import HASHITuiApp
-from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
+
+def _entry_module():
+    """Load ``tui.py`` by path.
+
+    ``import tui`` resolves to the ``tui`` package, not to the entry script, so
+    the shared launch/rescue logic is loaded explicitly by file path.
+    """
+
+    spec = importlib.util.spec_from_file_location(
+        "hashi_tui_entry", Path(_project_root) / "tui.py"
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - damaged checkout
+        raise RuntimeError(f"the TUI entry point is missing at {_project_root}/tui.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def _get_workbench_url() -> str:
-    try:
-        config_path = os.path.join(_project_root, "agents.json")
-        with open(config_path) as f:
-            config = json.load(f)
-        port = config.get("global", {}).get("workbench_port", DEFAULT_WORKBENCH_PORT)
-        return f"http://localhost:{port}"
-    except Exception:
-        return f"http://localhost:{DEFAULT_WORKBENCH_PORT}"
-
-
-def main():
-    app = HASHITuiApp(workbench_url=_get_workbench_url(), onboarding_mode=True)
-    app.run()
+def main() -> int:
+    return _entry_module()._launch(onboarding_mode=True)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

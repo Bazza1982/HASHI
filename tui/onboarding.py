@@ -9,7 +9,7 @@ from pathlib import Path
 
 from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import new_config_json, read_config_json, write_config_json
-from orchestrator.config import default_global_tools_config
+from orchestrator.runtime_defaults import DEFAULT_GLOBAL_ALLOWED_TOOLS
 from orchestrator.flexible_backend_registry import get_default_model, removed_backend_reason
 from orchestrator import pathing
 
@@ -170,7 +170,7 @@ def write_config(bridge_home: Path, engine: str, lang: dict, l_code: str, or_key
                 "global": {
                     "authorized_id": 0,
                     "whatsapp": {"enabled": False},
-                    "default_tools": default_global_tools_config(),
+                    "default_tools": {"allowed": list(DEFAULT_GLOBAL_ALLOWED_TOOLS)},
                 },
                 "agents": [agent_cfg],
             }

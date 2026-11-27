@@ -9,7 +9,34 @@ from textual.containers import VerticalScroll, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
-from onboarding.connection import ConnectionError, choices, validate, save, adopt_if_running, connect_telegram
+def _connection_helpers():
+    """Load the backend-aware setup helpers only when this page is used.
+
+    ``onboarding.connection`` pulls the server backend manager (click, httpx).
+    The rescue hatch must import without those packages, so the dependency is
+    resolved on demand and its absence is reported inside the page instead of
+    aborting the TUI at startup.
+    """
+
+    from types import SimpleNamespace
+
+    from onboarding.connection import (
+        ConnectionError,
+        adopt_if_running,
+        choices,
+        connect_telegram,
+        save,
+        validate,
+    )
+
+    return SimpleNamespace(
+        ConnectionError=ConnectionError,
+        adopt_if_running=adopt_if_running,
+        choices=choices,
+        connect_telegram=connect_telegram,
+        save=save,
+        validate=validate,
+    )
 
 
 class ConnectionScreen(ModalScreen[dict | None]):
@@ -25,7 +52,14 @@ class ConnectionScreen(ModalScreen[dict | None]):
         super().__init__()
         self.home = Path(home)
         self.language = language
-        self.options = choices(home)
+        self.options = []
+        self.setup_error = ''
+        try:
+            self.options = _connection_helpers().choices(home)
+        except Exception:
+            # Rescue mode: the setup helpers need server packages that this
+            # interpreter does not have. The page opens and explains why.
+            self.setup_error = 'SETUP_TOOLS_UNAVAILABLE'
         self.busy = False
         self.telegram_mode = False
 
@@ -52,6 +86,14 @@ class ConnectionScreen(ModalScreen[dict | None]):
 
     def on_mount(self):
         self.query_one('#connection-user-id').display = False
+        if self.setup_error:
+            self.query_one('#connection-backend',Select).disabled = True
+            self.query_one('#connection-submit',Button).disabled = True
+            self.query_one('#connection-result',Static).update(self.t(
+                'SETUP_TOOLS_UNAVAILABLE\nSetup helpers need server packages this Python lacks. '
+                'Run /doctor, or start the TUI with the installer runtime.',
+                'SETUP_TOOLS_UNAVAILABLE\n此 Python 缺少配置助手所需的服务端包。'
+                '请用 /doctor 检查，或改用安装包运行时启动 TUI。'))
 
     def on_input_changed(self, event: Input.Changed):
         event.stop()
@@ -106,27 +148,32 @@ class ConnectionScreen(ModalScreen[dict | None]):
             control.disabled = True
         key_input.value = ''
         try:
+            helpers = _connection_helpers()
             if self.telegram_mode:
-                result = await connect_telegram(self.home,key,self.query_one('#connection-user-id',Input).value,
+                result = await helpers.connect_telegram(self.home,key,self.query_one('#connection-user-id',Input).value,
                     confirmed=self.query_one('#connection-consent',Checkbox).value,
                     replace_confirmed=self.query_one('#connection-replace',Checkbox).value)
-                adoption = await self._adopt_saved()
+                adoption = await self._adopt_saved(helpers)
                 self.dismiss({**result, **adoption})
                 return
             engine = self.query_one('#connection-backend',Select).value
             model = self.query_one('#connection-model',Select).value
             if not isinstance(engine,str) or not isinstance(model,str):
-                raise ConnectionError('SELECTION_REQUIRED')
-            proof = await validate(self.home,engine,model,key,
+                raise helpers.ConnectionError('SELECTION_REQUIRED')
+            proof = await helpers.validate(self.home,engine,model,key,
                 confirmed=self.query_one('#connection-consent',Checkbox).value)
-            result = save(self.home,engine,model,key,verified=proof,
+            result = helpers.save(self.home,engine,model,key,verified=proof,
                 replace_confirmed=self.query_one('#connection-replace',Checkbox).value,language=self.language)
-            adoption = await self._adopt_saved()
+            adoption = await self._adopt_saved(helpers)
             self.dismiss({**result, **adoption})
-        except ConnectionError as exc:
+        except RuntimeError as exc:
+            # onboarding.connection.ConnectionError derives from RuntimeError;
+            # matching on the class attribute keeps the page importable in
+            # rescue mode, where those helpers cannot be imported at all.
+            code = str(getattr(exc, 'code', '') or '')
             detail = self.t('Settings are saved; live adoption is still pending. Retry when Hashiko is idle.',
-                            '设置已保存，尚未完成运行采用。请在小乔空闲后重试。') if exc.code=='SAVED_ADOPTION_PENDING' else self.t('Retry, choose another backend, or cancel.','可重试、换后端或取消。')
-            self.query_one('#connection-result',Static).update(exc.code + '\n' + detail)
+                            '设置已保存，尚未完成运行采用。请在小乔空闲后重试。') if code=='SAVED_ADOPTION_PENDING' else self.t('Retry, choose another backend, or cancel.','可重试、换后端或取消。')
+            self.query_one('#connection-result',Static).update((code or 'CONNECTION_FAILED') + '\n' + detail)
         except Exception:
             # Provider exceptions may contain request headers; never display raw errors.
             self.query_one('#connection-result',Static).update('CONNECTION_FAILED')
@@ -138,11 +185,11 @@ class ConnectionScreen(ModalScreen[dict | None]):
                     control.disabled = False
                 self.query_one('#connection-submit',Button).disabled = False
 
-    async def _adopt_saved(self):
+    async def _adopt_saved(self, helpers):
         self.query_one('#connection-result',Static).update(self.t(
             'Saved. Waiting for Hashiko to finish active work and load the settings.',
             '已保存，正在等待小乔完成当前工作并加载设置。'))
-        return await adopt_if_running(self.home)
+        return await helpers.adopt_if_running(self.home)
 
 
 class ConnectionApp(App):
@@ -166,3 +213,4 @@ def main():
 
 if __name__=='__main__':
     raise SystemExit(main())
+# HASHI-Fingerprint: hfp_01b28f9b0f8f446cb78884b9e7600348

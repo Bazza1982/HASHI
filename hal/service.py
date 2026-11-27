@@ -26,7 +26,8 @@ from typing import Any, Mapping
 from aiohttp import web
 
 from hal import compile_hal
-from hal.dispatch import DispatchAdapter, DispatchResult, resolve_agent_target
+from hal.dispatch import DispatchAdapter, DispatchResult, resolve_agent_target, split_agent_spec
+from hal.peer import RemoteTerminalUnavailable, handle_hal_peer_request
 from hal.event_source import (
     HalTrigger,
     feed_event_hal_event,
@@ -78,10 +79,12 @@ class HalService:
         dispatch: DispatchAdapter,
         logger: logging.Logger | None = None,
         clock: Any = None,
+        peer: Any = None,
     ):
         self.store = store
         self.session_store = session_store
         self.dispatch = dispatch
+        self.peer = peer
         self.logger = logger or logging.getLogger("hal.runtime")
         self._clock = clock if clock is not None else time.time
         self._loop_task: asyncio.Task | None = None
@@ -262,6 +265,10 @@ class HalService:
             return None
         detail = dict(row)
         detail["receipts"] = self.store.list_receipts(exec_id)
+        for receipt in detail["receipts"]:
+            if receipt["kind"] == "prompt":
+                _, target_instance = split_agent_spec(receipt.get("target"))
+                receipt["target_instance"] = target_instance or self._current_instance_id()
         return detail
 
     # ------------------------------------------------------------------ loop
@@ -524,7 +531,7 @@ class HalService:
         return str(getattr(self.session_store, "instance_id", "") or "")
 
     async def _prompt_result(
-        self, exec_row: Mapping[str, Any], directive, exec_id: str, stage: int
+        self, owner_id: str, exec_row: Mapping[str, Any], directive, exec_id: str, stage: int
     ) -> DispatchResult:
         target = directive.target
         if target == "@agent_trigger":
@@ -535,7 +542,15 @@ class HalService:
                     transient=False,
                     detail="prompt target @agent_trigger has no Agent for this system event",
                 )
-        name, error = resolve_agent_target(target, self._current_instance_id())
+        target_name, instance = split_agent_spec(target)
+        current = self._current_instance_id().casefold()
+        if target_name and instance and instance != current and self.peer is not None:
+            if owner_id.startswith("enterprise:"):
+                return DispatchResult(False, False, "cross-instance HAL requires the instance owner")
+            return await self.peer.dispatch_prompt(
+                instance, target_name, directive.payload, directive.idempotency_key,
+            )
+        name, error = resolve_agent_target(target, current)
         if error:
             return DispatchResult(accepted=False, transient=False, detail=error)
         return await self.dispatch.dispatch_prompt(
@@ -647,7 +662,7 @@ class HalService:
             return False
 
         if directive.kind == "prompt":
-            result = await self._prompt_result(exec_row, directive, exec_id, stage)
+            result = await self._prompt_result(owner_id, exec_row, directive, exec_id, stage)
         else:
             result = await self._command_result(exec_row, directive)
 
@@ -873,15 +888,11 @@ class HalService:
             # was already accepted and its Run finished (crash between accept
             # and the 'dispatched' write), retrying would risk a duplicate side
             # effect. Honour the persisted completion instead.
-            from orchestrator.automation_events import terminal_event_for_key
-
             try:
-                terminal = await asyncio.to_thread(
-                    terminal_event_for_key,
-                    self.session_store,
-                    owner_id=owner_id,
-                    run_idempotency_key=receipt["idempotency_key"],
-                )
+                terminal, _instance = await self._terminal_for_receipt(owner_id, receipt)
+                # An unavailable peer can still be safely retried with the same key.
+            except RemoteTerminalUnavailable:
+                terminal = None
             except Exception as exc:  # noqa: BLE001
                 # A transient terminal-evidence read failure must neither kill
                 # the runtime loop nor be treated as "no related Run" (which
@@ -936,7 +947,7 @@ class HalService:
                 continue
             next_retry_at = receipt.get("next_retry_at")
             if next_retry_at is not None and float(next_retry_at) > now:
-                continue  # still inside the backoff window: not work yet
+                continue
             directive = DispatchDirective(
                 exec_id=exec_row["exec_id"],
                 stage=stage,
@@ -976,8 +987,6 @@ class HalService:
         actually attempted (so a normal "still waiting" state never enters the
         0.1s fast loop).
         """
-        from orchestrator.automation_events import terminal_event_for_key
-
         execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
         loaded: list[dict[str, Any]] = []
         for e in execs:
@@ -1009,12 +1018,15 @@ class HalService:
                 # recorded as 'unverified'. Leave such a stage to normal matching.
                 continue
             try:
-                terminal = await asyncio.to_thread(
-                    terminal_event_for_key,
-                    self.session_store,
-                    owner_id=owner_id,
-                    run_idempotency_key=prior["idempotency_key"],
-                )
+                terminal, instance = await self._terminal_for_receipt(owner_id, prior)
+            except RemoteTerminalUnavailable as exc:
+                if exec_row.get("detail") != str(exc):
+                    await asyncio.to_thread(
+                        self.store.advance_exec_if_active,
+                        owner_id=owner_id, exec_id=exec_row["exec_id"], stage=stage,
+                        state=EXEC_ACTIVE, detail=str(exc),
+                    )
+                continue
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning(
                     "HAL dependent-stage evidence read failed for exec %s stage %s: %s",
@@ -1022,8 +1034,16 @@ class HalService:
                 )
                 continue
             if terminal is None:
-                continue  # prior Run still in flight: legitimately waiting
-            trigger = self._terminal_trigger(terminal)
+                if instance:
+                    detail = f"waiting for Run completion on @{instance}"
+                    if exec_row.get("detail") != detail:
+                        await asyncio.to_thread(
+                            self.store.advance_exec_if_active,
+                            owner_id=owner_id, exec_id=exec_row["exec_id"], stage=stage,
+                            state=EXEC_ACTIVE, detail=detail,
+                        )
+                continue
+            trigger = self._terminal_trigger(terminal, instance)
             if trigger is None:
                 continue
             if await self._apply_trigger(
@@ -1032,7 +1052,24 @@ class HalService:
                 did_work = True
         return did_work
 
-    def _terminal_trigger(self, terminal: Mapping[str, Any]) -> HalTrigger | None:
+    async def _terminal_for_receipt(self, owner_id: str, receipt: Mapping[str, Any]):
+        from orchestrator.automation_events import terminal_event_for_key
+
+        agent, instance = split_agent_spec(receipt.get("target"))
+        key = receipt["idempotency_key"]
+        if instance and instance != self._current_instance_id().casefold():
+            if self.peer is None or owner_id.startswith("enterprise:"):
+                raise RemoteTerminalUnavailable(f"HAL peer @{instance} unavailable")
+            return await self.peer.terminal_event(instance, agent, key), instance
+        terminal = await asyncio.to_thread(
+            terminal_event_for_key, self.session_store, owner_id=owner_id,
+            run_idempotency_key=key,
+        )
+        return terminal, None
+
+    def _terminal_trigger(
+        self, terminal: Mapping[str, Any], instance: str | None = None,
+    ) -> HalTrigger | None:
         """Convert a durable terminal Run event into a canonical HAL trigger.
 
         Mirrors the feed-event loop's identity canonicalisation so the recovered
@@ -1042,7 +1079,7 @@ class HalService:
         if trigger is None:
             return None
         if trigger.agent_identity:
-            instance_id = self._current_instance_id()
+            instance_id = instance.upper() if instance else self._current_instance_id()
             suffix = f"@{instance_id}" if instance_id else ""
             trigger = _with_agent_identity(trigger, f"@{trigger.agent_identity}{suffix}")
         return trigger
@@ -1236,6 +1273,7 @@ def ensure_service(server) -> HalService | None:
     try:
         from hal.store import HalStore
         from hal.dispatch import GatewayDispatchAdapter
+        from hal.peer import HalPeerClient
 
         logger = getattr(server, "logger", None) or logging.getLogger("hal.service")
         store_path = _migrate_legacy_store(
@@ -1246,6 +1284,9 @@ def ensure_service(server) -> HalService | None:
             store=store,
             session_store=server.session_store,
             dispatch=GatewayDispatchAdapter(server, logger=logger),
+            peer=HalPeerClient(
+                Path(server.config_path).parent, server.session_store.instance_id,
+            ),
             logger=logger,
         )
         server._hal_service = service
@@ -1293,6 +1334,16 @@ def _service_or_503(server):
             {"ok": False, "error_code": "hal_unavailable"}, status=503
         )
     return service, None
+
+
+async def handle_hal_peer(server, request):
+    owner_id, error = _require_auth(server, request)
+    if error is not None:
+        return error
+    body, error = await _read_bounded_body(request, MAX_SCRIPT_BYTES * 2)
+    if error is not None:
+        return error
+    return await handle_hal_peer_request(server, owner_id, body)
 
 
 async def handle_hal_status(server, request):

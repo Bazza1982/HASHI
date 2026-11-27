@@ -47,6 +47,37 @@ Follow the reported missing/runtime mismatch details. Prepare an environment
 for the intended program version; do not upgrade dependencies underneath a
 running Core. See [dependency profiles](DEPENDENCIES.md).
 
+### The TUI still starts when this check fails
+
+The TUI is the rescue hatch, so `windows\start_tui.bat`,
+`windows\TUI_onboarding.bat`, `mac/start_tui.command` and
+`mac/tui_onboarding.command` no longer refuse to start when this contract
+fails. A failing contract is reported as a notice line, inside the TUI, and by
+`/doctor`; it never means "the TUI is broken". The launchers pick the first
+interpreter that can import the three TUI packages (`textual`, `rich`,
+`aiohttp`) in this order: installer Functions runtime, `\python`, `.venv`,
+`python` on `PATH`.
+
+If no interpreter has those three packages, the launchers still start
+`tui.py`, which falls back to a standard-library rescue shell:
+
+~~~bash
+python tui.py --rescue
+~~~
+
+Inside the shell and inside a working TUI:
+
+- `/doctor` - local checks: interpreter, TUI packages, server dependency
+  contract, `agents.json` and `secrets.json` parse errors, workbench port,
+  loopback `/api/health`, newest launcher log;
+- `/logs [n]` - tail of the newest launcher and bridge logs;
+- in the rescue shell only: `/start` launches the Core bridge and waits for
+  `/api/health`, `/setup` prints the offline configuration steps.
+
+`tests/test_tui_minimal_import_boundary.py` enforces the underlying rule: the
+TUI must never import Playwright, `telegram`, `cryptography`, `httpx` or the
+other server packages.
+
 ## Engine or provider cannot connect
 
 Use /connect in the local TUI, or hashi onboard. Choose an installed CLI or
