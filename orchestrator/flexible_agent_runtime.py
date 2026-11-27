@@ -2163,6 +2163,19 @@ class FlexibleAgentRuntime:
                 }
             )
             return sent
+        from orchestrator.telegram_silent import suppressed
+
+        if suppressed(self):
+            # The safety silence covers direct replies, not only mirrors.
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "suppressed",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_silenced",
+                }
+            )
+            return None
         apply_disable_notification_default(self, kwargs)
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "reply")

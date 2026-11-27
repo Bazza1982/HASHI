@@ -337,10 +337,19 @@ class TelegramCredentialService:
         instance_global_mirror_enabled = instance_telegram_mirror_enabled(
             self.state_root, default=True
         )
+        from orchestrator.connector_delivery_preferences import (
+            instance_telegram_silenced,
+        )
+
+        instance_silenced = instance_telegram_silenced(
+            self.state_root, default=False
+        )
         resolved_mirror_enabled = resolve_telegram_mirror_policy(
             context.mirror_policy,
             instance_enabled=instance_mirror_enabled,
-            instance_global_off=not instance_global_mirror_enabled,
+            instance_global_off=(
+                not instance_global_mirror_enabled or instance_silenced
+            ),
         )
         return {
             "ok": True,

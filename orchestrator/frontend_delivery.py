@@ -577,6 +577,9 @@ def owner_mirror_for_admission(
 def instance_mirror_globally_off(state_root: Any | None) -> bool:
     """Report whether the instance-wide switch suppresses every mirror.
 
+    The safety silence is a superset of the mirror switch: while it is active
+    nothing may mirror, even for an Agent pinned to always on.
+
     An unreadable store keeps the historical behaviour (mirrors allowed) so a
     damaged preference document cannot silently stop delivery on its own.
     """
@@ -586,8 +589,11 @@ def instance_mirror_globally_off(state_root: Any | None) -> bool:
     try:
         from orchestrator.connector_delivery_preferences import (
             instance_telegram_mirror_enabled,
+            instance_telegram_silenced,
         )
 
+        if instance_telegram_silenced(state_root, default=False):
+            return True
         return not instance_telegram_mirror_enabled(state_root, default=True)
     except Exception:
         return False

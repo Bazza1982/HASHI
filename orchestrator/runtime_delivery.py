@@ -848,6 +848,15 @@ async def _send_long_message_transport(
         parse_mode=parse_mode,
     ):
         return 0.0, 1
+    from orchestrator.telegram_silent import suppressed
+
+    if suppressed(runtime):
+        # Under the instance-wide safety silence nothing leaves this process,
+        # including replies that were queued before the silence was armed.
+        # The outbox records a deliberate suppression, never a failure.
+        if outbox_outcome is not None:
+            outbox_outcome["status"] = "suppressed"
+        return 0.0, 0
     canonical = getattr(runtime, "canonical_audit", None)
     accepted_message_ids: list[str] = []
     from orchestrator.frontend_connector_registry import endpoint_id_for
@@ -1324,6 +1333,16 @@ async def dispatch_claimed_telegram_event(
     """Render one already-claimed standard FC Event through Telegram."""
 
     from orchestrator.telegram_actor_scope import delivery_allowed, explicit_telegram_purpose
+    from orchestrator.telegram_silent import suppressed
+
+    if suppressed(runtime):
+        await run_database_work(store.complete_delivery_outbox,
+            outbox_id=str(claim["outbox_id"]),
+            lease_token=str(claim["lease_token"]),
+            status="suppressed",
+            error_code="telegram_silenced",
+        )
+        return 0.0, 0
 
     if not delivery_allowed(
         runtime, owner_id=frontend_owner_id, chat_id=chat_id,

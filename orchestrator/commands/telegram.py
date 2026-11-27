@@ -109,6 +109,8 @@ def _global_status_text(runtime: Any) -> str:
                 "menu.telegram.global.status", state=_global_state_label(current)
             ),
             _global_scope_line(runtime),
+            _silent_status_line(runtime),
+            ui_language.tr("menu.telegram.silent.scope"),
             ui_language.tr("menu.telegram.global.unaffected"),
             ui_language.tr("menu.telegram.global.usage"),
         ]
@@ -126,6 +128,10 @@ async def _global_mirror_command(runtime: Any, update: Any, *, enabled: bool) ->
 
     try:
         set_instance_preference(home, "telegram", "mirror", enabled)
+        if enabled:
+            # "on global" restores the whole switch surface, silence included;
+            # "off global" only stops mirrors and leaves a silence untouched.
+            set_instance_preference(home, "telegram", "silent", False)
     except (OSError, TypeError, ValueError):
         await _send(runtime, update, ui_language.tr("menu.telegram.global.failed"))
         return
@@ -144,6 +150,7 @@ async def _global_mirror_command(runtime: Any, update: Any, *, enabled: bool) ->
                     state=_global_state_label(enabled),
                 ),
                 _global_scope_line(runtime),
+                _silent_status_line(runtime),
                 ui_language.tr("menu.telegram.global.unaffected"),
                 ui_language.tr(
                     "menu.telegram.global.restore_on" if not enabled
@@ -152,6 +159,100 @@ async def _global_mirror_command(runtime: Any, update: Any, *, enabled: bool) ->
             ]
         ),
     )
+
+
+def _silent_state(runtime: Any) -> bool | None:
+    """Read the instance-wide safety silence, or None without a store."""
+
+    home = _bridge_home(runtime)
+    if home is None:
+        return None
+    from orchestrator.connector_delivery_preferences import (
+        instance_telegram_silenced,
+    )
+
+    return instance_telegram_silenced(home, default=False)
+
+
+def _silent_state_label(enabled: bool) -> str:
+    return ui_language.tr(
+        "menu.telegram.silent.state.on" if enabled
+        else "menu.telegram.silent.state.off"
+    )
+
+
+def _silent_status_line(runtime: Any) -> str:
+    state = _silent_state(runtime)
+    if state is None:
+        return ui_language.tr("menu.telegram.unavailable")
+    from orchestrator.telegram_silent import dropped_since_start
+
+    return "\n".join(
+        [
+            ui_language.tr(
+                "menu.telegram.silent.status", state=_silent_state_label(state)
+            ),
+            ui_language.tr(
+                "menu.telegram.silent.dropped",
+                count=dropped_since_start(runtime),
+            ),
+        ]
+    )
+
+
+async def _silent_command(runtime: Any, update: Any, args: list[str]) -> None:
+    """Cut every Telegram instruction in and out, or lift that cut.
+
+    The silence is instance-wide by design: while the instance is locked down
+    a single Telegram account must not keep receiving instructions, so there is
+    no per-account form of this switch.
+    """
+
+    home = _bridge_home(runtime)
+    if home is None:
+        await _send(runtime, update, ui_language.tr("menu.telegram.unavailable"))
+        return
+    tokens = [str(token).strip().casefold() for token in args[1:]]
+    if "global" not in tokens:
+        await _send(
+            runtime, update, ui_language.tr("menu.telegram.silent.global_only")
+        )
+        return
+    enabled = "off" not in tokens
+    from orchestrator.connector_delivery_preferences import set_instance_preference
+    from orchestrator import telegram_silent
+
+    # Persist first and verify: a receipt that cannot be delivered must never
+    # leave the instance un-silenced.
+    try:
+        set_instance_preference(home, "telegram", "silent", enabled)
+    except (OSError, TypeError, ValueError):
+        await _send(runtime, update, ui_language.tr("menu.telegram.silent.failed"))
+        return
+    if _silent_state(runtime) is not enabled:
+        await _send(runtime, update, ui_language.tr("menu.telegram.silent.failed"))
+        return
+    notice = ui_language.tr(
+        "menu.telegram.silent.notice.on" if enabled
+        else "menu.telegram.silent.notice.off"
+    )
+    with telegram_silent.last_notice():
+        # This receipt is the one message a silence change may still deliver.
+        await _send(
+            runtime,
+            update,
+            "\n\n".join(
+                [
+                    f"\u2705 {notice}",
+                    _silent_status_line(runtime),
+                    ui_language.tr("menu.telegram.silent.scope"),
+                    ui_language.tr(
+                        "menu.telegram.silent.restore" if enabled
+                        else "menu.telegram.silent.usage"
+                    ),
+                ]
+            ),
+        )
 
 
 def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", notice: str | None = None,
@@ -169,6 +270,14 @@ def _menu_text(runtime: Any, update: Any, *, connector_id: str = "telegram", not
                 ui_language.tr(
                     "menu.telegram.global.menu_fact",
                     state=_global_state_label(global_state),
+                )
+            )
+        silent_state = _silent_state(runtime)
+        if silent_state:
+            facts.append(
+                ui_language.tr(
+                    "menu.telegram.silent.menu_fact",
+                    state=_silent_state_label(silent_state),
                 )
             )
         from orchestrator.telegram_status_presentation import summary_facts
@@ -362,6 +471,9 @@ async def telegram_command(runtime: Any, update: Any, context: Any) -> None:
     if args and args[0] == "disconnect":
         await _disconnect_command(runtime, update, args)
         return
+    if args and args[0] == "silent":
+        await _silent_command(runtime, update, args)
+        return
     if len(args) == 2 and args[1] == "global" and args[0] in {"on", "off"}:
         await _global_mirror_command(runtime, update, enabled=args[0] == "on")
         return
@@ -417,9 +529,10 @@ COMMANDS = [
     RuntimeCommand(
         name="telegram",
         description=(
-            "Toggle the Telegram mirror for this owner, for the whole instance, "
-            "or disconnect a Bot token "
-            "[on|off [global]|disconnect [agent_id]|global]"
+            "Toggle the Telegram mirror for this Telegram account, for the whole "
+            "instance, cut the instance off entirely (silent), or disconnect a "
+            "Bot token "
+            "[on|off [global]|silent [off] global|disconnect [agent_id]|global]"
         ),
         callback=telegram_command,
     ),

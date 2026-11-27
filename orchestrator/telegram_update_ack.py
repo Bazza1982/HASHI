@@ -22,7 +22,15 @@ def record_handler_error(update: Any, error: BaseException) -> None:
 
 
 async def dispatch_update(runtime: Any, update: Any) -> None:
+    from orchestrator import telegram_silent
     from orchestrator.telegram_actor_scope import scoped_access_enabled, process_telegram_update
+
+    if telegram_silent.silenced(runtime):
+        # Explicit drop: returning normally acknowledges the update so the Bot
+        # offset advances.  Never silence by stopping the connector, because
+        # Telegram would replay the retained backlog when it reconnects.
+        telegram_silent.record_dropped(runtime)
+        return
 
     current = _Dispatch(update.update_id)
     token = _current.set(current)

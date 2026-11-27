@@ -222,6 +222,18 @@ def instance_telegram_mirror_enabled(
     )
 
 
+def instance_telegram_silenced(bridge_home: Any, *, default: bool = False) -> bool:
+    """Return whether the instance-wide safety silence is active.
+
+    The silence is instance-only on purpose: one Telegram account cannot
+    override a cut-off that exists to stop every instruction on this instance.
+    """
+
+    return get_instance_preference(
+        bridge_home, "telegram", "silent", default=default
+    )
+
+
 def set_connector_preference(
     bridge_home: Any,
     owner_id: Any,
@@ -266,6 +278,7 @@ __all__ = [
     "get_connector_preference_snapshot",
     "get_instance_preference",
     "instance_telegram_mirror_enabled",
+    "instance_telegram_silenced",
     "legacy_state_path",
     "load_preferences",
     "set_connector_preference",

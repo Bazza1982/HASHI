@@ -126,6 +126,18 @@ switch changes mirroring only: origin-platform replies, inbound messages, Bot
 Tokens and connections are unaffected, and it never applies to another
 instance.
 
+`/telegram silent global` is the safety cut: it stops every Telegram
+instruction in and out for this instance — no inbound commands, no replies, no
+mirrors, no Agent turns and no notifications — while Bot Tokens and their
+connections are kept so recovery is immediate. It is instance-wide only; a
+single Telegram account cannot override it, and `/telegram off global` neither
+sets nor clears it. Inbound updates are dropped explicitly at the single ingest
+point (the Bot offset still advances) instead of pausing the connector, because
+Telegram would replay the retained backlog on reconnect. While the silence is
+active, Telegram cannot lift it: use `/telegram on global` from Workbench or
+the TUI, which clears both switches. `/telegram global` reports the silence
+state and the number of updates this Worker dropped.
+
 `/telegram` and `/whatsapp` control owner-scoped FC mirror preferences from any
 authenticated frontend. Their handlers and callbacks use the same persisted
 connector-delivery state and localized card contract. The `api_chat` text route
