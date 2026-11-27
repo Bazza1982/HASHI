@@ -1945,65 +1945,369 @@ def _tool_call_meta_by_id(messages: list[dict[str, Any]]) -> dict[str, tuple[str
     return meta
 
 
+# Initial tunable working context target for very large (e.g. 1M) models.
+# This is an adjustable performance/cost/quality target, NOT a hard capability
+# limit; raise or lower based on observed latency, cache hit rate, and quality.
+DEFAULT_WORKING_CONTEXT_TARGET_TOKENS = 300_000
+_DEFAULT_CLOUD_CONTEXT_WINDOW_TOKENS = 128_000
+_DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS = 32_768
+_HIGH_WATERMARK_RATIO = 0.85
+_LOW_WATERMARK_RATIO = 0.55
+_RECENT_TOOL_RETENTION_RATIO = 0.25
+
+
+@dataclass(frozen=True)
+class IntraTurnContextBudget:
+    """Resolved per-model intra-turn context budget and compaction watermarks."""
+
+    context_window_tokens: int
+    response_headroom_tokens: int
+    hard_input_limit_tokens: int
+    working_input_target_tokens: int
+    high_watermark_tokens: int
+    low_watermark_tokens: int
+    recent_tool_retention_tokens: int
+    provenance: str = "default"
+
+
+def build_intra_turn_context_budget(
+    *,
+    context_window_tokens: int,
+    response_headroom_tokens: int | None = None,
+    usable_input_tokens: int | None = None,
+    working_target_cap_tokens: int | None = DEFAULT_WORKING_CONTEXT_TARGET_TOKENS,
+    provenance: str = "default",
+) -> IntraTurnContextBudget:
+    """Derive hard limit, adjustable working target, and stateless high/low watermarks."""
+    window = max(2_048, int(context_window_tokens))
+    default_headroom = min(16_384, max(512, window // 4))
+    if response_headroom_tokens is None:
+        headroom = default_headroom
+    else:
+        # Clamp oversized global defaults (e.g. 16K on a 32K/16K local window)
+        # so small local models retain a sensible usable input window.
+        headroom = max(256, min(int(response_headroom_tokens), max(512, window // 4)))
+    if usable_input_tokens is not None and int(usable_input_tokens) > 0:
+        hard_limit = max(1_024, min(window - 256, int(usable_input_tokens)))
+        headroom = max(256, window - hard_limit)
+    else:
+        hard_limit = max(1_024, window - headroom)
+
+    if working_target_cap_tokens is not None and int(working_target_cap_tokens) > 0:
+        working_target = min(hard_limit, int(working_target_cap_tokens))
+    else:
+        working_target = hard_limit
+
+    high_watermark = max(
+        1_024,
+        min(
+            int(hard_limit * 0.90),
+            int(working_target * _HIGH_WATERMARK_RATIO),
+        ),
+    )
+    low_watermark = max(
+        512,
+        min(
+            high_watermark - 256,
+            int(working_target * _LOW_WATERMARK_RATIO),
+        ),
+    )
+    recent_retention = max(
+        512,
+        min(
+            low_watermark // 2,
+            int(working_target * _RECENT_TOOL_RETENTION_RATIO),
+        ),
+    )
+    return IntraTurnContextBudget(
+        context_window_tokens=window,
+        response_headroom_tokens=headroom,
+        hard_input_limit_tokens=hard_limit,
+        working_input_target_tokens=working_target,
+        high_watermark_tokens=high_watermark,
+        low_watermark_tokens=low_watermark,
+        recent_tool_retention_tokens=recent_retention,
+        provenance=provenance,
+    )
+
+
+def _estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    from tools.token_tracker import estimate_tokens
+
+    return int(estimate_tokens(text))
+
+
+def _estimate_message_tokens(message: Mapping[str, Any]) -> int:
+    """Estimate tokens for one OpenAI-compatible message including tools & reasoning."""
+    if not isinstance(message, Mapping):
+        return 0
+    total = 4  # Per-message role/framing overhead
+    content = message.get("content")
+    if isinstance(content, str):
+        total += _estimate_text_tokens(content)
+    elif isinstance(content, list):
+        for part in content:
+            if not isinstance(part, Mapping):
+                total += _estimate_text_tokens(str(part))
+                continue
+            ptype = str(part.get("type") or "")
+            if ptype == "text":
+                total += _estimate_text_tokens(str(part.get("text") or ""))
+            elif ptype in {"image_url", "input_image", "image"}:
+                # Avoid counting raw base64 bytes as text tokens.
+                total += 512
+            elif ptype in {"input_audio", "audio"}:
+                total += 512
+            else:
+                total += _estimate_text_tokens(
+                    json.dumps(part, ensure_ascii=False, default=str)
+                )
+    elif content is not None:
+        total += _estimate_text_tokens(
+            json.dumps(content, ensure_ascii=False, default=str)
+        )
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str):
+            total += _estimate_text_tokens(value)
+        elif value is not None:
+            total += _estimate_text_tokens(
+                json.dumps(value, ensure_ascii=False, default=str)
+            )
+    tool_calls = message.get("tool_calls")
+    if tool_calls:
+        total += _estimate_text_tokens(
+            json.dumps(tool_calls, ensure_ascii=False, default=str)
+        )
+    return total
+
+
+def _group_tool_messages(messages: Sequence[Mapping[str, Any]]) -> list[list[int]]:
+    """Group `role: "tool"` indices by their owning assistant tool-call round."""
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, Mapping):
+            continue
+        role = msg.get("role")
+        if role == "tool":
+            current.append(idx)
+        else:
+            if current:
+                groups.append(current)
+                current = []
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _format_compacted_tool_content(
+    content: str,
+    *,
+    tool_name: str,
+    target: str,
+    head_chars: int,
+    tail_chars: int,
+    oversized_hint: bool = False,
+) -> str:
+    digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+    head = content[: max(0, head_chars)].rstrip()
+    tail = content[-tail_chars:].lstrip() if tail_chars > 0 else ""
+    omitted = max(0, len(content) - len(head) - len(tail))
+    header = (
+        f"{_INTRA_TURN_COMPACTED_MARKER} | tool={tool_name}"
+        + (f" | target={target}" if target else "")
+        + f" | original_chars={len(content)} | sha256={digest}]"
+    )
+    hint = (
+        "\n[Note: payload exceeded remaining context budget; re-read a narrower "
+        "range or filtered slice if omitted lines are needed.]"
+        if oversized_hint
+        else ""
+    )
+    if tail:
+        return f"{header}\n{head}\n...[omitted {omitted} chars]...\n{tail}{hint}"
+    return f"{header}\n{head}\n...[omitted {omitted} chars]...{hint}"
+
+
 def compact_intra_turn_tool_messages(
     messages: list[dict[str, Any]],
     *,
+    budget: IntraTurnContextBudget | None = None,
+    tool_schema_tokens: int = 0,
     last_input_tokens: int = 0,
-    trigger_tokens: int = 110_000,
-    trigger_chars: int = 360_000,
-    keep_recent_tool_messages: int = 12,
+    new_messages_start: int | None = None,
     min_payload_chars: int = 1_200,
     head_chars: int = 300,
     tail_chars: int = 300,
 ) -> int:
-    """Fold bulky older `role: "tool"` payloads in place without breaking tool pairing.
+    """Stateless high/low watermark batch compaction for intra-turn tool outputs.
 
-    Preserves every assistant/tool message node and `tool_call_id` 1:1 mapping,
-    keeps the most recent tool outputs verbatim, and operates only when the
-    turn crosses its token or character threshold so KV prefix caching remains
-    stable between compaction epochs.
+    - Estimates the upcoming complete request (system + history + tool schemas +
+      all tool calls and newly appended tool results), anchored with provider
+      `last_input_tokens` when available.
+    - Does nothing below `budget.high_watermark_tokens` (and `hard_input_limit`),
+      preserving KV prefix cache stability across normal tool rounds.
+    - When triggered, batch-compacts older `role: "tool"` payloads down to
+      `budget.low_watermark_tokens`, naturally creating headroom without
+      cooldowns, step counters, timers, or epoch state machines.
+    - Retains recent assistant+tool groups by token budget rather than a fixed
+      tool count, preserving `tool_call_id` 1:1 pairing and never mutating
+      `system` or `user` messages.
+    - Handles unexpectedly large newly appended tool results against actual
+      remaining budget, and stops cleanly if `low_watermark` is unreachable.
     """
+    active_budget = budget or build_intra_turn_context_budget(
+        context_window_tokens=_DEFAULT_CLOUD_CONTEXT_WINDOW_TOKENS,
+        provenance="fallback_default",
+    )
+    msg_tokens = [_estimate_message_tokens(msg) for msg in messages]
+    estimated_full = max(0, int(tool_schema_tokens)) + sum(msg_tokens)
+    observed = max(0, int(last_input_tokens or 0))
     if (
-        int(last_input_tokens or 0) < int(trigger_tokens)
-        and _estimate_messages_chars(messages) < int(trigger_chars)
+        observed > 0
+        and new_messages_start is not None
+        and 0 <= new_messages_start <= len(messages)
+    ):
+        delta_tokens = sum(msg_tokens[new_messages_start:])
+        upcoming_tokens = max(estimated_full, observed + delta_tokens)
+    else:
+        upcoming_tokens = max(estimated_full, observed)
+
+    if (
+        upcoming_tokens < active_budget.high_watermark_tokens
+        and upcoming_tokens < active_budget.hard_input_limit_tokens
     ):
         return 0
-    tool_indices = [
-        idx
-        for idx, msg in enumerate(messages)
-        if isinstance(msg, Mapping) and msg.get("role") == "tool"
-    ]
-    cutoff = len(tool_indices) - max(0, int(keep_recent_tool_messages))
-    if cutoff <= 0:
+
+    groups = _group_tool_messages(messages)
+    if not groups:
         return 0
+
+    # Partition tool groups from newest to oldest by token budget so recent
+    # tool-call/result groups stay intact while older groups are batch-folded.
+    recent_group_count = 0
+    retained_tokens = 0
+    for group in reversed(groups):
+        group_tokens = sum(msg_tokens[idx] for idx in group)
+        if recent_group_count == 0:
+            recent_group_count = 1
+            retained_tokens += group_tokens
+        elif retained_tokens + group_tokens <= active_budget.recent_tool_retention_tokens:
+            recent_group_count += 1
+            retained_tokens += group_tokens
+        else:
+            break
+
+    older_groups = groups[: len(groups) - recent_group_count]
+    recent_groups = groups[len(groups) - recent_group_count :]
     meta_by_id = _tool_call_meta_by_id(messages)
     compacted = 0
-    for idx in tool_indices[:cutoff]:
+
+    def _fold_index(
+        idx: int,
+        *,
+        fold_head: int,
+        fold_tail: int,
+        min_chars: int,
+        oversized_hint: bool = False,
+    ) -> bool:
+        nonlocal upcoming_tokens, compacted
         msg = messages[idx]
         content = msg.get("content")
         if not isinstance(content, str):
-            continue
-        if len(content) < int(min_payload_chars):
-            continue
+            return False
+        if len(content) < min_chars:
+            return False
         if content.startswith(_INTRA_TURN_COMPACTED_MARKER):
-            continue
+            return False
         call_id = str(msg.get("tool_call_id") or "")
         tool_name, target = meta_by_id.get(call_id, ("tool", ""))
-        digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:12]
-        head = content[:head_chars].rstrip()
-        tail = content[-tail_chars:].lstrip() if tail_chars > 0 else ""
-        omitted = max(0, len(content) - len(head) - len(tail))
-        header = (
-            f"{_INTRA_TURN_COMPACTED_MARKER} | tool={tool_name}"
-            + (f" | target={target}" if target else "")
-            + f" | original_chars={len(content)} | sha256={digest}]"
+        replacement = _format_compacted_tool_content(
+            content,
+            tool_name=tool_name,
+            target=target,
+            head_chars=fold_head,
+            tail_chars=fold_tail,
+            oversized_hint=oversized_hint,
         )
-        msg["content"] = (
-            f"{header}\n{head}\n...[omitted {omitted} chars]...\n{tail}"
-            if tail
-            else f"{header}\n{head}\n...[omitted {omitted} chars]..."
-        )
+        if len(replacement) >= len(content):
+            return False
+        old_tok = msg_tokens[idx]
+        msg["content"] = replacement
+        new_tok = _estimate_message_tokens(msg)
+        msg_tokens[idx] = new_tok
+        upcoming_tokens = max(0, upcoming_tokens - max(0, old_tok - new_tok))
         compacted += 1
+        return True
+
+    # Phase A: batch-compact older tool outputs down to low_watermark_tokens.
+    for group in older_groups:
+        for idx in group:
+            if upcoming_tokens <= active_budget.low_watermark_tokens:
+                return compacted
+            _fold_index(
+                idx,
+                fold_head=head_chars,
+                fold_tail=tail_chars,
+                min_chars=int(min_payload_chars),
+            )
+
+    # If Phase A brought us cleanly below the high watermark (and hard limit),
+    # leave the recent tool groups verbatim.
+    if (
+        upcoming_tokens < active_budget.high_watermark_tokens
+        and upcoming_tokens < active_budget.hard_input_limit_tokens
+    ):
+        return compacted
+
+    # Phase B1: fold earlier groups inside recent_groups (keeping newest last).
+    for group in recent_groups[:-1]:
+        for idx in group:
+            if upcoming_tokens <= active_budget.low_watermark_tokens:
+                return compacted
+            _fold_index(
+                idx,
+                fold_head=head_chars,
+                fold_tail=tail_chars,
+                min_chars=int(min_payload_chars),
+            )
+
+    if (
+        upcoming_tokens < active_budget.high_watermark_tokens
+        and upcoming_tokens < active_budget.hard_input_limit_tokens
+    ):
+        return compacted
+
+    # Phase B2: handle unexpectedly large newly appended tool result(s) in the
+    # newest group against actual remaining budget (largest payload first).
+    newest_group = sorted(
+        recent_groups[-1],
+        key=lambda idx: msg_tokens[idx],
+        reverse=True,
+    )
+    for idx in newest_group:
+        if upcoming_tokens <= active_budget.low_watermark_tokens:
+            break
+        old_tok = msg_tokens[idx]
+        excess_tokens = max(0, upcoming_tokens - active_budget.low_watermark_tokens)
+        target_tokens = max(256, old_tok - excess_tokens)
+        if old_tok <= target_tokens:
+            continue
+        # Convert target token allowance into conservative head/tail char split.
+        budget_chars = max(400, int(target_tokens * 3))
+        dyn_head = max(200, int(budget_chars * 0.6))
+        dyn_tail = max(200, int(budget_chars * 0.35))
+        _fold_index(
+            idx,
+            fold_head=dyn_head,
+            fold_tail=dyn_tail,
+            min_chars=min(int(min_payload_chars), 600),
+            oversized_hint=True,
+        )
+
     return compacted
 
 
@@ -2122,10 +2426,151 @@ class OpenRouterAdapter(BaseBackend):
     TRANSIENT_PROVIDER_CALL_RETRY_MAX_DELAY_S = 16.0
     TRANSIENT_PROVIDER_CALL_DNS_RETRIES = 6
     TRANSIENT_PROVIDER_CALL_DNS_RETRY_MAX_DELAY_S = 60.0
-    INTRA_TURN_COMPACTION_TRIGGER_TOKENS = 110_000
-    INTRA_TURN_COMPACTION_TRIGGER_CHARS = 360_000
-    INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS = 12
+    WORKING_CONTEXT_TARGET_TOKENS = DEFAULT_WORKING_CONTEXT_TARGET_TOKENS
     PARALLEL_READONLY_TOOL_CONCURRENCY = 4
+
+    def _is_local_context_adapter(self) -> bool:
+        engine = str(getattr(self.config, "engine", "") or "").strip().casefold()
+        if engine in {"ollama-api", "hli-api"}:
+            return True
+        module = inspect.getmodule(type(self))
+        caps = getattr(module, "HASHI_COMPACTION_CAPABILITIES", None)
+        return isinstance(caps, Mapping) and bool(caps.get("local_or_slow"))
+
+    def _resolve_intra_turn_context_budget(self) -> IntraTurnContextBudget:
+        """Resolve serving context window and watermarks from existing adapter profiles."""
+        # 1. Native Ollama capacity resolver (handles ollama_num_ctx / live slot).
+        native_enabled = getattr(self, "_native_context_enabled", None)
+        native_cap = getattr(self, "_native_capacity", None)
+        if callable(native_enabled) and callable(native_cap):
+            try:
+                if native_enabled():
+                    cap = native_cap()
+                    return build_intra_turn_context_budget(
+                        context_window_tokens=int(cap.context_window_tokens),
+                        usable_input_tokens=int(cap.usable_input_tokens),
+                        working_target_cap_tokens=int(
+                            getattr(
+                                self,
+                                "WORKING_CONTEXT_TARGET_TOKENS",
+                                DEFAULT_WORKING_CONTEXT_TARGET_TOKENS,
+                            )
+                        ),
+                        provenance=str(getattr(cap, "provenance", "ollama_native")),
+                    )
+            except Exception:
+                pass
+
+        # 2. Shared HASHI capacity profile resolver (DeepSeek, HLI probed slot,
+        #    Ollama defaults, agent/global provider declarations).
+        runtime = getattr(self.config, "_hashi_runtime", None)
+        provider = str(getattr(self.config, "engine", "") or "openrouter-api")
+        model = str(getattr(self.config, "model", "") or "")
+        extra = getattr(self.config, "extra", None)
+        endpoint = getattr(self, "_endpoint", None)
+        profile = None
+        try:
+            from orchestrator.context_compaction import resolve_capacity_profile
+
+            profile = resolve_capacity_profile(
+                runtime,
+                provider,
+                model,
+                profile_options=extra if isinstance(extra, Mapping) else None,
+                endpoint=str(endpoint) if endpoint else None,
+            )
+            if profile is None and provider.strip().casefold() == "ollama-api":
+                profile = resolve_capacity_profile(
+                    runtime,
+                    provider,
+                    "default",
+                    profile_options=extra if isinstance(extra, Mapping) else None,
+                    endpoint=str(endpoint) if endpoint else None,
+                )
+        except Exception:
+            profile = None
+
+        working_cap = int(
+            getattr(
+                self,
+                "WORKING_CONTEXT_TARGET_TOKENS",
+                DEFAULT_WORKING_CONTEXT_TARGET_TOKENS,
+            )
+        )
+        if profile is not None:
+            return build_intra_turn_context_budget(
+                context_window_tokens=int(profile.context_window_tokens),
+                response_headroom_tokens=int(profile.response_headroom_tokens),
+                working_target_cap_tokens=working_cap,
+                provenance=str(profile.provenance),
+            )
+
+        fallback_window = (
+            _DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
+            if self._is_local_context_adapter()
+            else _DEFAULT_CLOUD_CONTEXT_WINDOW_TOKENS
+        )
+        return build_intra_turn_context_budget(
+            context_window_tokens=fallback_window,
+            working_target_cap_tokens=working_cap,
+            provenance=(
+                "local_default_fallback"
+                if self._is_local_context_adapter()
+                else "cloud_default_fallback"
+            ),
+        )
+
+    def _estimate_active_tool_schema_tokens(self) -> int:
+        registry = getattr(self, "tool_registry", None)
+        if registry is None:
+            return 0
+        getter = getattr(registry, "get_tool_definitions", None)
+        if not callable(getter):
+            return 0
+        try:
+            definitions = getter()
+        except Exception:
+            return 0
+        if not definitions:
+            return 0
+        try:
+            return _estimate_text_tokens(
+                json.dumps(definitions, ensure_ascii=False, default=str)
+            )
+        except Exception:
+            return 0
+
+    def _maintain_intra_turn_context(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        last_input_tokens: int = 0,
+        new_messages_start: int | None = None,
+        request_id: str = "",
+        loop_idx: int = 0,
+    ) -> int:
+        budget = self._resolve_intra_turn_context_budget()
+        tool_schema_tokens = self._estimate_active_tool_schema_tokens()
+        compacted = compact_intra_turn_tool_messages(
+            messages,
+            budget=budget,
+            tool_schema_tokens=tool_schema_tokens,
+            last_input_tokens=last_input_tokens,
+            new_messages_start=new_messages_start,
+        )
+        if compacted:
+            self.logger.info(
+                "Intra-turn context maintenance batch-compacted %d tool result(s) "
+                "(request_id=%s, loop=%d, high=%d, low=%d, hard=%d, provenance=%s)",
+                compacted,
+                request_id,
+                loop_idx + 1,
+                budget.high_watermark_tokens,
+                budget.low_watermark_tokens,
+                budget.hard_input_limit_tokens,
+                budget.provenance,
+            )
+        return compacted
 
     def _implicit_provider_resubmission_allowed(
         self, error: Exception, *, checkpoint_backed: bool = False,
@@ -3122,6 +3567,7 @@ class OpenRouterAdapter(BaseBackend):
         prompt: str,
         request_content: Mapping[str, Any] | None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
+        history_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
         def append_transient(
             messages: list[dict[str, Any]],
@@ -3133,12 +3579,24 @@ class OpenRouterAdapter(BaseBackend):
                 return messages
             return self._append_transient_images(messages, transient_images)
 
+        prefix: list[dict[str, Any]] = [{"role": "system", "content": self.sys_prompt}]
+        if history_messages:
+            for item in history_messages:
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("role") in {"user", "assistant"}
+                    and isinstance(item.get("content"), str)
+                ):
+                    prefix.append(
+                        {"role": str(item["role"]), "content": item["content"]}
+                    )
+
         normalized = normalize_request_content(request_content)
         if normalized is None or not request_content_has_media(normalized):
             return (
                 append_transient(
                     [
-                        {"role": "system", "content": self.sys_prompt},
+                        *prefix,
                         {"role": "user", "content": prompt},
                     ],
                 ),
@@ -3170,7 +3628,7 @@ class OpenRouterAdapter(BaseBackend):
         return (
             append_transient(
                 [
-                    {"role": "system", "content": self.sys_prompt},
+                    *prefix,
                     {"role": "user", "content": content},
                 ],
             ),
@@ -4835,6 +5293,7 @@ class OpenRouterAdapter(BaseBackend):
         provider_call_limit: int | None = None,
         before_provider_call: Callable[[], Any] | None = None,
         transient_images: Sequence[Mapping[str, Any]] | None = None,
+        history_messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> BackendResponse:
         started = time.perf_counter()
         self._ensure_client()
@@ -4926,6 +5385,7 @@ class OpenRouterAdapter(BaseBackend):
                 prompt,
                 provider_request_content,
                 transient_images=transient_images,
+                history_messages=history_messages,
             )
             self._last_media_routing = media_routing
             normalized_request_content = normalize_request_content(
@@ -5793,6 +6253,7 @@ class OpenRouterAdapter(BaseBackend):
                 )
 
                 # Append assistant message (with tool_calls) to conversation
+                tool_round_msg_start = len(messages)
                 assistant_msg: dict = {"role": "assistant"}
                 if result.text:
                     assistant_msg["content"] = result.text
@@ -5861,29 +6322,15 @@ class OpenRouterAdapter(BaseBackend):
                     for call in result.tool_calls
                     if isinstance(call, Mapping)
                 )
-                compacted_tool_outputs = compact_intra_turn_tool_messages(
+                self._maintain_intra_turn_context(
                     messages,
                     last_input_tokens=int(
                         (last_provider_call_record or {}).get("input") or 0
                     ),
-                    trigger_tokens=int(
-                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_TOKENS", 110_000)
-                    ),
-                    trigger_chars=int(
-                        getattr(self, "INTRA_TURN_COMPACTION_TRIGGER_CHARS", 360_000)
-                    ),
-                    keep_recent_tool_messages=int(
-                        getattr(self, "INTRA_TURN_COMPACTION_KEEP_RECENT_TOOLS", 12)
-                    ),
+                    new_messages_start=tool_round_msg_start,
+                    request_id=request_id,
+                    loop_idx=loop_idx,
                 )
-                if compacted_tool_outputs:
-                    self.logger.info(
-                        "Intra-turn context maintenance compacted %d older tool result(s) "
-                        "(request_id=%s, loop=%d)",
-                        compacted_tool_outputs,
-                        request_id,
-                        loop_idx + 1,
-                    )
                 self._observe_provider_context(
                     boundary="completed_tool_batch",
                     messages=messages,

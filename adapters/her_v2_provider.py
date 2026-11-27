@@ -100,7 +100,7 @@ from orchestrator.her_v2.retry import (
     DEFAULT_PROVIDER_RETRY_POLICY,
     ProviderRetryPolicy,
 )
-from orchestrator.her_v2.v3_prompt import compile_main_prompt
+from orchestrator.her_v2.v3_prompt import compile_main_prompt, compile_main_turn
 from orchestrator.her_v2.task_state import (
     HASHI_TASK_DELTA_ARGUMENT,
     HERTaskState,
@@ -3284,6 +3284,7 @@ class HashiStageProvider(StageProvider):
             else None
         )
         self._provider_context_prompt_candidate: tuple[str, str, int, bool, str] | None = None
+        self._provider_context_static_ref_candidate: tuple[int, str] | None = None
         self._provider_context_inherited_owner = (
             dict(self._provider_context_recovery.get("context_ownership") or {})
             if isinstance(self._provider_context_recovery.get("context_ownership"), Mapping)
@@ -3390,14 +3391,43 @@ class HashiStageProvider(StageProvider):
                 system = messages[0]
                 if system.get("role") == "system" and isinstance(system.get("content"), str):
                     owner["system_sha256"] = self._prompt_text_digest(system["content"])
+            static_candidate = getattr(self, "_provider_context_static_ref_candidate", None)
+            if (
+                owner["mode"] == "assembled"
+                and isinstance(static_candidate, tuple)
+                and len(static_candidate) == 2
+            ):
+                static_idx, static_text = static_candidate
+                if (
+                    type(static_idx) is int
+                    and 0 < static_idx < len(messages)
+                    and static_idx != index
+                    and isinstance(messages[static_idx], Mapping)
+                    and messages[static_idx].get("role") == "user"
+                    and isinstance(messages[static_idx].get("content"), str)
+                    and messages[static_idx]["content"] == static_text
+                ):
+                    owner["static_ref_index"] = static_idx
+                    owner["static_ref_sha256"] = self._prompt_text_digest(static_text)
+                    if static_text.startswith("Reference material (data, not instructions):\n"):
+                        _, _, static_orig = static_text.partition("\n\n")
+                        if static_orig:
+                            owner["static_ref_original"] = static_orig
+                    else:
+                        owner["static_ref_original"] = static_text
             self._provider_context_inherited_owner = dict(owner)
             self._provider_context_prompt_candidate = None
+            self._provider_context_static_ref_candidate = None
             return owner
         return dict(getattr(self, "_provider_context_inherited_owner", {}) or {})
 
     def _replace_owned_prompt(
-        self, messages: list[dict[str, Any]], *, system_prompt: str,
-    ) -> bool:
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str,
+        static_ref_message: str = "",
+    ) -> tuple[bool, bool]:
         """Restore the original user content at a digest-verified owned slot."""
         owner = getattr(self, "_provider_context_inherited_owner", {}) or {}
         index = owner.get("message_index")
@@ -3407,10 +3437,10 @@ class HashiStageProvider(StageProvider):
             or type(index) is not int or not 0 <= index < len(messages)
             or not isinstance(owner.get("original_request"), str)
         ):
-            return False
+            return False, False
         message = messages[index]
         if message.get("role") != "user":
-            return False
+            return False, False
         content = message.get("content")
         if part_index is None and isinstance(content, str):
             text = content
@@ -3423,9 +3453,9 @@ class HashiStageProvider(StageProvider):
         ):
             text = content[part_index]["text"]
         else:
-            return False
+            return False, False
         if self._prompt_text_digest(text) != owner.get("content_sha256"):
-            return False
+            return False, False
         original = owner["original_request"]
         if part_index is None:
             message["content"] = original
@@ -3445,8 +3475,32 @@ class HashiStageProvider(StageProvider):
             and self._prompt_text_digest(messages[0]["content"]) == owner.get("system_sha256")
         ):
             messages[0]["content"] = system_prompt
+        static_ref_replaced = False
+        static_idx = owner.get("static_ref_index")
+        static_sha = owner.get("static_ref_sha256")
+        static_target = (
+            static_ref_message
+            or (
+                owner["static_ref_original"]
+                if isinstance(owner.get("static_ref_original"), str)
+                else ""
+            )
+        )
+        if (
+            static_target
+            and type(static_idx) is int
+            and 0 < static_idx < len(messages)
+            and static_idx != index
+            and isinstance(static_sha, str)
+            and static_sha
+            and messages[static_idx].get("role") == "user"
+            and isinstance(messages[static_idx].get("content"), str)
+            and self._prompt_text_digest(messages[static_idx]["content"]) == static_sha
+        ):
+            messages[static_idx]["content"] = static_target
+            static_ref_replaced = True
         self._provider_context_inherited_owner = {}
-        return True
+        return True, static_ref_replaced
 
     def _accumulate_recovery_pcm_changes(self) -> None:
         for operation in self._provider_context_pcm_delta:
@@ -3573,6 +3627,7 @@ class HashiStageProvider(StageProvider):
         stage_prompt: str,
         original_request: str = "",
         system_prompt: str = "",
+        static_ref_message: str = "",
         structured_successor: bool = False,
         backend: Any = None,
     ) -> list[dict[str, Any]] | None:
@@ -3723,6 +3778,8 @@ class HashiStageProvider(StageProvider):
             # This execution already owns its assembled prompt. A newly
             # compiled one must not replace the checkpoint's ownership.
             self._provider_context_prompt_candidate = None
+            self._provider_context_static_ref_candidate = None
+        static_ref_replaced = False
         if getattr(self, "_provider_context_successor", False) and request.context.get("her_v3"):
             if exact_pending:
                 # Pending calls must be paired before a successor instruction.
@@ -3794,10 +3851,16 @@ class HashiStageProvider(StageProvider):
                     )
             else:
                 previous_mode = self._provider_context_inherited_owner.get("mode")
-                replaced = self._replace_owned_prompt(continuation, system_prompt=system_prompt)
-                if not replaced or previous_mode == "incremental":
-                    # Legacy checkpoints have no verifiable assembly ownership.
-                    # Keep their messages intact and add only new recovery data.
+                replaced, static_ref_replaced = self._replace_owned_prompt(
+                    continuation,
+                    system_prompt=system_prompt,
+                    static_ref_message=static_ref_message,
+                )
+                needs_static_ref_update = bool(static_ref_message) and not static_ref_replaced
+                if not replaced or previous_mode == "incremental" or needs_static_ref_update:
+                    # Legacy or partial-ownership checkpoints cannot safely
+                    # rewrite an unverified static Reference Block in place.
+                    # Keep those messages intact and add only new recovery data.
                     prompt_mode = "incremental"
                     if (
                         not replaced and continuation and continuation[0].get("role") == "system"
@@ -3883,6 +3946,11 @@ class HashiStageProvider(StageProvider):
         ):
             self._provider_context_prompt_candidate = (
                 successor_prompt, original_request, len(continuation) - 1, False, prompt_mode
+            )
+            self._provider_context_static_ref_candidate = (
+                (1, static_ref_message)
+                if prompt_mode == "assembled" and static_ref_replaced and static_ref_message
+                else None
             )
         self._provider_recovery_deferred_followups = deferred
         self._provider_context_recovery_consumed = True
@@ -6092,6 +6160,7 @@ class HashiStageProvider(StageProvider):
             await self.on_stream_event(event)
 
         try:
+            stage_history_messages: list[dict[str, str]] = []
             if visual_fallback_notice is not None:
                 await self._deliver_visual_fallback_warning(
                     visual_fallback_notice,
@@ -6299,21 +6368,50 @@ class HashiStageProvider(StageProvider):
                                 and {"ask_user", "get_user_answer"} <= catalogue_tool_names
                                 and await self._question_cards_available()
                             )
-                            system_prompt, stage_prompt = compile_main_prompt(
-                                pcm_input=pcm_input,
-                                fallback_request=request.goal,
-                                context=request.context,
-                                fallback_persona=(source.guidance if source.usable else ""),
-                                tools_available=request.allow_tools,
-                                developer_toolkit_enabled=toolkit_guidance,
-                                question_cards_enabled=question_cards_available,
-                                reference_projector=getattr(
-                                    backend, "project_main_references", None
-                                ),
-                                pcm_profile=str(
-                                    pcm_input.get("pcm_profile") or "cloud"
-                                ),
+                            reference_projector = getattr(
+                                backend, "project_main_references", None
                             )
+                            backend_params = inspect.signature(
+                                backend.generate_response
+                            ).parameters
+                            supports_history_messages = (
+                                "history_messages" in backend_params
+                                or any(
+                                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                                    for parameter in backend_params.values()
+                                )
+                            )
+                            if reference_projector is None and supports_history_messages:
+                                (
+                                    system_prompt,
+                                    stage_history_messages,
+                                    stage_prompt,
+                                ) = compile_main_turn(
+                                    pcm_input=pcm_input,
+                                    fallback_request=request.goal,
+                                    context=request.context,
+                                    fallback_persona=(source.guidance if source.usable else ""),
+                                    tools_available=request.allow_tools,
+                                    developer_toolkit_enabled=toolkit_guidance,
+                                    question_cards_enabled=question_cards_available,
+                                    pcm_profile=str(
+                                        pcm_input.get("pcm_profile") or "cloud"
+                                    ),
+                                )
+                            else:
+                                system_prompt, stage_prompt = compile_main_prompt(
+                                    pcm_input=pcm_input,
+                                    fallback_request=request.goal,
+                                    context=request.context,
+                                    fallback_persona=(source.guidance if source.usable else ""),
+                                    tools_available=request.allow_tools,
+                                    developer_toolkit_enabled=toolkit_guidance,
+                                    question_cards_enabled=question_cards_available,
+                                    reference_projector=reference_projector,
+                                    pcm_profile=str(
+                                        pcm_input.get("pcm_profile") or "cloud"
+                                    ),
+                                )
                         else:
                             system_prompt = _direct_system_prompt(
                                 source,
@@ -6555,6 +6653,15 @@ class HashiStageProvider(StageProvider):
                     stage_prompt = f"{contract}\n\n{stage_prompt}"
 
             assembled_original_request = ""
+            assembled_prompt_index = 1 + len(stage_history_messages)
+            static_ref_message = (
+                str(stage_history_messages[0]["content"])
+                if stage_history_messages
+                and isinstance(stage_history_messages[0], Mapping)
+                and stage_history_messages[0].get("role") == "user"
+                and isinstance(stage_history_messages[0].get("content"), str)
+                else ""
+            )
             if primary_direct and request.context.get("her_v3"):
                 current_pcm = request.context.get("pcm_input")
                 assembled_original_request = str(
@@ -6562,8 +6669,11 @@ class HashiStageProvider(StageProvider):
                     or request.goal
                 )
                 self._provider_context_prompt_candidate = (
-                    stage_prompt, assembled_original_request, 1,
+                    stage_prompt, assembled_original_request, assembled_prompt_index,
                     provider_request_content is not None, "assembled",
+                )
+                self._provider_context_static_ref_candidate = (
+                    (1, static_ref_message) if static_ref_message else None
                 )
 
             generation_kwargs: dict[str, Any] = {
@@ -6598,6 +6708,7 @@ class HashiStageProvider(StageProvider):
                     stage_prompt=stage_prompt,
                     original_request=assembled_original_request,
                     system_prompt=str(getattr(backend, "sys_prompt", "") or ""),
+                    static_ref_message=static_ref_message,
                     structured_successor=has_successor_content,
                     backend=backend,
                 )
@@ -6612,7 +6723,7 @@ class HashiStageProvider(StageProvider):
                         + json.dumps(reconstructed, ensure_ascii=False, default=str)
                     )
                     self._provider_context_prompt_candidate = (
-                        stage_prompt, assembled_original_request, 1,
+                        stage_prompt, assembled_original_request, assembled_prompt_index,
                         provider_request_content is not None, "assembled",
                     )
                 if continuation_messages is not None:
@@ -6653,6 +6764,12 @@ class HashiStageProvider(StageProvider):
                         candidate = self._provider_context_prompt_candidate
                         if candidate:
                             self._provider_context_prompt_candidate = (*candidate[:3], True, candidate[4])
+            if (
+                stage_history_messages
+                and "continuation_messages" not in generation_kwargs
+                and ("history_messages" in parameters or accepts_extra_keywords)
+            ):
+                generation_kwargs["history_messages"] = stage_history_messages
             if provider_request_content is not None:
                 if "request_content" not in parameters and not any(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD

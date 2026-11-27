@@ -880,6 +880,7 @@ class XaiApiAdapter(OpenRouterAdapter):
         provider_call_limit=None,
         before_provider_call=None,
         transient_images=None,
+        history_messages=None,
     ):
         started = time.perf_counter()
         self._ensure_client()
@@ -906,5 +907,6 @@ class XaiApiAdapter(OpenRouterAdapter):
             provider_call_limit=provider_call_limit,
             before_provider_call=before_provider_call,
             transient_images=transient_images,
+            history_messages=history_messages,
         )
 # HASHI-Fingerprint: hfp_f1b3c2cc1ad4418baba775fc42418dd7
