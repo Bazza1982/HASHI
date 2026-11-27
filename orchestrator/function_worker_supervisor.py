@@ -2709,8 +2709,27 @@ class FunctionWorkerSupervisor:
             projection = self._telegram_summary()
             if preference is None or projection is None:
                 return {"ok": False, "reason": "status_unavailable"}
-            summary = projection.snapshot(owner, actor_id=actor, mirror_enabled=preference["value"])
+            from orchestrator.connector_delivery_preferences import (
+                instance_telegram_mirror_enabled,
+                instance_telegram_silenced,
+            )
+
+            silenced = instance_telegram_silenced(
+                self.kernel.paths.bridge_home, default=False
+            )
+            summary = projection.snapshot(
+                owner,
+                actor_id=actor,
+                mirror_enabled=preference["value"],
+                mirror_global_off=(
+                    silenced
+                    or not instance_telegram_mirror_enabled(
+                        self.kernel.paths.bridge_home, default=True
+                    )
+                ),
+            )
             summary["instance"] = str(getattr(self.kernel.global_cfg, "instance_id", "HASHI") or "HASHI")
+            summary["silenced"] = silenced
             return summary
         if method == "core.telegram.disconnect":
             handle = self.kernel._runtime_map().get(client.agent_name)

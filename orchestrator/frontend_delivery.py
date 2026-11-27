@@ -574,6 +574,49 @@ def owner_mirror_for_admission(
         return default
 
 
+def instance_safety_silenced(state_root: Any | None) -> bool:
+    """Report whether this instance is under the safety silence.
+
+    Reads fail open: a damaged preference document must never silence an
+    instance on its own, exactly like the mirror switch.
+    """
+
+    if state_root is None:
+        return False
+    try:
+        from orchestrator.connector_delivery_preferences import (
+            instance_telegram_silenced,
+        )
+
+        return instance_telegram_silenced(state_root, default=False)
+    except Exception:
+        return False
+
+
+def instance_mirror_globally_off(state_root: Any | None) -> bool:
+    """Report whether the instance-wide switch suppresses every mirror.
+
+    The safety silence is a superset of the mirror switch: while it is active
+    nothing may mirror, even for an Agent pinned to always on.
+
+    An unreadable store keeps the historical behaviour (mirrors allowed) so a
+    damaged preference document cannot silently stop delivery on its own.
+    """
+
+    if state_root is None:
+        return False
+    if instance_safety_silenced(state_root):
+        return True
+    try:
+        from orchestrator.connector_delivery_preferences import (
+            instance_telegram_mirror_enabled,
+        )
+
+        return not instance_telegram_mirror_enabled(state_root, default=True)
+    except Exception:
+        return False
+
+
 def configured_owner_mirror_destinations(
     *,
     request_metadata: Mapping[str, Any] | None,
@@ -626,13 +669,22 @@ def telegram_delivery_for_admission(
         default=True,
     )
     return _resolve_agent_telegram_mirror(
-        instance_enabled, agent_id=agent_id, agent_config_path=agent_config_path
+        instance_enabled,
+        agent_id=agent_id,
+        agent_config_path=agent_config_path,
+        instance_global_off=instance_mirror_globally_off(state_root),
     )
 
 
 def _resolve_agent_telegram_mirror(
-    instance_enabled: bool, *, agent_id: Any, agent_config_path: Any
+    instance_enabled: bool,
+    *,
+    agent_id: Any,
+    agent_config_path: Any,
+    instance_global_off: bool = False,
 ) -> bool:
+    if instance_global_off:
+        return False
     if agent_config_path is None or not str(agent_id or "").strip():
         return instance_enabled
     try:
@@ -642,7 +694,11 @@ def _resolve_agent_telegram_mirror(
         )
 
         policy = load_agent_telegram_mirror_policy(agent_config_path, agent_id)
-        return resolve_telegram_mirror_policy(policy, instance_enabled=instance_enabled)
+        return resolve_telegram_mirror_policy(
+            policy,
+            instance_enabled=instance_enabled,
+            instance_global_off=instance_global_off,
+        )
     except (OSError, TypeError, ValueError):
         # A missing/corrupt Agent policy must not accidentally enable a mirror.
         # Telegram-origin traffic was returned above and remains deliverable.
@@ -659,6 +715,14 @@ def telegram_mirror_allowed_for_run(
     """Recheck the current mirror policy for a Run's frozen Telegram destination."""
     from orchestrator.runtime_session import request_metadata
 
+    global_config = getattr(runtime, "global_config", None)
+    state_root = getattr(global_config, "bridge_home", None)
+    if instance_safety_silenced(state_root):
+        # The safety silence is not a mirror preference. It is decided before
+        # any route short-circuit, so a Telegram primary destination or a Run
+        # admitted without a frozen route cannot step around the cut.
+        return False
+
     run = request_metadata(runtime, request_id)
     metadata = run.get("request_metadata") if isinstance(run, Mapping) else None
     metadata = metadata if isinstance(metadata, Mapping) else {}
@@ -674,9 +738,10 @@ def telegram_mirror_allowed_for_run(
         return True
     if not any(destination.get("surface") == "telegram" for destination in route["mirrors"]):
         return False
-    global_config = getattr(runtime, "global_config", None)
     owner = str(owner_id or run.get("owner_id") or metadata.get("owner_id") or "").strip()
-    state_root = getattr(global_config, "bridge_home", None)
+    # The instance-wide switch also stops mirrors this Run has not sent yet.
+    if instance_mirror_globally_off(state_root):
+        return False
     if state_root is None:
         # Legacy runtimes without an instance preference store retain their
         # admitted default; no persisted owner switch is available to read.

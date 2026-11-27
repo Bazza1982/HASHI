@@ -21,6 +21,9 @@ from orchestrator.config_json import (
 STATE_FILENAME = "frontend_delivery_preferences.json"
 LEGACY_STATE_FILENAME = "workbench_telegram_state.json"
 DEFAULT_MIRROR = True
+# The instance-wide switch reuses this revision-checked document under one
+# reserved owner key, so it needs no second store, migration or lock.
+INSTANCE_SCOPE_OWNER = "__instance__"
 _CONNECTOR_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _PREFERENCE_KEY = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
@@ -175,6 +178,62 @@ def get_connector_preference_snapshot(
         return None
 
 
+def get_instance_preference(
+    bridge_home: Any,
+    connector_id: str,
+    preference: str,
+    *,
+    default: bool,
+) -> bool:
+    """Read the instance-wide switch that overrides every owner preference."""
+
+    return get_connector_preference(
+        bridge_home,
+        INSTANCE_SCOPE_OWNER,
+        connector_id,
+        preference,
+        default=default,
+    )
+
+
+def set_instance_preference(
+    bridge_home: Any,
+    connector_id: str,
+    preference: str,
+    enabled: bool,
+) -> bool:
+    """Persist the instance-wide switch; the caller must verify its receipt."""
+
+    if type(enabled) is not bool:
+        raise TypeError("preference value must be boolean")
+    set_connector_preference(
+        bridge_home, INSTANCE_SCOPE_OWNER, connector_id, preference, enabled
+    )
+    return enabled
+
+
+def instance_telegram_mirror_enabled(
+    bridge_home: Any, *, default: bool = DEFAULT_MIRROR
+) -> bool:
+    """Return whether instance-wide Telegram mirroring is allowed."""
+
+    return get_instance_preference(
+        bridge_home, "telegram", "mirror", default=default
+    )
+
+
+def instance_telegram_silenced(bridge_home: Any, *, default: bool = False) -> bool:
+    """Return whether the instance-wide safety silence is active.
+
+    The silence is instance-only on purpose: one Telegram account cannot
+    override a cut-off that exists to stop every instruction on this instance.
+    """
+
+    return get_instance_preference(
+        bridge_home, "telegram", "silent", default=default
+    )
+
+
 def set_connector_preference(
     bridge_home: Any,
     owner_id: Any,
@@ -212,13 +271,18 @@ def set_connector_preference(
 
 __all__ = [
     "DEFAULT_MIRROR",
+    "INSTANCE_SCOPE_OWNER",
     "LEGACY_STATE_FILENAME",
     "STATE_FILENAME",
     "get_connector_preference",
     "get_connector_preference_snapshot",
+    "get_instance_preference",
+    "instance_telegram_mirror_enabled",
+    "instance_telegram_silenced",
     "legacy_state_path",
     "load_preferences",
     "set_connector_preference",
+    "set_instance_preference",
     "state_path",
 ]
 # HASHI-Fingerprint: hfp_c548ea08a6a44831a1330eaca6eb3d98

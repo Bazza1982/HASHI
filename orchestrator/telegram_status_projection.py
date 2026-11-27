@@ -127,7 +127,14 @@ class TelegramStatusProjection:
             return
         self._diagnostics[str(name)] = diagnostics
 
-    def snapshot(self, owner_id: str, *, actor_id: int | None, mirror_enabled: bool) -> dict[str, Any]:
+    def snapshot(
+        self,
+        owner_id: str,
+        *,
+        actor_id: int | None,
+        mirror_enabled: bool,
+        mirror_global_off: bool = False,
+    ) -> dict[str, Any]:
         """Return only aggregate facts authorised for the requesting owner."""
         try:
             current = (_signature(self.config_path), _signature(self.secrets_path))
@@ -218,7 +225,9 @@ class TelegramStatusProjection:
             status["ready"] = status["ready"] or ready
             try:
                 effective = resolve_telegram_mirror_policy(
-                    binding["policy"], instance_enabled=mirror_enabled
+                    binding["policy"],
+                    instance_enabled=mirror_enabled,
+                    instance_global_off=mirror_global_off,
                 )
             except (TypeError, ValueError):
                 effective = False

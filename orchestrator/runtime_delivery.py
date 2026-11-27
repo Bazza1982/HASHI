@@ -412,8 +412,16 @@ async def _send_standard_event_media_to_telegram(
 ) -> tuple[list[str], int]:
     """Render canonical media refs with Telegram's local presentation rules."""
 
+    from orchestrator.telegram_silent import suppressed
+
     media_refs = _standard_event_media_refs(event)
     if not media_refs:
+        return [], 0
+    if suppressed(runtime):
+        # Media is an outbound send: a safety silence stops it like text.
+        if outbox_outcome is not None:
+            prior = int(outbox_outcome.get("accepted_effect_count") or 0)
+            outbox_outcome["status"] = "unknown" if prior else "suppressed"
         return [], 0
     detail = claim.get("detail")
     message_id = (
@@ -426,7 +434,22 @@ async def _send_standard_event_media_to_telegram(
 
     accepted_ids: list[str] = []
     accepted_count = 0
+
+    def _mark_cut() -> None:
+        # Nothing sent is a suppression; a partly delivered batch is unknown,
+        # never complete. Either way the accepted receipts stay intact.
+        if outbox_outcome is None:
+            return
+        prior = int(outbox_outcome.get("accepted_effect_count") or 0)
+        outbox_outcome["status"] = (
+            "unknown" if (prior + accepted_count) else "suppressed"
+        )
+
     for index, media_ref in enumerate(media_refs, start=1):
+        if suppressed(runtime):
+            # Stop the remaining attachments of an already-started batch.
+            _mark_cut()
+            break
         attachment_id = str(media_ref.get("attachment_id") or "").strip()
         if not attachment_id:
             raise ValueError("canonical media reference has no attachment identity")
@@ -508,6 +531,15 @@ async def _send_standard_event_media_to_telegram(
         else:
             method = runtime.app.bot.send_document
             field = "document"
+        if suppressed(runtime):
+            # The attachment lookup and any audio conversion above are
+            # asynchronous, so the cut may be armed after the batch entry
+            # check. Nothing new is submitted from here on.
+            if derivative is not None:
+                derivative.unlink(missing_ok=True)
+                derivative = None
+            _mark_cut()
+            break
         try:
             from orchestrator.telegram_actor_scope import delivery_allowed, explicit_telegram_purpose
 
@@ -848,6 +880,15 @@ async def _send_long_message_transport(
         parse_mode=parse_mode,
     ):
         return 0.0, 1
+    from orchestrator.telegram_silent import suppressed
+
+    if suppressed(runtime):
+        # Under the instance-wide safety silence nothing leaves this process,
+        # including replies that were queued before the silence was armed.
+        # The outbox records a deliberate suppression, never a failure.
+        if outbox_outcome is not None:
+            outbox_outcome["status"] = "suppressed"
+        return 0.0, 0
     canonical = getattr(runtime, "canonical_audit", None)
     accepted_message_ids: list[str] = []
     from orchestrator.frontend_connector_registry import endpoint_id_for
@@ -999,6 +1040,17 @@ async def _send_long_message_transport(
         from orchestrator.telegram_actor_scope import (
             current_actor, delivery_allowed, explicit_telegram_purpose,
         )
+        from orchestrator.telegram_silent import suppressed
+
+        if suppressed(runtime):
+            # Rechecked per chunk: a cut armed mid-delivery must stop the
+            # remaining chunks instead of finishing the message.
+            await record_delivery("skipped", disposition="telegram_silenced")
+            if outbox_outcome is not None:
+                outbox_outcome["status"] = (
+                    "unknown" if accepted_message_ids else "suppressed"
+                )
+            return False
 
         actor = current_actor(runtime)
         effective_owner = frontend_owner_id or (actor.owner_id if actor else None)
@@ -1324,6 +1376,16 @@ async def dispatch_claimed_telegram_event(
     """Render one already-claimed standard FC Event through Telegram."""
 
     from orchestrator.telegram_actor_scope import delivery_allowed, explicit_telegram_purpose
+    from orchestrator.telegram_silent import suppressed
+
+    if suppressed(runtime):
+        await run_database_work(store.complete_delivery_outbox,
+            outbox_id=str(claim["outbox_id"]),
+            lease_token=str(claim["lease_token"]),
+            status="suppressed",
+            error_code="telegram_silenced",
+        )
+        return 0.0, 0
 
     if not delivery_allowed(
         runtime, owner_id=frontend_owner_id, chat_id=chat_id,
@@ -1580,6 +1642,29 @@ async def dispatch_claimed_telegram_event(
         message_ids.extend(media_message_ids)
         accepted_effects += media_count
         chunks += media_count
+        cut_status = str(outcome.get("status") or "")
+        if cut_status in {"suppressed", "unknown"}:
+            # A silence armed mid-batch stopped the remaining attachments. The
+            # batch is never reported complete; real receipts are preserved and
+            # already delivered attachments are never replayed.
+            await run_database_work(_record_standard_telegram_receipt,
+                store,
+                session_id=str(claim["session_id"]),
+                owner_id=str(frontend_owner_id),
+                event_id=str(claim["event_id"]),
+                endpoint_id=str(claim["endpoint_id"]),
+                status="skipped" if cut_status == "suppressed" else "unknown",
+                message_ids=message_ids,
+                attachment_receipts=list(outcome.get("attachment_receipts") or ()),
+            )
+            await run_database_work(store.complete_delivery_outbox,
+                outbox_id=str(claim["outbox_id"]),
+                lease_token=str(claim["lease_token"]),
+                status=cut_status,
+                error_code="telegram_silenced",
+            )
+            claim_terminal = True
+            return max(0.0, monotonic() - send_started), chunks
         receipt_status = (
             "delivered"
             if message_ids and len(message_ids) == accepted_effects
@@ -1916,10 +2001,14 @@ async def typing_loop(
     runtime: Any, chat_id: int, stop_event: asyncio.Event, *, request_id: str | None = None
 ):
     from orchestrator.frontend_delivery import telegram_mirror_allowed_for_run
+    from orchestrator.telegram_silent import suppressed
 
     if not runtime.telegram_connected:
         return
     while not stop_event.is_set():
+        if suppressed(runtime):
+            # A typing indicator is an outbound Telegram call like any other.
+            return
         if not telegram_mirror_allowed_for_run(runtime, request_id):
             return
         try:

@@ -2163,6 +2163,19 @@ class FlexibleAgentRuntime:
                 }
             )
             return sent
+        from orchestrator.telegram_silent import suppressed
+
+        if suppressed(self):
+            # The safety silence covers direct replies, not only mirrors.
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "suppressed",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_silenced",
+                }
+            )
+            return None
         apply_disable_notification_default(self, kwargs)
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "reply")
@@ -2340,6 +2353,26 @@ class FlexibleAgentRuntime:
                             "sent": False,
                             "transport_message_id": None,
                             "error_code": "telegram_access_revoked",
+                        }
+                    )
+                    return None
+                if suppressed(self):
+                    # Recheck at the real submit boundary: the publication, the
+                    # outbox claim and the retry sleeps above are asynchronous,
+                    # so the cut may be armed after the entry check.
+                    if claim is not None:
+                        self.session_store.complete_delivery_outbox(
+                            outbox_id=str(claim["outbox_id"]),
+                            lease_token=str(claim["lease_token"]),
+                            status="suppressed",
+                            error_code="telegram_silenced",
+                        )
+                    runtime_control.record_reply_delivery_outcome(
+                        {
+                            "status": "suppressed",
+                            "sent": False,
+                            "transport_message_id": None,
+                            "error_code": "telegram_silenced",
                         }
                     )
                     return None
@@ -2540,6 +2573,20 @@ class FlexibleAgentRuntime:
             raise
 
     async def _send_text(self, chat_id: int, text: str, **kwargs):
+        from orchestrator.telegram_silent import suppressed
+
+        if suppressed(self):
+            # Every outbound path is gated at send time, including messages
+            # queued before the silence was armed. Never publish, never send.
+            runtime_control.record_reply_delivery_outcome(
+                {
+                    "status": "suppressed",
+                    "sent": False,
+                    "transport_message_id": None,
+                    "error_code": "telegram_silenced",
+                }
+            )
+            return None
         apply_disable_notification_default(self, kwargs)
         request_id = kwargs.pop("_request_id", None)
         purpose = kwargs.pop("_purpose", "send")
@@ -2687,6 +2734,25 @@ class FlexibleAgentRuntime:
                         status="suppressed",
                         error_code="telegram_mirror_disabled",
                     )
+                return None
+            if suppressed(self):
+                # The publication and the outbox claim above are asynchronous:
+                # recheck immediately before the transport call.
+                if claim is not None:
+                    self.session_store.complete_delivery_outbox(
+                        outbox_id=str(claim["outbox_id"]),
+                        lease_token=str(claim["lease_token"]),
+                        status="suppressed",
+                        error_code="telegram_silenced",
+                    )
+                runtime_control.record_reply_delivery_outcome(
+                    {
+                        "status": "suppressed",
+                        "sent": False,
+                        "transport_message_id": None,
+                        "error_code": "telegram_silenced",
+                    }
+                )
                 return None
             sent = await self.app.bot.send_message(
                 chat_id=chat_id,
@@ -12676,7 +12742,9 @@ class FlexibleAgentRuntime:
         Thresholds (seconds): 30 → 60 → 90 → 150
         Exits immediately if stop_event is set (task completed) or placeholder is None.
         """
-        if placeholder is None or not self.telegram_connected:
+        from orchestrator.telegram_silent import suppressed
+
+        if placeholder is None or not self.telegram_connected or suppressed(self):
             return
 
         # Read per-agent config from extra (with safe fallbacks).
@@ -12695,6 +12763,10 @@ class FlexibleAgentRuntime:
                 return  # task finished before this threshold
             except asyncio.TimeoutError:
                 elapsed = threshold
+
+            if suppressed(self):
+                # The cut may be armed while this loop is already running.
+                return
 
             # --- Build status text ---
             idle_s: Optional[int] = None

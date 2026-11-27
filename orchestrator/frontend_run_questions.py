@@ -196,6 +196,13 @@ async def refresh_telegram_question_renditions(runtime, store):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.error import BadRequest, Forbidden
 
+    from orchestrator.telegram_silent import suppressed
+
+    if suppressed(runtime):
+        # Question cards stay pending and refresh once the cut is lifted; no
+        # Telegram call is made while the instance is silenced.
+        return
+
     def pending():
         renditions = QuestionRenditions(store)
         return renditions, renditions.pending_updates(agent_id=runtime.name)
@@ -222,6 +229,10 @@ async def refresh_telegram_question_renditions(runtime, store):
             text = html.escape(label) + "\n\n" + html.escape(question["question"])
             markup = InlineKeyboardMarkup([[InlineKeyboardButton(
                 label, callback_data=f"rq:{question['question_id']}:text")]])
+        if suppressed(runtime):
+            # Cards stay pending; a cut armed during the awaits above stops any
+            # further Telegram edit and they refresh once it is lifted.
+            return
         try:
             await runtime.app.bot.edit_message_text(
                 chat_id=int(question["chat_id"]), message_id=int(question["transport_message_id"]),
