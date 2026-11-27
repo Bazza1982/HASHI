@@ -2250,9 +2250,12 @@ class FunctionWorkerHost:
             return bool(runtime.has_active_transfer())
         if method == "runtime.set_command_menu":
             from telegram import BotCommandScopeChat
+            from orchestrator.runtime_command_binding import fit_telegram_bot_commands
 
             await runtime.app.bot.set_my_commands(
-                runtime.get_bot_commands(locale=str(params["locale"])),
+                fit_telegram_bot_commands(
+                    runtime.get_bot_commands(locale=str(params["locale"]))
+                ),
                 scope=BotCommandScopeChat(chat_id=int(params["chat_id"])),
             )
             return True

@@ -6,21 +6,46 @@ import hashlib
 import pytest
 
 from orchestrator.api_gateway import _gateway_body_evidence
-from orchestrator.runtime_command_binding import get_flexible_bot_commands
+from orchestrator.runtime_command_binding import (
+    get_flexible_picker_commands,
+    register_flexible_bot_commands,
+)
 from remote.restart_receipts import project_restart
 from tools import desktop
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize('wol', [False, True])
-def test_real_command_menu_fits_telegram_limit(monkeypatch, wol):
+async def test_telegram_menu_cap_applies_only_to_telegram_registration_not_workbench_picker(monkeypatch, wol):
     monkeypatch.setattr('orchestrator.runtime_command_binding.private_wol_available', lambda *_: wol)
-    runtime = SimpleNamespace(global_config=SimpleNamespace(project_root=Path.cwd(), instance_id='HASHI4'))
-    commands = get_flexible_bot_commands(runtime)
-    names = [command.command for command in commands]
-    assert len(names) <= 100
-    assert len(set(names)) == len(names)
-    assert {'language', 'restart', 'help'} <= set(names)
-    assert ('wol' in names) == wol
+    monkeypatch.setattr('orchestrator.runtime_command_binding.ui_language.configured_default_locale', lambda *_: 'en')
+    monkeypatch.setattr('orchestrator.runtime_command_binding.ui_language.saved_user_locales', lambda *_: {})
+    registered = []
+
+    class _FakeBot:
+        async def set_my_commands(self, commands, **kwargs):
+            registered.append((list(commands), kwargs))
+
+    runtime = SimpleNamespace(
+        name='test-agent',
+        global_config=SimpleNamespace(project_root=Path.cwd(), instance_id='HASHI4'),
+        app=SimpleNamespace(bot=_FakeBot()),
+    )
+
+    # Workbench picker preserves the full valid command catalog (never truncated by Telegram's 100-item cap).
+    picker_names = [command.command for command in get_flexible_picker_commands(runtime)]
+    assert len(set(picker_names)) == len(picker_names)
+    assert {'fresh', 'start', 'language', 'restart', 'help'} <= set(picker_names)
+    assert ('wol' in picker_names) == wol
+
+    # Actual Telegram menu registration is bounded to <=100 commands.
+    await register_flexible_bot_commands(runtime)
+    assert len(registered) == 1
+    tg_names = [command.command for command in registered[0][0]]
+    assert len(tg_names) <= 100
+    assert len(set(tg_names)) == len(tg_names)
+    assert {'language', 'restart', 'help'} <= set(tg_names)
+    assert ('wol' in tg_names) == wol
 
 
 def test_gateway_caps_large_body_and_preserves_full_digest():
