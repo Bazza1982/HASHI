@@ -12,18 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from orchestrator.agent_config_json import write_agent_config_json
 from orchestrator.config_json import (
     file_write_lock,
-    new_config_json,
     read_config_json,
-    write_config_json,
 )
 from orchestrator.post_turn_observer import PreTurnContextProvider, TurnContextRequest
+from orchestrator.post_turn_registry import MEMORY_PLUS_OBSERVER_ID, ensure_bundled_observer
 from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.workspace_state import WorkspaceStateStore
 
-MEMORY_PLUS_OBSERVER_FACTORY = "orchestrator.memory_plus_mode:build_memory_plus_observer"
 MEMORY_PLUS_OPEN = "<memory_plus_update>"
 MEMORY_PLUS_CLOSE = "</memory_plus_update>"
 MEMORY_PLUS_SCHEMA_VERSION = 2
@@ -187,34 +184,7 @@ def build_memory_plus_observer(
 
 
 def ensure_memory_plus_observer(workspace_dir: Path) -> bool:
-    path = workspace_dir / "post_turn_observers.json"
-    config = read_config_json(path) if path.exists() else new_config_json(path)
-    raw_observers = config.get("observers", [])
-    observers = raw_observers if isinstance(raw_observers, list) else []
-    changed = raw_observers is not observers
-    found = False
-    normalized: list[Any] = []
-    for item in observers:
-        if isinstance(item, str):
-            if item == MEMORY_PLUS_OBSERVER_FACTORY:
-                found = True
-            normalized.append(item)
-            continue
-        if isinstance(item, dict):
-            copied = dict(item)
-            if str(copied.get("factory") or "").strip() == MEMORY_PLUS_OBSERVER_FACTORY:
-                found = True
-                if copied.get("enabled") is False:
-                    copied["enabled"] = True
-                    changed = True
-            normalized.append(copied)
-    if not found:
-        normalized.append({"factory": MEMORY_PLUS_OBSERVER_FACTORY, "enabled": True})
-        changed = True
-    config["observers"] = normalized
-    if changed or not path.exists():
-        write_agent_config_json(path, config)
-    return changed
+    return ensure_bundled_observer(workspace_dir, MEMORY_PLUS_OBSERVER_ID)
 
 
 def is_memory_plus_enabled(workspace_dir: Path) -> bool:

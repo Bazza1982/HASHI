@@ -26,7 +26,6 @@ from orchestrator.function_generation import (
     VerifiedFunctionGeneration,
     compare_function_candidate_runtime,
     probe_function_generation,
-    configured_observers_are_qualified,
     verify_manifest_source_commit,
     verify_qualified_manifest_bytes,
 )
@@ -1458,8 +1457,6 @@ class FunctionWorkerSupervisor:
                     refreshed = cached.refresh_qualification_seal(
                         self.kernel.runtime_fingerprint
                     )
-                    if not configured_observers_are_qualified(self.kernel, refreshed):
-                        raise ValueError("Enabled observers require a new Function generation")
                 except Exception:
                     self._cached_generation = None
                     self._cached_artifact = None
@@ -1480,7 +1477,7 @@ class FunctionWorkerSupervisor:
                 self.kernel.paths.code_root,
                 self.kernel.runtime_fingerprint,
             )
-            if disk_cached is not None and configured_observers_are_qualified(self.kernel, disk_cached[0]):
+            if disk_cached is not None:
                 generation, artifact = disk_cached
                 self._cached_generation = generation
                 self._cached_artifact = (

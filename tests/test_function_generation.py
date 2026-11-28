@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import re
 import subprocess
@@ -369,7 +370,21 @@ def test_whole_function_generation_requires_lifecycle_assets(tmp_path):
         )
 
 
-def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):
+def test_default_hot_probe_uses_release_roots_with_existing_agent_config(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspaces" / "rika"
+    workspace.mkdir(parents=True)
+    config = tmp_path / "agents.json"
+    config.write_text(
+        json.dumps({"agents": [{"workspace_dir": "workspaces/rika"}]}),
+        encoding="utf-8",
+    )
+    observers = workspace / "post_turn_observers.json"
+    previous = json.dumps({"observers": [
+        "orchestrator.anatta.post_turn_observer:build_post_turn_observer",
+        {"factory": "orchestrator.removed_observer:build", "enabled": True},
+    ]})
+    observers.write_text(previous, encoding="utf-8")
+
     def reject_live_module_discovery(*_args, **_kwargs):
         raise AssertionError("Core live modules must not seed a Function generation")
 
@@ -394,12 +409,16 @@ def test_default_hot_probe_does_not_seed_from_core_loaded_modules(monkeypatch):
         )
 
     kernel = types.SimpleNamespace(
-        paths=types.SimpleNamespace(code_root=ROOT),
+        paths=types.SimpleNamespace(code_root=ROOT, config_path=config, bridge_home=tmp_path),
         runtime_fingerprint=enforce_runtime_contract(ROOT),
     )
     verified = probe_function_generation(kernel, probe_runner=probe_runner)
 
     assert set(FUNCTION_GENERATION_ENTRYPOINTS) <= set(seen["module_names"])
+    assert "orchestrator.memory_plus_mode" in verified.manifest.module_names
+    assert "orchestrator.dual_brain_mode" in verified.manifest.module_names
+    assert "orchestrator.anatta.post_turn_observer" not in verified.manifest.module_names
+    assert observers.read_text(encoding="utf-8") == previous
     assert "orchestrator.workbench_api" in verified.manifest.module_names
 
 
@@ -440,7 +459,6 @@ def test_new_generation_reuses_probe_receipt_without_core_side_rehash(
         "verify_qualified_source",
         repeated_verify,
     )
-    monkeypatch.setattr(function_generation, "declared_observer_modules", lambda _p: ())
 
     receipt = CandidateProbeReceipt(
         generation_id=manifest.generation_id,
@@ -660,3 +678,4 @@ def test_function_generation_packages_the_whole_hal_package():
         "hal/dispatch.py",
         "hal/event_source.py",
     } <= {entry.relative_path for entry in manifest.entries}
+# HASHI-Fingerprint: hfp_83e0dd4acaae478eb886d8456518344f

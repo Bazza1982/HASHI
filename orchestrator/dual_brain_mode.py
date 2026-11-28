@@ -12,14 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from orchestrator.agent_config_json import write_agent_config_json
-from orchestrator.config_json import new_config_json, read_config_json, write_config_json
 from orchestrator.post_turn_observer import (
     PostTurnObserver,
     PreTurnContextProvider,
     TurnContextRequest,
     TurnObservationRequest,
 )
+from orchestrator.post_turn_registry import DUAL_BRAIN_OBSERVER_ID, ensure_bundled_observer
 from orchestrator.runtime_retry import RETRY_HANDOFF_SOURCE
 from orchestrator.memory_plus_mode import (
     is_memory_plus_enabled,
@@ -34,7 +33,6 @@ except ModuleNotFoundError:  # Windows native runtime has no fcntl.
     fcntl = None
 
 
-DUAL_BRAIN_OBSERVER_FACTORY = "orchestrator.dual_brain_mode:build_dual_brain_observer"
 LEGACY_DEFAULT_LEFT_PROMPT = (
     "You are HASHI's left brain. You handle past-facing continuity and memory. "
     "Output JSON only. Do not execute the user's task. Do not rewrite user intent. "
@@ -680,34 +678,7 @@ def build_dual_brain_observer(
 
 
 def ensure_dual_brain_observer(workspace_dir: Path) -> bool:
-    path = workspace_dir / "post_turn_observers.json"
-    config = read_config_json(path) if path.exists() else new_config_json(path)
-    raw_observers = config.get("observers", [])
-    observers = raw_observers if isinstance(raw_observers, list) else []
-    changed = raw_observers is not observers
-    found = False
-    normalized: list[Any] = []
-    for item in observers:
-        if isinstance(item, str):
-            if item == DUAL_BRAIN_OBSERVER_FACTORY:
-                found = True
-            normalized.append(item)
-            continue
-        if isinstance(item, dict):
-            copied = dict(item)
-            if str(copied.get("factory") or "").strip() == DUAL_BRAIN_OBSERVER_FACTORY:
-                found = True
-                if copied.get("enabled") is False:
-                    copied["enabled"] = True
-                    changed = True
-            normalized.append(copied)
-    if not found:
-        normalized.append({"factory": DUAL_BRAIN_OBSERVER_FACTORY, "enabled": True})
-        changed = True
-    config["observers"] = normalized
-    if changed or not path.exists():
-        write_agent_config_json(path, config)
-    return changed
+    return ensure_bundled_observer(workspace_dir, DUAL_BRAIN_OBSERVER_ID)
 
 
 def _read_str(mapping: Mapping[str, Any], key: str, default: str) -> str:

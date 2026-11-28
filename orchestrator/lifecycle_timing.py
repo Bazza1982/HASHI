@@ -43,7 +43,7 @@ _OBSERVERS = {
     "orchestrator.runtime_fingerprint_cache": {"cached_current_runtime_fingerprint"},
     "orchestrator.runtime_inventory": {"runtime_dependency_digest"},
     "orchestrator.function_generation": {
-        "probe_function_generation", "build_source_manifest", "configured_observers_are_qualified",
+        "probe_function_generation", "build_source_manifest",
     },
     "orchestrator.function_worker_supervisor": {
         "load_qualified_generation_cache", "load_bootable_generation_cache",
