@@ -13,6 +13,13 @@ const { spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
+// The packaging audit runs a nested `npm pack --dry-run` to learn the real file
+// list.  That child is started with --ignore-scripts so it cannot re-enter this
+// hook; if it ever does, fail loudly instead of recursing.
+if (process.env.HASHI_NPM_PACK_LIST_CHILD === '1') {
+  throw new Error('Refusing to run the packaging audit inside its own npm pack child process.');
+}
+
 function git(...args) {
   const result = spawnSync('git', ['-C', root, ...args], {
     encoding: 'utf8',
@@ -64,15 +71,29 @@ const pythonChoices = [
   ['python3.12'], ...(process.platform === 'win32' ? [['py', '-3.12']] : []),
   ['python3'], ['python'],
 ];
-let exported = false;
+let interpreter = null;
 for (const [command, ...prefix] of pythonChoices) {
   const result = spawnSync(command, [...prefix, '-B',
     path.join(root, 'scripts', 'export_function_source.py'),
     '--output', path.join(root, 'FUNCTION_SOURCE.json')],
   { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-  if (result.status === 0) { exported = true; break; }
+  if (result.status === 0) { interpreter = [command, ...prefix]; break; }
 }
-if (!exported) throw new Error('Cannot export committed HASHI Function source; package was not qualified.');
+if (!interpreter) throw new Error('Cannot export committed HASHI Function source; package was not qualified.');
+
+// The contract above is captured from every tracked file, while the tarball only
+// carries what npm actually selects.  A package that advertises a module it does
+// not ship installs cleanly and then fails Function generation on every instance,
+// so refuse to build one.  The comparison uses npm's own file list (a nested
+// `npm pack --dry-run --json --ignore-scripts`), which is the only authority for
+// allow-list entries, nested .npmignore files and negative patterns alike.
+const packAudit = spawnSync(interpreter[0], [...interpreter.slice(1), '-B',
+  path.join(root, 'scripts', 'check_npm_package_files.py'), '--root', root, '--timeout', '240'],
+{ encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+if (packAudit.status !== 0) {
+  const detail = `${packAudit.stdout || ''}${packAudit.stderr || ''}`.trim();
+  throw new Error(`npm package is missing required Function source; package was not qualified.\n${detail}`);
+}
 
 fs.writeFileSync(
   path.join(root, 'BUILD_INFO.json'),
