@@ -25,7 +25,7 @@ You can also control the gateway at runtime from Telegram:
 /api off              # stop the gateway and persist disabled-on-restart
 /api model            # open default-model buttons
 /api model <model>    # set the default model for requests without model
-/api model grok-4.5   # example: make Grok 4.5 the default chat model
+/api model gpt-6-astra  # example: make GPT-6 Astra the default chat model
 ```
 
 `/api` only controls the OpenAI-compatible API Gateway. It does not change an
@@ -250,8 +250,8 @@ for chunk in stream:
 
 ### External Tool-Call Passthrough
 
-The gateway preserves caller-owned OpenAI function tools for Codex CLI models
-and xAI models that use the native `/chat/completions` route. For Codex, HASHI
+The gateway preserves caller-owned OpenAI function tools for Codex CLI models.
+For Codex, HASHI
 maps each OpenAI function schema to an app-server `dynamicTool`, captures the
 model's `item/tool/call`, and maps it back to `message.tool_calls` with
 `finish_reason: "tool_calls"`.
@@ -424,15 +424,6 @@ curl http://127.0.0.1:18801/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello"}],
     "stream": false
   }'
-
-# Grok 4.5 Responses-backed chat completion
-curl http://127.0.0.1:18801/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "grok-4.5",
-    "messages": [{"role": "user", "content": "Hello from HASHI"}],
-    "stream": false
-  }'
 ```
 
 ### JavaScript / TypeScript
@@ -507,8 +498,7 @@ OpenClaw uses the `vllm` provider type to connect to HASHI.
       "api": "openai-completions",
       "models": [
         { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", ... },
-        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", ... },
-        { "id": "grok-4.3", "name": "Grok 4.3", ... }
+        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", ... }
       ]
     }
   }
@@ -524,7 +514,6 @@ The model `id` in `openclaw.json` must match **exactly** what HASHI serves in `G
 "id": "gemini-2.5-flash"
 "id": "claude-opus-4-6"
 "id": "gpt-5.6-sol"
-"id": "grok-4.3"
 ```
 
 **Wrong (will cause "unknown model" errors):**
@@ -542,7 +531,6 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 "model": "vllm/gemini-2.5-flash"
 "model": "vllm/claude-opus-4-6"
 "model": "vllm/gpt-5.6-sol"
-"model": "vllm/grok-4.3"
 ```
 
 ### `api` Field
@@ -550,9 +538,8 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 Use `"openai-completions"` — despite the name, this maps to `/v1/chat/completions` in OpenClaw (not the legacy completions endpoint).
 
 For caller-owned tool use, select a supported Codex model such as
-`vllm/gpt-5.6-luna`, or an xAI Chat Completions model such as
-`vllm/grok-4.3`. The Gateway rejects unsupported CLI and xAI Responses API
-models instead of silently discarding tools. OpenClaw must execute each returned
+`vllm/gpt-5.6-luna`. The Gateway rejects unsupported CLI models instead of
+silently discarding tools. OpenClaw must execute each returned
 tool locally and include the assistant `tool_calls` plus matching
 `role: "tool"` result in its next request.
 
