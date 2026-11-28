@@ -896,6 +896,7 @@ def validate_release_payload(
     expected_commit: str,
     expected_instance: str,
     expected_agents: Sequence[str] | None = None,
+    remote_expected: bool = True,
 ) -> list[str]:
     """Return every reason the live release is not the exact requested commit."""
 
@@ -938,14 +939,15 @@ def validate_release_payload(
         if required_agents and worker_names != required_agents:
             issues.append("worker_set_mismatch")
 
-    remote = _mapping(running.get("remote"))
-    if remote.get("status") != "active":
-        issues.append("remote_not_active")
-    remote_commit = _component_commit(remote)
-    if not remote_commit:
-        issues.append("remote_provenance_missing")
-    elif remote_commit != target:
-        issues.append("remote_commit_mismatch")
+    if remote_expected:
+        remote = _mapping(running.get("remote"))
+        if remote.get("status") != "active":
+            issues.append("remote_not_active")
+        remote_commit = _component_commit(remote)
+        if not remote_commit:
+            issues.append("remote_provenance_missing")
+        elif remote_commit != target:
+            issues.append("remote_commit_mismatch")
 
     source = _mapping(payload.get("source"))
     if source.get("available") is not True:
@@ -974,13 +976,17 @@ def complete_runtime_release(
 
     preflight = adapter.preflight()
     core_restart = adapter.restart_core(expected_commit)
+    # Core has already persisted and emitted its restart receipt here, so a Remote
+    # restart can only follow it. An operator-disabled Remote stays stopped.
     remote_restart = adapter.restart_remote()
+    remote_skipped = bool(_mapping(remote_restart).get("skipped"))
     version = adapter.wait_for_version(expected_commit)
     issues = validate_release_payload(
         version,
         expected_commit=expected_commit,
         expected_instance=expected_instance,
         expected_agents=_mapping(preflight.get("runtime")).get("agents"),
+        remote_expected=not remote_skipped,
     )
     if issues:
         raise ReleaseUpdateError(
@@ -995,6 +1001,7 @@ def complete_runtime_release(
         "preflight": preflight,
         "core_restart": core_restart,
         "remote_restart": remote_restart,
+        "remote_status": "disabled" if remote_skipped else "restarted",
         "version_state": _mapping(version.get("state")).get("code"),
     }
 
@@ -1235,7 +1242,28 @@ class LocalReleaseAdapter:
         )
         return environment
 
+    def _remote_disabled_state(self) -> dict[str, Any] | None:
+        """The operator's explicit /remote off record, if one exists."""
+
+        try:
+            from orchestrator.remote_lifecycle import read_disabled_state
+        except Exception:
+            return None
+        try:
+            state = read_disabled_state(self.code_root)
+        except Exception:
+            return None
+        return state if state else None
+
     def restart_remote(self) -> dict[str, Any]:
+        disabled = self._remote_disabled_state()
+        if disabled is not None:
+            _progress("independent Remote is disabled by the operator; leaving it stopped")
+            return {
+                "skipped": True,
+                "reason": "remote_disabled",
+                "disabled_by": disabled.get("disabled_by"),
+            }
         _progress("re-registering and restarting independent Remote")
         environment = self._controller_environment()
         if self.platform_name == "nt":
