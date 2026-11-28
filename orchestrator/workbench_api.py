@@ -44,9 +44,11 @@ from orchestrator.admin_local_testing import (
 )
 from orchestrator.sys_command_contract import (
     SysCommandContractError,
+    config_transfer_target_agent,
     is_sys_command_line,
     normalize_sys_arguments,
 )
+from orchestrator.slash_command_audit import parse_slash_command_text
 from orchestrator.agent_creation import (
     AgentCreationError,
 )
@@ -6706,6 +6708,61 @@ class WorkbenchApiServer:
         return None
 
     @staticmethod
+    def _config_transfer_agent_names(command: str, arguments: list[str]) -> tuple[str, ...]:
+        """Return the named Agents a cross-Agent config transfer would touch.
+
+        Delegates to the parser the handlers themselves use, so the Agent this
+        gate authorizes is the Agent the command will actually read or write.
+        """
+
+        target = config_transfer_target_agent(command, arguments)
+        return (target,) if target else ()
+
+    def _guard_config_transfer_command(
+        self, request, session_agent: str, command: str, arguments
+    ):
+        """Require management rights on both ends of a cross-Agent transfer."""
+
+        names = self._config_transfer_agent_names(command, list(arguments or ()))
+        if not names:
+            return None
+        # A session the caller may open does not grant management rights over
+        # another project's Agent configuration.
+        return self._guard_config_transfer_access(request, str(session_agent), names)
+
+    def _guard_config_transfer_text(self, request, session_agent: str, text: str):
+        """Gate a slash command typed into a chat box, parsed exactly as the executor does."""
+
+        raw = str(text or "").lstrip()
+        if not raw.startswith("/"):
+            return None
+        command, arguments = parse_slash_command_text(raw)
+        if not command:
+            return None
+        return self._guard_config_transfer_command(
+            request, session_agent, command, arguments
+        )
+
+    def _guard_config_transfer_access(self, request, session_agent: str, names):
+        """Apply the governed Agent-management rule to every Agent involved."""
+
+        rows = self._load_agent_rows()
+        canonical = {
+            str(row.get("name") or "").casefold(): str(row.get("name") or "")
+            for row in rows
+            if row.get("name")
+        }
+        for name in (session_agent, *names):
+            resolved = canonical.get(str(name or "").casefold())
+            if resolved is None:
+                # Unknown Agents are reported by the command itself.
+                continue
+            denied = self._guard_agent_management_access(request, resolved)
+            if denied is not None:
+                return denied
+        return None
+
+    @staticmethod
     def _workzone_profile_ready(runtime, metadata: dict) -> bool:
         return bool(
             runtime is not None and metadata.get("online") is True
@@ -10358,10 +10415,24 @@ class WorkbenchApiServer:
             evidence_arguments = list(arguments)
             if command == "sys":
                 arguments = normalize_sys_arguments(arguments)
-            elif len(arguments) > 64 or any(
-                len(argument) > 4096 for argument in arguments
+            if command != "sys" and (
+                len(arguments) > 64
+                or any(len(argument) > 4096 for argument in arguments)
             ):
+                # Bound the payload before any formatting or parsing work.  This
+                # handler runs on the shared API event loop, so an oversized
+                # argument must be refused cheaply instead of being serialized
+                # and re-parsed first.
                 raise ValueError("command arguments are invalid")
+            # Authorization must judge the exact command the handler executes.
+            # This endpoint re-serializes the arguments into one slash command
+            # line that the executor parses again, so gate on that re-parsed
+            # form: whitespace a raw argument list hides must not reach the gate
+            # as "no target" while the handler resolves a real sibling Agent.
+            from orchestrator.admin_local_testing import _format_slash_command_line
+
+            command_line = _format_slash_command_line(command, arguments)
+            gated_command, gated_arguments = parse_slash_command_text(command_line)
             if not ID_PATTERN.fullmatch(client_id) or not ID_PATTERN.fullmatch(
                 request_id
             ):
@@ -10390,6 +10461,14 @@ class WorkbenchApiServer:
                 denied = self._guard_agent_management_access(request, str(session["agent_id"]))
                 if denied is not None:
                     return denied
+            denied = self._guard_config_transfer_command(
+                request,
+                str(session["agent_id"]),
+                gated_command or command,
+                gated_arguments,
+            )
+            if denied is not None:
+                return denied
 
             request_metadata = payload.get("request_metadata")
             connector_claims = None
@@ -10490,7 +10569,6 @@ class WorkbenchApiServer:
                     ValueError("command actor is not authorized"), status=403
                 )
             from orchestrator import command_interaction_bridge
-            from orchestrator.admin_local_testing import _format_slash_command_line
 
             instance_id = str(
                 getattr(self.global_config, "instance_id", "") or ""
@@ -10517,7 +10595,7 @@ class WorkbenchApiServer:
                 "client_id": client_id,
                 "request_id": request_id,
                 "ui_locale": ui_locale,
-                "command": _format_slash_command_line(command, arguments),
+                "command": command_line,
             }
             metadata = {
                 "actor_id": actor,
@@ -12636,6 +12714,11 @@ class WorkbenchApiServer:
                     if denied is not None:
                         return denied
                     session_metadata["_hashi_forget_authenticated"] = True
+                denied = self._guard_config_transfer_text(
+                    request, str(agent_name), text
+                )
+                if denied is not None:
+                    return denied
                 slash_result = await try_execute_slash_command_text(
                     runtime,
                     text,
@@ -13760,6 +13843,9 @@ class WorkbenchApiServer:
             if denied is not None:
                 return denied
             session_metadata["_hashi_forget_authenticated"] = True
+        denied = self._guard_config_transfer_text(request, str(agent_name), text)
+        if denied is not None:
+            return denied
         slash_result = await try_execute_slash_command_text(
             runtime,
             text,
@@ -16764,3 +16850,4 @@ class WorkbenchApiServer:
         return web.json_response(
             {"ok": True, "agent": agent_name, "chat_id": int(chat_id)}
         )
+# HASHI-Fingerprint: hfp_5536aae0751c41c2acb3188fe2d4a8c9

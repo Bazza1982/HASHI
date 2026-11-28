@@ -75,8 +75,9 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "tools",
         sensitive=True,
         guide=CommandGuide(
-            "/sys [global] <slot> [on|off|save|replace|delete]",
-            ("global", "output"),
+            "/sys [global] <slot> [on|off|save|replace|delete]"
+            " · copy|import <agent> [slot] · clear",
+            ("global", "output", "copy", "import", "clear"),
             example="/sys 1 on",
         ),
     ),
@@ -467,9 +468,10 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "View or set the working directory",
         "session",
         guide=CommandGuide(
-            "/workzone [slot] [on|off|reset|reload|delete|label|replace|set|cancel]",
-            ("all", "cancel"),
-            example="/workzone all off",
+            "/workzone [slot] [on|off|reset|reload|delete|label|replace|set|cancel]"
+            " · copy|import <agent> [slot] · clear",
+            ("all", "cancel", "copy", "import", "clear"),
+            example="/workzone copy helper 2",
         ),
     ),
     CommandSpec(
