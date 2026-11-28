@@ -131,7 +131,7 @@ def test_fallback_card_explains_the_mode_in_plain_chinese() -> None:
 
 def test_reboot_title_names_agents_not_internal_functions() -> None:
     with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
-        assert ui_language.tr("reboot.title") == "重启代理"
+        assert ui_language.tr("reboot.title") == "重启智能体"
     with ui_language.language_scope(SimpleNamespace(), locale="en"):
         assert ui_language.tr("reboot.title") == "Reboot agents"
 

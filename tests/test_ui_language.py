@@ -97,10 +97,10 @@ def test_common_cards_and_navigation_follow_active_language(tmp_path) -> None:
     with ui_language.language_scope(runtime, locale="zh-CN"):
         assert back_label() == "← 返回"
         assert refresh_label() == "↻ 刷新"
-        assert card_title("🤖", "Hashi agents").startswith("🤖 <b>HASHI 代理</b>")
+        assert card_title("🤖", "Hashi agents").startswith("🤖 <b>HASHI 智能体</b>")
 
 
-def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) -> None:
+def test_chinese_menu_bodies_and_buttons_render_from_the_catalog(tmp_path) -> None:
     class Slots:
         def list_slots(self):
             return [
@@ -123,8 +123,14 @@ def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) ->
         voice_keyboard = runtime._voice_keyboard().inline_keyboard
 
     assert "<b>" in sys_text and "</b>" in sys_text and "<code>" in sys_text
-    for old_label in ("Current", "Configured", "Scope", "Changes", "SLOTS"):
-        assert old_label not in sys_text
+    for key in (
+        "common.current",
+        "common.configured",
+        "common.scope",
+        "common.changes",
+        "sys.section.slots",
+    ):
+        assert ui_language.tr(key, locale="zh-CN") in sys_text
 
     assert "<b>" in group_text and "<code>" in group_text
     assert group_keyboard.inline_keyboard[-1][0].text
@@ -143,7 +149,7 @@ def test_help_and_telegram_command_menu_use_chinese_catalog(tmp_path) -> None:
     descriptions = {item.command: item.description for item in commands}
 
     assert descriptions["language"] == "选择界面语言"
-    assert descriptions["agents"] == "查看和管理代理"
+    assert descriptions["agents"] == "查看和管理智能体"
     text = help_menu_text(
         agent_name="zelda",
         agent_type="flex",
@@ -174,7 +180,7 @@ async def test_saved_language_command_menu_is_restored_as_chat_scope(tmp_path) -
     assert len(scoped) == 1
     assert scoped[0][1]["scope"].chat_id == 42
     descriptions = {item.command: item.description for item in scoped[0][0]}
-    assert descriptions["reboot"] == "重启当前代理"
+    assert descriptions["reboot"] == "重启当前智能体"
 
 
 @pytest.mark.asyncio
@@ -215,7 +221,7 @@ async def test_language_selection_persists_before_background_menu_refresh(
 
     assert calls[-1][1]["scope"].chat_id == 42
     descriptions = {item.command: item.description for item in calls[-1][0]}
-    assert descriptions["agents"] == "查看和管理代理"
+    assert descriptions["agents"] == "查看和管理智能体"
 
 
 @pytest.mark.asyncio
@@ -249,6 +255,64 @@ async def test_language_menu_sync_is_serialized_and_latest_selection_wins(
     await asyncio.gather(*tuple(runtime._language_menu_sync_tasks))
 
     assert calls == [(42, "zh-CN"), (42, "en")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "code", "cause_key", "succeeded"),
+    [
+        ("en", "request_timeout", "language.menu_sync_cause.timeout", 0),
+        ("zh-CN", "connection_unavailable", "language.menu_sync_cause.unavailable", 0),
+        ("zh-TW", "request_timeout", "language.menu_sync_cause.timeout", 0),
+        ("zh-TW", "connection_unavailable", "language.menu_sync_cause.unavailable", 0),
+        ("zh-TW", "unexpected_error", "language.menu_sync_cause.failed", 0),
+        ("zh-TW", "request_timeout", "language.menu_sync_cause.timeout", 1),
+    ],
+)
+async def test_language_menu_sync_warning_renders_in_the_selected_locale(
+    tmp_path, monkeypatch, locale, code, cause_key, succeeded
+) -> None:
+    replied: list[str] = []
+
+    async def sync(_runtime, *, chat_id, locale):
+        return runtime_command_binding.CommandMenuSyncResult(
+            succeeded + 2, succeeded, ({"code": code}, {"code": code}),
+        )
+
+    monkeypatch.setattr(runtime_command_binding, "sync_user_command_menus", sync)
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.global_config = GlobalConfig(
+        authorized_id=42, bridge_home=tmp_path, project_root=tmp_path
+    )
+    async def reply(_update, text, **_kwargs):
+        replied.append(text)
+
+    runtime._reply_text = reply
+
+    runtime._schedule_language_menu_sync(_update(), chat_id=42, locale=locale)
+    await asyncio.gather(*tuple(runtime._language_menu_sync_tasks))
+
+    warning_key = (
+        "language.menu_sync_warning_partial" if succeeded else "language.menu_sync_warning"
+    )
+    expected = "⚠️ " + ui_language.tr(
+        warning_key,
+        locale=locale,
+        cause=ui_language.tr(cause_key, locale=locale),
+        count=2,
+    )
+    assert replied == [expected]
+    # The notice keeps the concrete cause and the retry hint in the chosen language.
+    assert ui_language.tr(cause_key, locale=locale) in replied[0]
+    assert "2" in replied[0]
+    if locale != "en":
+        assert replied[0] != "⚠️ " + ui_language.tr(
+            warning_key,
+            locale="en",
+            cause=ui_language.tr(cause_key, locale="en"),
+            count=2,
+        )
 
 
 def test_telegram_activity_can_be_chinese_while_terminal_default_stays_english() -> None:

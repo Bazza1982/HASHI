@@ -77,15 +77,15 @@ TUI_COMMAND_HELP = {
     "attach": ("附加文件或剪贴板图片", "Attach a file or clipboard image"),
     "connect": ("打开本地后端接通／修复页", "Open local backend connection/repair"),
     "theme": ("查看或切换终端主题", "Inspect or change the terminal theme"),
-    "help": ("查看 TUI 与 Agent 命令", "Show TUI and Agent commands"),
+    "help": ("查看 TUI 与智能体命令", "Show TUI and Agent commands"),
     "to": ("切换聊天目标", "Change the chat target"),
     "instance": ("查看或切换 HASHI 实例", "List or switch HASHI instances"),
     "layout": ("调整日志与聊天布局", "Resize log and chat panes"),
     "log": ("显示、隐藏或暂停主机日志", "Show, hide, or pause the host log"),
-    "agents": ("查看可用 Agent", "List available Agents"),
+    "agents": ("查看可用智能体", "List available Agents"),
     "clear": ("清空当前 TUI 显示", "Clear the current TUI view"),
     "quit": ("退出 TUI", "Exit the TUI"),
-    "say": ("在本机朗读最近一至四条代理回复", "Read one to four Agent replies on this computer"),
+    "say": ("在本机朗读最近一至四条智能体回复", "Read one to four Agent replies on this computer"),
     "tui": ("设置 TUI 语言及客户端选项", "Set TUI language and client options"),
     "voice": ("设置本机自动朗读与共享声音", "Set local auto-read and the shared voice"),
     "doctor": ("本机环境、端口、日志与依赖体检", "Local environment, port, log and dependency checks"),
@@ -502,7 +502,7 @@ class FooterInfoBox(Static):
         labels = (
             {
                 "instance": "实例",
-                "agent": "代理",
+                "agent": "智能体",
                 "engine": "Engine",
                 "model": "模型",
                 "provider": "模型提供商",
@@ -535,7 +535,7 @@ class FooterInfoBox(Static):
             or backend
             or ""
         ).strip()
-        no_agent = "未选择代理" if language == "zh" else "No agent"
+        no_agent = "未选择智能体" if language == "zh" else "No agent"
         agent_label = display_name or agent_id or no_agent
         if agent_id and display_name and agent_id != display_name:
             agent_label = f"{display_name} ({agent_id})"
@@ -1451,7 +1451,7 @@ class HASHITuiApp(App):
             self._save_tui_preferences()
             if self.is_mounted:
                 message = (
-                    f"先前记住的 Agent ‘{remembered_name}’ 已不在 {self.current_instance_id}，已选择可用 Agent。"
+                    f"先前记住的智能体 ‘{remembered_name}’ 已不在 {self.current_instance_id}，已选择可用智能体。"
                     if self._ui_language == "zh" else
                     f"Remembered Agent ‘{remembered_name}’ no longer exists on {self.current_instance_id}; selecting an available Agent."
                 )
@@ -1533,7 +1533,7 @@ class HASHITuiApp(App):
             self._save_tui_preferences()
             if self.is_mounted:
                 message = (
-                    f"Agent ‘{missing}’ 已不在 {self.current_instance_id}；发送已暂停，请重新选择。"
+                    f"智能体 ‘{missing}’ 已不在 {self.current_instance_id}；发送已暂停，请重新选择。"
                     if self._ui_language == "zh" else
                     f"Agent ‘{missing}’ no longer exists on {self.current_instance_id}; sending is paused until you select another Agent."
                 )
@@ -1601,7 +1601,7 @@ class HASHITuiApp(App):
         self._forgotten_agent_instances.discard(self.current_instance_id)
         if not self._save_tui_preferences() and self.is_mounted:
             message = (
-                "Agent 已选择，但无法保存下次启动偏好。"
+                "智能体已选择，但无法保存下次启动偏好。"
                 if self._ui_language == "zh" else
                 "Agent selected, but the next-launch preference could not be saved."
             )
@@ -2461,7 +2461,7 @@ class HASHITuiApp(App):
         if name == "model":
             return "可用模型" if self._ui_language == "zh" else "Available model"
         if name in {"to", "start", "transfer", "fork", "hchat"}:
-            return "可用 Agent" if self._ui_language == "zh" else "Available Agent"
+            return "可用智能体" if self._ui_language == "zh" else "Available Agent"
         return "可用参数" if self._ui_language == "zh" else "Available option"
 
     def _guide_example(self, name: str, choices: list[str]) -> str | None:
@@ -2743,11 +2743,11 @@ class HASHITuiApp(App):
         if language == "zh":
             help_text = """## ❔ HASHI TUI 帮助
 
-**常用 Agent 命令**
+**常用智能体命令**
 
 `/backend`　选择或查看后端
 `/mode`　选择或查看工作模式
-`/status`　查看当前 Agent 状态
+`/status`　查看当前智能体状态
 `/version [full|all]`　查看实际运行版本
 
 **TUI 导航与布局**
@@ -2759,7 +2759,7 @@ class HASHITuiApp(App):
 `/sidepanel [on|off|toggle|refresh]`　控制只读信息面板
 `/sidepanel auto on|off|toggle`　设置自动巡览
 `/attach <路径|clipboard|cancel>`　发送文件或剪贴板图片
-`@相对路径`　发送当前 Agent Workzone 中的文件
+`@相对路径`　发送当前智能体 Workzone 中的文件
 `/say [1..4|1-3]`　仅在本机按先后顺序朗读代理回复
 `/voice [on|off|档案|advanced]`　设置本机自动朗读与共享声音
 `/tui language zh|en`　切换界面语言
@@ -2768,7 +2768,7 @@ class HASHITuiApp(App):
 `/logs [行数]`　查看最近的启动与后端日志
 `/clear`　清空当前显示　　`/quit`　退出
 
-输入命令前缀可自动补全；未知命令不会发送给 Agent。输入 `/help en` 查看英文版。"""
+输入命令前缀可自动补全；未知命令不会发送给智能体。输入 `/help en` 查看英文版。"""
         else:
             help_text = """## ❔ HASHI TUI HELP
 
@@ -3336,14 +3336,14 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
             chat.write(Text("用法：/say、/say 1 至 /say 4，或 /say 1-3。" if self._ui_language == "zh" else "Use /say, /say 1-4, or /say 1-3.", style="hashi.error"))
             return
         if not self.current_agent or self.current_agent_display == "ALL":
-            chat.write(Text("使用 /say 前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before using /say.", style="hashi.error"))
+            chat.write(Text("使用 /say 前请先选择一个智能体。" if self._ui_language == "zh" else "Select one Agent before using /say.", style="hashi.error"))
             return
         messages, available = select_recent_replies(
             self._assistant_replies_by_target.get(self._voice_target_key(), []),
             selection,
         )
         if not messages:
-            chat.write(Text("当前没有可朗读的已显示代理最终回复。" if self._ui_language == "zh" else "No visible final Agent reply is available to read.", style="hashi.error"))
+            chat.write(Text("当前没有可朗读的已显示智能体最终回复。" if self._ui_language == "zh" else "No visible final Agent reply is available to read.", style="hashi.error"))
             return
         if available < selection.end:
             chat.write(Text(
@@ -3374,7 +3374,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
     async def _handle_voice_cmd(self, text: str) -> None:
         chat = self.query_one("#chat-history", ChatHistory)
         if not self.current_agent or self.current_agent_display == "ALL":
-            chat.write(Text("更改语音设置前请先选择一个 Agent。" if self._ui_language == "zh" else "Select one Agent before changing voice settings.", style="hashi.error"))
+            chat.write(Text("更改语音设置前请先选择一个智能体。" if self._ui_language == "zh" else "Select one Agent before changing voice settings.", style="hashi.error"))
             return
         parts = text.split(maxsplit=1)
         action = parts[1].strip().casefold() if len(parts) > 1 else "status"
@@ -3412,7 +3412,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         }
         if action == "advanced":
             advanced = (
-                "高级共享 Agent 语音控制：\n"
+                "高级共享智能体语音控制：\n"
                 "/voice provider <名称> · /voice name <声音> · /voice rate <数值>\n"
                 "/voice mode <off|tts|native> · /voice target <Provider> <Model>\n"
                 "/voice native-voice <名称> · /voice native-format <格式>\n"
@@ -3441,7 +3441,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
                 chat.write(Text((f"声音档案未更改：{detail}" if self._ui_language == "zh" else f"Voice profile was not changed: {detail}"), style="hashi.error"))
                 return
             voice_state = updated
-            chat.write(Text((f"✓ Agent 的共享声音已设为 {profiles[action]}（{action}）。" if self._ui_language == "zh" else f"✓ Shared Agent voice set to {profiles[action]} ({action})."), style="hashi.accent"))
+            chat.write(Text((f"✓ 智能体的共享声音已设为 {profiles[action]}（{action}）。" if self._ui_language == "zh" else f"✓ Shared Agent voice set to {profiles[action]} ({action})."), style="hashi.accent"))
             return
         current = str(voice_state.get("profile") or "custom")
         auto = "ON" if self._voice_auto_enabled() else "OFF"
@@ -3452,7 +3452,7 @@ Command prefixes autocomplete; unknown commands are never sent to an Agent. Use 
         summary = (
             f"本机自动朗读：{auto}\nAgent 共享声音：{current}\n{choices}\n"
             "/voice on|off · /say · /voice advanced\n"
-            "自动朗读属于此 TUI 电脑；声音档案是 Agent 的共享声音身份。"
+            "自动朗读属于此 TUI 电脑；声音档案是智能体的共享声音身份。"
             if self._ui_language == "zh"
             else
             f"Local auto-read: {auto}\nShared Agent voice: {current}\n{choices}\n"

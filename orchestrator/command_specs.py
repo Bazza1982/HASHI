@@ -612,9 +612,9 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "Choose interface language",
         "session",
         guide=CommandGuide(
-            "/language [en|zh|default]",
-            ("en", "zh", "default"),
-            example="/language zh",
+            "/language [en|zh|zh-tw|default]",
+            ("en", "zh", "zh-tw", "default"),
+            example="/language zh-tw",
         ),
     ),
     CommandSpec(

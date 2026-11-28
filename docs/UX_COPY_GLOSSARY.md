@@ -14,7 +14,7 @@
 
 | 内部词 | 用户文案 |
 |---|---|
-| agent | 助手 / 代理（按上下文） |
+| agent | 智能体（繁中：智慧體；English：agent / Agent） |
 | effort / reasoning level | 思考深度 |
 | adopt | 启用 / 更新（不用“采用”） |
 | host / host machine | 本机 / 所在电脑（不用“母机”） |
@@ -32,6 +32,26 @@
 | runtime | 运行环境 |
 | fallback | 自动切换 |
 | tombstone | 已删除记录 |
+
+## 各语言术语（agent）
+
+每个界面语言只有一种写法，整套文案一起换，不在同一个界面里混用。
+
+| 界面语言 | agent | 说明 |
+|---|---|---|
+| en / en-AU | agent / agents（标题大写 Agent） | 英文界面直接用 |
+| zh-CN | 智能体 | 不用「代理」「智能工」；「代理」只留给网络代理 |
+| zh-TW / zh-HK | 智慧體 | 不用「智能體」「智慧代理」 |
+| ja | エージェント | 不写 Agent |
+| ko | 에이전트 | 不写 Agent |
+| de | Agent / Agenten | 德语本词，照用 |
+| fr | agent / agents | 小写 |
+| ru | агент / агенты | |
+| ar | وكيل / وكلاء | |
+
+配套固定说法：Agent Presence = 智能体在场 / 智慧體在場；Agent registry = 智能体列表 /
+智慧體清單；Manage agents = 管理智能体 / 管理智慧體；Agent Connector、BotFather、
+HASHI、Workbench、Telegram、WhatsApp 等产品名一律不翻译。
 
 ## 禁用词（用户界面）
 

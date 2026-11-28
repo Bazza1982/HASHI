@@ -14,7 +14,7 @@ from orchestrator.config_json import ConfigDocument, read_config_json, write_con
 from orchestrator.process_resources import named_lock
 
 DEFAULT_LOCALE = "en"
-SUPPORTED_LOCALES = ("en", "zh-CN")
+SUPPORTED_LOCALES = ("en", "zh-CN", "zh-TW")
 PREFERENCES_VERSION = 1
 
 _LOCALE_ALIASES = {
@@ -31,6 +31,15 @@ _LOCALE_ALIASES = {
     "chinese-simplified": "zh-CN",
     "简体中文": "zh-CN",
     "中文": "zh-CN",
+    "zh-tw": "zh-TW",
+    "zh-hant": "zh-TW",
+    "zh-hk": "zh-TW",
+    "zh-mo": "zh-TW",
+    "chinese-traditional": "zh-TW",
+    "traditional-chinese": "zh-TW",
+    "繁体中文": "zh-TW",
+    "繁體中文": "zh-TW",
+    "繁中": "zh-TW",
 }
 
 _ACTIVE_LOCALE: ContextVar[str] = ContextVar(
@@ -360,3 +369,4 @@ def validate_catalogs() -> list[str]:
             if _placeholder_names(str(template)) != _placeholder_names(str(translated)):
                 errors.append(f"{locale}: placeholder mismatch for {key}")
     return errors
+# HASHI-Fingerprint: hfp_da83443d7b7a4e3292ce493b9fa8fc2d

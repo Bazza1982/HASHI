@@ -876,7 +876,7 @@ async def test_sidepanel_is_read_only_bilingual_and_persistent(tmp_path):
         assert "任务" in plain and "nightly-mail" in plain and "job-7" in plain
         assert "HASHI 上下文" in plain and "Friendly assistant" in plain
         assert "暂存主题" in plain and "TUI polish" in plain
-        assert "代理" in plain and "Akane" in plain and "Rika" in plain
+        assert "智能体" in plain and "Akane" in plain and "Rika" in plain
         assert "只读" not in plain
         assert "HASHI1" not in plain
         assert client.sent == []
