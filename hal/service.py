@@ -1769,7 +1769,7 @@ def ensure_service(server) -> HalService | None:
                 Path(server.config_path).parent, server.session_store.instance_id,
             ),
             # Default to the LAN board so a stock install can use whiteboard
-            # rules without new configuration; HASHI_HAL_WHITEBOARD_URL="" 
+            # rules without new configuration; HASHI_HAL_WHITEBOARD_URL=""
             # disables the source explicitly.
             whiteboard=(
                 WhiteboardClient(board_url or DEFAULT_BASE_URL, token=board_token)
