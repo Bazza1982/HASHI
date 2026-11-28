@@ -241,14 +241,6 @@ class NagareApiRequestHandler(BaseHTTPRequestHandler):
         # Auto-load callables persisted from previous runs
         self._autoload_callables(step_handler)
 
-        # Register Veritas callable adapters if available
-        try:
-            from veritas import CALLABLE_REGISTRY
-            step_handler.register_callables(CALLABLE_REGISTRY)
-            self.server.logger.info("Veritas callable adapters registered (%d)", len(CALLABLE_REGISTRY))
-        except ImportError:
-            pass  # Veritas not installed — callable steps will fail at runtime with a clear error
-
         runner.step_handler = step_handler
 
         # Start workflow in background thread; clean up setup manager when done.
