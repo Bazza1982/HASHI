@@ -26,7 +26,6 @@ _BACKEND_ADAPTER_TARGETS: dict[str, tuple[str, str]] = {
     "dsh-cli": ("adapters.dsh_cli", "DshCLIAdapter"),
     "ollama-api": ("adapters.ollama_api", "OllamaAdapter"),
     "hli-api": ("adapters.hli_api", "HLIAdapter"),
-    "xai-api": ("adapters.xai_api", "XaiApiAdapter"),
     "hashi-api": ("adapters.hashi_api", "HashiApiAdapter"),
 }
 
@@ -57,3 +56,4 @@ def get_backend_class(engine_name: str):
         raise ValueError(f"Unknown engine: {engine}") from exc
     module = importlib.import_module(module_name)
     return getattr(module, class_name)
+# HASHI-Fingerprint: hfp_cab2105032ac4d989318044df859cec6

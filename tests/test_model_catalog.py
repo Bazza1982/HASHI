@@ -11,7 +11,6 @@ from orchestrator.flexible_backend_registry import (
 from orchestrator.model_catalog import (
     AVAILABLE_CODEX_MODELS,
     AVAILABLE_OPENROUTER_MODELS,
-    AVAILABLE_XAI_API_MODELS,
     available_gateway_models,
     default_gateway_model,
 )
@@ -85,11 +84,6 @@ def test_her_v3_public_id_has_no_placeholder_models_or_efforts():
     assert normalize_effort("her-v3", "planned") is None
 
 
-def test_xai_api_models_are_available_to_gateway_catalog():
-    assert "grok-4.3" in AVAILABLE_XAI_API_MODELS
-    assert "grok-4.3" in get_available_models("xai-api")
-
-
 def test_provider_catalogs_expose_only_the_hashi1_supported_models():
     direct_models = get_available_models("deepseek-api")
     openrouter_models = get_available_models("openrouter-api")
@@ -129,4 +123,4 @@ def test_compatibility_catalog_is_derived_from_backend_registry():
         "deepseek/deepseek-v4-pro",
         "google/gemini-3.8-flash",
     ]
-    assert "grok-imagine-video-1.5-preview" in AVAILABLE_XAI_API_MODELS
+# HASHI-Fingerprint: hfp_12f305041b284a218effcbec5bf6f53e

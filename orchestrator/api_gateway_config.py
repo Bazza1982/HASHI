@@ -169,7 +169,14 @@ def _gateway_config_view(data: dict[str, Any], global_config: Any) -> dict[str, 
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
         enabled = False
-    model = normalize_api_model(data.get("default_model"), global_config) or default_api_model()
+    raw_model = str(data.get("default_model") or "").strip()
+    # Never rewrite an operator's stored default. An uncatalogued model (for
+    # example one retired together with its backend) is reported as unavailable
+    # so the operator re-selects, instead of the gateway silently switching to
+    # a different model for requests that omit "model".
+    model = (normalize_api_model(raw_model, global_config) if raw_model else None) or (
+        raw_model or default_api_model()
+    )
     return {
         "enabled": enabled,
         "default_model": model,

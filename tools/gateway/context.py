@@ -27,7 +27,6 @@ LEGACY_HER_GATEWAY_MAX_CALLS = 100
 
 _TOOL_SECRET_KEYS = {
     "web_search": {"brave_api_key"},
-    "xai_imagine": {"xai_api_key", "XAI_API_KEY", "xai_oauth_refresh_token"},
     "telegram_send": {"telegram_bot_token", "_authorized_telegram_id"},
     "telegram_send_file": {
         "telegram_bot_token",

@@ -20,7 +20,6 @@ from orchestrator.privacy_levels import (
         "openrouter-api",
         "deepseek-api",
         "openai-compatible-api",
-        "xai-api",
         "ollama-api",
     ),
 )
@@ -85,3 +84,4 @@ def test_privacy_downgrade_requires_explicit_confirmation() -> None:
         require_transition_confirmation(1, 0, confirmed=True)
         is PrivacyLevel.OFF
     )
+# HASHI-Fingerprint: hfp_ea3113f95fdb4d32991a4a45b9ff491b

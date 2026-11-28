@@ -107,6 +107,8 @@ def _status_text(runtime: Any, *, prefix: str = "") -> str:
     running = bool(status.get("running"))
     configured = bool(cfg.get("enabled"))
     address = _api_address(runtime)
+    catalogue = {str(model).strip() for model in available_api_models()}
+    default_missing = bool(cfg["default_model"]) and cfg["default_model"] not in catalogue
     lines = []
     if prefix:
         lines.append(html.escape(prefix))
@@ -125,12 +127,14 @@ def _status_text(runtime: Any, *, prefix: str = "") -> str:
             f"<b>{html.escape(ui_language.tr('api.address'))}</b> · <code>{html.escape(address)}</code>",
             f"{html.escape(ui_language.tr('api.endpoint.models'))} · <code>{html.escape(address)}/v1/models</code>",
             f"{html.escape(ui_language.tr('api.endpoint.chat'))} · <code>{html.escape(address)}/v1/chat/completions</code>",
-            f"{html.escape(ui_language.tr('api.endpoint.images'))} · <code>{html.escape(address)}/v1/images/generations</code>",
-            f"{html.escape(ui_language.tr('api.endpoint.videos'))} · <code>{html.escape(address)}/v1/videos/generations</code>",
             "",
             ui_language.tr("api.override_effect"),
         ]
     )
+    if default_missing:
+        # The stored default is kept rather than replaced; tell the operator to
+        # re-select one so requests that omit "model" stop failing.
+        lines.append(ui_language.tr("api.default_model_unavailable"))
     return "\n".join(lines)
 
 
@@ -304,3 +308,4 @@ COMMANDS = []
 CALLBACKS = [
     RuntimeCallback(pattern=r"^api:", callback=api_callback),
 ]
+# HASHI-Fingerprint: hfp_95e4736196d44dfe9573c28396bd234b

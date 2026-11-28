@@ -102,7 +102,6 @@ def test_working_mode_product_surface_is_exact() -> None:
         ("antigravity-cli", "fixed"),
         ("ollama-api", "flex"),
         ("ollama", "flex"),
-        ("xai-api", "flex"),
         (None, "flex"),
     ],
 )
@@ -268,3 +267,4 @@ async def test_retired_mode_callbacks_are_non_mutating_alerts(
     assert query.answers == [
         (ui_language.tr("mode.retired"), {"show_alert": True})
     ]
+# HASHI-Fingerprint: hfp_f6b0e76833314b94bd3c9d35e0770007

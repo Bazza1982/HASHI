@@ -19,7 +19,6 @@ CLAUDE_MODEL_ALIASES = dict(_CLAUDE_MODEL_ALIASES)
 AVAILABLE_CLAUDE_EFFORTS = get_available_efforts("claude-cli")
 AVAILABLE_CODEX_MODELS = get_gateway_models("codex-cli")
 AVAILABLE_CODEX_EFFORTS = get_available_efforts("codex-cli")
-AVAILABLE_XAI_API_MODELS = get_gateway_models("xai-api")
 
 
 def available_gateway_models() -> list[str]:
@@ -32,3 +31,4 @@ def gateway_engine_for_model(model: str) -> str | None:
 
 def default_gateway_model() -> str:
     return str(get_default_gateway_model() or "")
+# HASHI-Fingerprint: hfp_c3bee2a60f8d427bb8941c000a2f9057

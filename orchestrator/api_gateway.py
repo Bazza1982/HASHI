@@ -5,8 +5,7 @@ Exposes:
   POST /v1/chat/completions
   GET  /v1/models
 
-Routes requests to local CLI backends (antigravity-cli, claude-cli, codex-cli) and
-xAI HTTP backend (xai-api).
+Routes requests to local CLI backends (antigravity-cli, claude-cli, codex-cli).
 Runs on its own port (default 18801), independent from Telegram and the Backend API.
 
 Adapter instances are separate from Telegram runtimes — no shared queue.
@@ -36,15 +35,6 @@ from aiohttp import web
 
 from orchestrator.runtime_defaults import DEFAULT_API_GATEWAY_PORT
 from orchestrator import multimodal_contract, terminal_console
-from adapters.xai_imagine import (
-    DEFAULT_IMAGINE_MODEL,
-    DEFAULT_IMAGINE_VIDEO_MODEL,
-    XaiOAuthCredentialError,
-    generate_xai_image,
-    generate_xai_video,
-    is_imagine_image_model,
-    is_imagine_video_model,
-)
 from adapters.registry import get_backend_class
 from orchestrator.model_catalog import (
     available_gateway_models as catalog_gateway_models,
@@ -82,7 +72,7 @@ MAX_INLINE_MEDIA_BYTES = 50 * 1024 * 1024
 API_GATEWAY_MAX_REQUEST_BYTES = 256 * 1024 * 1024
 API_GATEWAY_DRAIN_TIMEOUT_SEC = 10.0
 API_GATEWAY_CANCEL_TIMEOUT_SEC = 2.0
-_EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli", "xai-api"})
+_EXTERNAL_TOOL_ENGINES = frozenset({"codex-cli"})
 _EXTERNAL_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _GATEWAY_SERVER_APP_KEY = web.AppKey("hashi-api-gateway-server", object)
 _CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
@@ -1012,14 +1002,7 @@ class _AdapterPool:
             project_root=self._global_config.project_root,
         )
         BackendClass = get_backend_class(engine)
-        if engine == "xai-api":
-            api_key = {
-                "xai_api_key": self._secrets.get("xai_api_key")
-                or self._secrets.get("XAI_API_KEY"),
-                "xai_oauth_refresh_token": self._secrets.get("xai_oauth_refresh_token"),
-            }
-        else:
-            api_key = self._secrets.get(f"{engine}_key")
+        api_key = self._secrets.get(f"{engine}_key")
         adapter = BackendClass(cfg, self._global_config, api_key)
         ok = await adapter.initialize()
         if not ok:
@@ -1120,11 +1103,17 @@ class APIGatewayServer:
         gateway_config = load_api_gateway_config(global_config)
         self.enabled: bool = bool(gateway_config.get("enabled", False))
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
-        self.default_model = (
-            selected_default
-            if selected_default in self._engine_for_model
-            else DEFAULT_API_MODEL
-        )
+        # A configured default is never silently replaced. When the stored model is
+        # no longer catalogued (for example after a backend retirement) the operator
+        # keeps the original value and must re-select a default explicitly.
+        self.default_model = selected_default or DEFAULT_API_MODEL
+        if self.default_model_unavailable:
+            logger.warning(
+                "Configured API Gateway default model %r is not in the current "
+                "catalogue; keeping it. Requests that omit 'model' fail until an "
+                "operator selects a new default model.",
+                self.default_model,
+            )
         self._workspace_root = Path(workspace_root).resolve()
         capability_root = getattr(global_config, "bridge_home", None) or getattr(
             global_config,
@@ -1177,8 +1166,6 @@ class APIGatewayServer:
         self.app[_GATEWAY_SERVER_APP_KEY] = self
         self.app.router.add_get("/v1/models", self.handle_models)
         self.app.router.add_post("/v1/chat/completions", self.handle_chat_completions)
-        self.app.router.add_post("/v1/images/generations", self.handle_image_generations)
-        self.app.router.add_post("/v1/videos/generations", self.handle_video_generations)
         self.app.router.add_get("/health", self.handle_health)
 
     def _observe(self, event: str, *, required: bool = False, **fields: Any) -> None:
@@ -1625,6 +1612,17 @@ class APIGatewayServer:
                 self._runner = None
                 self._observe("gateway_stopped")
 
+    @property
+    def default_model_unavailable(self) -> bool:
+        """True when the stored default is no longer in the model catalogue.
+
+        Derived from the current ``default_model`` on every read so the health
+        payload follows an operator re-selecting a default instead of repeating
+        the verdict taken at server start-up.
+        """
+
+        return bool(self.default_model) and self.default_model not in self._engine_for_model
+
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()
         if normalized not in self._engine_for_model:
@@ -1716,6 +1714,7 @@ class APIGatewayServer:
                 "available_models": self._available_models(),
                 "default_model": self.default_model,
                 "default_model_available": self.default_model in self._available_models(),
+                "default_model_unavailable": self.default_model_unavailable,
                 "bind_host": self.bind_host,
                 "port": self.port,
             }
@@ -1795,7 +1794,7 @@ class APIGatewayServer:
             if engine not in _EXTERNAL_TOOL_ENGINES:
                 return _external_tool_error(
                     f"model '{model}' does not support external tool passthrough; "
-                    "Codex CLI and compatible xAI /chat/completions models are enabled",
+                    "only Codex CLI models are enabled",
                     code="external_tool_passthrough_unsupported",
                     param="model",
                 )
@@ -2168,125 +2167,6 @@ class APIGatewayServer:
             t_start,
             reasoning_effort=reasoning_effort,
         )
-
-    def _xai_base_url(self) -> str:
-        return str(getattr(self.global_config, "xai_api_base_url", "") or "").strip()
-
-    def _hermes_home(self) -> str | None:
-        return str(getattr(self.global_config, "hermes_home", "") or "").strip() or None
-
-    def _xai_static_key(self) -> str | None:
-        return str(
-            self._secrets.get("xai_api_key")
-            or self._secrets.get("XAI_API_KEY")
-            or ""
-        ).strip() or None
-
-    def _xai_refresh_token(self) -> str | None:
-        return str(self._secrets.get("xai_oauth_refresh_token") or "").strip() or None
-
-    def _validate_xai_media_model(self, model: str, *, kind: str) -> web.Response | None:
-        engine = self._engine_for_model.get(model)
-        if engine != "xai-api":
-            return web.json_response(
-                {"error": f"unknown {kind} model '{model}'. Use GET /v1/models to list available models."},
-                status=400,
-            )
-        engine_ok, engine_reason = self._engine_available(engine)
-        if not engine_ok:
-            return web.json_response(
-                {"error": f"backend unavailable for '{model}': {engine_reason}"},
-                status=503,
-            )
-        return None
-
-    # ── Route: POST /v1/images/generations ───────────────────────────────────
-
-    async def handle_image_generations(self, request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-
-        model = str(body.get("model") or DEFAULT_IMAGINE_MODEL).strip()
-        if not is_imagine_image_model(model):
-            return web.json_response({"error": f"model '{model}' is not an image model"}, status=400)
-        model_error = self._validate_xai_media_model(model, kind="image")
-        if model_error is not None:
-            return model_error
-
-        prompt = str(body.get("prompt") or "").strip()
-        if not prompt:
-            return web.json_response({"error": "prompt is required"}, status=400)
-
-        try:
-            result = await generate_xai_image(
-                prompt=prompt,
-                model=model,
-                bearer_token=self._xai_static_key(),
-                oauth_refresh_token=self._xai_refresh_token(),
-                hermes_home=self._hermes_home(),
-                base_url=self._xai_base_url(),
-                aspect_ratio=body.get("aspect_ratio"),
-                resolution=body.get("resolution"),
-                n=int(body.get("n") or 1),
-                response_format=str(body.get("response_format") or "url"),
-            )
-        except XaiOAuthCredentialError as exc:
-            return web.json_response({"error": str(exc)}, status=503)
-        except Exception as exc:
-            logger.error("xAI image generation failed: %s", exc)
-            return web.json_response({"error": str(exc)}, status=500)
-
-        return web.json_response(
-            {
-                "created": int(time.time()),
-                "model": result.model,
-                "data": [{"url": url} for url in result.urls],
-            }
-        )
-
-    # ── Route: POST /v1/videos/generations ───────────────────────────────────
-
-    async def handle_video_generations(self, request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-
-        model = str(body.get("model") or DEFAULT_IMAGINE_VIDEO_MODEL).strip()
-        if not is_imagine_video_model(model):
-            return web.json_response({"error": f"model '{model}' is not a video model"}, status=400)
-        model_error = self._validate_xai_media_model(model, kind="video")
-        if model_error is not None:
-            return model_error
-
-        prompt = str(body.get("prompt") or "").strip()
-        if not prompt:
-            return web.json_response({"error": "prompt is required"}, status=400)
-
-        try:
-            result = await generate_xai_video(
-                prompt=prompt,
-                model=model,
-                bearer_token=self._xai_static_key(),
-                oauth_refresh_token=self._xai_refresh_token(),
-                hermes_home=self._hermes_home(),
-                base_url=self._xai_base_url(),
-                image_url=body.get("image_url"),
-            )
-        except XaiOAuthCredentialError as exc:
-            return web.json_response({"error": str(exc)}, status=503)
-        except Exception as exc:
-            logger.error("xAI video generation failed: %s", exc)
-            return web.json_response({"error": str(exc)}, status=500)
-
-        payload = dict(result.raw)
-        payload.setdefault("id", result.request_id)
-        payload.setdefault("request_id", result.request_id)
-        payload.setdefault("model", result.model)
-        payload.setdefault("object", "video.generation")
-        return web.json_response(payload)
 
     # ── External caller-owned tool-call passthrough ──────────────────────────
 
@@ -3118,3 +2998,4 @@ class APIGatewayServer:
                 elapsed_ms=round((time.time() - t_start) * 1000, 2),
             )
         return resp
+# HASHI-Fingerprint: hfp_7fa9181e628b48029fab899c8540ebe7

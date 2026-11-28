@@ -194,7 +194,6 @@ PRUNED_SOURCE_PATHS = (
     "adapters/grok_cli.py",
     "adapters/hashi_api.py",
     "adapters/ollama_api.py",
-    "adapters/xai_api.py",
     "skills/claude",
     "skills/codex",
     "skills/gemini",

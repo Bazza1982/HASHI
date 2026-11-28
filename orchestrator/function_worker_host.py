@@ -153,6 +153,7 @@ class WorkerServiceManagerFacade:
             "enabled": False,
             "running": False,
             "default_model": "",
+            "default_model_catalogued": True,
             "available_models": [],
             "base_url": None,
             "port": None,

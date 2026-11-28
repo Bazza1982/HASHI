@@ -115,10 +115,6 @@ _ADAPTER_INPUT_TRANSPORTS: Mapping[str, Mapping[str, tuple[str, ...]]] = {
         "image": ("data_url",),
         "audio": ("data_url", "inline"),
     },
-    "xai-api": {
-        "image": ("data_url",),
-        "audio": ("data_url", "inline"),
-    },
 }
 
 
@@ -1625,3 +1621,4 @@ def routing_decisions_payload(
     decisions: Iterable[MediaRoutingDecision],
 ) -> tuple[dict[str, Any], ...]:
     return tuple(item.as_dict() for item in decisions)
+# HASHI-Fingerprint: hfp_3ee24c51de2242a8966c0ced91b77cfe

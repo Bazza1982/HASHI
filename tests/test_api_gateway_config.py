@@ -49,7 +49,7 @@ def test_first_model_selection_keeps_fresh_gateway_available(cfg):
     assert result["enabled"] is True
     assert gateway.load_api_gateway_config(cfg)["enabled"] is True
     gateway.save_api_gateway_config(cfg, enabled=False)
-    gateway.save_api_gateway_config(cfg, default_model="grok-4.5")
+    gateway.save_api_gateway_config(cfg, default_model="gpt-6-astra")
     assert gateway.load_api_gateway_config(cfg)["enabled"] is False
 
 
@@ -92,11 +92,11 @@ def test_incompatible_known_fields_are_not_silently_normalized_during_save(cfg, 
 
 def test_legacy_bom_migrates_once_and_retains_source_and_extension(cfg):
     legacy = gateway.legacy_state_path_for(cfg)
-    before = _seed(legacy, {"enabled": True, "default_model": "grok-4.5", "extension": {"retain": "yes"}}, bom=True)
+    before = _seed(legacy, {"enabled": True, "default_model": "gpt-6-astra", "extension": {"retain": "yes"}}, bom=True)
     assert gateway.migrate_legacy_api_gateway_state(cfg) is True
     path = gateway.config_path_for(cfg)
     assert _saved(path)["extension"] == {"retain": "yes"}
-    assert gateway.load_api_gateway_config(cfg)["default_model"] == "grok-4.5"
+    assert gateway.load_api_gateway_config(cfg)["default_model"] == "gpt-6-astra"
     assert legacy.read_bytes() == before
     canonical = path.read_bytes()
     legacy.write_bytes(b"broken later")
@@ -133,10 +133,15 @@ def test_invalid_update_does_not_first_publish_a_legacy_migration(cfg, invalid):
 def test_unselected_model_value_is_preserved_not_written_back_from_effective_view(cfg):
     path = gateway.config_path_for(cfg)
     _seed(path, {"enabled": False, "default_model": "configured-on-a-newer-generation"})
-    assert gateway.load_api_gateway_config(cfg)["default_model"] == gateway.default_api_model()
+    # The effective view keeps the operator's value: an uncatalogued default is
+    # reported as unavailable, never silently replaced with the fallback model.
+    assert (
+        gateway.load_api_gateway_config(cfg)["default_model"]
+        == "configured-on-a-newer-generation"
+    )
     saved = gateway.save_api_gateway_config(cfg, enabled=True)
     assert _saved(path)["default_model"] == "configured-on-a-newer-generation"
-    assert saved["default_model"] == gateway.default_api_model()
+    assert saved["default_model"] == "configured-on-a-newer-generation"
 
 
 def test_instance_model_opt_ins_and_config_location_remain_local(cfg, tmp_path):
@@ -181,7 +186,7 @@ def test_conflict_preserves_another_writers_update_without_retry(cfg, monkeypatc
 def test_migration_does_not_overwrite_a_concurrently_created_canonical_file(cfg, monkeypatch):
     before = _seed(gateway.legacy_state_path_for(cfg), {"enabled": True, "default_model": "gpt-5.5"})
     write = gateway._write_config_atomic
-    winner = {"enabled": False, "default_model": "grok-4.5", "extension": "winner"}
+    winner = {"enabled": False, "default_model": "gpt-6-astra", "extension": "winner"}
 
     def interleaved(path, document):
         _seed(path, winner)

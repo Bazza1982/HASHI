@@ -58,14 +58,14 @@ def test_api_gateway_config_migrates_legacy_state_once(tmp_path):
     cfg = _global_config(tmp_path)
     legacy_path = legacy_state_path_for(cfg)
     legacy_path.write_text(
-        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        json.dumps({"enabled": True, "default_model": "gpt-6-astra"}),
         encoding="utf-8",
     )
 
     loaded = load_api_gateway_config(cfg)
 
     assert loaded["enabled"] is True
-    assert loaded["default_model"] == "grok-4.5"
+    assert loaded["default_model"] == "gpt-6-astra"
     assert loaded["updated_by"] == "legacy-state-migration"
     assert config_path_for(cfg).exists()
     assert legacy_path.exists()
@@ -77,16 +77,7 @@ def test_api_gateway_config_migrates_legacy_state_once(tmp_path):
     loaded_again = load_api_gateway_config(cfg)
 
     assert loaded_again["enabled"] is True
-    assert loaded_again["default_model"] == "grok-4.5"
-
-
-def test_api_gateway_default_model_list_includes_grok_models():
-    models = available_api_models()
-    assert "grok-4.5" in models
-    assert "grok-4.3" in models
-    assert "grok-build-0.1" in models
-    assert "grok-imagine-image" in models
-    assert "grok-imagine-video" in models
+    assert loaded_again["default_model"] == "gpt-6-astra"
 
 
 def test_api_gateway_model_list_includes_qualified_gpt6_variants():
@@ -522,3 +513,62 @@ async def test_api_callback_rejects_crafted_unknown_model(tmp_path):
     assert query.answers == [("Unknown API model: not-a-model", True)]
     assert query.edits == []
 # HASHI-Fingerprint: hfp_88bdc2647c1e4be28dc70c664b18ae01
+
+
+@pytest.mark.asyncio
+async def test_api_gateway_keeps_uncatalogued_default_model_and_warns(tmp_path):
+    """A stored default is preserved, never silently replaced by the fallback."""
+
+    global_config = _global_config(tmp_path)
+    # A stored default from before a backend retirement is no longer catalogued,
+    # so write the persisted config directly instead of going through validation.
+    config_path_for(global_config).parent.mkdir(parents=True, exist_ok=True)
+    config_path_for(global_config).write_text(
+        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        encoding="utf-8",
+    )
+    server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
+    server.bind_host = "127.0.0.1"
+
+    response = await server.handle_health(_FakeRequest({}))
+    body = json.loads(response.text)
+
+    assert body["default_model"] == "grok-4.5"
+    assert body["default_model_available"] is False
+    assert body["default_model_unavailable"] is True
+
+    omitted = await server.handle_chat_completions(
+        _FakeRequest({"messages": [{"role": "user", "content": "hi"}]})
+    )
+    assert omitted.status == 400
+    assert "'grok-4.5'" in json.loads(omitted.text)["error"]
+
+
+@pytest.mark.asyncio
+async def test_health_follows_default_model_reselection(tmp_path):
+    """Re-selecting a catalogue model must not leave health contradicting itself."""
+
+    global_config = _global_config(tmp_path)
+    config_path_for(global_config).parent.mkdir(parents=True, exist_ok=True)
+    config_path_for(global_config).write_text(
+        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        encoding="utf-8",
+    )
+    server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
+    server.bind_host = "127.0.0.1"
+    server._schedule_capability_refresh = lambda *models: None
+
+    before = json.loads((await server.handle_health(_FakeRequest({}))).text)
+    assert before["default_model"] == "grok-4.5"
+    assert before["default_model_available"] is False
+    assert before["default_model_unavailable"] is True
+
+    replacement = next(
+        model for model in available_api_models(global_config) if model != "grok-4.5"
+    )
+    server.set_default_model(replacement)
+
+    after = json.loads((await server.handle_health(_FakeRequest({}))).text)
+    assert after["default_model"] == replacement
+    assert after["default_model_available"] is True
+    assert after["default_model_unavailable"] is False

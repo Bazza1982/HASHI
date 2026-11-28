@@ -502,7 +502,6 @@ def test_non_her_token_budget_compacts_oldest_whole_exchanges_into_capsule(
         "antigravity-cli",
         "openrouter-api",
         "deepseek-api",
-        "xai-api",
         "hashi-api",
     ],
 )

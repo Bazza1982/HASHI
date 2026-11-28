@@ -1788,7 +1788,6 @@ class BridgeContextAssembler:
         "dsh-cli": DEFAULT_PROMPT_TOKEN_BUDGET,
         "openrouter-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "deepseek-api": DEFAULT_PROMPT_TOKEN_BUDGET,
-        "xai-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         "hashi-api": DEFAULT_PROMPT_TOKEN_BUDGET,
         # Local inference never uses the generic 64K budget as an operating
         # budget; its own capacity resolver remains authoritative.

@@ -110,12 +110,10 @@ FOUNDATION_PHASES = {
     "orchestrator.context_compaction": 3,
     "adapters.base": 1,
     "adapters.her_persona": 1,
-    "adapters.xai_oauth_credentials": 1,
     "orchestrator.model_catalog": 1,
     "orchestrator.manager_registry": 1,
     "orchestrator.ticket_manager": 1,
     "adapters.openrouter_api": 2,
-    "adapters.xai_imagine": 2,
     # HER v2 dependency order. Construct value types first and the facade only
     # after the provider-neutral runtime graph is coherent.
     "orchestrator.her_v2.models": 0,

@@ -248,37 +248,37 @@ def test_one_model_provider_assigns_the_same_model_to_both_slots(tmp_path):
     manager.config.allowed_backends.insert(
         0,
         {
-            "engine": "xai-api",
-            "models": ["grok-4.5"],
-            "default_model": "grok-4.5",
+            "engine": "ollama-api",
+            "models": ["gemma4:26b"],
+            "default_model": "gemma4:26b",
         },
     )
-    manager.global_config.her_providers["providers"]["xai"] = {
-        "engine": "xai-api",
+    manager.global_config.her_providers["providers"]["ollama"] = {
+        "engine": "ollama-api",
         "status": "stable",
     }
 
-    selected = manager.prepare_her_v2_provider("xai")
+    selected = manager.prepare_her_v2_provider("ollama")
 
-    assert selected.fast_model == "grok-4.5"
-    assert selected.pro_model == "grok-4.5"
+    assert selected.fast_model == "gemma4:26b"
+    assert selected.pro_model == "gemma4:26b"
 
 
 def test_instance_configured_provider_does_not_need_agent_backend_row(tmp_path):
     manager = _manager(tmp_path)
-    manager.global_config.her_providers["providers"]["xai"] = {
-        "engine": "xai-api",
+    manager.global_config.her_providers["providers"]["ollama"] = {
+        "engine": "ollama-api",
         "status": "stable",
     }
 
-    option = manager._her_v2_provider_option("xai")
-    selected = manager.prepare_her_v2_provider("xai")
+    option = manager._her_v2_provider_option("ollama")
+    selected = manager.prepare_her_v2_provider("ollama")
 
     assert option is not None
     assert option["available"] is True
-    assert "grok-4.5" in option["models"]
-    assert selected.fast_provider == "xai-api"
-    assert selected.pro_provider == "xai-api"
+    assert "gemma4:26b" in option["models"]
+    assert selected.fast_provider == "ollama-api"
+    assert selected.pro_provider == "ollama-api"
 
 
 def test_instance_configured_provider_can_create_her_ephemeral_backend(tmp_path):
@@ -843,3 +843,4 @@ def test_provider_options_expose_only_valid_explicit_fallback_costs():
 
     assert by_engine["openrouter-api"]["estimated_fallback_call_cost_usd"] == 0.0125
     assert "estimated_fallback_call_cost_usd" not in by_engine["deepseek-api"]
+# HASHI-Fingerprint: hfp_dd48ae38977040388a728595bd77af58
