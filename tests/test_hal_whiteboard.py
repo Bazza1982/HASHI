@@ -269,8 +269,10 @@ def test_halt_reasons_cover_fuse_gate_budget_and_category():
     assert whiteboard_halt_reason(trigger(fused=True, reason="round fuse")) == "round fuse"
     assert "halted" in whiteboard_halt_reason(trigger(category="halted", to_stage="blocked"))
     assert "human decision" in whiteboard_halt_reason(trigger(human_gate=True, to_stage="merged"))
-    assert "max_rounds" in whiteboard_halt_reason(trigger(round=3, max_rounds=3))
-    assert whiteboard_halt_reason(trigger(round=2, max_rounds=3)) is None
+    # A bare round/max_rounds pair is NOT a stop by itself: the board decides
+    # whether a move spends a rework round, and a forward move at the boundary
+    # is legal.
+    assert whiteboard_halt_reason(trigger(round=3, max_rounds=3)) is None
     # A feed trigger is never halted by board rules.
     feed = HalTrigger(
         event="#turn_finish", agent_identity="@lily@x", feed_event_id="e1",
@@ -516,17 +518,35 @@ def test_fuse_without_a_live_chain_is_still_reported(tmp_path):
     assert len(notices) == 1 and "max_rounds" in notices[0]["detail"]
 
 
-def test_exhausted_round_budget_stops(tmp_path):
-    board = FakeBoard()
+def test_exhausted_rework_budget_stops_but_a_forward_move_is_legal(tmp_path):
+    board = FakeBoard(
+        stages={
+            "in_review": {"key": "in_review", "counts_round": False},
+            "changes_requested": {"key": "changes_requested", "counts_round": True},
+        }
+    )
     service, adapter = make_service(tmp_path, board=board)
-    rule = make_rule(service, REVIEW_RULE)
+    rule = make_rule(
+        service,
+        'if #whiteboard_stage where [to_stage="in_review"] then @lily $prompt "review {card_id}".'
+        'if #whiteboard_stage where [to_stage="changes_requested"] then '
+        '@lily $prompt "rework {card_id}".',
+    )
     service.set_enabled(owner_id=OWNER, rule_id=rule["rule_id"], enabled=True)
-    board.append(card_id=CARD, revision=8, round=3, max_rounds=3)
 
+    # A forward move into review at the budget boundary is legal and dispatches.
+    board.append(card_id=CARD, revision=30, to_stage="in_review", round=1, max_rounds=1)
+    run(service._process_owner(OWNER))
+    assert len(adapter.prompt_calls) == 1
+    assert service.store.list_notices(OWNER) == []
+
+    # Entering another rework round does not.
+    board.append(card_id=CARD, revision=31, to_stage="changes_requested", round=2, max_rounds=1)
     run(service._process_owner(OWNER))
 
-    assert adapter.prompt_calls == []
-    assert "max_rounds" in service.store.list_notices(OWNER)[0]["detail"]
+    assert len(adapter.prompt_calls) == 1
+    notices = service.store.list_notices(OWNER)
+    assert len(notices) == 1 and "refusing another rework cycle" in notices[0]["detail"]
 
 
 def test_unreadable_stage_table_refuses_to_auto_advance(tmp_path):

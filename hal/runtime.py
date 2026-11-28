@@ -498,15 +498,11 @@ def whiteboard_halt_reason(trigger: HalTrigger) -> str | None:
         return f"transition into halted stage {context.get('to_stage')}"
     if bool(context.get("human_gate")):
         return f"stage {context.get('to_stage')} requires a human decision"
-    round_no = context.get("round")
-    max_rounds = context.get("max_rounds")
-    if (
-        isinstance(round_no, int)
-        and isinstance(max_rounds, int)
-        and max_rounds > 0
-        and round_no >= max_rounds
-    ):
-        return f"round {round_no} reached max_rounds {max_rounds}"
+    # The round budget is deliberately NOT re-derived from round/max_rounds here:
+    # the board already fuses (``fused``) only when a rework move would exceed
+    # the budget, and a plain forward move at the boundary is legal. Counting
+    # rounds locally would block that legal move. The service applies the budget
+    # to rework destinations from the board's own stage table instead.
     return None
 
 
@@ -520,17 +516,7 @@ def whiteboard_stop_is_exceptional(trigger: HalTrigger) -> bool:
     if trigger.source != SOURCE_WHITEBOARD:
         return False
     context = trigger.context or {}
-    if bool(context.get("fused")):
-        return True
-    if str(context.get("category") or "") == "halted":
-        return True
-    round_no, max_rounds = context.get("round"), context.get("max_rounds")
-    return (
-        isinstance(round_no, int)
-        and isinstance(max_rounds, int)
-        and max_rounds > 0
-        and round_no >= max_rounds
-    )
+    return bool(context.get("fused")) or str(context.get("category") or "") == "halted"
 
 
 def entry_rules_match(

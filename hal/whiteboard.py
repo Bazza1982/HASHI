@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from typing import Any
 from urllib.parse import quote
 
@@ -227,11 +228,14 @@ class WhiteboardClient:
         """Post the stop reason where the humans already look. Never raises."""
         try:
             # The board accepts exactly {"body": ...}; the comment's author is
-            # the authenticated identity, never a client-supplied field.
+            # the authenticated identity, never a client-supplied field. The
+            # mutation endpoint also requires an idempotency key, so a retried
+            # stop notice cannot double-post.
             await self._request(
                 "POST",
                 f"/api/cards/{quote(card_id, safe='')}/comments",
                 json={"body": body},
+                headers={**self._headers(), "Idempotency-Key": f"hal-notice-{uuid.uuid4()}"},
             )
         except WhiteboardUnavailable as exc:
             return False, str(exc)

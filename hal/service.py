@@ -515,16 +515,17 @@ class HalService:
     ) -> bool:
         """Stop the chain when the board says so, otherwise plan normally."""
         context = dict(trigger.context or {})
-        # The gate verdict is read from the board's own stage table. Its reason
-        # is kept verbatim: "the table could not be read" and "this stage is
-        # human-gated" are different facts and must not be merged into one.
-        gate_reason = await self._human_gate_reason(context)
-        if gate_reason and "human decision" in gate_reason:
+        # The guard verdict is read from the board's own stage table. Its reason
+        # is kept verbatim: "the table could not be read", "this stage is
+        # human-gated" and "this rework is over budget" are different facts and
+        # must not be merged into one.
+        guard_reason, guard_exceptional = await self._board_guard(context)
+        if guard_reason and "human decision" in guard_reason:
             context["human_gate"] = True
         trigger = dataclasses.replace(trigger, context=context)
 
         active = await self._load_active_execs(owner_id)
-        reason = gate_reason or whiteboard_halt_reason(trigger)
+        reason = guard_reason or whiteboard_halt_reason(trigger)
         if reason:
             halts = halted_execs_for(trigger, list(active.values()))
             would_start = entry_rules_match(
@@ -533,6 +534,7 @@ class HalService:
             if (
                 not halts
                 and not would_start
+                and not guard_exceptional
                 and not whiteboard_stop_is_exceptional(trigger)
             ):
                 # Nothing was running, nothing would have started and the board
@@ -574,25 +576,44 @@ class HalService:
             if row.get("program") is not None
         }
 
-    async def _human_gate_reason(self, context: Mapping[str, Any]) -> str | None:
-        """Is the destination stage one only a human may enter?
+    async def _board_guard(self, context: Mapping[str, Any]) -> tuple[str | None, bool]:
+        """Reasons the board's own stage table forbids continuing here.
 
-        The board owns the stage table, so the answer is read from it (cached).
-        An unreadable table is a stop, not a green light: firing work into a
-        stage we cannot classify would bypass a gate we simply failed to see.
+        Returns ``(reason, exceptional)``. The table decides two things HAL must
+        not re-derive: whether the destination is human-gated, and whether this
+        move spends a rework round the budget cannot afford. A forward move at
+        the budget boundary is legal, so only rework destinations are checked.
         """
         project = str(context.get("project") or "")
         stage = str(context.get("to_stage") or "")
         if not stage:
-            return None
+            return None, False
         try:
             stages = await self.whiteboard.stages(project)
         except Exception as exc:  # noqa: BLE001
-            return f"whiteboard stage table unavailable ({exc}); refusing to auto-advance"
+            # Firing work into a stage we cannot classify would bypass a gate we
+            # simply failed to see, so an unreadable table stops the chain.
+            return f"whiteboard stage table unavailable ({exc}); refusing to auto-advance", True
         entry = stages.get(stage)
         if entry is None:
-            return None
-        return f"stage {stage} requires a human decision" if entry.get("human_gate") else None
+            return None, False
+        if entry.get("human_gate"):
+            return f"stage {stage} requires a human decision", False
+        round_no = context.get("round")
+        max_rounds = context.get("max_rounds")
+        if (
+            entry.get("counts_round")
+            and isinstance(round_no, int)
+            and isinstance(max_rounds, int)
+            and max_rounds > 0
+            and round_no >= max_rounds
+        ):
+            return (
+                f"round {round_no} reached max_rounds {max_rounds}; "
+                "refusing another rework cycle",
+                True,
+            )
+        return None, False
 
     async def _notify_stop(
         self, owner_id: str, trigger: HalTrigger, reason: str
