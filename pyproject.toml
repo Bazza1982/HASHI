@@ -235,7 +235,6 @@ select = ["E4", "E7", "E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 # Standalone entry points must add the checkout root before importing HASHI.
 "scripts/check_vector_upgrade.py" = ["E402"]
-"scripts/hermes_transfer.py" = ["E402"]
 "scripts/link_whatsapp.py" = ["E402"]
 "scripts/migrate_vectors.py" = ["E402"]
 "scripts/move_agent.py" = ["E402"]

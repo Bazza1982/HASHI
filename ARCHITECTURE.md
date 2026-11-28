@@ -192,8 +192,7 @@ HERV3 owns:
 - one selected Model Provider/model/tool loop in which the model reasons,
   plans, adapts, uses tools, and verifies continuously;
 - HER recovery evidence, checkpoints, Compact, and Engine-level metering;
-- optional Strategy Cards as advisory context;
-- the bounded JEV Agent Companion experiment; and
+- optional Strategy Cards as advisory context; and
 - optional HER-specific Habit and Meditation behaviour.
 
 HERV3 completely removes Triage, Strategy, Planning, Replanning, Review, and

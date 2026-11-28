@@ -510,10 +510,6 @@ class FlexibleBackendManager:
             effective = HERv2Config.from_mapping(apply_v3_target(base, target))
             for profile in effective.all_provider_profiles():
                 require_herv3_provider_compatibility(profile.engine, parsed)
-            if effective.agent_companion.enabled:
-                raise PrivacyPolicyError(
-                    "HERV3 Agent Companion is unavailable at privacy level 2"
-                )
 
         def update_state(state: dict[str, Any]) -> dict[str, Any]:
             if expected_current_level is not None:

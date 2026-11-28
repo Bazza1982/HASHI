@@ -139,8 +139,6 @@
   - optional Strategy Cards enter the same main loop as advisory context only;
     Habit/Meditation remains the request-scoped learning owner and never becomes a
     routing stage
-  - the optional JEV Agent Companion receives bounded observable liveness state only,
-    stays advisory, and cannot create a second planner, reviewer, or execution owner
   - the release candidate passes the explicit offline product suite once;
     repeated overlapping HER bundles are not separate gates
   - `python -m py_compile adapters/her_v2.py adapters/her_v2_provider.py orchestrator/her_v2/prompt_catalog.py orchestrator/her_v2/prompts.py orchestrator/her_v2/runtime.py orchestrator/her_v2/runtime_invocation.py orchestrator/her_v2/runtime_support.py adapters/her_habits.py orchestrator/runtime_her_habits.py tools/media_read.py tools/gateway/mcp_stdio.py`

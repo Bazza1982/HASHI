@@ -1062,10 +1062,6 @@ class HERv2Adapter(BaseBackend):
             if int(getattr(self, "privacy_level", 1)) == 2:
                 for profile in self._v2_config.all_provider_profiles():
                     require_herv3_provider_compatibility(profile.engine, 2)
-                if self._v2_config.agent_companion.enabled:
-                    raise HERv2ConfigurationError(
-                        "HERV3 Agent Companion is unavailable at privacy level 2"
-                    )
             requested_effort = (
                 str(self._extra.get("effort") or raw.get("effort") or "medium")
                 .strip()
@@ -2519,26 +2515,7 @@ class HERv2Adapter(BaseBackend):
                 )
         turn_services = None
         if isinstance(provider, HashiStageProvider):
-            from orchestrator.her_v2.turn_services import HEALTH_QUESTION, TurnServices
-
-            if runtime_config.agent_companion.enabled:
-                from adapters.her_jev import judge as jev_judge
-
-            companion_serial = 0
-
-            async def _judge_companion(snapshot):
-                nonlocal companion_serial
-                companion_serial += 1
-                return await jev_judge(
-                    provider=provider,
-                    config=runtime_config.agent_companion,
-                    state=snapshot,
-                    questions={"health": HEALTH_QUESTION},
-                    turn_id=(fixed_turn.turn_id if fixed_turn is not None else request_id),
-                    request_ref=request_ref,
-                    phase="agent_companion",
-                    serial=companion_serial,
-                )
+            from orchestrator.her_v2.turn_services import TurnServices
 
             turn_services = TurnServices(
                 turn_id=(fixed_turn.turn_id if fixed_turn is not None else request_id),
@@ -2547,17 +2524,7 @@ class HERv2Adapter(BaseBackend):
                 liveness_delivery=(
                     delivery if commentary_mode != "off" else None
                 ),
-                companion_enabled=runtime_config.agent_companion.enabled,
-                companion_interval_s=(
-                    runtime_config.agent_companion.interval_minutes * 60.0
-                ),
-                companion_judge=(
-                    _judge_companion
-                    if runtime_config.agent_companion.enabled
-                    else None
-                ),
             )
-            turn_services.start()
             provider.bind_commentary_port(turn_services)
             provider.bind_turn_services(turn_services)
 
