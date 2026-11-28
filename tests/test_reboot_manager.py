@@ -1361,7 +1361,7 @@ async def test_max_reboot_rejects_busy_worker_before_shared_handoff(tmp_path):
         "sunny:102:worker.metadata",
     ]
     assert "Busy Agents: sunny." in render_notice(record, locale="en")
-    assert "正在处理任务的代理：sunny。" in render_notice(record, locale="zh-CN")
+    assert "正在处理任务的智能体：sunny。" in render_notice(record, locale="zh-CN")
 
 
 @pytest.mark.asyncio

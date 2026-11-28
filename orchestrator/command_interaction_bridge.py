@@ -127,6 +127,23 @@ def _resolve(runtime, data):
     return None
 
 
+def _request_locale(runtime, payload: Mapping, actor: Any) -> str:
+    """Pick the interface language for one frontend command request.
+
+    A language carried by the request wins when HASHI ships that catalog;
+    an unsupported language deliberately falls back to English rather than to
+    an unrelated catalog. Requests that carry no language keep the actor's own
+    saved preference instead of silently forcing the default one.
+    """
+
+    from orchestrator import ui_language
+
+    raw_locale = payload.get("ui_locale")
+    if isinstance(raw_locale, str) and raw_locale.strip():
+        return ui_language.normalize_locale(raw_locale)
+    return ui_language.preferred_locale(runtime, actor_id=actor)
+
+
 def _catalogue(runtime, locale):
     from orchestrator import ui_language
     from orchestrator.command_specs import COMMAND_SPECS
@@ -189,7 +206,7 @@ async def dispatch_command_interaction(runtime, payload: Mapping, metadata: Mapp
         checker = getattr(runtime, "_is_authorized_user", None)
         if callable(checker) and not checker(actor):
             raise InteractionError("command_menu_forbidden", 403)
-        locale = ui_language.normalize_locale(payload.get("ui_locale"))
+        locale = _request_locale(runtime, payload, actor)
         if op == "catalogue":
             return _catalogue(runtime, locale)
         if (not isinstance(metadata.get("session_id"), str) or not metadata["session_id"]

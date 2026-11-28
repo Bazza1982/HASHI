@@ -27,7 +27,7 @@ def test_optional_connector_recovery_is_success_with_progress(locale):
     assert "139.8" in notice
     assert "Remote" in notice
     if locale == "zh-CN":
-        assert "2个代理在线" in notice
+        assert "2个智能体在线" in notice
     else:
         assert "2 agents online" in notice
     projection = RebootManager._operation_projection(record)
@@ -54,6 +54,8 @@ RESTART_ESTIMATE_CASES = (
      "🔄 Starting a full system restart. This usually completes within 2 minutes."),
     ("zh-CN", "🔄 开始热重启。通常会在1分钟内完成。",
      "🔄 开始完整系统重启。通常会在2分钟内完成。"),
+    ("zh-TW", "🔄 開始熱重啟。通常會在1分鐘內完成。",
+     "🔄 開始完整系統重啟。通常會在2分鐘內完成。"),
 )
 
 
