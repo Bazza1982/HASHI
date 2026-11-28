@@ -97,10 +97,10 @@ def test_common_cards_and_navigation_follow_active_language(tmp_path) -> None:
     with ui_language.language_scope(runtime, locale="zh-CN"):
         assert back_label() == "← 返回"
         assert refresh_label() == "↻ 刷新"
-        assert card_title("🤖", "Hashi agents").startswith("🤖 <b>HASHI 代理</b>")
+        assert card_title("🤖", "Hashi agents").startswith("🤖 <b>HASHI 智能体</b>")
 
 
-def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) -> None:
+def test_chinese_menu_bodies_and_buttons_render_from_the_catalog(tmp_path) -> None:
     class Slots:
         def list_slots(self):
             return [
@@ -123,8 +123,14 @@ def test_chinese_menu_bodies_and_buttons_do_not_keep_english_shells(tmp_path) ->
         voice_keyboard = runtime._voice_keyboard().inline_keyboard
 
     assert "<b>" in sys_text and "</b>" in sys_text and "<code>" in sys_text
-    for old_label in ("Current", "Configured", "Scope", "Changes", "SLOTS"):
-        assert old_label not in sys_text
+    for key in (
+        "common.current",
+        "common.configured",
+        "common.scope",
+        "common.changes",
+        "sys.section.slots",
+    ):
+        assert ui_language.tr(key, locale="zh-CN") in sys_text
 
     assert "<b>" in group_text and "<code>" in group_text
     assert group_keyboard.inline_keyboard[-1][0].text
@@ -143,7 +149,7 @@ def test_help_and_telegram_command_menu_use_chinese_catalog(tmp_path) -> None:
     descriptions = {item.command: item.description for item in commands}
 
     assert descriptions["language"] == "选择界面语言"
-    assert descriptions["agents"] == "查看和管理代理"
+    assert descriptions["agents"] == "查看和管理智能体"
     text = help_menu_text(
         agent_name="zelda",
         agent_type="flex",
@@ -174,7 +180,7 @@ async def test_saved_language_command_menu_is_restored_as_chat_scope(tmp_path) -
     assert len(scoped) == 1
     assert scoped[0][1]["scope"].chat_id == 42
     descriptions = {item.command: item.description for item in scoped[0][0]}
-    assert descriptions["reboot"] == "重启当前代理"
+    assert descriptions["reboot"] == "重启当前智能体"
 
 
 @pytest.mark.asyncio
@@ -215,7 +221,7 @@ async def test_language_selection_persists_before_background_menu_refresh(
 
     assert calls[-1][1]["scope"].chat_id == 42
     descriptions = {item.command: item.description for item in calls[-1][0]}
-    assert descriptions["agents"] == "查看和管理代理"
+    assert descriptions["agents"] == "查看和管理智能体"
 
 
 @pytest.mark.asyncio

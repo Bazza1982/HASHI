@@ -104,6 +104,24 @@ class TestRenderedMenus:
         assert ui_language.tr("menu.commentary.title", locale="zh-CN") == "过程播报"
 
 
+class TestAgentTerm:
+    """One concept, one spelling per script: 智能体 (zh-CN), 智慧體 (zh-TW)."""
+
+    def test_each_script_keeps_its_own_spelling(self):
+        simplified = ui_language.load_catalog("zh-CN")
+        traditional = ui_language.load_catalog("zh-TW")
+        assert simplified.commands["agents"] == "查看和管理智能体"
+        assert traditional.commands["agents"] == "檢視和管理智慧體"
+
+    def test_rendered_agent_presence_title_follows_the_script(self):
+        with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+            simplified = ui_language.tr("menu.agentpresence.title")
+        with ui_language.language_scope(SimpleNamespace(), locale="zh-TW"):
+            traditional = ui_language.tr("menu.agentpresence.title")
+        assert simplified == "智能体在场"
+        assert traditional == "智慧體在場"
+
+
 class TestRequestLocale:
     def test_request_language_wins_when_supported(self, tmp_path):
         runtime = _runtime(tmp_path, default_locale="en")

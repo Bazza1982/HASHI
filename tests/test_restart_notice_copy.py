@@ -27,7 +27,7 @@ def test_optional_connector_recovery_is_success_with_progress(locale):
     assert "139.8" in notice
     assert "Remote" in notice
     if locale == "zh-CN":
-        assert "2个代理在线" in notice
+        assert "2个智能体在线" in notice
     else:
         assert "2 agents online" in notice
     projection = RebootManager._operation_projection(record)

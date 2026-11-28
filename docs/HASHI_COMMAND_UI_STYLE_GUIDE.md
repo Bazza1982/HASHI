@@ -150,8 +150,10 @@ navigation labels, and that `/help` is derived from registered command metadata.
   unimplemented Adapter transport, policy blocking, and unavailable local
   fallback; the stable error code remains visible in both languages.
 - Chinese wording follows formal product terminology. In particular, user-facing
-  `agent` is `代理`; use `已启用的代理`, `正在运行的代理`, and `已配置的代理`
-  when those states differ. Do not leave `Agent` in a Chinese menu.
+  `agent` is `智能体` in Simplified Chinese and `智慧體` in Traditional Chinese;
+  use `已启用的智能体`, `正在运行的智能体`, and `已配置的智能体` when those
+  states differ. English keeps `agent` / `Agent`. The Latin word never appears
+  inside Chinese copy, and the two Chinese scripts never share one spelling.
 - Keep callback data, command names, enum values, IDs, and persisted wire values
   language-neutral. Only presentation strings belong in a catalog.
 - Shared helpers resolve the active locale from command context. Proactive

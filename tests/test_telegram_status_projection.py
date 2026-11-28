@@ -215,7 +215,7 @@ def test_summary_render_reports_safe_failure_and_rejects_invalid_counts(tmp_path
     with ui_language.language_scope(None, locale="zh-CN"):
         text = "\\n".join(summary_facts(payload))
         invalid = "\\n".join(summary_facts({**payload, "ready": 99}))
-    assert "收信端与代理使用的机器人不一致" in text
+    assert "收信端与智能体使用的机器人不一致" in text
     assert "&lt;TEST&gt;" in text and "secret token" not in text
     assert "快照版本" in text and "未核实最近送达回执" in text
     assert "状态暂不可用" in invalid

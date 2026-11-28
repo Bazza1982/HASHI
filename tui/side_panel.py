@@ -38,7 +38,7 @@ LABELS = {
         "configured": "已配置",
         "characters": "字符",
         "parked": "暂存主题",
-        "agents": "代理",
+        "agents": "智能体",
         "online": "在线",
         "offline_agent": "离线",
         "busy": "忙碌",

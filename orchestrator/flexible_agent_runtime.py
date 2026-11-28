@@ -4820,9 +4820,9 @@ class FlexibleAgentRuntime:
                     else:
                         cause = "菜单同步失败"
                     if result.succeeded:
-                        cause = "部分 Agent 菜单已更新；" + cause
+                        cause = "部分智能体菜单已更新；" + cause
                     warning = (
-                        f"语言偏好已保存，但{cause}（{result.failure_count} 个 Agent）。"
+                        f"语言偏好已保存，但{cause}（{result.failure_count} 个智能体）。"
                         "稍后会在重连时重试。"
                     )
                 else:
