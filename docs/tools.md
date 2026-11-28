@@ -197,12 +197,7 @@ adapter; it does not make that adapter a top-level Engine Provider.
               "reasoning": "high"
             },
             "v3_provider_allowlist": ["deepseek-api", "openrouter-api"],
-            "strategy_cards": true,
-            "agent_companion": {
-              "enabled": true,
-              "interval_minutes": 5,
-              "model": "jev-latest"
-            }
+            "strategy_cards": true
           }
         }
       ]
@@ -219,10 +214,10 @@ later Turns see persisted changes. Legacy Quick/Pro, Hybrid, stage-role, and
 staged routing. The internal `role-configured` model and `her-v2` adapter ID are
 compatibility sentinels and are never presented as the HERV3 product name.
 
-The optional JEV Agent Companion sees bounded observable activity rather than
-private reasoning and can only offer advisory intervention at a safe tool
-boundary. Strategy Cards and Habits are advisory context; neither introduces
-another model route or mandatory handoff. See [HERV3 upgrade](HERV3_UPGRADE.md).
+Persona Commentary and the deterministic liveness keepalive observe a running
+turn and inform the user; they never intervene in execution. Strategy Cards and
+Habits are advisory context; neither introduces another model route or mandatory
+handoff. See [HERV3 upgrade](HERV3_UPGRADE.md).
 
 **Retired working modes:** `/mode wrapper`, `/mode audit`, and
 `/mode dual-brain` return a compatibility notice. Their former configuration commands

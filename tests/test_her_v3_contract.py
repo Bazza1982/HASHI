@@ -10,7 +10,6 @@ from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.her_v2.config import HERv2Config
 from orchestrator.her_v2.models import Stage, StageResponse, parse_effort
 from orchestrator.her_v2.presentation import FinalStyleResult
-from orchestrator.her_v2.turn_services import parse_health
 from orchestrator.her_v2.v3_prompt import compile_main_prompt
 from orchestrator.her_v2.wip_journal import WIPJournal
 from orchestrator.pcm import render_pcm_document
@@ -31,6 +30,24 @@ def test_legacy_config_collapses_to_one_main_foreground_model():
     assert set(config.profiles) == {"main", "auxiliary"}
     assert config.profile_for(Stage.DIRECT).model == "deepseek-v4-pro"
     assert config.profile_for(Stage.EXECUTION).model == "deepseek-v4-pro"
+
+
+def test_retired_agent_companion_block_is_ignored_not_validated():
+    """A leftover agent_companion block must never fail a normal load."""
+
+    config = HERv2Config.from_mapping(
+        {
+            **_legacy_config(),
+            "agent_companion": {
+                "enabled": True,
+                "interval_minutes": 7,
+                "model": "",
+                "api_key_env": "not an identifier",
+            },
+        }
+    )
+    assert not hasattr(config, "agent_companion")
+    assert config.profile_for(Stage.DIRECT).model == "deepseek-v4-pro"
 
 
 def test_effort_none_is_model_reasoning_wire_alias():
@@ -62,21 +79,6 @@ def test_main_contract_carries_recoverable_search_guidance():
     assert "these budgets never limit the agent, the run, or the task" in folded
     assert "memory_search" in system
     assert "partial or empty results do not prove absence" in system
-
-
-def test_agent_companion_only_intervenes_on_high_confidence_trouble():
-    payload = {
-        "answers": {
-            "health": {
-                "type": "choice",
-                "choice": "trouble",
-                "probabilities": {"continue": 0.05, "trouble": 0.9, "unknown": 0.05},
-            }
-        }
-    }
-    assert parse_health(payload)
-    payload["answers"]["health"]["probabilities"] = {"continue": 0.2, "trouble": 0.7, "unknown": 0.1}
-    assert not parse_health(payload)
 
 
 class _MainProvider:
@@ -348,3 +350,4 @@ async def test_recovered_work_is_context_not_a_new_request(tmp_path):
     assert "never replay them" in system
     assert "side effect may already have happened" in user
     assert user.endswith("Current user request:\nCheck before continuing")
+# HASHI-Fingerprint: hfp_8303c98d4df34b5d9feff771d9bbae0f

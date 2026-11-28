@@ -26,7 +26,6 @@ _OPERATIONS = {
     "tool_started": ("turn_services", "tool_started"),
     "tool_completed": ("turn_services", "tool_completed"),
     "tool_activity": ("turn_services", "observe_tool_activity"),
-    "intervention": ("turn_services", "take_intervention"),
     "snapshot": ("turn_services", "snapshot"),
 }
 
@@ -202,9 +201,6 @@ class _TurnServicesPort(_AsyncPort):
 
     def observe_tool_activity(self, facts):
         return self.owner._sync("tool_activity", facts)
-
-    def take_intervention(self):
-        return self.owner._sync("intervention")
 
     def snapshot(self):
         return self.owner._sync("snapshot")

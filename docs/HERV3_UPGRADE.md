@@ -184,12 +184,10 @@ temporarily as compatibility boundaries; they are not the product name.
 Telegram activity and status cards must use the shared public Engine projection
 instead of rendering those storage compatibility names.
 
-The upgrade combines four decisions:
+The upgrade combines three decisions:
 
 - one continuous main-model/tool loop owns reasoning, planning, adaptation,
   tool use, and verification;
-- a bounded JEV Agent Companion experiment may judge observable liveness state
-  and offer advisory intervention at a safe tool boundary;
 - Strategy Cards remain optional reference context, never a routing stage or
   mandatory handoff; and
 - Habit/Meditation learning remains an optional post-delivery subsystem.
@@ -352,11 +350,6 @@ backend/session migration is required. New configurations may use:
     },
     "v3_provider_allowlist": ["deepseek-api"],
     "strategy_cards": false,
-    "agent_companion": {
-      "enabled": true,
-      "interval_minutes": 5,
-      "model": "jev-latest"
-    },
     "commentary_interval_s": 150
   }
 }
@@ -506,20 +499,19 @@ check; meter attribution distinguishes a kept main-model answer from an answer
 whose expression was rewritten. Provider output is never sent directly: both
 paths return one final response through FC.
 
-## JEV Agent Companion experiment
+## JEV Agent Companion (retired)
 
-AC is an optional 5/10-minute liveness observer. JEV receives bounded observable runtime
-state (tool names, hashes/status, activity/progress timing), not hidden reasoning. A
-`continue` or `unknown` judgement is silent. A high-confidence `trouble` judgement queues
-one notice at the next safe tool boundary; that one tool action is not executed and the
-same main model decides whether to change direction, report a blocker, or finish.
-Deterministic cycle control and user cancellation remain independent safety controls.
+The bounded JEV liveness experiment, its `agent_companion` configuration block, and
+its tool-boundary intervention notice are retired. A leftover `agent_companion`
+block in an existing Agent configuration is ignored and never blocks loading or a
+`/privacy 2` upgrade. Persona Commentary and the deterministic liveness keepalive
+remain: they observe a turn and inform the user, but they never intervene or
+replace execution control.
 
 ## Habit and Meditation retention
 
 Habit/Meditation reflection remains a post-delivery background learning path.
-It remains separate from the JEV Agent Companion experiment. HERV3 does not
-turn Habits into routing stages and does not require a Strategy, Planning, or
+HERV3 does not turn Habits into routing stages and does not require a Strategy, Planning, or
 Replanning handoff before applying advisory Habit context.
 
 ## Local verification and next testing
@@ -586,8 +578,8 @@ The final retained `phd_1` setting is `deepseek-api / deepseek-v4-pro` at
 effort `high`. These checks establish HASHI3 Backend API selection, persistence,
 real DeepSeek execution, provider reasoning, Session presentation, token
 accounting, and meter reporting. They do not authorize a merge or deployment to
-another instance, and do not qualify optional Strategy Cards, Agent Companion,
-long-running processes, or Habit Reflection.
+another instance, and do not qualify optional Strategy Cards, long-running
+processes, or Habit Reflection.
 
 ### Model picker callback repair (2026-09-26)
 

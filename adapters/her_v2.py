@@ -1062,10 +1062,6 @@ class HERv2Adapter(BaseBackend):
             if int(getattr(self, "privacy_level", 1)) == 2:
                 for profile in self._v2_config.all_provider_profiles():
                     require_herv3_provider_compatibility(profile.engine, 2)
-                if self._v2_config.agent_companion.enabled:
-                    raise HERv2ConfigurationError(
-                        "HERV3 Agent Companion is unavailable at privacy level 2"
-                    )
             requested_effort = (
                 str(self._extra.get("effort") or raw.get("effort") or "medium")
                 .strip()
@@ -2529,7 +2525,6 @@ class HERv2Adapter(BaseBackend):
                     delivery if commentary_mode != "off" else None
                 ),
             )
-            turn_services.start()
             provider.bind_commentary_port(turn_services)
             provider.bind_turn_services(turn_services)
 
