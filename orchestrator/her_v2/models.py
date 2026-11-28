@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from orchestrator import ui_language
+
 if TYPE_CHECKING:
     from .checkpoint import CompulsoryReplanCoordinator
 
@@ -55,6 +57,17 @@ EFFORT_DISPLAY_LABELS: Mapping[Effort, str] = {
     Effort.MAX: "Maximum",
 }
 
+# One locale key per level so every surface (menus, job labels, skills) shows
+# the level in the active interface language instead of a raw English value.
+EFFORT_LOCALE_KEYS: Mapping[Effort, str] = {
+    Effort.ZERO: "menu.her.reasoning.level.none",
+    Effort.LOW: "menu.her.reasoning.level.low",
+    Effort.MEDIUM: "menu.her.reasoning.level.medium",
+    Effort.HIGH: "menu.her.reasoning.level.high",
+    Effort.XHIGH: "menu.her.reasoning.level.xhigh",
+    Effort.MAX: "menu.her.reasoning.level.max",
+}
+
 _EFFORT_ALIASES: Mapping[str, Effort] = {
     "none": Effort.ZERO,
     "off": Effort.ZERO,
@@ -82,9 +95,37 @@ def parse_effort(value: Effort | str) -> Effort:
     return aliased if aliased is not None else Effort(normalized)
 
 
-def effort_display_label(value: Effort | str, *, include_value: bool = True) -> str:
-    effort = parse_effort(value)
-    label = EFFORT_DISPLAY_LABELS[effort]
+# Boolean thinking switches exposed by models that only provide on/off.
+# They share this entry point with tiered levels so no menu has to special
+# case them (and none can crash on a value outside :class:`Effort`).
+BINARY_EFFORT_LOCALE_KEYS: Mapping[str, str] = {
+    "enabled": "menu.her.reasoning.level.enabled",
+    "off": "menu.her.reasoning.level.off",
+}
+
+
+def effort_display_label(value: Effort | str, *, include_value: bool = False) -> str:
+    """Return a human label for any configured effort value.
+
+    Covers tiered levels, boolean thinking switches and values this build
+    does not recognise.  Unknown values are returned unchanged so a menu
+    still opens instead of raising; the saved configuration is never hidden.
+    """
+
+    raw = value.value if isinstance(value, Effort) else str(value or "").strip()
+    if not raw:
+        return ui_language.tr("common.default")
+    binary_key = BINARY_EFFORT_LOCALE_KEYS.get(raw.casefold())
+    if binary_key is not None:
+        return ui_language.tr(binary_key)
+    try:
+        effort = parse_effort(raw)
+    except (KeyError, ValueError):
+        return raw
+    if ui_language.normalize_locale(ui_language.current_locale()) == ui_language.DEFAULT_LOCALE:
+        label = EFFORT_DISPLAY_LABELS[effort]
+    else:
+        label = ui_language.tr(EFFORT_LOCALE_KEYS[effort])
     return f"{label} ({effort.value})" if include_value else label
 
 
@@ -423,3 +464,4 @@ def as_terminal(state: LifecycleState) -> TerminalState:
     if state not in TERMINAL_STATES:
         raise ValueError(f"{state.value} is not terminal")
     return TerminalState(state.value)
+# HASHI-Fingerprint: hfp_ca0b7254081f4e95991ed1882cefd471
