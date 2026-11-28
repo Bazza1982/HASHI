@@ -117,8 +117,12 @@ class HalService:
             "runtime_loop_running": self._loop_task is not None and not self._loop_task.done(),
             "event_availability": {
                 event: {
-                    "available": available,
-                    "source": reason,
+                    "available": available and self._event_source_enabled(event),
+                    "source": (
+                        reason
+                        if self._event_source_enabled(event)
+                        else "no whiteboard endpoint configured on this instance"
+                    ),
                 }
                 for event, (available, reason) in _ALL_EVENT_AVAILABILITY.items()
             },
@@ -474,6 +478,12 @@ class HalService:
         # A reported feed backlog (has_more) keeps the loop consuming pages
         # immediately instead of idling POLL_INTERVAL between non-matching pages.
         return activity or recovered or has_more
+
+    def _event_source_enabled(self, event: str) -> bool:
+        """A board event is only available when this instance has a board."""
+        if event == EVENT_WHITEBOARD_STAGE and self.whiteboard is None:
+            return False
+        return True
 
     async def _process_whiteboard(self, owner_id: str) -> bool:
         """One bounded board read per pass, with its own cursor."""

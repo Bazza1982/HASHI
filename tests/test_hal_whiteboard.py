@@ -593,6 +593,16 @@ def test_a_broken_comment_endpoint_cannot_hide_the_stop(tmp_path):
     assert notices[0]["delivered"].startswith("not delivered: RuntimeError")
 
 
+def test_status_reports_the_board_event_unavailable_without_a_board(tmp_path):
+    service, _adapter = make_service(tmp_path, board=None)
+    availability = service.status()["event_availability"]["#whiteboard_stage"]
+    assert availability["available"] is False
+    assert "no whiteboard endpoint" in availability["source"]
+
+    with_board, _ = make_service(tmp_path / "b", board=FakeBoard())
+    assert with_board.status()["event_availability"]["#whiteboard_stage"]["available"] is True
+
+
 def test_whiteboard_rule_refuses_enable_without_a_board(tmp_path):
     service, _adapter = make_service(tmp_path, board=None)
     rule = make_rule(service, REVIEW_RULE)
