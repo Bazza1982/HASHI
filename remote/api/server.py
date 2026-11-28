@@ -103,6 +103,7 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from ..attachments import AttachmentStore, STREAM_ATTACHMENT_CHUNK_BYTES
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
+from .diag_logs import DiagLogsGate, install_diag_logs_routes
 from .lan_readiness import LanReadinessCache, MAX_REPORT_BYTES
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
 from ..protocol_outbound import (
@@ -3755,6 +3756,7 @@ def create_app(
     hashi_root: str = None,
     control_hashi_root: str = None,
     control_code_root: str = None,
+    diag_logs_gate: Optional[DiagLogsGate] = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
@@ -6530,6 +6532,18 @@ def create_app(
                 },
             )
         return _agent_move_response(request, result)
+
+    # ── Diagnostics: default-off read-only LAN log gate ────────────────────
+    # Deliberately minimal: no token, no login flow. The switch is the whole
+    # boundary; only the local machine may flip it, and it closes itself.
+    install_diag_logs_routes(
+        app,
+        gate=diag_logs_gate
+        or DiagLogsGate(
+            (Path(hashi_root) / "logs") if hashi_root else None,
+            instance_id=str(instance_info.get("instance_id") or ""),
+        ),
+    )
 
     return app
 # HASHI-Fingerprint: hfp_74f60e9736404b2cb1d7ad2d5990d98f
