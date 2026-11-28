@@ -513,3 +513,32 @@ async def test_api_callback_rejects_crafted_unknown_model(tmp_path):
     assert query.answers == [("Unknown API model: not-a-model", True)]
     assert query.edits == []
 # HASHI-Fingerprint: hfp_88bdc2647c1e4be28dc70c664b18ae01
+
+
+@pytest.mark.asyncio
+async def test_api_gateway_keeps_uncatalogued_default_model_and_warns(tmp_path):
+    """A stored default is preserved, never silently replaced by the fallback."""
+
+    global_config = _global_config(tmp_path)
+    # A stored default from before a backend retirement is no longer catalogued,
+    # so write the persisted config directly instead of going through validation.
+    config_path_for(global_config).parent.mkdir(parents=True, exist_ok=True)
+    config_path_for(global_config).write_text(
+        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        encoding="utf-8",
+    )
+    server = APIGatewayServer(global_config, secrets={}, workspace_root=tmp_path / "workspaces")
+    server.bind_host = "127.0.0.1"
+
+    response = await server.handle_health(_FakeRequest({}))
+    body = json.loads(response.text)
+
+    assert body["default_model"] == "grok-4.5"
+    assert body["default_model_available"] is False
+    assert body["default_model_unavailable"] is True
+
+    omitted = await server.handle_chat_completions(
+        _FakeRequest({"messages": [{"role": "user", "content": "hi"}]})
+    )
+    assert omitted.status == 400
+    assert "'grok-4.5'" in json.loads(omitted.text)["error"]

@@ -1103,11 +1103,20 @@ class APIGatewayServer:
         gateway_config = load_api_gateway_config(global_config)
         self.enabled: bool = bool(gateway_config.get("enabled", False))
         selected_default = str(default_model or gateway_config.get("default_model") or "").strip()
-        self.default_model = (
-            selected_default
-            if selected_default in self._engine_for_model
-            else DEFAULT_API_MODEL
+        # A configured default is never silently replaced. When the stored model is
+        # no longer catalogued (for example after a backend retirement) the operator
+        # keeps the original value and must re-select a default explicitly.
+        self.default_model = selected_default or DEFAULT_API_MODEL
+        self.default_model_unavailable = bool(
+            selected_default and selected_default not in self._engine_for_model
         )
+        if self.default_model_unavailable:
+            logger.warning(
+                "Configured API Gateway default model %r is not in the current "
+                "catalogue; keeping it. Requests that omit 'model' fail until an "
+                "operator selects a new default model.",
+                self.default_model,
+            )
         self._workspace_root = Path(workspace_root).resolve()
         capability_root = getattr(global_config, "bridge_home", None) or getattr(
             global_config,
@@ -1697,6 +1706,7 @@ class APIGatewayServer:
                 "available_models": self._available_models(),
                 "default_model": self.default_model,
                 "default_model_available": self.default_model in self._available_models(),
+                "default_model_unavailable": self.default_model_unavailable,
                 "bind_host": self.bind_host,
                 "port": self.port,
             }

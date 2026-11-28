@@ -114,8 +114,6 @@ def _gateway_status_text(runtime: Any) -> str:
             "",
             f"<b>{html.escape(ui_language.tr('api.address'))}</b> · <code>{html.escape(base_url)}</code>",
             f"{html.escape(ui_language.tr('api.endpoint.chat'))} · <code>{html.escape(base_url)}/v1/chat/completions</code>",
-            f"{html.escape(ui_language.tr('api.endpoint.images'))} · <code>{html.escape(base_url)}/v1/images/generations</code>",
-            f"{html.escape(ui_language.tr('api.endpoint.videos'))} · <code>{html.escape(base_url)}/v1/videos/generations</code>",
             f"{html.escape(ui_language.tr('api.endpoint.models'))} · <code>{html.escape(base_url)}/v1/models</code>",
         ]
     )

@@ -100,8 +100,6 @@ async def test_api_command_status_includes_address_and_default_model():
 
     text, kwargs = runtime.messages[-1]
     assert "<b>Address</b> · <code>http://127.0.0.1:18801</code>" in text
-    assert "Images · <code>http://127.0.0.1:18801/v1/images/generations</code>" in text
-    assert "Videos · <code>http://127.0.0.1:18801/v1/videos/generations</code>" in text
     assert "<b>Default model</b> · <code>gpt-5.5</code>" in text
     assert kwargs["parse_mode"] == "HTML"
 
@@ -403,3 +401,15 @@ async def test_unauthorized_callbacks_are_answered():
     await api_restart.restart_callback(runtime, SimpleNamespace(callback_query=query), SimpleNamespace())
 
     assert query.answers[-1] == ("Not authorized.", True)
+
+
+@pytest.mark.asyncio
+async def test_api_status_card_omits_retired_image_and_video_routes():
+    runtime = _FakeRuntime()
+
+    await api_restart.api_command(runtime, _command_update(), SimpleNamespace(args=[]))
+
+    text, _kwargs = runtime.messages[-1]
+    assert "/v1/images/generations" not in text
+    assert "/v1/videos/generations" not in text
+    assert "/v1/chat/completions" in text

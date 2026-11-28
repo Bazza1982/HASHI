@@ -133,10 +133,15 @@ def test_invalid_update_does_not_first_publish_a_legacy_migration(cfg, invalid):
 def test_unselected_model_value_is_preserved_not_written_back_from_effective_view(cfg):
     path = gateway.config_path_for(cfg)
     _seed(path, {"enabled": False, "default_model": "configured-on-a-newer-generation"})
-    assert gateway.load_api_gateway_config(cfg)["default_model"] == gateway.default_api_model()
+    # The effective view keeps the operator's value: an uncatalogued default is
+    # reported as unavailable, never silently replaced with the fallback model.
+    assert (
+        gateway.load_api_gateway_config(cfg)["default_model"]
+        == "configured-on-a-newer-generation"
+    )
     saved = gateway.save_api_gateway_config(cfg, enabled=True)
     assert _saved(path)["default_model"] == "configured-on-a-newer-generation"
-    assert saved["default_model"] == gateway.default_api_model()
+    assert saved["default_model"] == "configured-on-a-newer-generation"
 
 
 def test_instance_model_opt_ins_and_config_location_remain_local(cfg, tmp_path):
