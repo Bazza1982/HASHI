@@ -345,6 +345,84 @@ async def test_disconnect_command_requires_authorization(tmp_path):
     assert "lily.telegram" in read_config_json(secrets_path)
 
 
+class _CommentaryRuntimeStub:
+    """Minimal surface for FlexibleAgentRuntime._commentary_keyboard."""
+
+    def __init__(self, mode: str) -> None:
+        self._commentary_mode = mode
+        self._commentary = mode != "off"
+
+    def _is_her_commentary_backend(self) -> bool:
+        return True
+
+    def _effective_commentary_mode(self) -> str:
+        return self._commentary_mode
+
+
+def test_commentary_menu_shows_the_selected_mode_not_a_binary_toggle():
+    for mode in runtime_menu_views.HER_COMMENTARY_MODES:
+        with ui_language.language_scope(None, locale="en"):
+            text = runtime_menu_views.her_commentary_text(
+                saved_mode=mode, effective_mode=mode
+            )
+            name = runtime_menu_views.commentary_mode_name(mode)
+        assert f"<b>Current</b> · <b>{name}</b>" in text
+        assert "<b>ON</b>" not in text and "<b>OFF</b>" not in text
+
+
+def test_commentary_menu_names_and_explains_all_four_modes():
+    with ui_language.language_scope(None, locale="zh-CN"):
+        text = runtime_menu_views.her_commentary_text(
+            saved_mode="off", effective_mode="off"
+        )
+        names = [runtime_menu_views.commentary_mode_name(m) for m in runtime_menu_views.HER_COMMENTARY_MODES]
+        descriptions = [
+            ui_language.tr(f"menu.commentary.mode.{mode}.desc")
+            for mode in runtime_menu_views.HER_COMMENTARY_MODES
+        ]
+    assert len(set(names)) == 4
+    for name in names:
+        assert name in text
+    for description in descriptions:
+        assert description in text
+
+
+def test_commentary_menu_reports_local_fallback_in_the_active_language():
+    with ui_language.language_scope(None, locale="en"):
+        english = runtime_menu_views.her_commentary_text(
+            saved_mode="packaged", effective_mode="raw"
+        )
+    assert 'Saved "Polished"' in english
+    assert 'runs as "Technical"' in english
+
+    with ui_language.language_scope(None, locale="zh-CN"):
+        chinese = runtime_menu_views.her_commentary_text(
+            saved_mode="packaged", effective_mode="raw"
+        )
+    assert "已保存「角色润色」" in chinese
+    assert "实际按「技术进度」运行" in chinese
+    assert "Saved" not in chinese
+
+
+def test_commentary_keyboard_sends_mode_callbacks_with_localized_labels():
+    from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
+
+    for locale, expected in (
+        ("en", ["Off", "Technical", "Persona", "Polished"]),
+        ("zh-CN", ["关闭", "技术进度", "角色直出", "角色润色"]),
+    ):
+        with ui_language.language_scope(None, locale=locale):
+            markup = FlexibleAgentRuntime._commentary_keyboard(
+                _CommentaryRuntimeStub("raw")
+            )
+        buttons = markup.to_dict()["inline_keyboard"][0]
+        assert [button["callback_data"] for button in buttons] == [
+            f"tgl:commentary:{mode}" for mode in runtime_menu_views.HER_COMMENTARY_MODES
+        ]
+        assert [button["text"].lstrip("✓ ") for button in buttons] == expected
+        assert buttons[1]["text"].startswith("✓ ")
+
+
 if __name__ == "__main__":
     unittest.main()
 # HASHI-Fingerprint: hfp_4a45aa3abdee4a8d8f7a43692561cdb4

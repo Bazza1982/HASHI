@@ -5935,7 +5935,13 @@ class FlexibleAgentRuntime:
             await query.answer(
                 ui_language.tr(
                     "menu.commentary.changed",
-                    state=status_label(self._commentary),
+                    state=(
+                        runtime_menu_views.commentary_mode_name(
+                            self._effective_commentary_mode()
+                        )
+                        if self._is_her_commentary_backend()
+                        else status_label(self._commentary)
+                    ),
                 )
             )
 
@@ -8458,28 +8464,19 @@ class FlexibleAgentRuntime:
         mode = self._effective_commentary_mode()
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(
-                selected_label("OFF", mode == "off"),
-                callback_data="tgl:commentary:off",
-            ),
-            InlineKeyboardButton(
-                selected_label("RAW", mode == "raw"),
-                callback_data="tgl:commentary:raw",
-            ),
-            InlineKeyboardButton(
-                selected_label("ORIGINAL", mode == "original"),
-                callback_data="tgl:commentary:original",
-            ),
-            InlineKeyboardButton(
-                selected_label("PACKAGED", mode == "packaged"),
-                callback_data="tgl:commentary:packaged",
-            ),
+                selected_label(
+                    runtime_menu_views.commentary_mode_name(choice), mode == choice
+                ),
+                callback_data=f"tgl:commentary:{choice}",
+            )
+            for choice in runtime_menu_views.HER_COMMENTARY_MODES
         ]])
 
     def _commentary_unavailable_text(self) -> str:
         backend = str(getattr(self.config, "active_backend", "unknown") or "unknown")
         return setting_card(
             "💬",
-            "Model commentary",
+            ui_language.tr("menu.commentary.model_title"),
             current=f"<b>{html.escape(ui_language.tr('common.unavailable'))}</b>",
             facts=[
                 f"<b>{html.escape(ui_language.tr('common.availability'))}</b> · "
@@ -8492,25 +8489,19 @@ class FlexibleAgentRuntime:
         )
 
     def _commentary_menu_text(self) -> str:
-        backend = getattr(getattr(self, "backend_manager", None), "current_backend", None)
-        effort = str(getattr(backend, "effort", "unknown") or "unknown").upper()
-        text = runtime_menu_views.commentary_text(
+        her_backend = self._is_her_commentary_backend()
+        saved = str(getattr(self, "_commentary_mode", "off") or "off")
+        return runtime_menu_views.commentary_text(
             enabled=self._commentary,
             backend=str(getattr(self.config, "active_backend", "unknown") or "unknown"),
-            her_backend=self._is_her_commentary_backend(),
-            effort=effort,
+            her_backend=her_backend,
+            saved_mode=saved,
+            effective_mode=(
+                self._effective_commentary_mode()
+                if her_backend
+                else ("raw" if self._commentary else "off")
+            ),
         )
-        if self._is_her_commentary_backend():
-            saved = getattr(self, "_commentary_mode", "off")
-            effective = self._effective_commentary_mode()
-            if effective != saved:
-                text += (
-                    f"\n\n💬 Saved <b>{html.escape(saved.upper())}</b> actually runs "
-                    f"as <b>{html.escape(effective.upper())}</b> on this local "
-                    f"provider (it supports only OFF/RAW); your saved preference "
-                    f"is preserved."
-                )
-        return text
 
     async def cmd_commentary(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
