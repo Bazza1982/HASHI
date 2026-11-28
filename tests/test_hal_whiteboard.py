@@ -34,7 +34,7 @@ class FakeBoard:
 
     base_url = "http://board.test"
 
-    def __init__(self, stages=None, *, comment_ok=True, stages_error=None):
+    def __init__(self, stages=None, *, comment_ok=True, stages_error=None, comment_raises=False):
         self.events: list[dict] = []
         self.head = 0
         self.comments: list[tuple[str, str]] = []
@@ -43,6 +43,7 @@ class FakeBoard:
         self._stages = stages or {}
         self._comment_ok = comment_ok
         self._stages_error = stages_error
+        self._comment_raises = comment_raises
 
     def append(self, **fields) -> dict:
         self.head += 1
@@ -94,6 +95,8 @@ class FakeBoard:
 
     async def post_comment(self, card_id: str, body: str, *, actor: str = "HAL"):
         self.comment_calls += 1
+        if self._comment_raises:
+            raise RuntimeError("board exploded")
         if not self._comment_ok:
             return False, "board unreachable"
         self.comments.append((card_id, body))
@@ -573,6 +576,21 @@ def test_notice_delivery_failure_is_recorded_not_hidden(tmp_path):
 
     notices = service.store.list_notices(OWNER)
     assert notices and notices[0]["delivered"].startswith("not delivered")
+
+
+def test_a_broken_comment_endpoint_cannot_hide_the_stop(tmp_path):
+    """The stop is recorded first; only delivery is allowed to fail."""
+    board = FakeBoard(comment_raises=True)
+    service, _adapter = make_service(tmp_path, board=board)
+    rule = make_rule(service, REVIEW_RULE)
+    service.set_enabled(owner_id=OWNER, rule_id=rule["rule_id"], enabled=True)
+    board.append(card_id=CARD, revision=40, fused=True)
+
+    run(service._process_owner(OWNER))
+
+    notices = service.store.list_notices(OWNER)
+    assert len(notices) == 1
+    assert notices[0]["delivered"].startswith("not delivered: RuntimeError")
 
 
 def test_whiteboard_rule_refuses_enable_without_a_board(tmp_path):

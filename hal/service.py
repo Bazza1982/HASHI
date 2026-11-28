@@ -641,9 +641,16 @@ class HalService:
             return  # this exact stop was already reported
         if self.whiteboard is None or not card_id:
             return
-        posted, info = await self.whiteboard.post_comment(card_id, f"**HAL 停止自动接力**：{detail}")
+        try:
+            posted, info = await self.whiteboard.post_comment(
+                card_id, f"**HAL 停止自动接力**：{detail}"
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed comment never hides the stop
+            posted, info = False, f"{type(exc).__name__}: {exc}"
         await asyncio.to_thread(
-            self.store.mark_notice_delivered, notice_id, info if posted else f"not delivered: {info}"
+            self.store.mark_notice_delivered,
+            notice_id,
+            info if posted else f"not delivered: {info}",
         )
 
     async def _load_enabled_rules(self, owner_id: str) -> list[dict[str, Any]]:

@@ -66,9 +66,12 @@ class WhiteboardClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
+        # Caller headers (e.g. an idempotency key) extend the auth headers
+        # instead of replacing them; passing both would be a duplicate keyword.
+        headers = {**self._headers(), **(kwargs.pop("headers", None) or {})}
         try:
             async with aiohttp.ClientSession(timeout=self._timeout) as session:
-                async with session.request(method, url, headers=self._headers(), **kwargs) as response:
+                async with session.request(method, url, headers=headers, **kwargs) as response:
                     if response.status != 200:
                         raise WhiteboardUnavailable(
                             f"whiteboard {method} {path} answered {response.status}"
