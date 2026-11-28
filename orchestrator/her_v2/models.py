@@ -95,10 +95,33 @@ def parse_effort(value: Effort | str) -> Effort:
     return aliased if aliased is not None else Effort(normalized)
 
 
-def effort_display_label(value: Effort | str, *, include_value: bool = False) -> str:
-    """Return the effort level in the active interface language."""
+# Boolean thinking switches exposed by models that only provide on/off.
+# They share this entry point with tiered levels so no menu has to special
+# case them (and none can crash on a value outside :class:`Effort`).
+BINARY_EFFORT_LOCALE_KEYS: Mapping[str, str] = {
+    "enabled": "menu.her.reasoning.level.enabled",
+    "off": "menu.her.reasoning.level.off",
+}
 
-    effort = parse_effort(value)
+
+def effort_display_label(value: Effort | str, *, include_value: bool = False) -> str:
+    """Return a human label for any configured effort value.
+
+    Covers tiered levels, boolean thinking switches and values this build
+    does not recognise.  Unknown values are returned unchanged so a menu
+    still opens instead of raising; the saved configuration is never hidden.
+    """
+
+    raw = value.value if isinstance(value, Effort) else str(value or "").strip()
+    if not raw:
+        return ui_language.tr("common.default")
+    binary_key = BINARY_EFFORT_LOCALE_KEYS.get(raw.casefold())
+    if binary_key is not None:
+        return ui_language.tr(binary_key)
+    try:
+        effort = parse_effort(raw)
+    except (KeyError, ValueError):
+        return raw
     if ui_language.normalize_locale(ui_language.current_locale()) == ui_language.DEFAULT_LOCALE:
         label = EFFORT_DISPLAY_LABELS[effort]
     else:

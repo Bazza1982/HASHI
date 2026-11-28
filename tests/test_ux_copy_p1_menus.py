@@ -14,6 +14,7 @@ import pytest
 from orchestrator import model_fallback_policy as policy_owner
 from orchestrator import runtime_her_fallback
 from orchestrator import runtime_menu_views
+from orchestrator import runtime_model_selection
 from orchestrator import ui_language
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.her_v2.models import effort_display_label
@@ -133,4 +134,153 @@ def test_reboot_title_names_agents_not_internal_functions() -> None:
         assert ui_language.tr("reboot.title") == "重启代理"
     with ui_language.language_scope(SimpleNamespace(), locale="en"):
         assert ui_language.tr("reboot.title") == "Reboot agents"
+
+
+def test_effort_label_covers_boolean_thinking_models() -> None:
+    with ui_language.language_scope(SimpleNamespace(), locale="zh-CN"):
+        assert effort_display_label("enabled") == "开启"
+        assert effort_display_label("off") == "关闭"
+        assert effort_display_label("n/a") == "n/a"
+        assert effort_display_label("") == "默认"
+    with ui_language.language_scope(SimpleNamespace(), locale="en"):
+        assert effort_display_label("enabled") == "On"
+        assert effort_display_label("off") == "Off"
+
+
+class _BinaryModelHost:
+    """Host for the real /model entry with boolean thinking configured."""
+
+    config = SimpleNamespace(active_backend="her-v2")
+    backend_manager = SimpleNamespace(
+        agent_mode="fixed",
+        current_backend=SimpleNamespace(
+            _v2_config=SimpleNamespace(
+                profiles={"main": SimpleNamespace(engine="ollama", model="llama3")}
+            )
+        ),
+        get_her_v3_target=lambda: SimpleNamespace(provider="ollama", model="llama3"),
+        _her_v3_provider_option=lambda provider: {"models": ["llama3"]},
+    )
+
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    def _is_authorized_user(self, user_id) -> bool:
+        return True
+
+    def _get_current_effort(self) -> str:
+        return "enabled"
+
+    def _get_available_efforts(self) -> list[str]:
+        return ["enabled", "off"]
+
+    def _is_binary_reasoning(self) -> bool:
+        return True
+
+    def _effort_display_value(self, effort: str) -> str:
+        return FlexibleAgentRuntime._effort_display_value(self, effort)
+
+    def get_current_provider(self) -> str:
+        return "ollama"
+
+    def get_current_model(self) -> str:
+        return "llama3"
+
+    async def _reply_text(self, update, text, **kwargs) -> None:
+        self.replies.append(text)
+
+
+@pytest.mark.asyncio
+async def test_model_entry_opens_for_binary_thinking_model() -> None:
+    host = _BinaryModelHost()
+    with ui_language.language_scope(host, locale="zh-CN"):
+        await runtime_model_selection.cmd_model(
+            host,
+            SimpleNamespace(effective_user=SimpleNamespace(id=1)),
+            SimpleNamespace(args=[]),
+        )
+    assert len(host.replies) == 1
+    assert "<code>开启</code>" in host.replies[0]
+
+
+class _EffortEntryHost(_EffortHost):
+    config = SimpleNamespace(active_backend="her-v2")
+    backend_manager = SimpleNamespace(current_backend=object())
+
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    def _is_authorized_user(self, user_id) -> bool:
+        return True
+
+    def _set_active_effort(self, value: str) -> None:
+        self.active = value
+
+    def _effort_keyboard(self, current_effort=None, *, source=None):
+        return FlexibleAgentRuntime._effort_keyboard(self, current_effort, source=source)
+
+    def get_current_model(self) -> str:
+        return "deepseek-chat"
+
+    async def _reply_text(self, update, text, **kwargs) -> None:
+        self.replies.append(text)
+
+
+@pytest.mark.asyncio
+async def test_effort_entry_card_and_echo_use_localized_levels() -> None:
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=1))
+    host = _EffortEntryHost()
+    with ui_language.language_scope(host, locale="zh-CN"):
+        await FlexibleAgentRuntime.cmd_effort(host, update, SimpleNamespace(args=[]))
+    assert "<code>最大</code>" in host.replies[-1]
+
+    host = _EffortEntryHost()
+    with ui_language.language_scope(host, locale="zh-CN"):
+        await FlexibleAgentRuntime.cmd_effort(host, update, SimpleNamespace(args=["max"]))
+    assert host.replies[-1] == "推理档位已切换为：最大"
+
+
+@pytest.mark.asyncio
+async def test_effort_button_echo_uses_localized_level() -> None:
+    from unittest.mock import AsyncMock
+
+    host = _EffortEntryHost()
+    host.error_logger = SimpleNamespace(exception=lambda *args: None)
+    query = SimpleNamespace(
+        data="effort:max",
+        from_user=SimpleNamespace(id=1),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+    with ui_language.language_scope(host, locale="zh-CN"):
+        await runtime_model_selection.callback_model(
+            host, SimpleNamespace(callback_query=query), SimpleNamespace()
+        )
+    query.edit_message_text.assert_awaited_once()
+    assert query.edit_message_text.await_args.args[0] == "推理档位已切换为：最大"
+
+
+def test_think_card_does_not_promise_an_unavailable_stream() -> None:
+    host = SimpleNamespace(
+        _think=True,
+        config=SimpleNamespace(active_backend="codex-cli"),
+        backend_manager=SimpleNamespace(
+            current_backend=SimpleNamespace(
+                capabilities=SimpleNamespace(
+                    supports_thinking_stream=False,
+                    supports_commentary_stream=False,
+                )
+            )
+        ),
+        _is_her_commentary_backend=lambda: False,
+    )
+    with ui_language.language_scope(host, locale="zh-CN"):
+        text = FlexibleAgentRuntime._think_menu_text(host)
+    assert "未提供" in text
+    assert "这个开关对它无效" in text
+    assert "会显示模型的思考过程" not in text
+    with ui_language.language_scope(host, locale="en"):
+        text = FlexibleAgentRuntime._think_menu_text(host)
+    assert "this switch has no effect" in text
+    assert "Shows the model's thinking output" not in text
 # HASHI-Fingerprint: hfp_1d39258c447a4ea2b89bce6ffbca20b7

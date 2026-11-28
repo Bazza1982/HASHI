@@ -9845,14 +9845,11 @@ class FlexibleAgentRuntime:
         return set(self._get_available_efforts()) == {"enabled", "off"}
 
     def _effort_display_value(self, effort: str) -> str:
-        if self._is_binary_reasoning() and effort in {"enabled", "off"}:
-            return ui_language.tr(f"menu.her.reasoning.level.{effort}")
+        # One display entry covers tiered levels, boolean thinking switches
+        # and unset/unknown values, so menus, echoes and buttons agree.
         from orchestrator.her_v2.models import effort_display_label
 
-        try:
-            return effort_display_label(effort)
-        except (KeyError, ValueError):
-            return effort
+        return effort_display_label(effort)
 
     def _effort_keyboard(
         self,
@@ -9958,7 +9955,7 @@ class FlexibleAgentRuntime:
                 f"<b>{html.escape(ui_language.tr('common.model'))}</b> · "
                 f"<code>{html.escape(self.get_current_model())}</code>",
                 f"<b>{html.escape(ui_language.tr('common.effort'))}</b> · "
-                f"<code>{html.escape(effort or 'n/a')}</code>",
+                f"<code>{html.escape(self._effort_display_value(effort) if effort else 'n/a')}</code>",
                 "",
                 ui_language.tr("menu.model.configuration_saved"),
             ]
@@ -10167,11 +10164,12 @@ class FlexibleAgentRuntime:
             if self.config.active_backend == HER_V2_ENGINE:
                 switched = ui_language.tr(
                     "menu.effort.her_switched",
-                    effort=requested,
+                    effort=self._effort_display_value(requested),
                 )
             else:
                 switched = ui_language.tr(
-                    "menu.effort.switched", effort=requested
+                    "menu.effort.switched",
+                    effort=self._effort_display_value(requested),
                 )
             await self._reply_text(update, switched)
             return
@@ -10195,13 +10193,11 @@ class FlexibleAgentRuntime:
             ]
         if self._is_binary_reasoning():
             effort_title = ui_language.tr("menu.effort.binary_title")
-            current_display = self._effort_display_value(current_effort)
         elif self.config.active_backend == HER_V2_ENGINE:
             effort_title = ui_language.tr("menu.effort.her_title")
-            current_display = current_effort
         else:
-            effort_title = "Model effort"
-            current_display = current_effort
+            effort_title = ui_language.tr("menu.effort.standard_title")
+        current_display = self._effort_display_value(current_effort)
         await self._reply_text(
             update,
             setting_card(

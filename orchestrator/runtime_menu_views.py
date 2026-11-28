@@ -360,14 +360,16 @@ def thinking_output_text(
             )
         )
     )
-    if enabled and her_backend:
+    if not reasoning_available:
+        # An unavailable stream wins over the enabled promise: the switch
+        # stays saved but the card must say it has no effect right now.
+        consequence = _tr("menu.think.unavailable_effect")
+    elif enabled and her_backend:
         consequence = _tr("menu.think.enabled_her")
     elif enabled:
         consequence = _tr("menu.think.enabled_other")
     elif her_backend:
         consequence = _tr("menu.think.disabled_her")
-    elif not reasoning_available:
-        consequence = _tr("menu.think.unavailable_effect")
     else:
         consequence = _tr("menu.think.disabled_other")
     return setting_card(
