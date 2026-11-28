@@ -398,45 +398,50 @@ def thinking_output_text(
     )
 
 
-def her_commentary_text(*, enabled: bool, effort: str) -> str:
-    """Render the HER-only Persona commentary ownership contract."""
+HER_COMMENTARY_MODES: tuple[str, ...] = ("off", "raw", "original", "packaged")
 
-    from orchestrator.her_v2.models import effort_display_label
 
-    try:
-        effort = effort_display_label(effort)
-    except ValueError:
-        pass
+def commentary_mode_name(mode: str) -> str:
+    """Return the human name of one commentary mode in the active language."""
 
+    normalized = str(mode or "").strip().casefold()
+    if normalized not in HER_COMMENTARY_MODES:
+        normalized = "off"
+    return _tr(f"menu.commentary.mode.{normalized}")
+
+
+def her_commentary_text(*, saved_mode: str, effective_mode: str) -> str:
+    """Render the HER-only commentary control as four readable choices."""
+
+    saved = str(saved_mode or "off").strip().casefold()
+    effective = str(effective_mode or saved).strip().casefold()
+    facts = [
+        _fact(
+            f"menu.commentary.mode.{mode}",
+            html.escape(_tr(f"menu.commentary.mode.{mode}.desc"), quote=False),
+        )
+        for mode in HER_COMMENTARY_MODES
+    ]
+    consequence = html.escape(_tr("menu.commentary.scope"), quote=False)
+    if saved != effective:
+        consequence = (
+            html.escape(
+                _tr(
+                    "menu.commentary.local_fallback",
+                    saved=commentary_mode_name(saved),
+                    effective=commentary_mode_name(effective),
+                ),
+                quote=False,
+            )
+            + "\n\n"
+            + consequence
+        )
     return setting_card(
-        "🌿",
-        _tr("menu.commentary.her_v3_title"),
-        current=f"<b>{status_label(enabled)}</b>",
-        facts=[
-            _fact(
-                "menu.commentary.execution_mode",
-                f"<code>{html.escape(effort)}</code>",
-            ),
-            html.escape(_tr("menu.commentary.her_v3_policy")),
-            _fact(
-                "menu.commentary.delivery_label",
-                html.escape(_tr("menu.commentary.delivery")),
-            ),
-            _fact(
-                "menu.commentary.leases_label",
-                html.escape(_tr("menu.commentary.leases")),
-            ),
-            _fact(
-                "menu.commentary.independent_label",
-                html.escape(_tr("menu.commentary.independent")),
-            ),
-            _fact("common.saved", html.escape(_tr("menu.setting.workspace"))),
-        ],
-        consequence=(
-            _tr("menu.commentary.enabled")
-            if enabled
-            else _tr("menu.commentary.disabled")
-        ),
+        "💬",
+        _tr("menu.commentary.title"),
+        current=f"<b>{html.escape(commentary_mode_name(effective))}</b>",
+        facts=facts,
+        consequence=consequence,
         action=_tr("menu.commentary.action"),
     )
 
@@ -446,37 +451,33 @@ def commentary_text(
     enabled: bool,
     backend: str,
     her_backend: bool,
-    effort: str,
+    saved_mode: str = "off",
+    effective_mode: str | None = None,
 ) -> str:
     """Render the capability-owned commentary control for any backend."""
 
     if her_backend:
-        return her_commentary_text(enabled=enabled, effort=effort)
+        return her_commentary_text(
+            saved_mode=saved_mode,
+            effective_mode=effective_mode or saved_mode,
+        )
     return setting_card(
         "💬",
-        "Model commentary",
+        _tr("menu.commentary.model_title"),
         current=f"<b>{status_label(enabled)}</b>",
         facts=[
             _fact(
                 "menu.commentary.current_backend",
                 f"<code>{html.escape(backend)}</code>",
             ),
-            _fact(
-                "menu.commentary.delivery_label",
-                html.escape(_tr("menu.commentary.model_delivery")),
-            ),
-            _fact(
-                "menu.commentary.independent_label",
-                html.escape(_tr("menu.commentary.independent")),
-            ),
-            _fact("common.saved", html.escape(_tr("menu.setting.workspace"))),
+            html.escape(_tr("menu.commentary.model_scope"), quote=False),
         ],
         consequence=(
             _tr("menu.commentary.model_enabled")
             if enabled
             else _tr("menu.commentary.model_disabled")
         ),
-        action=_tr("menu.commentary.action"),
+        action=_tr("menu.commentary.action_binary"),
     )
 
 

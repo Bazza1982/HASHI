@@ -650,9 +650,9 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "Show model-authored interim commentary",
         "session",
         guide=CommandGuide(
-            "/commentary [on|off]",
-            ("on", "off"),
-            example="/commentary on",
+            "/commentary [off|raw|original|packaged|on|off]",
+            ("off", "raw", "original", "packaged", "on"),
+            example="/commentary packaged",
         ),
     ),
     CommandSpec(
