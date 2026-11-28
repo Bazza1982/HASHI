@@ -26,7 +26,7 @@ from orchestrator.her_v2.v3_callback_contract import (
 from orchestrator.runtime_effort_options import (
     get_available_efforts, model_is_allowed, normalize_effort,
 )
-from orchestrator.her_v2.models import Route
+from orchestrator.her_v2.models import Route, effort_display_label
 
 HER_V2_STAGE_ROUTE_ORDER = (
     Route.DIRECT,
@@ -248,7 +248,7 @@ def her_v3_model_menu_text(runtime) -> str:
     return runtime_menu_views.her_v3_model_menu_text(
         provider=str(getattr(profile, "engine", "") or "unavailable"),
         model=str(getattr(profile, "model", "") or "unavailable"),
-        effort=str(runtime._get_current_effort() or "n/a"),
+        effort=str(runtime._get_current_effort() or ""),
     )
 
 
@@ -2703,15 +2703,10 @@ async def callback_model(runtime, update, context: Any) -> None:
                         parse_mode="HTML",
                     )
                 else:
-                    if runtime.config.active_backend == HER_V2_ENGINE:
-                        switched_text = ui_language.tr(
-                            "model.effort_switched",
-                            effort=requested,
-                        )
-                    else:
-                        switched_text = ui_language.tr(
-                            "model.effort_switched", effort=requested
-                        )
+                    switched_text = ui_language.tr(
+                        "model.effort_switched",
+                        effort=effort_display_label(requested),
+                    )
                     await query.edit_message_text(
                         switched_text,
                         reply_markup=runtime._effort_keyboard(requested),
@@ -2724,3 +2719,4 @@ async def callback_model(runtime, update, context: Any) -> None:
         )
         return
     await query.answer()
+# HASHI-Fingerprint: hfp_ca8f76d8408740b89041ecf77fcd5007

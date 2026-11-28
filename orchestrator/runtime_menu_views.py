@@ -8,6 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from orchestrator import ui_language
 from orchestrator.flexible_backend_registry import public_model_provider
+from orchestrator.her_v2.models import effort_display_label
 from orchestrator.command_ui import (
     card_title,
     confirm_card,
@@ -359,14 +360,16 @@ def thinking_output_text(
             )
         )
     )
-    if enabled and her_backend:
+    if not reasoning_available:
+        # An unavailable stream wins over the enabled promise: the switch
+        # stays saved but the card must say it has no effect right now.
+        consequence = _tr("menu.think.unavailable_effect")
+    elif enabled and her_backend:
         consequence = _tr("menu.think.enabled_her")
     elif enabled:
         consequence = _tr("menu.think.enabled_other")
     elif her_backend:
         consequence = _tr("menu.think.disabled_her")
-    elif not reasoning_available:
-        consequence = _tr("menu.think.unavailable_effect")
     else:
         consequence = _tr("menu.think.disabled_other")
     return setting_card(
@@ -509,7 +512,7 @@ def her_v2_provider_menu_text(
         )
     return setting_card(
         "🔌",
-        "HERV3 provider",
+        _tr("menu.her_v3.provider_title"),
         current=f"<code>{html.escape(current_provider)}</code>",
         facts=facts,
         consequence=_tr("menu.provider.effect"),
@@ -524,7 +527,7 @@ def her_v2_provider_menu_text(
 def her_v2_provider_unavailable_text(*, backend: str) -> str:
     return setting_card(
         "🔌",
-        "HERV3 Provider",
+        _tr("menu.her_v3.provider_title"),
         current=_state("common.unavailable"),
         facts=[
             _fact("common.backend", f"<code>{html.escape(backend)}</code>"),
@@ -578,12 +581,15 @@ def her_v2_model_menu_text(
 def her_v3_model_menu_text(*, provider: str, model: str, effort: str) -> str:
     """Project the selectable single-model HERV3 runtime."""
 
+    effort_text = (
+        effort_display_label(effort) if str(effort or "").strip() else _tr("common.default")
+    )
     return setting_card(
         "🧠",
         _tr("menu.her_v3.title"),
         current=f"<code>{html.escape(public_model_provider(provider))} / {html.escape(model)}</code>",
         facts=[
-            _fact("common.effort", f"<code>{html.escape(effort)}</code>"),
+            _fact("common.effort", f"<code>{html.escape(effort_text)}</code>"),
             _fact("common.backend", "<code>her-v3</code>"),
         ],
         consequence=_tr("menu.her_v3.effect"),

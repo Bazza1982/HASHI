@@ -112,19 +112,19 @@ def test_fallback_default_card_is_off_and_covers_the_required_facts(tmp_path):
     runtime = _runtime(tmp_path)
     with ui_language.language_scope(None, locale="en"):
         text = fallback_menu_text(runtime)
-    assert "FALLBACK" in text.upper()
-    assert "OFF" in text
-    assert "without PAO retries or fallback" in text
-    assert "ordinary general-model requests only" in text
+    assert "AUTOMATIC RECOVERY" in text.upper()
+    assert "Off" in text
+    assert "without retrying or switching models" in text
+    assert "ordinary model requests only" in text
     assert "Privacy:" in text
-    assert "Allowed targets, in order:" in text
-    assert "No allowed target configured." in text
+    assert "Backup targets, in order:" in text
+    assert "No usable backup target is configured yet." in text
     assert "Codex CLI" in text
     assert "Extra paid calls" in text
     assert "60 / 180 / 300" in text
     assert "Pause and notify" in text
     assert "immediately and persist" in text
-    assert "Phone, call, and voice requests are excluded." in text
+    assert "Phone, call, and voice requests are not covered." in text
 
 
 def test_fallback_command_registration_matches_catalog_description():
@@ -193,7 +193,7 @@ def test_fallback_locked_target_shows_a_plain_reason(tmp_path):
     with ui_language.language_scope(None, locale="en"):
         text = fallback_menu_text(runtime)
     assert "🔒" in text
-    assert "target key missing" in text
+    assert "this target has no key" in text
 
 
 def test_fallback_callbacks_stay_short_and_language_neutral(tmp_path):
@@ -309,7 +309,7 @@ async def test_fallback_save_conflict_keeps_the_previous_policy(
     saved, _document = _read(runtime)
     assert saved.mode == policy_owner.MODE_OFF
     assert query.edit_message_text.await_count == 1
-    assert "OFF" in query.edit_message_text.await_args.args[0]
+    assert "Off" in query.edit_message_text.await_args.args[0]
     assert query.answer.await_args.kwargs.get("show_alert") is True
 
 
@@ -354,9 +354,9 @@ async def test_fallback_effect_safety_is_independent_per_backend(tmp_path):
 
     with ui_language.language_scope(None, locale="en"):
         text = fallback_menu._sources_text(runtime)
-    assert "Codex CLI source" in text
+    assert "Codex CLI:" in text
     assert "Resume unfinished work" in text
-    assert "HERV3 source" in text
+    assert "HERV3:" in text
     assert "Pause and notify" in text
 
 
@@ -502,3 +502,4 @@ async def test_fallback_ask_confirmation_is_bound_and_one_time(
     stale = _query("fallback:confirm:ask-once:allow")
     await callback_fallback(runtime, _update(stale), SimpleNamespace())
     assert stale.answer.await_args.kwargs.get("show_alert") is True
+# HASHI-Fingerprint: hfp_069b18cd08fa42afa93d75421a4d8c9b
