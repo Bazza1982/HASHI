@@ -996,3 +996,54 @@ def test_flexible_runtime_persists_her_backend_events(tmp_path):
             logger.propagate = True
         for handler in handlers.values():
             handler.close()
+
+
+def test_retired_agent_companion_block_never_blocks_privacy_level_two(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A leftover HERV3 agent_companion block is ignored, not a privacy gate."""
+
+    monkeypatch.setattr(
+        "orchestrator.flexible_backend_manager.configured_filter_python",
+        lambda *args, **kwargs: tmp_path / "filter-python.exe",
+    )
+    monkeypatch.setattr(
+        "orchestrator.flexible_backend_manager.configured_filter_script",
+        lambda *args, **kwargs: tmp_path / "filter_sidecar.py",
+    )
+    workspace = tmp_path / "agent"
+    workspace.mkdir(parents=True, exist_ok=True)
+    cfg = FlexibleAgentConfig(
+        name="test-herv3",
+        workspace_dir=workspace,
+        system_md=workspace / "AGENT.md",
+        telegram_token_key="test-herv3",
+        allowed_backends=[
+            {
+                "engine": "her-v2",
+                "model": "deepseek-flash",
+                "her_v2": {
+                    "main": {"provider": "deepseek-api", "model": "deepseek-flash"},
+                    "v3_provider_allowlist": ["deepseek-api"],
+                    "agent_companion": {"enabled": True, "interval_minutes": 5},
+                },
+            }
+        ],
+        active_backend="her-v2",
+        default_mode="fixed",
+        project_root=workspace,
+    )
+    global_cfg = GlobalConfig(
+        authorized_id=1,
+        base_logs_dir=workspace / "logs",
+        base_media_dir=workspace / "media",
+        project_root=workspace,
+    )
+    manager = FlexibleBackendManager(cfg, global_cfg, secrets={})
+
+    assert (
+        manager.set_privacy_level(PrivacyLevel.BASIC_REDACTION)
+        is PrivacyLevel.BASIC_REDACTION
+    )
+    assert manager.privacy_level is PrivacyLevel.BASIC_REDACTION
+# HASHI-Fingerprint: hfp_e8bb729339224fc3ba1bde468a25a6bd

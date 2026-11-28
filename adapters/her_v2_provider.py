@@ -2202,18 +2202,6 @@ class _CognitiveControlToolRegistry:
 
             semantic_arguments, delta = self._split_arguments(arguments)
             if self._turn_services is not None:
-                notice = str(self._turn_services.take_intervention() or "").strip()
-                if notice:
-                    return self._result(
-                        tool_call_id=tool_call_id,
-                        output=(
-                            "HASHI_AGENT_COMPANION_INTERVENTION\n" + notice +
-                            "\nThe requested tool action was not executed. Decide the next "
-                            "step yourself; do not repeat mechanically."
-                        ),
-                        is_error=True,
-                        details={"control_disposition": "agent_companion_intervention"},
-                    )
                 self._turn_services.tool_started(name, semantic_arguments, tool_call_id)
             delta_application = self._apply_task_delta(
                 delta,

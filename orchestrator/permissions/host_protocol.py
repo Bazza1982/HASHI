@@ -12,12 +12,11 @@ import json
 
 from orchestrator.her_v2.config import HERv2Config, ProviderProfile, ProviderTarget
 from orchestrator.her_v2.models import DeliveryRecord, Effort, Route, Stage, TerminalState, TriageClassification, TurnResult
-from orchestrator.her_v2.v3_config import CompanionConfig
 from orchestrator.her_v2.presentation import (RequiredUserMessage, RenderedRequiredMessage,
     PresentationRequirement, FinalStyleRequest, FinalStyleResult)
 from orchestrator.her_v2.commentary import NeutralCommentary, DraftResponseCommentary
 
-_CLASSES = {c.__name__: c for c in (HERv2Config, ProviderProfile, ProviderTarget, CompanionConfig,
+_CLASSES = {c.__name__: c for c in (HERv2Config, ProviderProfile, ProviderTarget,
                                      TurnResult, DeliveryRecord, RequiredUserMessage, RenderedRequiredMessage,
                                      PresentationRequirement, FinalStyleRequest, FinalStyleResult,
                                      NeutralCommentary, DraftResponseCommentary)}
@@ -89,3 +88,4 @@ def unpack(value, *, _depth=0):
             raise ValueError("HER host DTO schema changed")
         return cls(**values)
     raise ValueError("unknown HER host value")
+# HASHI-Fingerprint: hfp_667598759b374db89afd399949b9c761

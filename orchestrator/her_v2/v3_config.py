@@ -49,42 +49,6 @@ class HERv3ModelTarget:
     def to_dict(self) -> dict[str, str]:
         return {"provider": public_model_provider(self.provider), "model": self.model}
 
-@dataclass(frozen=True)
-class CompanionConfig:
-    enabled: bool = False
-    interval_minutes: int = 5
-    model: str = "jev-latest"
-    api_key_env: str = "TYPESAFE_API_KEY"
-    check_timeout_s: float = 5.0
-
-    @classmethod
-    def from_mapping(cls, raw: Any) -> "CompanionConfig":
-        if raw is None:
-            return cls()
-        if not isinstance(raw, Mapping):
-            raise ValueError("agent_companion must be an object")
-        enabled = raw.get("enabled", False)
-        interval = raw.get("interval_minutes", 5)
-        timeout = raw.get("check_timeout_s", 5.0)
-        if not isinstance(enabled, bool):
-            raise ValueError("agent_companion.enabled must be a boolean")
-        if isinstance(interval, bool) or interval not in (5, 10):
-            raise ValueError("agent_companion.interval_minutes must be 5 or 10")
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("agent_companion.check_timeout_s must be positive")
-        model = str(raw.get("model", "jev-latest")).strip()
-        key_env = str(raw.get("api_key_env", "TYPESAFE_API_KEY")).strip()
-        if not model or not key_env.isidentifier():
-            raise ValueError("agent_companion requires a model and credential environment variable")
-        return cls(
-            enabled=enabled,
-            interval_minutes=int(interval),
-            model=model,
-            api_key_env=key_env,
-            check_timeout_s=float(timeout),
-        )
-
-
 def normalise_v3_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Collapse the old route/stage model matrix to one main model + auxiliary lane."""
     result = deepcopy(dict(raw))

@@ -81,8 +81,8 @@ filter. Level 2 runs a replaceable local PII detector before a qualified
 online-model request. Levels 3–5 are planned and cannot be selected yet.
 
 This Level 2 trial works only with HERV3 and its qualified official DeepSeek
-Model Provider. Other Engines and Model Providers, Agent Companion, and
-unsupported media are unavailable while Level 2 is active. Select HERV3 and
+Model Provider. Other Engines and Model Providers, and unsupported media are
+unavailable while Level 2 is active. Select HERV3 and
 DeepSeek first, then open `/privacy 2` and accept the displayed residual risk.
 Activation checks that the local detector is ready and saves the setting for
 the Agent. Lowering the level requires separate confirmation.

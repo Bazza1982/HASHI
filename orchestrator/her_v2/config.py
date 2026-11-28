@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .v3_config import CompanionConfig, normalise_v3_config
+from .v3_config import normalise_v3_config
 from .models import (
     DEFAULT_ROUTES_BY_STAGE,
     EXECUTION_ROUTES,
@@ -182,7 +182,6 @@ DEFAULT_STAGE_ROLES: Mapping[Stage, str] = {
 class HERv2Config:
     profiles: Mapping[str, ProviderProfile]
     stage_roles: Mapping[Stage, str]
-    agent_companion: CompanionConfig = field(default_factory=CompanionConfig)
     commentary_interval_s: float = 150.0
     routing_mode: str = "single"
     stage_reasoning: Mapping[Stage, str] = field(default_factory=dict)
@@ -452,7 +451,6 @@ class HERv2Config:
         return cls(
             profiles=profiles,
             stage_roles=stage_roles,
-            agent_companion=CompanionConfig.from_mapping(raw.get("agent_companion")),
             commentary_interval_s=float(raw.get("commentary_interval_s", 150.0)),
             routing_mode=routing_mode,
             stage_reasoning=stage_reasoning,

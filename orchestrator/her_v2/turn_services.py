@@ -1,15 +1,14 @@
-"""HERV3 sidecars: rate-limited Persona Commentary and Agent Companion.
+"""HERV3 sidecar: rate-limited Persona Commentary and liveness keepalive.
 
-These services observe the foreground model. They never plan or review the task.
-Commentary informs the user; Agent Companion is silent unless a bounded JEV
-liveness judgement finds strong evidence that execution is stuck or looping.
+This service observes the foreground model. It never plans or reviews the task.
+Commentary informs the user; a deterministic keepalive keeps a long tool run
+visible without any model call.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
-import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -23,58 +22,14 @@ from .commentary import (
 )
 from .models import Stage
 
-HEALTH_QUESTION = {
-    "type": "choice",
-    "instructions": (
-        "Judge ONLY execution liveness from observable runtime evidence. Select "
-        "continue when credible forward progress exists or a managed long-running "
-        "operation is behaving normally. Select trouble only for strong evidence "
-        "of a repeated semantic loop, repeated failure without adaptation, prolonged "
-        "lack of progress, or a stuck operation. Select unknown when evidence is "
-        "insufficient. Do not review task quality, correctness, style, completeness, "
-        "or create a new plan."
-    ),
-    "criteria": {
-        "continue": "Credible progress or normal waiting is visible.",
-        "trouble": "Strong observable evidence of a loop, stall, or repeated failure.",
-        "unknown": "The snapshot does not justify intervention.",
-    },
-}
-
-
 def _digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
-def parse_health(payload: Mapping[str, Any], *, threshold: float = 0.8) -> bool:
-    answers = payload.get("answers")
-    if not isinstance(answers, Mapping):
-        return False
-    answer = answers.get("health")
-    if not isinstance(answer, Mapping) or answer.get("type") != "choice":
-        return False
-    choice = str(answer.get("choice") or "unknown").casefold()
-    probabilities = answer.get("probabilities")
-    if choice not in HEALTH_QUESTION["criteria"] or not isinstance(probabilities, Mapping):
-        return False
-    values: list[float] = []
-    for key in HEALTH_QUESTION["criteria"]:
-        raw = probabilities.get(key)
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            return False
-        value = float(raw)
-        if not math.isfinite(value) or not 0 <= value <= 1:
-            return False
-        values.append(value)
-    if not math.isclose(sum(values), 1.0, abs_tol=0.01):
-        return False
-    return choice == "trouble" and float(probabilities["trouble"]) >= threshold
-
-
 class TurnServices(CommentaryPort):
-    """One request-local observer shared by commentary and Agent Companion."""
+    """One request-local observer for commentary and liveness keepalives."""
 
     def __init__(
         self,
@@ -84,9 +39,6 @@ class TurnServices(CommentaryPort):
         commentary_interval_s: float = 150.0,
         keepalive_threshold_s: float = 180.0,
         liveness_delivery: Any | None = None,
-        companion_enabled: bool = False,
-        companion_interval_s: float = 300.0,
-        companion_judge: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -95,9 +47,6 @@ class TurnServices(CommentaryPort):
         self.commentary_interval_s = max(120.0, min(180.0, float(commentary_interval_s)))
         self.keepalive_threshold_s = max(60.0, min(3600.0, float(keepalive_threshold_s)))
         self.liveness_delivery = liveness_delivery
-        self.companion_enabled = bool(companion_enabled)
-        self.companion_interval_s = max(1.0, float(companion_interval_s))
-        self.companion_judge = companion_judge
         self.clock = clock
         self.sleep = sleep
         self.started_at = clock()
@@ -109,11 +58,8 @@ class TurnServices(CommentaryPort):
         self._events: deque[dict[str, Any]] = deque(maxlen=24)
         self._active_tools: dict[str, dict[str, Any]] = {}
         self._result_fingerprints: deque[str] = deque(maxlen=12)
-        self._pending_intervention = ""
-        self._intervention_progress_revision = -1
         self._tasks: set[asyncio.Task] = set()
         self._keepalive_tasks: dict[str, asyncio.Task] = {}
-        self._companion_task: asyncio.Task | None = None
         self._forward_lock = asyncio.Lock()
         self._pending_commentary: deque[NeutralCommentary] = deque()
         self._commentary_fingerprints: set[str] = set()
@@ -122,20 +68,10 @@ class TurnServices(CommentaryPort):
         self._closed = False
         self._initial_ack_sent = False
 
-    def start(self) -> None:
-        if (
-            self.companion_enabled
-            and self.companion_judge is not None
-            and self._companion_task is None
-        ):
-            self._companion_task = asyncio.create_task(self._companion_loop())
-
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        if self._companion_task is not None:
-            self._companion_task.cancel()
         for task in tuple(self._tasks):
             task.cancel()
         for task in tuple(self._keepalive_tasks.values()):
@@ -143,18 +79,13 @@ class TurnServices(CommentaryPort):
                 task.cancel()
         pending = [
             task
-            for task in (
-                self._companion_task,
-                *tuple(self._tasks),
-                *tuple(self._keepalive_tasks.values()),
-            )
+            for task in (*tuple(self._tasks), *tuple(self._keepalive_tasks.values()))
             if task
         ]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
         self._keepalive_tasks.clear()
-        self._companion_task = None
         self._pending_commentary.clear()
         self._pending_commentary_task = None
         close_downstream = getattr(self.downstream, "close", None)
@@ -312,17 +243,6 @@ class TurnServices(CommentaryPort):
             "recent_result_fingerprints": list(self._result_fingerprints),
         }
 
-    def take_intervention(self) -> str:
-        """Return one AC notice at the next safe tool boundary, then consume it."""
-        if not self._pending_intervention:
-            return ""
-        if self.progress_revision != self._intervention_progress_revision:
-            self._pending_intervention = ""
-            return ""
-        notice = self._pending_intervention
-        self._pending_intervention = ""
-        return notice
-
     async def publish(self, commentary: NeutralCommentary) -> bool:
         text = str(commentary.text or "").strip()
         if self._closed or not text:
@@ -428,29 +348,4 @@ class TurnServices(CommentaryPort):
                 await self.sleep(delay)
         finally:
             self._pending_commentary_task = None
-
-    async def _companion_loop(self) -> None:
-        while not self._closed:
-            await asyncio.sleep(self.companion_interval_s)
-            if self._closed or self.companion_judge is None:
-                return
-            state = self.snapshot()
-            revision = self.progress_revision
-            try:
-                result = await self.companion_judge(state)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                continue
-            if not parse_health(result):
-                continue
-            # A JEV answer is advisory and may arrive after progress resumed.
-            if revision != self.progress_revision:
-                continue
-            self._pending_intervention = (
-                "Agent Companion observed apparent execution trouble from runtime "
-                "evidence. Reassess the current approach before taking another tool "
-                "action. If the blocker cannot be resolved, report it instead of "
-                "repeating the same action."
-            )
-            self._intervention_progress_revision = self.progress_revision
+# HASHI-Fingerprint: hfp_ab45a4c5ac324cdebbb656f2cd7e1711

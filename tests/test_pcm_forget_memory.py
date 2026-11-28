@@ -302,12 +302,50 @@ def test_central_memory_without_source_lineage_remains_available_after_forget(tm
 
 
 def test_tracked_emotional_events_are_removed_and_unattributed_cache_is_preserved(tmp_path):
-    from orchestrator.anatta.bridge_adapter import BridgeMemoryAdapter
-    from orchestrator.anatta.config import AnattaConfig
-    from orchestrator.anatta.memory import AnattaMemoryStore
-
     memory = BridgeMemoryStore(tmp_path)
-    AnattaMemoryStore(BridgeMemoryAdapter(memory), AnattaConfig(tmp_path))
+    # Anatta is retired, but existing instances still carry its tables. PCM
+    # forget must keep scrubbing that legacy data, so the schema is created
+    # directly here instead of importing the deleted package.
+    with memory._connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS emotional_annotations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bridge_row_type TEXT NOT NULL,
+                bridge_row_id INTEGER NOT NULL,
+                event_ts TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                actor_role TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                intensity INTEGER NOT NULL CHECK (intensity BETWEEN 0 AND 10),
+                dominant_drives_json TEXT NOT NULL,
+                drive_contributions_json TEXT NOT NULL,
+                relationship_key TEXT,
+                tags_json TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                importance REAL NOT NULL DEFAULT 1.0,
+                archived INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS relationship_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relationship_key TEXT NOT NULL,
+                event_ts TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                intensity INTEGER NOT NULL CHECK (intensity BETWEEN 0 AND 10),
+                drive_contributions_json TEXT NOT NULL,
+                metadata_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS derived_relationship_cache (
+                relationship_key TEXT PRIMARY KEY,
+                derived_summary_json TEXT NOT NULL,
+                computed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
     with memory._connect() as connection:
         for label, when in (("old", stamp(8)), ("forgotten", stamp(10))):
             connection.execute(
@@ -445,3 +483,4 @@ def test_unattributed_recovery_capsule_is_preserved(tmp_path, monkeypatch):
         assert connection.execute(
             "SELECT COUNT(*) FROM turns WHERE text LIKE '%bad idea%'"
         ).fetchone()[0] == 1
+# HASHI-Fingerprint: hfp_94f5419e35804391a917a480a04e6c3d
