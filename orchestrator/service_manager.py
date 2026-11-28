@@ -320,7 +320,7 @@ class ServiceManager:
 
         if backend in {"k8s", "kubernetes"}:
             try:
-                from orchestrator.enterprise import (
+                from orchestrator.enterprise.kubernetes_leases import (
                     KubernetesApiLeaseClient,
                     KubernetesLeaseCoordinator,
                     KubernetesSchedulerLeaseStore,
@@ -355,7 +355,7 @@ class ServiceManager:
             return {}
 
         try:
-            from orchestrator.enterprise import EnterpriseLeaseStore
+            from orchestrator.enterprise.leases import EnterpriseLeaseStore
 
             database_url = self._scheduler_enterprise_database_url(
                 getattr(global_cfg, "enterprise_database_url", None)

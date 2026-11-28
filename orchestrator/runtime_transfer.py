@@ -17,12 +17,7 @@ import aiohttp
 
 from orchestrator.runtime_common import QueuedRequest
 from orchestrator.runtime_delivery import format_backend_error_for_user
-from orchestrator import runtime_remote, ui_language
-from orchestrator.agent_move.remote_client import (
-    AgentMoveRemoteError,
-    candidate_remote_base_urls,
-    request_authenticated_json,
-)
+from orchestrator import ui_language
 from orchestrator.service_endpoints import ServiceEndpointError
 from remote.peer.base import normalize_instance_id
 from remote.security.shared_token import load_shared_token
@@ -469,6 +464,8 @@ def resolve_bridge_handoff_endpoint(
     target_instance: str,
     mode: str,
 ) -> tuple[str, str]:
+    from orchestrator.agent_move.remote_client import candidate_remote_base_urls
+
     action = "fork" if str(mode or "").strip().lower() == "fork" else "transfer"
     normalized_target = runtime._normalize_instance_name(target_instance)
     current_instance = runtime._normalize_instance_name(runtime._detect_instance_name())
@@ -553,6 +550,8 @@ def _remote_handoff_candidate_endpoints(
     endpoint: str,
     expected_target: str,
 ) -> list[str]:
+    from orchestrator.agent_move.remote_client import candidate_remote_base_urls
+
     marker = "/workbench/v1/proxy/api/bridge/"
     path = urlsplit(endpoint).path
     if path not in {marker + "transfer", marker + "fork"}:
@@ -604,6 +603,12 @@ def _request_remote_handoff(
     expected_target: str,
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
+    from orchestrator import runtime_remote
+    from orchestrator.agent_move.remote_client import (
+        AgentMoveRemoteError,
+        request_authenticated_json,
+    )
+
     token = load_shared_token(runtime_remote.instance_root(runtime))
     source = normalize_instance_id(runtime._detect_instance_name())
     if not token or not source:

@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import logging
 from collections import deque
+from dataclasses import dataclass
 from uuid import uuid4
 from contextlib import suppress
 from datetime import datetime
@@ -73,7 +74,6 @@ from orchestrator import runtime_mode
 from orchestrator import runtime_privacy
 from orchestrator import runtime_nudge
 from orchestrator import runtime_pipeline
-from orchestrator import runtime_remote
 from orchestrator import runtime_retry
 from orchestrator import runtime_scheduler_recovery
 from orchestrator import telegram_delivery_failover
@@ -188,6 +188,34 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 
 MAX_JOB_TRANSFER_SELECTIONS = 256
+
+
+@dataclass(frozen=True)
+class _PersonalChannelGateResult:
+    allowed: bool = True
+    reason: str = "personal_profile"
+    channel_id: str | None = None
+
+
+class _PersonalChannelGate:
+    """Allow-all channel gate for the personal deployment profile.
+
+    ``EnterpriseChannelGate`` already returns ``allowed=True`` with reason
+    ``personal_profile`` whenever the profile is personal.  Keeping that answer
+    here avoids importing the whole enterprise package on the Worker startup
+    path for installs that are never governed.
+    """
+
+    governed = False
+
+    def check(self, *, channel_type: str, direction: Any = None, **context: Any) -> _PersonalChannelGateResult:
+        return _PersonalChannelGateResult()
+
+    def check_ingress(self, channel_type: str, **context: Any) -> _PersonalChannelGateResult:
+        return _PersonalChannelGateResult()
+
+    def check_egress(self, channel_type: str, **context: Any) -> _PersonalChannelGateResult:
+        return _PersonalChannelGateResult()
 
 
 def _parse_key_values(args: list[str]) -> dict[str, str]:
@@ -616,12 +644,17 @@ class FlexibleAgentRuntime:
             },
         )
 
-    def _build_channel_gate(self) -> EnterpriseChannelGate:
-        from orchestrator.enterprise.audit_schema import AuditEventWriter
-        from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+    def _build_channel_gate(self) -> EnterpriseChannelGate | _PersonalChannelGate:
         profile = str(getattr(self.global_config, "deployment_profile", "personal") or "personal")
         if profile == "personal":
-            return EnterpriseChannelGate.from_global_config(self.global_config)
+            # Personal installs are never governed, so importing the enterprise
+            # package here would put it back on the Worker startup path for
+            # nothing.  ``_PersonalChannelGate`` mirrors the personal-profile
+            # result of ``EnterpriseChannelGate``.
+            return _PersonalChannelGate()
+        from orchestrator.enterprise.audit_schema import AuditEventWriter
+        from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
+
         bridge_home = Path(getattr(self.global_config, "bridge_home", Path(".")))
         return EnterpriseChannelGate.from_global_config(
             self.global_config,
@@ -6141,11 +6174,15 @@ class FlexibleAgentRuntime:
 
     # ── /move command ────────────────────────────────────────────────────────
     def _load_instances(self) -> dict:
+        from orchestrator import runtime_remote
+
         return runtime_remote.load_instances(project_root=runtime_remote.instance_root(self))
 
     async def cmd_move(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
+
+        from orchestrator import runtime_remote
 
         try:
             instances = await runtime_remote.load_move_instances(self)
@@ -6234,16 +6271,24 @@ class FlexibleAgentRuntime:
         await self._move_show_agent_picker(update, instances)
 
     async def _move_show_agent_picker(self, update: Update, instances: dict):
+        from orchestrator import runtime_remote
+
         await runtime_remote.move_show_agent_picker(self, update, instances)
 
     async def _move_show_target_picker(self, update: Update, agent_id: str, instances: dict):
+        from orchestrator import runtime_remote
+
         await runtime_remote.move_show_target_picker(self, update, agent_id, instances)
 
     async def _move_show_options(self, update, agent_id: str, target: str):
+        from orchestrator import runtime_remote
+
         await runtime_remote.move_show_options(self, update, agent_id, target)
 
     async def _do_move(self, update, agent_id: str, target: str, instances: dict,
                        keep_source: bool = False, sync: bool = False, dry_run: bool = False, transfer_mode: str | None = None):
+        from orchestrator import runtime_remote
+
         await runtime_remote.do_move(
             self,
             update,
@@ -6257,12 +6302,16 @@ class FlexibleAgentRuntime:
         )
 
     async def callback_move(self, update: Update, context: Any):
+        from orchestrator import runtime_remote
+
         await runtime_remote.handle_move_callback(self, update, context)
 
     # ── /clone command ───────────────────────────────────────────────────────
     async def cmd_clone(self, update: Update, context: Any):
         if not self._is_authorized_user(update.effective_user.id):
             return
+        from orchestrator import runtime_remote
+
         try:
             instances = await runtime_remote.load_clone_instances(self)
         except runtime_remote.MoveDiscoveryError as exc:
@@ -6317,6 +6366,8 @@ class FlexibleAgentRuntime:
         target_agent_id: str | None = None,
         dry_run: bool = False,
     ):
+        from orchestrator import runtime_remote
+
         await runtime_remote.do_clone(
             self,
             update,
@@ -6328,6 +6379,8 @@ class FlexibleAgentRuntime:
         )
 
     async def callback_clone(self, update: Update, context: Any):
+        from orchestrator import runtime_remote
+
         await runtime_remote.handle_clone_callback(self, update, context)
 
     def _resolve_bridge_handoff_endpoint(self, target_instance: str, mode: str) -> tuple[str, str]:
@@ -12551,6 +12604,8 @@ class FlexibleAgentRuntime:
 
         return [f"addr: <code>{html.escape(route_host)}:{html.escape(route_port)}</code>"]
     async def cmd_remote(self, update: Update, context: Any):
+        from orchestrator import runtime_remote
+
         await runtime_remote.cmd_remote(self, update, context)
 
     async def cmd_wol(self, update: Update, context: Any):

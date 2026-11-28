@@ -5,6 +5,7 @@ from urllib.error import URLError
 import pytest
 
 from orchestrator import runtime_transfer, ui_language
+from orchestrator.agent_move import remote_client
 from orchestrator.agent_move.remote_client import AgentMoveRemoteError
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 
@@ -561,7 +562,7 @@ def test_remote_bridge_handoff_authenticates_status_identity_and_posts_once(
             }
         return {"ok": True, "status": "accepted"}
 
-    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+    monkeypatch.setattr(remote_client, "request_authenticated_json", request)
 
     result = runtime_transfer._request_remote_handoff(
         runtime,
@@ -633,7 +634,7 @@ def test_remote_bridge_handoff_selects_reachable_explicit_target_before_post(
             }
         return {"ok": True, "status": "accepted"}
 
-    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+    monkeypatch.setattr(remote_client, "request_authenticated_json", request)
 
     result = runtime_transfer._request_remote_handoff(
         runtime,
@@ -685,7 +686,7 @@ def test_remote_bridge_handoff_wrong_identity_does_not_try_later_candidate(
             "workbench_health": {"ok": True, "instance_id": "HASHI4"},
         }
 
-    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+    monkeypatch.setattr(remote_client, "request_authenticated_json", request)
 
     with pytest.raises(ValueError, match="identity check failed"):
         runtime_transfer._request_remote_handoff(
@@ -723,7 +724,7 @@ def test_remote_bridge_handoff_auth_failure_does_not_try_later_candidate(
         calls.append((url, kwargs["method"]))
         raise AgentMoveRemoteError("receiver response authentication failed")
 
-    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+    monkeypatch.setattr(remote_client, "request_authenticated_json", request)
 
     with pytest.raises(AgentMoveRemoteError, match="authentication failed"):
         runtime_transfer._request_remote_handoff(
@@ -757,7 +758,7 @@ def test_remote_bridge_handoff_rejects_wrong_identity_before_post(tmp_path, monk
             "workbench_health": {"ok": True, "instance_id": "HASHI4"},
         }
 
-    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+    monkeypatch.setattr(remote_client, "request_authenticated_json", request)
 
     with pytest.raises(ValueError, match="identity check failed"):
         runtime_transfer._request_remote_handoff(
@@ -795,7 +796,7 @@ def test_remote_bridge_handoff_post_error_is_unknown_and_never_replayed(
             }
         raise TimeoutError("signed response was lost")
 
-    monkeypatch.setattr(runtime_transfer, "request_authenticated_json", request)
+    monkeypatch.setattr(remote_client, "request_authenticated_json", request)
 
     with pytest.raises(runtime_transfer.BridgeHandoffOutcomeUnknown) as raised:
         runtime_transfer._request_remote_handoff(
