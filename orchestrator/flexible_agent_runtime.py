@@ -4812,32 +4812,23 @@ class FlexibleAgentRuntime:
                 if generations.get(key) != generation or not result.failures:
                     return
                 codes = {item["code"] for item in result.failures}
-                if locale == "zh-CN":
-                    if "request_timeout" in codes:
-                        cause = "菜单同步超时"
-                    elif "connection_unavailable" in codes:
-                        cause = "菜单同步无法连接"
-                    else:
-                        cause = "菜单同步失败"
-                    if result.succeeded:
-                        cause = "部分智能体菜单已更新；" + cause
-                    warning = (
-                        f"语言偏好已保存，但{cause}（{result.failure_count} 个智能体）。"
-                        "稍后会在重连时重试。"
-                    )
+                if "request_timeout" in codes:
+                    cause_key = "language.menu_sync_cause.timeout"
+                elif "connection_unavailable" in codes:
+                    cause_key = "language.menu_sync_cause.unavailable"
                 else:
-                    if "request_timeout" in codes:
-                        cause = "menu synchronization timed out"
-                    elif "connection_unavailable" in codes:
-                        cause = "menu synchronization could not connect"
-                    else:
-                        cause = "menu synchronization failed"
-                    if result.succeeded:
-                        cause = "some Agent menus updated; " + cause
-                    warning = (
-                        f"Language preference was saved, but {cause} for "
-                        f"{result.failure_count} Agent(s). It will retry on reconnect."
-                    )
+                    cause_key = "language.menu_sync_cause.failed"
+                warning_key = (
+                    "language.menu_sync_warning_partial"
+                    if result.succeeded
+                    else "language.menu_sync_warning"
+                )
+                warning = ui_language.tr(
+                    warning_key,
+                    locale=locale,
+                    cause=ui_language.tr(cause_key, locale=locale),
+                    count=result.failure_count,
+                )
                 await self._reply_text(update, f"⚠️ {warning}")
 
         tasks = getattr(self, "_language_menu_sync_tasks", None)

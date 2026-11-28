@@ -257,6 +257,64 @@ async def test_language_menu_sync_is_serialized_and_latest_selection_wins(
     assert calls == [(42, "zh-CN"), (42, "en")]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "code", "cause_key", "succeeded"),
+    [
+        ("en", "request_timeout", "language.menu_sync_cause.timeout", 0),
+        ("zh-CN", "connection_unavailable", "language.menu_sync_cause.unavailable", 0),
+        ("zh-TW", "request_timeout", "language.menu_sync_cause.timeout", 0),
+        ("zh-TW", "connection_unavailable", "language.menu_sync_cause.unavailable", 0),
+        ("zh-TW", "unexpected_error", "language.menu_sync_cause.failed", 0),
+        ("zh-TW", "request_timeout", "language.menu_sync_cause.timeout", 1),
+    ],
+)
+async def test_language_menu_sync_warning_renders_in_the_selected_locale(
+    tmp_path, monkeypatch, locale, code, cause_key, succeeded
+) -> None:
+    replied: list[str] = []
+
+    async def sync(_runtime, *, chat_id, locale):
+        return runtime_command_binding.CommandMenuSyncResult(
+            succeeded + 2, succeeded, ({"code": code}, {"code": code}),
+        )
+
+    monkeypatch.setattr(runtime_command_binding, "sync_user_command_menus", sync)
+    runtime = object.__new__(FlexibleAgentRuntime)
+    runtime.name = "zelda"
+    runtime.global_config = GlobalConfig(
+        authorized_id=42, bridge_home=tmp_path, project_root=tmp_path
+    )
+    async def reply(_update, text, **_kwargs):
+        replied.append(text)
+
+    runtime._reply_text = reply
+
+    runtime._schedule_language_menu_sync(_update(), chat_id=42, locale=locale)
+    await asyncio.gather(*tuple(runtime._language_menu_sync_tasks))
+
+    warning_key = (
+        "language.menu_sync_warning_partial" if succeeded else "language.menu_sync_warning"
+    )
+    expected = "⚠️ " + ui_language.tr(
+        warning_key,
+        locale=locale,
+        cause=ui_language.tr(cause_key, locale=locale),
+        count=2,
+    )
+    assert replied == [expected]
+    # The notice keeps the concrete cause and the retry hint in the chosen language.
+    assert ui_language.tr(cause_key, locale=locale) in replied[0]
+    assert "2" in replied[0]
+    if locale != "en":
+        assert replied[0] != "⚠️ " + ui_language.tr(
+            warning_key,
+            locale="en",
+            cause=ui_language.tr(cause_key, locale="en"),
+            count=2,
+        )
+
+
 def test_telegram_activity_can_be_chinese_while_terminal_default_stays_english() -> None:
     digest = ActivityDigest()
     digest.record(
