@@ -54,6 +54,8 @@ RESTART_ESTIMATE_CASES = (
      "🔄 Starting a full system restart. This usually completes within 2 minutes."),
     ("zh-CN", "🔄 开始热重启。通常会在1分钟内完成。",
      "🔄 开始完整系统重启。通常会在2分钟内完成。"),
+    ("zh-TW", "🔄 開始熱重啟。通常會在1分鐘內完成。",
+     "🔄 開始完整系統重啟。通常會在2分鐘內完成。"),
 )
 
 
