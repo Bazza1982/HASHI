@@ -229,6 +229,25 @@ def _remote_log_handler(
     return handler, trimmed
 
 
+def _diag_remote_log_dir(log_file: Optional[Path], hashi_root: Path) -> Optional[str]:
+    """Directory that holds this Remote's own process log.
+
+    The diagnostics gate serves the instance's configured log directory; the
+    Remote may keep its own log somewhere else (``--log-file``), so hand that
+    directory over as a second, explicitly labelled root.
+    """
+
+    if log_file is None:
+        return None
+    path = Path(log_file)
+    if not path.is_absolute():
+        path = Path(hashi_root) / path
+    try:
+        return str(path.expanduser().resolve().parent)
+    except OSError:
+        return None
+
+
 def _build_local_capabilities(*, rescue_start_enabled: bool) -> list[str]:
     capabilities = build_default_capabilities(
         rescue_start_enabled=rescue_start_enabled
@@ -771,6 +790,7 @@ class HashiRemoteApplication:
             hashi_root=str(self._hashi_root),
             control_hashi_root=str(self._control_hashi_root),
             control_code_root=str(self._control_code_root),
+            diag_remote_log_dir=_diag_remote_log_dir(self._log_file, self._hashi_root),
         )
 
         # Perform one initial local HASHI liveness probe so initial mDNS TXT and /health

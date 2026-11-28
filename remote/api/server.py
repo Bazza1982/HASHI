@@ -103,7 +103,7 @@ from orchestrator.runtime_defaults import DEFAULT_WORKBENCH_PORT
 from ..attachments import AttachmentStore, STREAM_ATTACHMENT_CHUNK_BYTES
 from ..audit.logger import get_audit_logger
 from ..local_http import local_http_hosts, local_http_url
-from .diag_logs import DiagLogsGate, install_diag_logs_routes
+from .diag_logs import DiagLogsGate, build_diag_log_roots, install_diag_logs_routes
 from .lan_readiness import LanReadinessCache, MAX_REPORT_BYTES
 from ..protocol_ack import ack_state_path, load_ack_state, record_protocol_ack
 from ..protocol_outbound import (
@@ -3757,6 +3757,7 @@ def create_app(
     control_hashi_root: str = None,
     control_code_root: str = None,
     diag_logs_gate: Optional[DiagLogsGate] = None,
+    diag_remote_log_dir: str = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
@@ -6540,7 +6541,10 @@ def create_app(
         app,
         gate=diag_logs_gate
         or DiagLogsGate(
-            (Path(hashi_root) / "logs") if hashi_root else None,
+            log_roots=build_diag_log_roots(
+                Path(hashi_root) if hashi_root else None,
+                remote_log_dir=Path(diag_remote_log_dir) if diag_remote_log_dir else None,
+            ),
             instance_id=str(instance_info.get("instance_id") or ""),
         ),
     )

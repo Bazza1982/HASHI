@@ -32,11 +32,12 @@ be unit tested without booting a Remote.
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import threading
 import time
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Mapping, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -64,6 +65,99 @@ _RFC1918_NETWORKS = (
     ipaddress.IPv4Network("172.16.0.0/12"),
     ipaddress.IPv4Network("192.168.0.0/16"),
 )
+
+
+# ---------------------------------------------------------------------------
+# Log roots
+# ---------------------------------------------------------------------------
+
+#: Roots the gate can serve.  ``instance`` is the instance's *effective* log
+#: directory (``global.base_logs_dir``), which is where Core, Bridge, HER audit
+#: and agent session logs actually land; ``remote`` is the Remote process' own
+#: log directory, which sits outside that tree when ``--log-file`` points
+#: somewhere else.
+LOG_ROOT_INSTANCE = "instance"
+LOG_ROOT_REMOTE = "remote"
+
+#: Prefix ``orchestrator.pathing`` accepts for "relative to the bridge home".
+HOME_PREFIX = "@home/"
+
+
+def _expand_config_path(value: str, *, config_dir: Path, bridge_home: Path) -> Path:
+    """Resolve a configured path the same way ``orchestrator.config`` does."""
+
+    raw = os.path.expanduser(os.path.expandvars(str(value).strip()))
+    normalized = raw.replace("\\", "/")
+    if normalized.startswith(HOME_PREFIX):
+        return (bridge_home / Path(normalized[len(HOME_PREFIX):])).resolve()
+    candidate = Path(normalized)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (config_dir / candidate).resolve()
+
+
+def resolve_effective_logs_dir(hashi_root: Optional[Path]) -> Optional[Path]:
+    """Return the instance's effective log directory.
+
+    Instances may point ``global.base_logs_dir`` at any directory; the Remote
+    must serve the same directory the Core writes to, otherwise Bridge, HER
+    audit and agent session logs stay invisible over the LAN even though the
+    switch is open.
+    """
+
+    if not hashi_root:
+        return None
+    root = Path(hashi_root)
+    configured: object = "logs"
+    try:
+        raw = json.loads((root / "agents.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        raw = None
+    if isinstance(raw, dict):
+        global_section = raw.get("global")
+        if isinstance(global_section, dict) and "base_logs_dir" in global_section:
+            configured = global_section.get("base_logs_dir")
+    try:
+        return _expand_config_path(configured, config_dir=root, bridge_home=root)
+    except (OSError, ValueError):
+        return (root / "logs").resolve()
+
+
+def build_diag_log_roots(
+    hashi_root: Optional[Path],
+    *,
+    remote_log_dir: Optional[Path] = None,
+) -> dict[str, Path]:
+    """Build the labelled roots the diagnostics gate may serve.
+
+    The instance root always follows the instance's own configuration, and the
+    Remote's log directory is added only when it lives outside that tree, so the
+    same directory is never listed twice.
+    """
+
+    roots: dict[str, Path] = {}
+    instance_root = resolve_effective_logs_dir(hashi_root)
+    if instance_root is not None:
+        roots[LOG_ROOT_INSTANCE] = instance_root
+    if remote_log_dir:
+        remote_root = Path(remote_log_dir).expanduser().resolve()
+        if all(remote_root != existing for existing in roots.values()):
+            roots[LOG_ROOT_REMOTE] = remote_root
+    return roots
+
+
+def _normalise_log_roots(
+    log_root: Optional[Path],
+    log_roots: Optional[Mapping[str, Optional[Path]]],
+) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    if log_roots:
+        for label, path in log_roots.items():
+            if path:
+                roots[str(label)] = Path(path)
+    if not roots and log_root:
+        roots[LOG_ROOT_INSTANCE] = Path(log_root)
+    return roots
 
 
 class DiagLogError(Exception):
@@ -139,13 +233,15 @@ class DiagLogsGate:
 
     def __init__(
         self,
-        log_root: Optional[Path],
+        log_root: Optional[Path] = None,
         *,
+        log_roots: Optional[Mapping[str, Optional[Path]]] = None,
         instance_id: str = "",
         default_ttl_seconds: int = DEFAULT_TTL_SECONDS,
         now=time.time,
     ):
-        self._log_root = Path(log_root) if log_root else None
+        self._log_roots = _normalise_log_roots(log_root, log_roots)
+        self._log_root = self._log_roots[LOG_ROOT_INSTANCE] if self._log_roots else None
         self._instance_id = str(instance_id or "")
         self._default_ttl_seconds = int(default_ttl_seconds)
         self._now = now
@@ -160,7 +256,15 @@ class DiagLogsGate:
 
     @property
     def log_root(self) -> Optional[Path]:
+        """Primary (instance) log directory, kept for single-root callers."""
+
         return self._log_root
+
+    @property
+    def log_roots(self) -> dict[str, Path]:
+        """Every directory this gate may serve, in listing order."""
+
+        return dict(self._log_roots)
 
     def _expire_locked(self) -> None:
         if not self._enabled or self._expires_at is None:
@@ -182,6 +286,10 @@ class DiagLogsGate:
             "instance_id": self._instance_id,
             "log_root": str(self._log_root) if self._log_root else None,
             "log_root_exists": bool(self._log_root and self._log_root.is_dir()),
+            "log_roots": {
+                label: str(path)
+                for label, path in self._log_roots.items()
+            },
             "opened_at": self._opened_at,
             "expires_at": self._expires_at,
             "ttl_seconds": self._ttl_seconds,
@@ -333,6 +441,66 @@ def list_log_files(log_root: Optional[Path], *, max_files: int = MAX_LISTED_FILE
     }
 
 
+def list_all_log_files(
+    log_roots: Mapping[str, Path],
+    *,
+    max_files: int = MAX_LISTED_FILES,
+) -> dict:
+    """List every regular file across all served roots, labelled per root."""
+
+    files: list[dict] = []
+    total_bytes = 0
+    truncated = False
+    served: dict[str, str] = {}
+    for label, root in log_roots.items():
+        remaining = max_files - len(files)
+        if remaining <= 0:
+            truncated = True
+            break
+        try:
+            listing = list_log_files(root, max_files=remaining)
+        except DiagLogError:
+            continue
+        served[label] = listing["log_root"]
+        for entry in listing["files"]:
+            files.append({"root": label, **entry})
+            total_bytes += entry["size"]
+        if listing["truncated"]:
+            truncated = True
+    return {
+        "log_roots": served,
+        "file_count": len(files),
+        "total_bytes": total_bytes,
+        "truncated": truncated,
+        "max_files": max_files,
+        "files": files,
+    }
+
+
+def resolve_requested_log(
+    log_roots: Mapping[str, Path],
+    requested: str,
+) -> tuple[str, str, Path]:
+    """Resolve ``[<root>/]<relative path>`` to ``(label, relative, absolute)``.
+
+    A leading ``instance``/``remote`` segment selects a root explicitly; that is
+    the form the listing hands out so a caller can copy a path straight back.
+    Anything else resolves against the instance root, which keeps the original
+    single-root URLs working.
+    """
+
+    if not log_roots:
+        raise DiagLogError("log_root_unavailable", status_code=503)
+    relative = normalise_relative_path(requested)
+    segments = relative.split("/")
+    labelled = segments[0] in log_roots and len(segments) > 1
+    label = segments[0] if labelled else LOG_ROOT_INSTANCE
+    if label not in log_roots:
+        raise DiagLogError("log_root_unavailable", status_code=503)
+    inner = "/".join(segments[1:]) if labelled else relative
+    return label, inner, resolve_log_file(log_roots[label], inner)
+
+
 # ---------------------------------------------------------------------------
 # Ranged / streamed reads
 # ---------------------------------------------------------------------------
@@ -391,6 +559,10 @@ def _read_with_meta(
     return start, chunks
 
 
+class DiagLogRevoked(DiagLogError):
+    """Raised mid-stream when the switch closes or expires under a download."""
+
+
 def iter_log_bytes(
     path: Path,
     *,
@@ -398,12 +570,17 @@ def iter_log_bytes(
     lines: Optional[int] = None,
     max_bytes: Optional[int] = None,
     chunk_size: int = CHUNK_SIZE,
+    keep_alive: Optional[Callable[[], bool]] = None,
 ) -> Iterator[bytes]:
     """Yield the file contents from ``offset``, optionally line-capped.
 
     The read is incremental, so a multi-gigabyte log never lands in memory.
     ``lines`` counts complete lines from the requested start position; the
     final partial line is included.
+
+    ``keep_alive`` is re-checked before every chunk, so flipping the switch off
+    (or letting the TTL expire) aborts a download that is already in progress
+    instead of letting it run to completion.
     """
 
     if lines is not None and lines <= 0:
@@ -416,6 +593,8 @@ def iter_log_bytes(
     with path.open("rb") as handle:
         handle.seek(max(0, int(offset)))
         while True:
+            if keep_alive is not None and not keep_alive():
+                raise DiagLogRevoked("gate_closed", status_code=403)
             want = chunk_size if remaining is None else min(chunk_size, remaining)
             if want <= 0:
                 return
@@ -504,10 +683,12 @@ def install_diag_logs_routes(app: FastAPI, *, gate: DiagLogsGate) -> None:
         if denied is not None:
             return denied
         state = gate.status()
-        try:
-            listing = list_log_files(gate.log_root)
-        except DiagLogError as exc:
-            return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": exc.reason})
+        if not gate.log_roots:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "log_root_unavailable"},
+            )
+        listing = list_all_log_files(gate.log_roots)
         return {
             "ok": True,
             "client_scope": scope,
@@ -543,8 +724,7 @@ def install_diag_logs_routes(app: FastAPI, *, gate: DiagLogsGate) -> None:
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_max_bytes"})
 
         try:
-            relative = normalise_relative_path(log_path)
-            resolved = resolve_log_file(gate.log_root, relative)
+            root_label, relative, resolved = resolve_requested_log(gate.log_roots, log_path)
         except DiagLogError as exc:
             return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": exc.reason})
 
@@ -553,6 +733,7 @@ def install_diag_logs_routes(app: FastAPI, *, gate: DiagLogsGate) -> None:
         state = gate.status()
 
         headers = {
+            "X-Diag-Log-Root": root_label,
             "X-Diag-Log-Path": relative,
             "X-Diag-Log-Size": str(size),
             "X-Diag-Log-Start": str(start),
@@ -567,6 +748,7 @@ def install_diag_logs_routes(app: FastAPI, *, gate: DiagLogsGate) -> None:
             offset=start,
             lines=lines,
             max_bytes=max_bytes,
+            keep_alive=gate.is_open,
         )
         return StreamingResponse(
             body,

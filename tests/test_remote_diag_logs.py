@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -15,13 +16,16 @@ from remote.api.diag_logs import (
     MAX_TTL_SECONDS,
     MIN_TTL_SECONDS,
     DiagLogError,
+    DiagLogRevoked,
     DiagLogsGate,
+    build_diag_log_roots,
     classify_client_host,
     compute_start_offset,
     iter_log_bytes,
     list_log_files,
     normalise_relative_path,
     read_log_slice,
+    resolve_effective_logs_dir,
     resolve_log_file,
 )
 from remote.api.server import create_app
@@ -434,4 +438,138 @@ def test_gate_state_is_exposed_for_ui_hints(instance_root: Path) -> None:
     assert body["enabled"] is True
     assert body["remaining_seconds"] == 600
     assert body["log_root_exists"] is True
+
+
+# ---------------------------------------------------------------------------
+# Effective log directory: instances that move global.base_logs_dir
+# ---------------------------------------------------------------------------
+
+
+def write_agents_json(hashi_root: Path, base_logs_dir) -> None:
+    payload = {"global": {"authorized_id": 1, "instance_id": "HASHI8"}}
+    if base_logs_dir is not None:
+        payload["global"]["base_logs_dir"] = base_logs_dir
+    (hashi_root / "agents.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_effective_logs_dir_defaults_to_logs_when_unconfigured(tmp_path: Path) -> None:
+    write_agents_json(tmp_path, None)
+    assert resolve_effective_logs_dir(tmp_path) == (tmp_path / "logs").resolve()
+
+
+def test_effective_logs_dir_follows_configured_absolute_path(tmp_path: Path) -> None:
+    custom = tmp_path / "moved-logs"
+    write_agents_json(tmp_path, str(custom))
+    assert resolve_effective_logs_dir(tmp_path) == custom.resolve()
+
+
+def test_effective_logs_dir_supports_home_prefix_and_relative_values(tmp_path: Path) -> None:
+    write_agents_json(tmp_path, "@home/alt-logs")
+    assert resolve_effective_logs_dir(tmp_path) == (tmp_path / "alt-logs").resolve()
+
+    write_agents_json(tmp_path, "nested/rel-logs")
+    assert resolve_effective_logs_dir(tmp_path) == (tmp_path / "nested" / "rel-logs").resolve()
+
+
+def test_effective_logs_dir_survives_missing_or_broken_config(tmp_path: Path) -> None:
+    assert resolve_effective_logs_dir(tmp_path) == (tmp_path / "logs").resolve()
+    (tmp_path / "agents.json").write_text("{not json", encoding="utf-8")
+    assert resolve_effective_logs_dir(tmp_path) == (tmp_path / "logs").resolve()
+
+
+def test_diag_log_roots_add_the_remote_dir_only_when_it_lives_elsewhere(tmp_path: Path) -> None:
+    moved = tmp_path / "moved-logs"
+    write_agents_json(tmp_path, str(moved))
+
+    assert list(build_diag_log_roots(tmp_path)) == ["instance"]
+    assert list(build_diag_log_roots(tmp_path, remote_log_dir=str(moved))) == ["instance"]
+
+    separate = tmp_path / "remote-logs"
+    roots = build_diag_log_roots(tmp_path, remote_log_dir=str(separate))
+    assert roots == {"instance": moved.resolve(), "remote": separate.resolve()}
+
+
+def test_gate_serves_the_effective_logs_dir_and_the_remote_dir(tmp_path: Path) -> None:
+    instance_logs = tmp_path / "moved-logs"
+    (instance_logs / "agent").mkdir(parents=True)
+    (instance_logs / "agent" / "her_v2_audit.jsonl").write_bytes(b'{"a":1}\n')
+    (instance_logs / "bridge.log").write_bytes(b"bridge line\n")
+    remote_logs = tmp_path / "remote-logs"
+    remote_logs.mkdir()
+    (remote_logs / "hashi-remote.log").write_bytes(b"remote line\n")
+
+    gate = DiagLogsGate(
+        log_roots={"instance": instance_logs, "remote": remote_logs},
+        instance_id="HASHI8",
+    )
+    client = build_client(tmp_path, gate, LOOPBACK)
+    assert client.post("/diag/gate", json={"enabled": True}).status_code == 200
+
+    listing = client.get("/diag/logs").json()
+    served = {(entry["root"], entry["path"]) for entry in listing["files"]}
+    assert ("instance", "agent/her_v2_audit.jsonl") in served
+    assert ("instance", "bridge.log") in served
+    assert ("remote", "hashi-remote.log") in served
+    assert set(listing["log_roots"]) == {"instance", "remote"}
+
+    remote_read = client.get("/diag/logs/remote/hashi-remote.log")
+    assert remote_read.status_code == 200
+    assert remote_read.content == b"remote line\n"
+    assert remote_read.headers["x-diag-log-root"] == "remote"
+
+    # The original unprefixed URL keeps resolving against the instance root.
+    legacy = client.get("/diag/logs/agent/her_v2_audit.jsonl")
+    assert legacy.status_code == 200
+    assert legacy.content == b'{"a":1}\n'
+    assert legacy.headers["x-diag-log-root"] == "instance"
+
+    # Boundaries are enforced per root, not just once for the whole gate.
+    # Percent-encoded so the HTTP client cannot pre-resolve the `..` itself.
+    traversal = client.get("/diag/logs/remote/%2e%2e%2fsecrets.json")
+    assert traversal.status_code == 400
+    assert traversal.json()["error"] == "parent_traversal"
+    assert client.get("/diag/logs/instance/%2e%2e%2f%2e%2e%2fsecrets.json").status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Revoking a download that is already running
+# ---------------------------------------------------------------------------
+
+
+def test_in_flight_download_is_revoked_when_the_switch_closes(tmp_path: Path) -> None:
+    gate = DiagLogsGate(log_roots={"instance": tmp_path})
+    payload = tmp_path / "big.log"
+    payload.write_bytes(b"y" * (256 * 1024))
+    gate.open()
+
+    chunks = iter_log_bytes(payload, chunk_size=4096, keep_alive=gate.is_open)
+    assert len(next(chunks)) == 4096
+    gate.close()
+    with pytest.raises(DiagLogRevoked):
+        next(chunks)
+
+
+def test_in_flight_download_is_revoked_when_the_ttl_expires(tmp_path: Path) -> None:
+    clock = {"now": 1_800_000_000.0}
+    gate = DiagLogsGate(log_roots={"instance": tmp_path}, now=lambda: clock["now"])
+    payload = tmp_path / "big.log"
+    payload.write_bytes(b"z" * (256 * 1024))
+    gate.open(ttl_seconds=MIN_TTL_SECONDS)
+
+    chunks = iter_log_bytes(payload, chunk_size=4096, keep_alive=gate.is_open)
+    assert len(next(chunks)) == 4096
+    clock["now"] += MIN_TTL_SECONDS + 1
+    with pytest.raises(DiagLogRevoked):
+        next(chunks)
+
+
+def test_download_route_binds_the_live_gate_to_the_stream() -> None:
+    """The read route must hand the live switch to the streamer.
+
+    Without this binding the admission check would only run once, and a
+    download would keep running after the switch was closed or expired.
+    """
+
+    source = Path("remote/api/diag_logs.py").read_text(encoding="utf-8")
+    assert "keep_alive=gate.is_open" in source
 # HASHI-Fingerprint: hfp_4174ac376c904b8285ee559e4dfb6a6b
