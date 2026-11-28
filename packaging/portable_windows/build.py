@@ -158,7 +158,6 @@ SOURCE_DIRS = (
     "tools",
     "transports",
     "tui",
-    "veritas",
 )
 RUNTIME_ENTRY_FILE = "runtime-entry.json"
 ROOT_SOURCE_FILES = (
@@ -232,11 +231,7 @@ PRUNED_SOURCE_PATHS = (
     "tools/browser_bridge_maturity.py",
     "tools/browser_bridge_smoke_runner.py",
     "tools/browser_bridge_stub_server.py",
-    "tools/browser_bridge_test_bundle.py",
     "tools/browser_bridge_test_env.py",
-    "tools/browser_bridge_test_runner.py",
-    "tools/windows_use_evaluation.py",
-    "veritas/SETUP.md",
     "superloops/loops",
 )
 IGNORED_SOURCE_NAMES = {
@@ -1314,7 +1309,6 @@ def validate_image(image_root: Path) -> None:
         "app/hashi/tui/assets/sounds/soft_chat_send.wav",
         "app/hashi/tui/assets/sounds/soft_chat_receive.wav",
         "app/hashi/exp/loader.py",
-        "app/hashi/veritas/__init__.py",
         "app/hashi/voice_models/piper/zh_CN-huayan-medium.onnx",
         "app/hashi/hashi_assets/ocr/bin/windows-x86_64/tesseract.exe",
         "Install_HASHI_On_This_PC.bat",

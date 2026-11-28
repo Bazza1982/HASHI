@@ -130,7 +130,6 @@
     "tools/",
     "transports/",
     "tui/",
-    "veritas/",
     "windows/",
     "agents.json.sample",
     "secrets.json.sample",

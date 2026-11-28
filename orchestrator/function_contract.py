@@ -22,7 +22,6 @@ FUNCTION_MODULE_PREFIXES = (
     "remote.",
     "transports.",
     "exp.",
-    "veritas.",
     "specs.",
     "browser_gateway.",
     "apps.",

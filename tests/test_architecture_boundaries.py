@@ -24,8 +24,6 @@ def _runtime_python_sources() -> list[Path]:
     sources.extend(
         [
             ROOT / "tools" / "hchat_send.py",
-            ROOT / "tools" / "news_deliver_to_sunny.py",
-            ROOT / "tools" / "onedrive_memo_gen.py",
         ]
     )
     return sources
@@ -135,3 +133,4 @@ def test_retired_her_v1_and_openclaw_surfaces_cannot_reenter_runtime():
                     violations.append(f"{path.relative_to(ROOT)}: {marker}")
 
     assert violations == []
+# HASHI-Fingerprint: hfp_cf9e311cc4914d998d384eefc68d62b2
