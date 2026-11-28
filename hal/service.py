@@ -52,6 +52,7 @@ from hal.runtime import (
     unavailable_wait_detail,
     validate_script,
     whiteboard_halt_reason,
+    whiteboard_stop_is_exceptional,
 )
 from hal.store import HalStore, HalStoreError
 
@@ -529,9 +530,14 @@ class HalService:
             would_start = entry_rules_match(
                 trigger, rules, current_instance=self._current_instance_id() or None
             )
-            if not halts and not would_start:
-                # Nothing was running and nothing would have started: this is a
-                # human-gated move nobody automated, not an automation stop.
+            if (
+                not halts
+                and not would_start
+                and not whiteboard_stop_is_exceptional(trigger)
+            ):
+                # Nothing was running, nothing would have started and the board
+                # did not take a protective action: a human-gated move nobody
+                # automated is ordinary traffic, not an automation stop.
                 return False
             stopped = 0
             for halt in halts:

@@ -510,6 +510,29 @@ def whiteboard_halt_reason(trigger: HalTrigger) -> str | None:
     return None
 
 
+def whiteboard_stop_is_exceptional(trigger: HalTrigger) -> bool:
+    """True when the board itself took a protective action.
+
+    A fused card, a halted-category move or an exhausted round budget is an
+    exception the humans must hear about even if no rule was going to fire. A
+    plain human-gated move is ordinary workflow traffic, not an automation stop.
+    """
+    if trigger.source != SOURCE_WHITEBOARD:
+        return False
+    context = trigger.context or {}
+    if bool(context.get("fused")):
+        return True
+    if str(context.get("category") or "") == "halted":
+        return True
+    round_no, max_rounds = context.get("round"), context.get("max_rounds")
+    return (
+        isinstance(round_no, int)
+        and isinstance(max_rounds, int)
+        and max_rounds > 0
+        and round_no >= max_rounds
+    )
+
+
 def entry_rules_match(
     trigger: HalTrigger,
     rules: Sequence[Mapping[str, Any]],

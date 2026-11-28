@@ -498,6 +498,24 @@ def test_human_gate_move_without_automation_is_silent(tmp_path):
     assert board.comments == []
 
 
+def test_fuse_without_a_live_chain_is_still_reported(tmp_path):
+    """The board fusing a card is always worth telling the humans about."""
+    board = FakeBoard()
+    service, adapter = make_service(tmp_path, board=board)
+    rule = make_rule(service, REVIEW_RULE)
+    service.set_enabled(owner_id=OWNER, rule_id=rule["rule_id"], enabled=True)
+    board.append(
+        card_id=CARD, revision=21, fused=True, to_stage="blocked", category="halted",
+        reason="Round 4 exceeded max_rounds 3; the card was fused into blocked.",
+    )
+
+    run(service._process_owner(OWNER))
+
+    assert adapter.prompt_calls == []
+    notices = service.store.list_notices(OWNER)
+    assert len(notices) == 1 and "max_rounds" in notices[0]["detail"]
+
+
 def test_exhausted_round_budget_stops(tmp_path):
     board = FakeBoard()
     service, adapter = make_service(tmp_path, board=board)
