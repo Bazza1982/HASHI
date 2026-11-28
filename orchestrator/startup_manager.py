@@ -1016,9 +1016,18 @@ class StartupManager:
             main_logger.warning("Connector startup is degraded; inspect /api/health for affected agents.",
                                 extra={"terminal_safe": True})
         report = getattr(self.kernel, "_report_startup", None)
-        if callable(report) and not getattr(self, "_connector_startup_reported", False):
-            self._connector_startup_reported = True
-            report()
+        if callable(report):
+            reported = getattr(self, "_connector_startup_reported", False)
+            reported_degraded = getattr(self, "_connector_reported_degraded", None)
+            # Render the full startup summary for the first published connector
+            # state and whenever degradation actually flips. Individual agent
+            # transitions inside the same degradation state must not redraw the
+            # banner, but a recovery (or a fresh failure) has to, otherwise the
+            # last rendered summary keeps showing stale connector health.
+            if not reported or reported_degraded is not degraded:
+                self._connector_startup_reported = True
+                self._connector_reported_degraded = degraded
+                report()
 
     def show_startup_status(self) -> None:
         """Render verified Worker, Telegram ingress, and live service state."""
