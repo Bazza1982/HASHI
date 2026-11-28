@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from types import SimpleNamespace
 
 import pytest
@@ -268,3 +269,18 @@ async def test_retired_mode_callbacks_are_non_mutating_alerts(
         (ui_language.tr("mode.retired"), {"show_alert": True})
     ]
 # HASHI-Fingerprint: hfp_f6b0e76833314b94bd3c9d35e0770007
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "orchestrator.wrapper_mode",
+        "orchestrator.runtime_wrapper",
+        "orchestrator.audit_mode",
+        "orchestrator.dual_brain_mode",
+        "orchestrator.runtime_audit",
+    ],
+)
+def test_retired_mode_modules_stay_retired(module):
+    """Guard: the retired modes must not creep back into the package."""
+    assert importlib.util.find_spec(module) is None
