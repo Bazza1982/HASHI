@@ -14,7 +14,6 @@ Two properties matter for correctness:
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from typing import Any
 from urllib.parse import quote
@@ -28,7 +27,6 @@ PAGE_LIMIT = 500
 # pathological board cannot stall an enable forever; if it is hit we refuse the
 # enable rather than guess a baseline and replay history.
 MAX_BASELINE_PAGES = 40
-STAGE_CACHE_SECONDS = 60.0
 
 
 class WhiteboardUnavailable(RuntimeError):
@@ -48,13 +46,10 @@ class WhiteboardClient:
         *,
         token: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
-        clock=None,
     ):
         self.base_url = str(base_url or DEFAULT_BASE_URL).rstrip("/")
         self._token = (token or "").strip() or None
         self._timeout = aiohttp.ClientTimeout(total=timeout)
-        self._clock = clock if clock is not None else time.monotonic
-        self._stages: dict[str, tuple[float, dict[str, dict[str, Any]]]] = {}
 
     # ------------------------------------------------------------- plumbing
 
@@ -145,74 +140,42 @@ class WhiteboardClient:
             "refusing to guess an enable baseline"
         )
 
-    def head_seq_blocking(self) -> int:
-        """Synchronous baseline read for the (sync) enable path.
+    async def card(self, card_id: str) -> dict[str, Any]:
+        """One card's CURRENT document.
 
-        Enabling runs inside a request handler with a live loop, so awaiting is
-        not an option and a bounded blocking read is the honest trade: it is one
-        short GET, and its failure refuses the enable rather than guessing.
+        This is the authority for "may this chain continue": the board fuses a
+        card, and its owner edits gates, at any moment. A cached projection
+        could therefore let automation walk through a stop that already exists.
         """
-        cursor = 0
-        highest = 0
-        for _ in range(MAX_BASELINE_PAGES):
-            payload = self._get_blocking(
-                f"/api/workflow/events?after={cursor}&limit={PAGE_LIMIT}"
-            )
-            events = payload.get("events")
-            next_cursor = _int(payload.get("next_cursor"))
-            if not isinstance(events, list) or next_cursor is None:
-                raise WhiteboardUnavailable("whiteboard event page is unusable")
-            for event in events:
-                seq = _int(event.get("seq")) if isinstance(event, dict) else None
-                if seq is not None and seq > highest:
-                    highest = seq
-            if next_cursor > highest:
-                highest = next_cursor
-            if not payload.get("has_more"):
-                return highest
-            if next_cursor <= cursor:
-                raise WhiteboardUnavailable(
-                    "whiteboard event page did not advance while reading the baseline"
-                )
-            cursor = next_cursor
-        raise WhiteboardUnavailable(
-            "whiteboard event history exceeds the baseline page bound; "
-            "refusing to guess an enable baseline"
-        )
+        payload = await self._request("GET", f"/api/cards/{quote(card_id, safe='')}")
+        card = payload.get("card")
+        if isinstance(card, dict):
+            return card
+        if isinstance(payload.get("id"), str):
+            return payload
+        raise WhiteboardUnavailable("whiteboard card payload has no card object")
 
-    def _get_blocking(self, path: str) -> dict[str, Any]:
-        import json as _json
-        import urllib.error
-        import urllib.request
-
-        request = urllib.request.Request(
-            f"{self.base_url}{path}", headers=self._headers(), method="GET"
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout.total) as response:
-                if response.status != 200:
-                    raise WhiteboardUnavailable(
-                        f"whiteboard GET {path} answered {response.status}"
-                    )
-                payload = _json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError) as exc:
-            raise WhiteboardUnavailable(
-                f"whiteboard GET {path} unreachable: {type(exc).__name__}"
-            ) from exc
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise WhiteboardUnavailable(f"whiteboard GET {path} returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise WhiteboardUnavailable(f"whiteboard GET {path} returned a non-object")
-        return payload
+    async def cards(self) -> dict[str, dict[str, Any]]:
+        """Every live card keyed by id (used to resync after a cursor gap)."""
+        payload = await self._request("GET", "/api/board")
+        cards = payload.get("cards")
+        if not isinstance(cards, list):
+            raise WhiteboardUnavailable("whiteboard board payload has no cards array")
+        return {
+            str(card["id"]): card
+            for card in cards
+            if isinstance(card, dict) and isinstance(card.get("id"), str)
+        }
 
     async def stages(self, project: str = "") -> dict[str, dict[str, Any]]:
-        """Resolved stage table for one project (cached briefly)."""
-        key = str(project or "")
-        cached = self._stages.get(key)
-        now = self._clock()
-        if cached is not None and cached[0] > now:
-            return cached[1]
-        query = f"?project={quote(key, safe='')}" if key else ""
+        """Resolved stage table for one project, read live on every call.
+
+        Never cached: the gate and round-budget decisions below are taken from
+        this table, and the board lets its owner edit the definition at any
+        moment. A stale copy would silently authorise a move through a gate that
+        exists by now.
+        """
+        query = f"?project={quote(str(project or ''), safe='')}" if project else ""
         payload = await self._request("GET", f"/api/workflow{query}")
         workflow = payload.get("workflow")
         stages = workflow.get("stages") if isinstance(workflow, dict) else None
@@ -222,7 +185,6 @@ class WhiteboardClient:
         for stage in stages:
             if isinstance(stage, dict) and isinstance(stage.get("key"), str):
                 table[stage["key"]] = stage
-        self._stages[key] = (now + STAGE_CACHE_SECONDS, table)
         return table
 
     # ------------------------------------------------------------ write side

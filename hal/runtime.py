@@ -302,7 +302,7 @@ def plan_for_trigger(
             stage=stage,
             action=rule.action,
             agent_trigger=exec_row.get("trigger_agent"),
-            context=_exec_context(exec_row),
+            context=exec_context(exec_row),
         )
         advances.append(
             AdvanceIntent(
@@ -345,7 +345,7 @@ def _next_exec_id(rule_id: str, workflow_index: int, feed_event_id: str | None) 
     return f"hx{digest}"
 
 
-def _exec_context(exec_row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+def exec_context(exec_row: Mapping[str, Any]) -> Mapping[str, Any] | None:
     """The card context frozen on an execution, if any."""
     context = exec_row.get("context")
     if isinstance(context, Mapping):
@@ -430,7 +430,7 @@ def directive_for_exec_stage(exec_row: Mapping[str, Any]) -> DispatchDirective |
         stage=stage,
         action=workflow[stage].action,
         agent_trigger=exec_row.get("trigger_agent"),
-        context=_exec_context(exec_row),
+        context=exec_context(exec_row),
     )
 
 
@@ -551,10 +551,20 @@ def entry_rules_match(
 def halted_execs_for(
     trigger: HalTrigger,
     execs: Sequence[Mapping[str, Any]],
+    *,
+    reason: str | None = None,
 ) -> list[HaltIntent]:
-    """Active executions on the halted card that must be settled now."""
-    reason = whiteboard_halt_reason(trigger)
+    """Active executions on the halted card that must be settled now.
+
+    ``reason`` exists because the stop is not always visible in the event
+    document: an exhausted rework budget and an unreadable stage table are
+    decided from the board's stage table by the service. Passing the resolved
+    reason here keeps ONE halt judgement — the service's — instead of letting
+    this helper silently drop stops it cannot re-derive.
+    """
     if reason is None:
+        reason = whiteboard_halt_reason(trigger)
+    if not reason:
         return []
     card_id = str((trigger.context or {}).get("card_id") or "")
     if not card_id:
@@ -563,7 +573,7 @@ def halted_execs_for(
     for exec_row in execs:
         if str(exec_row.get("state")) != EXEC_ACTIVE:
             continue
-        context = _exec_context(exec_row) or {}
+        context = exec_context(exec_row) or {}
         if str(context.get("card_id") or "") != card_id:
             continue
         halts.append(
