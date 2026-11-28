@@ -14,6 +14,7 @@ All persistence is synchronous SQLite behind ``asyncio.to_thread``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -29,8 +30,10 @@ from hal import compile_hal
 from hal.dispatch import DispatchAdapter, DispatchResult, resolve_agent_target, split_agent_spec
 from hal.peer import RemoteTerminalUnavailable, handle_hal_peer_request
 from hal.event_source import (
+    EVENT_WHITEBOARD_STAGE,
     HalTrigger,
     feed_event_hal_event,
+    whiteboard_event_trigger,
 )
 from hal.runtime import (
     EXEC_ACTIVE,
@@ -39,12 +42,19 @@ from hal.runtime import (
     EXEC_UNVERIFIED,
     RECEIPT_DISPATCHED,
     RECEIPT_FAILED,
+    exec_context,
     directive_for_exec_stage,
     program_from_json,
     plan_for_trigger,
+    entry_rules_match,
+    halted_execs_for,
+    rework_budget_reason,
+    rule_waits_for_whiteboard,
     stage_after_dispatch,
     unavailable_wait_detail,
     validate_script,
+    whiteboard_halt_reason,
+    whiteboard_stop_is_exceptional,
 )
 from hal.store import HalStore, HalStoreError
 
@@ -80,11 +90,16 @@ class HalService:
         logger: logging.Logger | None = None,
         clock: Any = None,
         peer: Any = None,
+        whiteboard: Any = None,
     ):
         self.store = store
         self.session_store = session_store
         self.dispatch = dispatch
         self.peer = peer
+        # Optional whiteboard stage-transition source. None means this instance
+        # has no board: whiteboard rules then refuse to enable rather than
+        # silently never firing.
+        self.whiteboard = whiteboard
         self.logger = logger or logging.getLogger("hal.runtime")
         self._clock = clock if clock is not None else time.time
         self._loop_task: asyncio.Task | None = None
@@ -104,10 +119,18 @@ class HalService:
             "runtime_loop_running": self._loop_task is not None and not self._loop_task.done(),
             "event_availability": {
                 event: {
-                    "available": available,
-                    "source": reason,
+                    "available": available and self._event_source_enabled(event),
+                    "source": (
+                        reason
+                        if self._event_source_enabled(event)
+                        else "no whiteboard endpoint configured on this instance"
+                    ),
                 }
                 for event, (available, reason) in _ALL_EVENT_AVAILABILITY.items()
+            },
+            "whiteboard": {
+                "configured": self.whiteboard is not None,
+                "url": getattr(self.whiteboard, "base_url", None),
             },
         }
 
@@ -150,6 +173,48 @@ class HalService:
             )
         return rule, created
 
+    async def enable_rule(
+        self,
+        *,
+        owner_id: str,
+        rule_id: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Enable a rule whose board baseline must be read live.
+
+        The only network read on the enable path is awaited here, so the API
+        request handler never blocks the event loop while a (possibly slow)
+        board answers. The value is then handed to the atomic enable
+        transaction, which keeps the cursor and the enabled state in ONE write.
+        """
+        rule = self.store.get_rule(owner_id, rule_id)
+        if rule is None:
+            raise HalStoreError("rule not found")
+        # Converge the conflict check before the network read: a stale write
+        # must never spend a board round-trip, and must never move a baseline.
+        if expected_revision is not None and int(rule["revision"]) != expected_revision:
+            raise HalStoreError("rule revision conflict; refresh before saving")
+        wb_baseline: int | None = None
+        if _script_has_whiteboard_entry(rule["script"]):
+            if self.whiteboard is None:
+                raise HalStoreError(
+                    "this rule waits for whiteboard stage transitions, but no "
+                    "whiteboard endpoint is configured"
+                )
+            try:
+                wb_baseline = int(await self.whiteboard.head_seq())
+            except Exception as exc:  # noqa: BLE001
+                raise HalStoreError(
+                    f"cannot establish whiteboard enable baseline: {exc}"
+                ) from exc
+        return self.set_enabled(
+            owner_id=owner_id,
+            rule_id=rule_id,
+            enabled=True,
+            expected_revision=expected_revision,
+            wb_baseline=wb_baseline,
+        )
+
     def set_enabled(
         self,
         *,
@@ -157,7 +222,17 @@ class HalService:
         rule_id: str,
         enabled: bool,
         expected_revision: int | None = None,
+        wb_baseline: int | None = None,
     ) -> dict[str, Any]:
+        """Flip a rule's enabled state in one transaction (no network here).
+
+        Enabling a whiteboard rule needs the board's CURRENT sequence as its
+        baseline. That read is deliberately NOT done here: this method is
+        synchronous and may be called from a running event loop, where a
+        blocking HTTP read would stall every other task (the whole Workbench
+        API). ``enable_rule`` awaits the read and passes it in; a sync caller
+        without a baseline is refused instead of silently blocking.
+        """
         rule = self.store.get_rule(owner_id, rule_id)
         if rule is None:
             raise HalStoreError("rule not found")
@@ -206,6 +281,27 @@ class HalService:
         if baseline < 0:
             baseline = 0
 
+        # A rule that waits for whiteboard transitions needs the SAME guarantee
+        # on the board sequence: the position at enable time, read live by
+        # ``enable_rule`` and handed over here. If it could not be read, the
+        # enable fails instead of replaying history.
+        # Turning a rule OFF must never depend on the board being reachable:
+        # during a board outage the operator still has to be able to stop
+        # automation. Only an enable needs the live baseline.
+        if enabled and _script_has_whiteboard_entry(rule["script"]):
+            if self.whiteboard is None:
+                raise HalStoreError(
+                    "this rule waits for whiteboard stage transitions, but no "
+                    "whiteboard endpoint is configured"
+                )
+            if wb_baseline is None:
+                raise HalStoreError(
+                    "enabling a whiteboard rule needs the board baseline; use "
+                    "enable_rule() so the read never blocks the event loop"
+                )
+            if not isinstance(wb_baseline, int) or isinstance(wb_baseline, bool):
+                raise HalStoreError("whiteboard enable baseline must be an integer")
+
         # Atomic enable: revision check, per-rule enable baseline, enabled-state
         # update and the initial owner-cursor anchor happen in ONE transaction.
         updated = self.store.enable_rule(
@@ -213,6 +309,7 @@ class HalService:
             rule_id=rule_id,
             expected_revision=expected_revision,
             baseline_cursor=baseline,
+            wb_baseline_cursor=wb_baseline,
         )
         if updated is None:
             raise HalStoreError("rule not found")
@@ -328,11 +425,27 @@ class HalService:
             self._loop_task = None
 
     async def _process_owner(self, owner_id: str) -> bool:
-        """One bounded feed check + deterministic planning + idempotent apply."""
+        """One bounded pass over every configured source for this owner.
+
+        The two sources are independent: a whiteboard outage cannot stall the
+        Run feed and vice versa, and each keeps its own cursor.
+        """
         # The API can listen before the shared Function generation commits its
         # Worker routes. Keep the cursor intact until those routes are ready.
         if not self.dispatch.ready_for_events():
             return False
+        feed_activity = await self._process_feed(owner_id)
+        try:
+            board_activity = await self._process_whiteboard(owner_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the board must never kill the loop
+            self.logger.warning("HAL whiteboard pass failed for %s: %s", owner_id, exc)
+            board_activity = False
+        return feed_activity or board_activity
+
+    async def _process_feed(self, owner_id: str) -> bool:
+        """One bounded feed check + deterministic planning + idempotent apply."""
         activity = False
         try:
             cursor = await asyncio.to_thread(self.store.get_cursor, owner_id)
@@ -424,6 +537,339 @@ class HalService:
         # immediately instead of idling POLL_INTERVAL between non-matching pages.
         return activity or recovered or has_more
 
+    def _event_source_enabled(self, event: str) -> bool:
+        """A board event is only available when this instance has a board."""
+        if event == EVENT_WHITEBOARD_STAGE and self.whiteboard is None:
+            return False
+        return True
+
+    async def _process_whiteboard(self, owner_id: str) -> bool:
+        """One bounded board read per pass, with its own cursor."""
+        if self.whiteboard is None:
+            return False
+        rules = await self._load_enabled_rules(owner_id)
+        if not any(_rule_waits_for_whiteboard(rule["program"]) for rule in rules):
+            return False
+        try:
+            cursor = await asyncio.to_thread(self.store.get_wb_cursor, owner_id)
+            page = await self.whiteboard.fetch_events(cursor, MAX_PAGE_EVENTS)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("HAL whiteboard read failed for %s: %s", owner_id, exc)
+            return False
+        new_cursor = int(page["next_cursor"])
+        if cursor < 0:
+            # Bootstrap: adopt the board's current position. Enabling HAL never
+            # replays transitions that happened before enablement.
+            await asyncio.to_thread(self.store.set_wb_cursor, owner_id, new_cursor)
+            return False
+        if page.get("gap"):
+            # The board pruned past this cursor. The skipped transitions cannot
+            # be replayed, and one of them may have been a stop: recover from
+            # the cards' own current state (the board's contract for a gap)
+            # instead of trusting a feed that no longer holds the evidence.
+            self.logger.warning(
+                "HAL whiteboard cursor gap for %s: %s", owner_id, page["gap"]
+            )
+            await self._resync_after_gap(owner_id)
+        activity = False
+        for event in page["events"]:
+            trigger = whiteboard_event_trigger(event)
+            if trigger is None:
+                continue
+            if await self._apply_whiteboard_trigger(owner_id, trigger, rules):
+                activity = True
+        await asyncio.to_thread(self.store.set_wb_cursor, owner_id, new_cursor)
+        return activity or bool(page["has_more"])
+
+    async def _apply_whiteboard_trigger(
+        self, owner_id: str, trigger: HalTrigger, rules: list[dict[str, Any]]
+    ) -> bool:
+        """Stop the chain when the board says so, otherwise plan normally."""
+        context = dict(trigger.context or {})
+        # The guard verdict is read from the board's own stage table. Its reason
+        # is kept verbatim: "the table could not be read", "this stage is
+        # human-gated" and "this rework is over budget" are different facts and
+        # must not be merged into one.
+        guard_reason, guard_exceptional = await self._board_guard(context)
+        if guard_reason and "human decision" in guard_reason:
+            context["human_gate"] = True
+        trigger = dataclasses.replace(trigger, context=context)
+
+        active = await self._load_active_execs(owner_id)
+        reason = guard_reason or whiteboard_halt_reason(trigger)
+        if reason:
+            # The resolved reason is authoritative: the budget and the stage
+            # table are judged here, so a stop this helper cannot re-derive must
+            # still settle the live executions instead of only being announced.
+            halts = halted_execs_for(trigger, list(active.values()), reason=reason)
+            would_start = entry_rules_match(
+                trigger, rules, current_instance=self._current_instance_id() or None
+            )
+            if (
+                not halts
+                and not would_start
+                and not guard_exceptional
+                and not whiteboard_stop_is_exceptional(trigger)
+            ):
+                # Nothing was running, nothing would have started and the board
+                # did not take a protective action: a human-gated move nobody
+                # automated is ordinary traffic, not an automation stop.
+                return False
+            stopped = 0
+            for halt in halts:
+                if await asyncio.to_thread(
+                    self.store.fail_exec_if_active,
+                    owner_id=owner_id,
+                    exec_id=halt.exec_id,
+                    detail=f"stopped by the board: {reason}",
+                ):
+                    stopped += 1
+            await self._notify_stop(owner_id, context, reason)
+            self.logger.info(
+                "HAL stopped %s execution(s) for card %s: %s",
+                stopped, context.get("card_id"), reason,
+            )
+            return stopped > 0
+
+        receipts = await self._load_receipts(list(active.values()))
+        consumed: dict[str, set[str]] = {}
+        return await self._apply_trigger(
+            owner_id, trigger, rules, active, receipts, consumed
+        )
+
+    async def _load_active_execs(self, owner_id: str) -> dict[str, dict[str, Any]]:
+        execs = await asyncio.to_thread(self.store.list_active_execs, owner_id)
+        for row in execs:
+            try:
+                row["program"] = program_from_json(json.loads(row["program_blob"]))
+            except (ValueError, KeyError, TypeError):
+                row["program"] = None
+        return {
+            str(row["exec_id"]): row
+            for row in execs
+            if row.get("program") is not None
+        }
+
+    async def _board_guard(self, context: Mapping[str, Any]) -> tuple[str | None, bool]:
+        """Reasons the board's own stage table forbids continuing here.
+
+        Returns ``(reason, exceptional)``. The table decides two things HAL must
+        not re-derive: whether the destination is human-gated, and whether this
+        move spends a rework round the budget cannot afford. A forward move at
+        the budget boundary is legal, so only rework destinations are checked.
+        """
+        project = str(context.get("project") or "")
+        stage = str(context.get("to_stage") or "")
+        if not stage:
+            return None, False
+        try:
+            stages = await self.whiteboard.stages(project)
+        except Exception as exc:  # noqa: BLE001
+            # Firing work into a stage we cannot classify would bypass a gate we
+            # simply failed to see, so an unreadable table stops the chain.
+            return f"whiteboard stage table unavailable ({exc}); refusing to auto-advance", True
+        entry = stages.get(stage)
+        if entry is None:
+            return None, False
+        if entry.get("human_gate"):
+            return f"stage {stage} requires a human decision", False
+        budget = rework_budget_reason(
+            stage, entry, context.get("round"), context.get("max_rounds")
+        )
+        if budget:
+            return budget, True
+        return None, False
+
+    async def _card_stop_state(
+        self, card: Mapping[str, Any], project: str
+    ) -> tuple[str | None, bool]:
+        """(stop reason, confirmed) from the card's CURRENT board projection.
+
+        The card document already carries the board's own ``stage_category``,
+        ``stage``, ``round`` and effective ``max_rounds``, projected with the
+        project's definition at read time, so a fused card is visible without a
+        second round-trip. Two facts are not carried by the card — the human
+        gate flag and whether its current stage spends a rework round — so the
+        stage table is read for them; when that read fails the answer is "not
+        confirmed" and the caller HOLDS the chain instead of guessing.
+
+        The budget is judged by the same ``rework_budget_reason`` rule the
+        transition-event guard uses: a card the board moved into its last
+        rework round (``changes_requested`` at ``round == max_rounds``) must
+        not receive one more remediation, whether the stop is noticed by the
+        event, by the pre-dispatch check or by the post-gap resync. A forward
+        stage at the same round stays dispatchable — it spends no round.
+        """
+        stage = str(card.get("stage") or "")
+        if not stage:
+            return None, True
+        if str(card.get("stage_category") or "") == "halted":
+            return f"card is on halted stage {stage}", True
+        try:
+            stages = await self.whiteboard.stages(project)
+        except Exception as exc:  # noqa: BLE001
+            return f"whiteboard stage table unavailable ({exc})", False
+        entry = stages.get(stage)
+        if entry is not None and entry.get("human_gate"):
+            return f"stage {stage} requires a human decision", True
+        budget = rework_budget_reason(
+            stage, entry, card.get("round"), card.get("max_rounds")
+        )
+        if budget:
+            return budget, True
+        return None, True
+
+    async def _card_allows_dispatch(
+        self, owner_id: str, exec_row: Mapping[str, Any]
+    ) -> bool:
+        """May this execution dispatch now? The card, not the feed, decides.
+
+        The Run feed is processed before the board on every pass, so a reviewer
+        finishing in the same pass in which the board fused the card would
+        otherwise dispatch the remediation first and only then process the stop.
+        Holding when the board cannot answer keeps the chain intact (its
+        receipt/stage are untouched) and retries on a later pass.
+        """
+        if self.whiteboard is None:
+            return True
+        context = exec_context(exec_row) or {}
+        card_id = str(context.get("card_id") or "")
+        if not card_id:
+            return True  # an independent Run rule owns no card and is untouched
+        try:
+            card = await self.whiteboard.card(card_id)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "HAL holding card %s chain: card state unreadable (%s)", card_id, exc
+            )
+            return False
+        project = str(card.get("project") or context.get("project") or "")
+        reason, confirmed = await self._card_stop_state(card, project)
+        if reason is None:
+            return True
+        if not confirmed:
+            self.logger.warning("HAL holding card %s chain: %s", card_id, reason)
+            return False
+        await self._stop_card_chain(owner_id, card_id, reason, card=card)
+        return False
+
+    async def _stop_card_chain(
+        self,
+        owner_id: str,
+        card_id: str,
+        reason: str,
+        *,
+        card: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Settle every active execution on this card and report the stop once.
+
+        The card's CURRENT revision names the stop: the transition event for the
+        same move carries that revision, so a stop first noticed by the
+        pre-dispatch check (Run feed read before the board) and then seen again
+        on the event is recorded and posted once, not twice.
+        """
+        active = await self._load_active_execs(owner_id)
+        stopped = 0
+        context: Mapping[str, Any] = {}
+        for exec_row in active.values():
+            row_context = exec_context(exec_row) or {}
+            if str(row_context.get("card_id") or "") != card_id:
+                continue
+            if not context:
+                context = row_context
+            if await asyncio.to_thread(
+                self.store.fail_exec_if_active,
+                owner_id=owner_id,
+                exec_id=str(exec_row["exec_id"]),
+                detail=f"stopped by the board: {reason}",
+            ):
+                stopped += 1
+        stop_context = {**dict(context), "card_id": card_id}
+        if card is not None:
+            # The notice quotes the card as it is NOW, not the stage that
+            # dispatched this execution: the stop is about the card's current
+            # round and stage.
+            if card.get("revision") is not None:
+                stop_context["revision"] = card["revision"]
+            if card.get("stage"):
+                stop_context["to_stage"] = card["stage"]
+            if isinstance(card.get("round"), int):
+                stop_context["round"] = card["round"]
+            if isinstance(card.get("max_rounds"), int):
+                stop_context["max_rounds"] = card["max_rounds"]
+        await self._notify_stop(owner_id, stop_context, reason)
+        self.logger.info(
+            "HAL stopped %s execution(s) for card %s: %s", stopped, card_id, reason
+        )
+        return stopped
+
+    async def _resync_after_gap(self, owner_id: str) -> None:
+        """A pruned window may have hidden a stop: re-derive it from the cards.
+
+        The board's own contract for a stale cursor is "read the current card
+        state". If the board cannot be read the cursor still advances (the
+        skipped window is unrecoverable), and every card chain is then held at
+        dispatch time until the board answers again.
+        """
+        try:
+            cards = await self.whiteboard.cards()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "HAL whiteboard resync unreadable for %s: %s", owner_id, exc
+            )
+            return
+        active = await self._load_active_execs(owner_id)
+        seen: set[str] = set()
+        for exec_row in active.values():
+            context = exec_context(exec_row) or {}
+            card_id = str(context.get("card_id") or "")
+            card = cards.get(card_id) if card_id else None
+            if card is None or card_id in seen:
+                continue
+            seen.add(card_id)
+            project = str(card.get("project") or context.get("project") or "")
+            reason, confirmed = await self._card_stop_state(card, project)
+            if reason is None or not confirmed:
+                continue
+            await self._stop_card_chain(owner_id, card_id, reason, card=card)
+
+    async def _notify_stop(
+        self, owner_id: str, context: Mapping[str, Any], reason: str
+    ) -> None:
+        """Record the stop once, then try to put it in front of the humans."""
+        card_id = str(context.get("card_id") or "") or None
+        revision = context.get("revision")
+        detail = (
+            f"自动接力已停止：{reason}。卡片 {card_id or '?'}"
+            f"（{context.get('project') or '?'}，{context.get('from_stage') or '?'}"
+            f" → {context.get('to_stage') or '?'}，"
+            f"第 {context.get('round') or '?'}/{context.get('max_rounds') or '?'} 轮）"
+        )
+        notice_id = f"hal:{card_id}:rev:{revision}:halted" if card_id else None
+        created = await asyncio.to_thread(
+            self.store.add_notice,
+            owner_id=owner_id,
+            card_id=card_id,
+            kind="halted",
+            detail=detail,
+            notice_id=notice_id,
+        )
+        if not created:
+            return  # this exact stop was already reported
+        if self.whiteboard is None or not card_id:
+            return
+        try:
+            posted, info = await self.whiteboard.post_comment(
+                card_id, f"**HAL 停止自动接力**：{detail}"
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed comment never hides the stop
+            posted, info = False, f"{type(exc).__name__}: {exc}"
+        await asyncio.to_thread(
+            self.store.mark_notice_delivered,
+            notice_id,
+            info if posted else f"not delivered: {info}",
+        )
+
     async def _load_enabled_rules(self, owner_id: str) -> list[dict[str, Any]]:
         rows = await asyncio.to_thread(self.store.list_rules, owner_id)
         loaded = []
@@ -502,6 +948,10 @@ class HalService:
                 trigger_kind=intent.trigger_kind,
                 program_blob=_program_for_rule(rules, intent.rule_id),
                 detail=None,
+                context_blob=(
+                    json.dumps(dict(intent.context), ensure_ascii=False)
+                    if intent.context is not None else None
+                ),
             )
             exec_row = await asyncio.to_thread(self.store.get_exec, owner_id, intent.exec_id)
             if exec_row is None:
@@ -603,6 +1053,12 @@ class HalService:
         receipts: dict[tuple[str, int], dict[str, Any]],
     ) -> bool:
         """Dispatch one stage once; crash-safe and never double-executing."""
+        # One choke point for the board's veto: creates, dependent advances and
+        # every recovery retry all pass through here, so a card the board has
+        # already stopped can never receive one more prompt — regardless of
+        # whether the Run feed or the board pass happens to run first.
+        if not await self._card_allows_dispatch(owner_id, exec_row):
+            return False
         exec_id = directive.exec_id
         stage = directive.stage
         rule_id = str(exec_row["rule_id"])
@@ -1172,9 +1628,25 @@ def _program_for_rule(rules: list[dict[str, Any]], rule_id: str):
     return None
 
 
+def _rule_waits_for_whiteboard(program) -> bool:
+    return rule_waits_for_whiteboard(program)
+
+
+def _script_has_whiteboard_entry(script: str) -> bool:
+    """Compile-and-check, used before enabling a rule."""
+    try:
+        return rule_waits_for_whiteboard(compile_hal(script))
+    except Exception:  # noqa: BLE001 — an uncompilable script is rejected earlier
+        return False
+
+
 _ALL_EVENT_AVAILABILITY = {
     "#turn_finish": (True, "real durable run-terminal feed event (run.completed)"),
     "#turn_error": (True, "real durable run-terminal feed event (run.failed)"),
+    "#whiteboard_stage": (
+        True,
+        "whiteboard stage-transition feed (requires a configured board endpoint)",
+    ),
     "#system_idle": (False, "no reliable active-to-idle transition event source in v0.1"),
     "#turn_commentary": (False, "no commentary event source exists in the durable event feed"),
     "#hashideploy_finish": (False, "no deployment-completion event source exists"),
@@ -1285,12 +1757,24 @@ def ensure_service(server) -> HalService | None:
             _legacy_store_path(server), _default_store_path(server), logger
         )
         store = HalStore(store_path)
+        from hal.whiteboard import WhiteboardClient, DEFAULT_BASE_URL
+
+        board_url = (os.environ.get("HASHI_HAL_WHITEBOARD_URL") or "").strip() or None
+        board_token = (os.environ.get("HASHI_HAL_WHITEBOARD_TOKEN") or "").strip() or None
         service = HalService(
             store=store,
             session_store=server.session_store,
             dispatch=GatewayDispatchAdapter(server, logger=logger),
             peer=HalPeerClient(
                 Path(server.config_path).parent, server.session_store.instance_id,
+            ),
+            # Default to the LAN board so a stock install can use whiteboard
+            # rules without new configuration; HASHI_HAL_WHITEBOARD_URL=""
+            # disables the source explicitly.
+            whiteboard=(
+                WhiteboardClient(board_url or DEFAULT_BASE_URL, token=board_token)
+                if os.environ.get("HASHI_HAL_WHITEBOARD_URL") != ""
+                else None
             ),
             logger=logger,
         )
@@ -1359,6 +1843,29 @@ async def handle_hal_status(server, request):
     if error is not None:
         return error
     return web.json_response(service.status(), headers={"Cache-Control": "no-store"})
+
+
+async def handle_hal_notices(server, request):
+    owner_id, error = _require_auth(server, request)
+    if error is not None:
+        return error
+    service, error = _service_or_503(server)
+    if error is not None:
+        return error
+    try:
+        limit = int(request.query.get("limit", "50"))
+    except (TypeError, ValueError):
+        return web.json_response(
+            {"ok": False, "error_code": "invalid_limit"}, status=400
+        )
+    return web.json_response(
+        {
+            "ok": True,
+            "schema": SCHEMA_ID,
+            "notices": service.store.list_notices(owner_id, limit=limit),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def handle_hal_validate(server, request):
@@ -1453,7 +1960,7 @@ async def handle_hal_rules_post(server, request):
             migration_key=migration_key if rule_id is None else None,
         )
         if enable:
-            service.set_enabled(owner_id=owner_id, rule_id=rule["rule_id"], enabled=True)
+            await service.enable_rule(owner_id=owner_id, rule_id=rule["rule_id"])
             rule = service.store.get_rule(owner_id, rule["rule_id"])
     except HalStoreError as exc:
         return web.json_response(
@@ -1509,12 +2016,23 @@ async def _handle_hal_rule_toggle(server, request, enabled: bool):
                 {"ok": False, "error_code": "invalid_json"}, status=400
             )
     try:
-        rule = service.set_enabled(
-            owner_id=owner_id,
-            rule_id=rule_id,
-            enabled=enabled,
-            expected_revision=expected_revision,
-        )
+        if enabled:
+            # The board baseline read is awaited inside enable_rule: the event
+            # loop keeps serving the API while a slow board answers.
+            rule = await service.enable_rule(
+                owner_id=owner_id,
+                rule_id=rule_id,
+                expected_revision=expected_revision,
+            )
+        else:
+            # Disabling never reads the board: an outage must not pin
+            # automation on.
+            rule = service.set_enabled(
+                owner_id=owner_id,
+                rule_id=rule_id,
+                enabled=False,
+                expected_revision=expected_revision,
+            )
     except HalStoreError as exc:
         status = 404 if "not found" in str(exc) else (409 if "revision" in str(exc) else 409)
         return web.json_response(

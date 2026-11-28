@@ -21,6 +21,17 @@ FEED_KIND_RUN_FAILED = "run.failed"
 # active->idle transition event source, so this event stays unavailable.
 EVENT_SYSTEM_IDLE = "#system_idle"
 
+# Whiteboard stage-transition feed (Phase 2). One trigger per committed card
+# transition; the event document is carried as the trigger context so rules can
+# match on it and prompts can interpolate it.
+EVENT_WHITEBOARD_STAGE = "#whiteboard_stage"
+FEED_KIND_WHITEBOARD_STAGE = "whiteboard.stage"
+
+# Which durable source a trigger came from. Two cursors stay independent so a
+# slow whiteboard read can never rewind the Agent Run feed (or the reverse).
+SOURCE_FEED = "feed"
+SOURCE_WHITEBOARD = "whiteboard"
+
 # Agent-scoped events mapped 1:1 from real feed kinds. The feed projects the
 # raw kind into "agent.run.*"; both spellings map to the same HAL event.
 FEED_TO_HAL_EVENT = {
@@ -66,6 +77,10 @@ class HalTrigger:
     # Monotonic feed position (the event's ``cursor``); None for synthetic
     # triggers built in tests. Used for the per-rule enable baseline.
     feed_cursor: int | None = None
+    # ``feed`` (Agent Run terminal events) or ``whiteboard`` (stage transitions).
+    source: str = SOURCE_FEED
+    # Whiteboard event document for context events; None for feed triggers.
+    context: Mapping[str, Any] | None = None
 
 
 def feed_event_hal_event(event: Mapping[str, Any]) -> HalTrigger | None:
@@ -87,10 +102,39 @@ def feed_event_hal_event(event: Mapping[str, Any]) -> HalTrigger | None:
     )
 
 
+def whiteboard_event_trigger(event: Mapping[str, Any]) -> HalTrigger | None:
+    """Map one whiteboard stage-transition document to a HAL trigger.
+
+    Identity is the board's own ``event_id`` (``<card_id>:<revision>``), so a
+    replay of the same transition can never create a second execution. The
+    cursor is the board's monotonic ``seq``.
+    """
+    card_id = str(event.get("card_id") or "")
+    revision = event.get("revision")
+    if not card_id or not isinstance(revision, int):
+        return None
+    seq = event.get("seq")
+    return HalTrigger(
+        event=EVENT_WHITEBOARD_STAGE,
+        # A stage transition is board state, not an Agent event: it has no
+        # Agent identity, so only rules without a source Agent can match it.
+        agent_identity=None,
+        feed_event_id=f"{card_id}:rev:{revision}",
+        feed_kind=FEED_KIND_WHITEBOARD_STAGE,
+        run_idempotency_key=None,
+        automation_origin=False,
+        feed_cursor=(int(seq) if isinstance(seq, int) else None),
+        source=SOURCE_WHITEBOARD,
+        context=dict(event),
+    )
+
+
 def event_availability(event_name: str) -> tuple[bool, str]:
     """True when a real source can produce this event, plus a truthful reason."""
     if event_name in FEED_TO_HAL_EVENT.values():
         return True, "real durable run-terminal feed event"
+    if event_name == EVENT_WHITEBOARD_STAGE:
+        return True, "whiteboard stage-transition feed (requires a configured board endpoint)"
     reason = UNAVAILABLE_EVENT_REASONS.get(event_name)
     if reason is not None:
         return False, reason

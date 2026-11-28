@@ -13,13 +13,18 @@ from .language import (
     compile_hal,
     entry_matches,
     resolve_prompt,
+    resolve_role_target,
 )
 from .event_source import (
     EVENT_SYSTEM_IDLE,
+    EVENT_WHITEBOARD_STAGE,
+    SOURCE_FEED,
+    SOURCE_WHITEBOARD,
     HalTrigger,
     event_availability,
     feed_event_hal_event,
     is_automation_origin,
+    whiteboard_event_trigger,
 )
 from .runtime import (
     EXEC_ACTIVE,
@@ -32,9 +37,10 @@ from .runtime import (
 
 __all__ = [
     "HALAction", "HALEvent", "HALProgram", "HALRule", "HALSyntaxError",
-    "compile_hal", "entry_matches", "resolve_prompt",
-    "EVENT_SYSTEM_IDLE", "HalTrigger", "event_availability",
-    "feed_event_hal_event", "is_automation_origin",
+    "compile_hal", "entry_matches", "resolve_prompt", "resolve_role_target",
+    "EVENT_SYSTEM_IDLE", "EVENT_WHITEBOARD_STAGE", "SOURCE_FEED",
+    "SOURCE_WHITEBOARD", "HalTrigger", "event_availability",
+    "feed_event_hal_event", "is_automation_origin", "whiteboard_event_trigger",
     "EXEC_ACTIVE", "EXEC_COMPLETED", "EXEC_DISABLED", "EXEC_FAILED",
     "plan_for_trigger", "validate_script",
 ]

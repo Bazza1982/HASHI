@@ -69,6 +69,7 @@ HAL 是一门由 HASHI 项目作者设计的**极简、事件驱动自动化语�
 | `#system_idle` | 系统从有工作进入无 Agent 工作的空闲状态 | 基础词汇已确定，实例范围待明确 |
 | `#hashideploy_finish` | 某次 HASHI 部署完成 | 用户给出的工作流示例名称；事件接口和成功语义待核实 |
 | `#reboot_ok` | 某次重启成功 | 用户给出的工作流示例名称；事件接口和失败分支待核实 |
+| `#whiteboard_stage` | 白板卡片提交了一次阶段跃迁 | 已实现（v2）：白板跃迁事件源，无 Agent 主语 |
 
 `#system_idle` 应是**进入空闲的事件**，而不是只要持续空闲就反复触发的轮询条件。具体作用域（单个 HASHI 实例或其他范围）尚待作者决定。
 
@@ -133,6 +134,24 @@ if #reboot_ok then @lily $prompt "重启成功，看看新代码加载是否完�
 ```
 
 `else` 已由作者提出，但**准确触发语义尚未最终确定**。特别是「尚未收到 `#reboot_ok`」不等于「重启已失败」。实现前必须确定失败事件或失败状态如何对应 `else`，不能擅自把超时或未知状态等同于失败。
+
+### 3.6 白板阶段跃迁触发（v2）
+
+```hal
+if #whiteboard_stage where [project="Hashi", to_stage="in_review"] then
+  @{reviewer} $prompt "【评审请求】{card_id} HEAD {head_sha} 第 {round}/{max_rounds} 轮：{next_step}";
+if @agent_any #turn_finish then @{implementer} $prompt "【整改】{card_id}：{next_step}".
+```
+
+- **条件**：`where [key="value", ...]`，可用键为 `project`、`from_stage`、`to_stage`、`category`，取值来自事件本身；阶段名是作者数据，代码里不写死，白板新增自定义阶段无需改 HAL。
+- **变量**：`{card_id}`、`{work_key}`、`{project}`、`{from_stage}`、`{to_stage}`、`{revision}`、`{round}`、`{max_rounds}`、`{implementer}`、`{reviewer}`、`{tester}`、`{pr_url}`、`{head_sha}`、`{last_verdict}`、`{test_env}`、`{next_step}`。
+- **角色路由**：`@{reviewer}` / `@{implementer}` / `@{tester}` 取卡片上该字段的值；写 `yun` 即本实例，写 `yun@hashi6` 走既有点对点通道。字段为空时如实失败，不猜测接收人。
+- **幂等**：同一张卡的同一 `revision` 只派发一次（键为 `<card_id>:rev:<revision>`）。
+- **停转**：阶段被熔断（`fused`）、进入 `halted` 类阶段、或白板判定这次跃迁超出返工预算时，不派发并在卡片上留言通知；进入人类门禁阶段同样停转，但只有本来会触发规则或在跑执行时才通知。熔断理由（含预算用尽、阶段表不可读）一律落到执行记录里，执行不会「通知了却没停」。
+- **停转以卡片为准**：每次派发（含重试）前都读一次卡片的当前状态。因此 Agent Run 完成事件先于白板事件被处理时，也不会把整改派进一张已经被熔断的卡；白板读不到时暂缓该卡链路，等能读到时再继续。
+- **游标**：启用规则时只记下当前白板位置，不重放历史；与 Agent Run 事件游标互相独立。出现缺口（事件已被清理）时按白板契约改读卡片当前状态，缺口之前的跃迁无法重放也不假装重放。
+- **阶段表**：门禁与返工预算的判定每次都读白板的当前定义，不使用缓存——白板主人随时可以改定义，旧表会让自动化穿过刚加上的门禁。
+- **配置**：`HASHI_HAL_WHITEBOARD_URL`（默认 `http://127.0.0.1:4417`，设为空字符串即停用该事件源）、`HASHI_HAL_WHITEBOARD_TOKEN`（`key` 模式下的 Bearer 令牌）。
 
 ## 4. `.` 与 `;`：最重要的执行规则
 

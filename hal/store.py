@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS hal_rules (
     revision     INTEGER NOT NULL DEFAULT 1,
     enabled      INTEGER NOT NULL DEFAULT 0,
     enable_cursor INTEGER,
+    wb_enable_cursor INTEGER,
     migration_key TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS hal_workflow_execs (
     trigger_agent    TEXT,
     trigger_kind     TEXT,
     program_blob     TEXT NOT NULL,
+    context_blob     TEXT,
     detail           TEXT,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
@@ -89,6 +91,26 @@ CREATE TABLE IF NOT EXISTS hal_feed_cursor (
     owner_id TEXT PRIMARY KEY,
     cursor   INTEGER NOT NULL
 );
+
+-- Whiteboard stage-transition cursor. A separate sequence from the Run feed,
+-- so neither source can rewind the other.
+CREATE TABLE IF NOT EXISTS hal_whiteboard_cursor (
+    owner_id TEXT PRIMARY KEY,
+    cursor   INTEGER NOT NULL
+);
+
+-- Human-facing notices produced by a deliberate stop (circuit breaker, human
+-- gate, exhausted round budget). Deduped per (card, revision, kind).
+CREATE TABLE IF NOT EXISTS hal_notices (
+    notice_id  TEXT PRIMARY KEY,
+    owner_id   TEXT NOT NULL,
+    card_id    TEXT,
+    kind       TEXT NOT NULL,
+    detail     TEXT NOT NULL,
+    delivered  TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hal_notices_owner ON hal_notices(owner_id, created_at);
 """
 
 
@@ -114,6 +136,7 @@ class HalStore:
             self._migrate_rule_enable_cursor()
             self._migrate_rule_migration_key()
             self._migrate_receipt_retry()
+            self._migrate_whiteboard_source()
             self._conn.commit()
 
     def _migrate_exec_dedupe_index(self) -> None:
@@ -145,6 +168,24 @@ class HalStore:
         cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(hal_rules)")}
         if "enable_cursor" not in cols:
             self._conn.execute("ALTER TABLE hal_rules ADD COLUMN enable_cursor INTEGER")
+
+    def _migrate_whiteboard_source(self) -> None:
+        """Add the whiteboard baseline and card-context columns.
+
+        Both are additive: a pre-existing store keeps every rule and execution,
+        and rows without a whiteboard baseline simply never match a whiteboard
+        event until the rule is re-enabled.
+
+        Caller must already hold ``_LOCK`` (this runs inside ``__init__``).
+        """
+        rule_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(hal_rules)")}
+        if "wb_enable_cursor" not in rule_cols:
+            self._conn.execute("ALTER TABLE hal_rules ADD COLUMN wb_enable_cursor INTEGER")
+        exec_cols = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(hal_workflow_execs)")
+        }
+        if "context_blob" not in exec_cols:
+            self._conn.execute("ALTER TABLE hal_workflow_execs ADD COLUMN context_blob TEXT")
 
     def _migrate_rule_migration_key(self) -> None:
         """Add the optional migration-key column to pre-existing stores.
@@ -306,6 +347,16 @@ class HalStore:
             )
             self._conn.commit()
 
+    def set_rule_wb_enable_cursor(self, owner_id: str, rule_id: str, cursor: int) -> None:
+        """Record the whiteboard position a rule was enabled at."""
+        with _LOCK:
+            self._conn.execute(
+                "UPDATE hal_rules SET wb_enable_cursor=?, updated_at=? "
+                "WHERE rule_id=? AND owner_id=?",
+                (int(cursor), _now(), rule_id, owner_id),
+            )
+            self._conn.commit()
+
     def enable_rule(
         self,
         *,
@@ -313,6 +364,7 @@ class HalStore:
         rule_id: str,
         expected_revision: int | None,
         baseline_cursor: int,
+        wb_baseline_cursor: int | None = None,
     ) -> dict[str, Any] | None:
         """Atomically enable one rule.
 
@@ -334,9 +386,15 @@ class HalStore:
             if expected_revision is not None and int(row["revision"]) != expected_revision:
                 raise HalStoreError("rule revision conflict; refresh before saving")
             self._conn.execute(
-                "UPDATE hal_rules SET enabled=1, enable_cursor=?, updated_at=? "
-                "WHERE rule_id=? AND owner_id=?",
-                (int(baseline_cursor), now, rule_id, owner_id),
+                "UPDATE hal_rules SET enabled=1, enable_cursor=?, wb_enable_cursor=?, "
+                "updated_at=? WHERE rule_id=? AND owner_id=?",
+                (
+                    int(baseline_cursor),
+                    int(wb_baseline_cursor) if wb_baseline_cursor is not None else None,
+                    now,
+                    rule_id,
+                    owner_id,
+                ),
             )
             # Anchor the owner cursor only when absent; never overwrite an
             # existing owner cursor, which would drop already-consumed history
@@ -346,6 +404,12 @@ class HalStore:
                 "ON CONFLICT(owner_id) DO NOTHING",
                 (owner_id, int(baseline_cursor)),
             )
+            if wb_baseline_cursor is not None:
+                self._conn.execute(
+                    "INSERT INTO hal_whiteboard_cursor (owner_id, cursor) VALUES (?,?) "
+                    "ON CONFLICT(owner_id) DO NOTHING",
+                    (owner_id, int(wb_baseline_cursor)),
+                )
             self._conn.commit()
             row = self._conn.execute(
                 "SELECT * FROM hal_rules WHERE rule_id=? AND owner_id=?",
@@ -387,6 +451,7 @@ class HalStore:
         trigger_kind: str,
         program_blob: Any,
         detail: str | None = None,
+        context_blob: str | None = None,
     ) -> bool:
         """True when the row was newly created (unique per rule+event)."""
         now = _now()
@@ -396,7 +461,8 @@ class HalStore:
                     "INSERT INTO hal_workflow_execs (exec_id, owner_id, rule_id, "
                     "rule_revision, rule_name, workflow_index, stage, state, "
                     "trigger_event_id, trigger_agent, trigger_kind, program_blob, "
-                    "detail, created_at, updated_at) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
+                    "context_blob, detail, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)",
                     (
                         exec_id,
                         owner_id,
@@ -409,6 +475,7 @@ class HalStore:
                         trigger_agent,
                         trigger_kind,
                         json.dumps(program_to_json(program_blob)),
+                        context_blob,
                         detail,
                         now,
                         now,
@@ -722,6 +789,75 @@ class HalStore:
                 (owner_id, int(cursor)),
             )
             self._conn.commit()
+
+    # --- whiteboard cursor and notices ------------------------------------
+
+    def get_wb_cursor(self, owner_id: str) -> int:
+        with _LOCK:
+            row = self._conn.execute(
+                "SELECT cursor FROM hal_whiteboard_cursor WHERE owner_id=?", (owner_id,)
+            ).fetchone()
+        return int(row["cursor"]) if row is not None else -1
+
+    def set_wb_cursor(self, owner_id: str, cursor: int) -> None:
+        with _LOCK:
+            self._conn.execute(
+                "INSERT INTO hal_whiteboard_cursor (owner_id, cursor) VALUES (?,?) "
+                "ON CONFLICT(owner_id) DO UPDATE SET cursor=excluded.cursor",
+                (owner_id, int(cursor)),
+            )
+            self._conn.commit()
+
+    def add_notice(
+        self,
+        *,
+        owner_id: str,
+        card_id: str | None,
+        kind: str,
+        detail: str,
+        delivered: str | None = None,
+        notice_id: str | None = None,
+    ) -> bool:
+        """Record one stop notice. False when the same notice already exists."""
+        now = _now()
+        with _LOCK:
+            try:
+                self._conn.execute(
+                    "INSERT INTO hal_notices (notice_id, owner_id, card_id, kind, "
+                    "detail, delivered, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        notice_id or f"hn{uuid.uuid4().hex}",
+                        owner_id,
+                        card_id,
+                        kind,
+                        detail,
+                        delivered,
+                        now,
+                    ),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def mark_notice_delivered(self, notice_id: str | None, detail: str) -> None:
+        if not notice_id:
+            return
+        with _LOCK:
+            self._conn.execute(
+                "UPDATE hal_notices SET delivered=? WHERE notice_id=?",
+                (detail, notice_id),
+            )
+            self._conn.commit()
+
+    def list_notices(self, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with _LOCK:
+            rows = self._conn.execute(
+                "SELECT notice_id, card_id, kind, detail, delivered, created_at "
+                "FROM hal_notices WHERE owner_id=? ORDER BY created_at DESC LIMIT ?",
+                (owner_id, max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
 def exec_summary(exec_row: Mapping[str, Any]) -> dict[str, Any]:
     return {
