@@ -126,10 +126,8 @@ class MemoryPlusObserver(PreTurnContextProvider):
         self.runtime = runtime
 
     def should_provide(self, source: str, *, is_bridge_request: bool) -> bool:
-        return (
-            self._enabled()
-            and not self._dual_brain_owns_continuity()
-            and not self._should_bypass_source(source, is_bridge_request=is_bridge_request)
+        return self._enabled() and not self._should_bypass_source(
+            source, is_bridge_request=is_bridge_request
         )
 
     def should_observe(self, source: str, *, is_bridge_request: bool) -> bool:
@@ -157,10 +155,6 @@ class MemoryPlusObserver(PreTurnContextProvider):
 
     def _enabled(self) -> bool:
         return is_memory_plus_enabled(self.workspace_dir)
-
-    def _dual_brain_owns_continuity(self) -> bool:
-        state = WorkspaceStateStore(self.workspace_dir).read()
-        return str(state.get("agent_mode") or "").strip().lower() == "dual-brain"
 
     def _config(self) -> MemoryPlusConfig:
         return memory_plus_config(self.workspace_dir)
@@ -1180,4 +1174,92 @@ def _read_bool(mapping: Mapping[str, Any], key: str, default: bool) -> bool:
         if normalized in {"true", "yes", "1", "on"}:
             return True
     return bool(value)
+def apply_memory_plus_block(runtime: Any, item: Any, visible_text: str) -> str:
+    """Strip the memory+ update block from a reply and persist its contents.
+
+    Retired wrapper/audit/dual-brain modes used to share this delivery path.
+    Only the memory+ write-back survives, so this is the single remaining
+    visible-text transform in the turn pipeline.
+    """
+    from orchestrator.runtime_session import item_session_workspace
+
+    workspace = item_session_workspace(runtime, item)
+    extracted = extract_memory_plus_update_details(visible_text)
+    visible_text = extracted.visible_text
+    update = extracted.update
+    should_write = False
+    notes_count = 0
+    open_items_count = 0
+    if isinstance(update, dict):
+        should_write = memory_plus_should_write(update)
+        note_fields = (
+            "facts",
+            "notes",
+            "decisions",
+            "completed",
+            "state_changes",
+            "resolved_items",
+            "pointers",
+        )
+        notes = [
+            value
+            for field in note_fields
+            for value in (
+                update.get(field)
+                if isinstance(update.get(field), list)
+                else ([update.get(field)] if update.get(field) else [])
+            )
+        ]
+        open_items = update.get("open_items")
+        notes_count = len(notes)
+        open_items_count = (
+            len(open_items)
+            if isinstance(open_items, list)
+            else int(bool(open_items))
+        )
+    write_result = False
+    reason = "not_attempted"
+    try:
+        write_result = write_memory_plus_update(
+            workspace,
+            request_id=item.request_id,
+            source=item.source,
+            prompt=item.prompt,
+            update=update,
+        )
+        reason = memory_plus_write_reason(
+            update,
+            write_result=write_result,
+            block_present=extracted.block_present,
+        )
+    except Exception as exc:
+        reason = f"exception:{type(exc).__name__}"
+        runtime.logger.warning(
+            "Memory+ write-back failed for %s: %s", item.request_id, exc
+        )
+    try:
+        write_memory_plus_diagnostic(
+            workspace,
+            request_id=item.request_id,
+            source=item.source,
+            block_present=extracted.block_present,
+            parse_ok=extracted.parse_ok,
+            should_write=should_write,
+            notes_count=notes_count,
+            open_items_count=open_items_count,
+            write_result=write_result,
+            reason=reason,
+            response_chars=len(visible_text or ""),
+            visible_chars=len(visible_text or ""),
+            raw_block_chars=extracted.raw_chars,
+        )
+    except Exception as exc:
+        runtime.logger.warning(
+            "Memory+ diagnostic write failed for %s: %s", item.request_id, exc
+        )
+    if write_result:
+        mark_memory_plus_session_synced(runtime, workspace)
+    return visible_text
+
+
 # HASHI-Fingerprint: hfp_e38c26d502b246179e0a601c5b0fb21f

@@ -865,7 +865,6 @@ def test_status_summary_reports_delivery_block_and_typing(tmp_path):
     runtime.config.allowed_backends = [{"engine": "grok"}]
     runtime.get_current_model = lambda: "grok-4"
     runtime._get_current_effort = lambda: "medium"
-    runtime._format_status_mode_block = lambda mode, state, detailed: []
     runtime._verbose = False
     runtime._think = False
     runtime.last_prompt = None

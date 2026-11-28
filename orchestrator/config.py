@@ -55,6 +55,9 @@ SESSION_MODE_BACKENDS = frozenset(
 DEFAULT_AGENT_MODE = "fixed"
 SUPPORTED_AGENT_MODES = frozenset({"fixed", "flex"})
 RETIRED_AGENT_MODES = frozenset({"wrapper", "audit", "dual-brain"})
+# Source tag for turns that begin a fresh session; such turns are excluded from
+# episodic/history memory writes.
+SESSION_RESET_SOURCE = "session_reset"
 LEGACY_FIXED_CONFIG_BACKUP_SUFFIX = ".pre-flex-migration.bak"
 LEGACY_PCM_CONFIG_BACKUP_SUFFIX = ".pre-pcm-migration.bak"
 config_logger = logging.getLogger("BridgeU.Config")

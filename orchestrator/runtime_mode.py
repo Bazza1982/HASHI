@@ -17,7 +17,7 @@ from orchestrator.memory_plus_mode import (
 
 
 def _mode_key(mode: str) -> str:
-    return "dual_brain" if mode == "dual-brain" else mode.replace("+", "_plus")
+    return mode.replace("+", "_plus")
 
 
 def _mode_label(mode: str) -> str:

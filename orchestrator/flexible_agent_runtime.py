@@ -24,7 +24,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, constan
 from telegram.error import RetryAfter
 from telegram.ext import ApplicationBuilder
 
-from orchestrator.config import DEFAULT_AGENT_MODE, FlexibleAgentConfig, GlobalConfig
+from orchestrator.config import (
+    DEFAULT_AGENT_MODE,
+    SESSION_RESET_SOURCE,
+    FlexibleAgentConfig,
+    GlobalConfig,
+)
 from orchestrator.config_json import (
     ConfigDocument,
     new_config_json,
@@ -44,7 +49,6 @@ from orchestrator.command_ui import (
 )
 from orchestrator import (
     final_style_policy,
-    runtime_audit,
     runtime_common,
     runtime_pending,
     terminal_console,
@@ -87,7 +91,6 @@ from orchestrator import runtime_status
 from orchestrator import runtime_timeout
 from orchestrator import runtime_transfer
 from orchestrator import runtime_workspace
-from orchestrator import runtime_wrapper
 from orchestrator import runtime_workzone
 from orchestrator.slash_command_audit import (
     SlashCommandAuditSession,
@@ -118,9 +121,7 @@ from orchestrator.flexible_backend_registry import (
     CLAUDE_MODEL_ALIASES,
     HER_V2_ENGINE,
     canonical_backend_engine,
-    get_available_models,
     allows_custom_models,
-    get_backend_label,
     is_selectable_backend,
     normalize_model,
     public_backend_engine,
@@ -145,6 +146,7 @@ from orchestrator.post_turn_observer import (
 )
 from orchestrator import runtime_observers
 from orchestrator.memory_plus_mode import (
+    apply_memory_plus_block,
     append_memory_plus_manual_note,
     clear_memory_plus_notepad,
     compact_memory_plus,
@@ -171,18 +173,6 @@ from orchestrator.telegram_notifications import (
 )
 from orchestrator.voice_manager import VoiceManager
 from orchestrator.phone_manager import PhoneConfigError, PhoneManager
-from orchestrator.wrapper_mode import SESSION_RESET_SOURCE, load_wrapper_config, visible_wrapper_slots
-from orchestrator.audit_mode import (
-    AuditTelemetryCollector,
-    load_audit_config,
-)
-from orchestrator.dual_brain_mode import (
-    DEFAULT_AFTER_ACTION_PROMPT,
-    DEFAULT_LEFT_PROMPT,
-    dual_brain_block_with,
-    ensure_dual_brain_observer,
-    load_dual_brain_config,
-)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
@@ -4048,9 +4038,6 @@ class FlexibleAgentRuntime:
             "performance": asset.performance,
             "request_id": str(request_id or ""),
         }
-
-    def _format_status_mode_block(self, mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
-        return runtime_status.format_status_mode_block(mode, state, detailed)
 
     def _build_status_text(
         self, detailed: bool = False, *, update: Update | None = None
@@ -9095,9 +9082,6 @@ class FlexibleAgentRuntime:
             parse_hchat_draft,
             validate_hchat_target_format,
         )
-        from orchestrator.wrapper_mode import passthrough_result
-
-        wrapper_result = passthrough_result(core_raw or "", fallback_reason="hchat_runtime_delivery")
         try:
             request_metadata = (
                 item.request_metadata if isinstance(item.request_metadata, Mapping) else {}
@@ -9122,7 +9106,6 @@ class FlexibleAgentRuntime:
                 core_raw=core_raw,
                 visible_text=visible_text,
                 completion_path=completion_path,
-                wrapper_result=wrapper_result,
             )
             await self._notify_request_listeners(
                 item.request_id,
@@ -9139,7 +9122,6 @@ class FlexibleAgentRuntime:
             return runtime_pipeline.SuccessfulResponse(
                 display_text=core_raw or "",
                 visible_text=visible_text,
-                wrapper_result=wrapper_result,
             )
 
         sender = getattr(self, "_hchat_draft_sender", None)
@@ -9235,7 +9217,6 @@ class FlexibleAgentRuntime:
             core_raw=core_raw,
             visible_text=visible_text,
             completion_path=completion_path,
-            wrapper_result=wrapper_result,
         )
         await self._notify_request_listeners(
             item.request_id,
@@ -9260,7 +9241,6 @@ class FlexibleAgentRuntime:
         return runtime_pipeline.SuccessfulResponse(
             display_text=core_raw or "",
             visible_text=visible_text,
-            wrapper_result=wrapper_result,
         )
 
     # ── /group ────────────────────────────────────────────────────────────────
@@ -10268,233 +10248,37 @@ class FlexibleAgentRuntime:
             reply_markup=self._effort_keyboard(current_effort),
         )
 
-    def _is_wrapper_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "wrapper"
 
-    def _is_audit_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "audit"
 
-    def _is_dual_brain_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) == "dual-brain"
 
-    def _is_managed_core_mode(self) -> bool:
-        return getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE) in {"wrapper", "audit"}
 
-    async def _require_wrapper_mode(self, update: Update, command_name: str) -> bool:
-        if self._is_wrapper_mode():
-            return True
-        await self._reply_text(
-            update,
-            ui_language.tr("advanced.require_wrapper", command=command_name),
-            parse_mode="Markdown",
-        )
-        return False
 
-    async def _require_managed_core_mode(self, update: Update, command_name: str) -> bool:
-        if self._is_managed_core_mode():
-            return True
-        await self._reply_text(
-            update,
-            ui_language.tr("advanced.require_managed", command=command_name),
-            parse_mode="Markdown",
-        )
-        return False
 
-    def _parse_backend_model_args(self, args: list[str]) -> tuple[dict[str, str], list[str]]:
-        values: dict[str, str] = {}
-        positional: list[str] = []
-        for raw in args:
-            if "=" in raw:
-                key, value = raw.split("=", 1)
-                key = key.strip().lower().replace("-", "_")
-                value = value.strip()
-                if key and value:
-                    values[key] = value
-            elif raw.strip():
-                positional.append(raw.strip())
-        return values, positional
 
-    def _allowed_wrapper_engine(self, engine: str) -> bool:
-        return any(b.get("engine") == engine for b in self.config.allowed_backends)
 
-    def _normalize_wrapper_model(self, engine: str, model: str) -> str:
-        if engine == "claude-cli":
-            model = CLAUDE_MODEL_ALIASES.get(model.lower(), model)
-        return normalize_model(engine, model) or model
 
-    def _validate_wrapper_backend_model(self, engine: str, model: str) -> str | None:
-        if not self._allowed_wrapper_engine(engine):
-            allowed = ", ".join(b.get("engine", "?") for b in self.config.allowed_backends)
-            return ui_language.tr(
-                "advanced.backend_not_allowed",
-                backend=engine,
-                allowed=allowed,
-            )
-        available = self._get_available_models_for(engine)
-        if not allows_custom_models(engine) and available and model not in available:
-            return ui_language.tr(
-                "advanced.unknown_model",
-                backend=engine,
-                model=model,
-            )
-        return None
 
-    @staticmethod
-    def _advanced_mode_label(mode: str) -> str:
-        return ui_language.tr(f"advanced.mode.{mode}")
 
-    @staticmethod
-    def _advanced_core_updated_text(
-        *,
-        mode: str,
-        backend: str,
-        model: str,
-        switch_ok: bool,
-        switch_message: str,
-    ) -> str:
-        return ui_language.tr(
-            "advanced.core_updated",
-            mode=FlexibleAgentRuntime._advanced_mode_label(mode),
-            backend=backend,
-            model=model,
-            state=ui_language.tr(
-                "advanced.active_core.updated"
-                if switch_ok
-                else "advanced.active_core.not_changed"
-            ),
-            message=switch_message,
-        )
 
-    @staticmethod
-    def _wrapper_translator_updated_text(
-        *,
-        backend: str,
-        model: str,
-        context_window: int,
-        fallback: str,
-    ) -> str:
-        return ui_language.tr(
-            "advanced.translator_updated",
-            backend=backend,
-            model=model,
-            context_window=context_window,
-            fallback=fallback,
-        )
 
-    def _wrapper_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        models = get_available_models("codex-cli")
-        rows: list[list[InlineKeyboardButton]] = []
-        for model in models:
-            label = selected_label(
-                model,
-                cfg.core_backend == "codex-cli" and cfg.core_model == model,
-            )
-            rows.append([InlineKeyboardButton(label, callback_data=f"wcfg:core:codex-cli:{model}")])
-        rows.append([
-            InlineKeyboardButton(
-                ui_language.tr("wrapper.button.wrapper_model"),
-                callback_data="wcfg:menu:wrap",
-            ),
-            InlineKeyboardButton(back_label(), callback_data="wcfg:menu:wrapper"),
-        ])
-        return InlineKeyboardMarkup(rows)
 
-    def _wrapper_model_choices(self) -> list[tuple[str, str, str, str]]:
-        return [
-            ("claude_haiku", "Claude Haiku", "claude-cli", "claude-haiku-4-5"),
-            ("claude_sonnet", "Claude Sonnet", "claude-cli", "claude-sonnet-4-6"),
-            ("deepseek_flash", "DeepSeek Flash", "deepseek-api", "deepseek-flash"),
-            ("deepseek_pro", "DeepSeek Pro", "deepseek-api", "deepseek-v4-pro"),
-            ("or_v32", "OR DeepSeek V3.2 Exp", "openrouter-api", "deepseek/deepseek-v3.2-exp"),
-            ("or_v4_flash", "OR DeepSeek V4 Flash", "openrouter-api", "deepseek/deepseek-v4-flash"),
-            ("or_v4_pro", "OR DeepSeek V4 Pro", "openrouter-api", "deepseek/deepseek-v4-pro"),
-            ("or_gemini", "OR Gemini 3.8 Flash", "openrouter-api", "google/gemini-3.8-flash"),
-        ]
 
-    def _wrapper_model_choice(self, choice_id: str) -> tuple[str, str, str, str] | None:
-        return next((choice for choice in self._wrapper_model_choices() if choice[0] == choice_id), None)
 
-    def _wrapper_wrap_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = []
-        choices = {choice_id: (label, backend, model) for choice_id, label, backend, model in self._wrapper_model_choices()}
-        grouped_rows = [
-            ["claude_haiku", "claude_sonnet"],
-            ["deepseek_flash", "deepseek_pro"],
-            ["or_v32", "or_v4_flash"],
-            ["or_v4_pro", "or_gemini"],
-        ]
-        for group in grouped_rows:
-            row: list[InlineKeyboardButton] = []
-            for choice_id in group:
-                label, backend, model = choices[choice_id]
-                active = cfg.wrapper_backend == backend and cfg.wrapper_model == model
-                row.append(
-                    InlineKeyboardButton(
-                        selected_label(label, active),
-                        callback_data=f"wcfg:wrapid:{choice_id}:{cfg.context_window}",
-                    )
-                )
-            rows.append(row)
-        rows.append([
-            InlineKeyboardButton(
-                f"{ui_language.tr('wrapper.context_button', value=value)}"
-                f"{' ✅' if cfg.context_window == value else ''}",
-                callback_data=f"wcfg:wrapctx:{value}",
-            )
-            for value in (0, 3, 5)
-        ])
-        rows.append([
-            InlineKeyboardButton(
-                ui_language.tr("wrapper.button.core_model"),
-                callback_data="wcfg:menu:core",
-            ),
-            InlineKeyboardButton(back_label(), callback_data="wcfg:menu:wrapper"),
-        ])
-        return InlineKeyboardMarkup(rows)
 
-    def _wrapper_status_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        ui_language.tr("wrapper.button.core_model"),
-                        callback_data="wcfg:menu:core",
-                    ),
-                    InlineKeyboardButton(
-                        ui_language.tr("wrapper.button.wrapper_model"),
-                        callback_data="wcfg:menu:wrap",
-                    ),
-                ],
-                [InlineKeyboardButton(refresh_label(), callback_data="wcfg:menu:wrapper")],
-            ]
-        )
 
-    def _wrapper_core_text(self, cfg) -> str:
-        return setting_card(
-            "🧠",
-            "Wrapper core model",
-            current=f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            facts=[
-                f"<b>{html.escape(ui_language.tr('wrapper.role'))}</b> · "
-                f"{ui_language.tr('wrapper.core_role')}"
-            ],
-            consequence=ui_language.tr("wrapper.core_effect"),
-            action=ui_language.tr("wrapper.core_action"),
-        )
 
-    def _audit_core_model_choices(self) -> list[tuple[str, str, str, str]]:
-        return runtime_audit.audit_core_model_choices(self)
 
-    def _audit_auditor_model_choices(self) -> list[tuple[str, str, str, str]]:
-        return runtime_audit.audit_auditor_model_choices(self)
 
     def _filter_allowed_model_choices(
         self,
         choices: list[tuple[str, str, str, str]],
     ) -> list[tuple[str, str, str, str]]:
         filtered: list[tuple[str, str, str, str]] = []
+        allowed_engines = {
+            str(b.get("engine") or "") for b in self.config.allowed_backends
+        }
         for choice_id, label, backend, model in choices:
-            if not self._allowed_wrapper_engine(backend):
+            if backend not in allowed_engines:
                 continue
             available = self._get_available_models_for(backend)
             if available and model not in available:
@@ -10502,1233 +10286,35 @@ class FlexibleAgentRuntime:
             filtered.append((choice_id, label, backend, model))
         return filtered
 
-    def _audit_choice_by_id(self, target: str, choice_id: str) -> tuple[str, str, str, str] | None:
-        return runtime_audit.audit_choice_by_id(self, target, choice_id)
 
-    def _audit_model_keyboard(self, cfg, *, target: str) -> InlineKeyboardMarkup:
-        return runtime_audit.audit_model_keyboard(self, cfg, target=target)
 
-    def _audit_core_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        return self._audit_model_keyboard(cfg, target="core")
 
-    def _audit_core_text(self, cfg) -> str:
-        return runtime_audit.audit_core_text(cfg)
 
-    def _audit_auditor_text(self, cfg) -> str:
-        return runtime_audit.audit_auditor_text(cfg)
 
-    def _audit_auditor_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        return self._audit_model_keyboard(cfg, target="audit")
 
-    def _audit_config_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        return runtime_audit.audit_config_keyboard(cfg)
 
-    def _audit_block_with(
-        self,
-        cfg,
-        *,
-        delivery: str | None = None,
-        severity_threshold: str | None = None,
-        backend: str | None = None,
-        model: str | None = None,
-    ) -> dict[str, Any]:
-        return runtime_audit.audit_block_with(
-            cfg,
-            delivery=delivery,
-            severity_threshold=severity_threshold,
-            backend=backend,
-            model=model,
-        )
 
-    def _wrapper_wrap_text(self, cfg) -> str:
-        return setting_card(
-            "🎭",
-            "Wrapper translator model",
-            current=f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
-            facts=[
-                f"<b>{html.escape(ui_language.tr('wrapper.context_window'))}</b> · "
-                f"<code>{cfg.context_window}</code> {ui_language.tr('wrapper.visible_turns')}",
-                f"<b>{html.escape(ui_language.tr('wrapper.fallback'))}</b> · "
-                f"<code>{html.escape(cfg.fallback)}</code>",
-                f"<b>{html.escape(ui_language.tr('wrapper.recommended'))}</b> · "
-                "<code>claude-cli / claude-haiku-4-5</code>",
-            ],
-            consequence=ui_language.tr("wrapper.model_effect"),
-            action=ui_language.tr("wrapper.model_action"),
-        )
 
-    def _wrapper_status_text(self, state: dict, slots: dict) -> str:
-        cfg = load_wrapper_config(state)
-        visible_slots = visible_wrapper_slots(slots)
-        lines = [
-            card_title("🎭", "Wrapper configuration"),
-            "",
-            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
-            f"{ui_language.tr('wrapper.current_core', backend_model=f'<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>')}",
-            f"<b>{html.escape(ui_language.tr('common.wrapper'))}</b> · "
-            f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
-            f"<b>{html.escape(ui_language.tr('wrapper.context_window'))}</b> · "
-            f"<code>{cfg.context_window}</code> {ui_language.tr('wrapper.visible_turns')}",
-            f"<b>{html.escape(ui_language.tr('common.slot'))}</b> · "
-            f"{ui_language.tr('wrapper.slots_count', count=f'<code>{len(visible_slots)}</code>')}",
-            "",
-            ui_language.tr("wrapper.status_effect"),
-            "",
-            f"<b>{html.escape(ui_language.tr('wrapper.slots_heading').upper())}</b>",
-        ]
-        if visible_slots:
-            for key in sorted(visible_slots, key=lambda value: (not str(value).isdigit(), int(value) if str(value).isdigit() else str(value))):
-                lines.append(f"• <code>{html.escape(str(key))}</code>: {html.escape(str(visible_slots[key]))}")
-        else:
-            lines.append(f"• {ui_language.tr('common.none')}")
-        lines.extend(
-            [
-                "",
-                ui_language.tr("wrapper.status_action"),
-            ]
-        )
-        return "\n".join(lines)
 
-    async def _activate_wrapper_core_backend(
-        self,
-        chat_id: int,
-        *,
-        backend: str,
-        model: str,
-    ) -> tuple[bool, str]:
-        current_model = self.get_current_model() if self.backend_manager.current_backend else None
-        if self.config.active_backend == backend and current_model == model:
-            return True, ui_language.tr("advanced.core_already_active")
-        return await self._switch_backend_mode(
-            chat_id,
-            backend,
-            target_model=model,
-            with_context=False,
-        )
 
-    async def cmd_core(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not await self._require_managed_core_mode(update, "core"):
-            return
 
-        state = self.backend_manager.get_state_snapshot()
-        mode = getattr(self.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
-        cfg = load_wrapper_config(state) if mode == "wrapper" else load_audit_config(state)
-        args = context.args or []
-        if not args:
-            text = self._wrapper_core_text(cfg) if mode == "wrapper" else self._audit_core_text(cfg)
-            keyboard = self._wrapper_core_keyboard(cfg) if mode == "wrapper" else self._audit_core_keyboard(cfg)
-            await self._reply_text(
-                update,
-                text,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-            return
 
-        values, positional = self._parse_backend_model_args(args)
-        backend = values.get("backend") or (positional[0] if positional else cfg.core_backend)
-        model = values.get("model") or (positional[1] if len(positional) > 1 else cfg.core_model)
-        backend = backend.strip().lower()
-        model = self._normalize_wrapper_model(backend, model.strip())
 
-        error = self._validate_wrapper_backend_model(backend, model)
-        if error:
-            await self._reply_text(update, error)
-            return
 
-        if mode == "wrapper":
-            self.backend_manager.update_wrapper_blocks(core={"backend": backend, "model": model})
-        else:
-            self.backend_manager.update_audit_blocks(core={"backend": backend, "model": model})
-        switch_ok, switch_message = await self._activate_wrapper_core_backend(
-            update.effective_chat.id,
-            backend=backend,
-            model=model,
-        )
-        await self._reply_text(
-            update,
-            self._advanced_core_updated_text(
-                mode=mode,
-                backend=backend,
-                model=model,
-                switch_ok=switch_ok,
-                switch_message=switch_message,
-            ),
-            parse_mode="Markdown",
-        )
 
-    async def cmd_wrap(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not await self._require_wrapper_mode(update, "wrap"):
-            return
 
-        state = self.backend_manager.get_state_snapshot()
-        cfg = load_wrapper_config(state)
-        args = context.args or []
-        if not args:
-            await self._reply_text(
-                update,
-                self._wrapper_wrap_text(cfg),
-                parse_mode="HTML",
-                reply_markup=self._wrapper_wrap_keyboard(cfg),
-            )
-            return
 
-        values, positional = self._parse_backend_model_args(args)
-        backend = values.get("backend") or (positional[0] if positional else cfg.wrapper_backend)
-        model = values.get("model") or (positional[1] if len(positional) > 1 else cfg.wrapper_model)
-        context_value = values.get("context_window") or values.get("context") or values.get("window")
-        fallback = values.get("fallback") or cfg.fallback
-        backend = backend.strip().lower()
-        model = self._normalize_wrapper_model(backend, model.strip())
 
-        error = self._validate_wrapper_backend_model(backend, model)
-        if error:
-            await self._reply_text(update, error)
-            return
 
-        context_window = cfg.context_window
-        if context_value is not None:
-            try:
-                context_window = max(0, min(int(context_value), 20))
-            except ValueError:
-                await self._reply_text(update, ui_language.tr("advanced.context_integer"))
-                return
 
-        self.backend_manager.update_wrapper_blocks(
-            wrapper={
-                "backend": backend,
-                "model": model,
-                "context_window": context_window,
-                "fallback": fallback,
-            }
-        )
-        await self._reply_text(
-            update,
-            self._wrapper_translator_updated_text(
-                backend=backend,
-                model=model,
-                context_window=context_window,
-                fallback=fallback,
-            ),
-            parse_mode="Markdown",
-        )
 
-    async def cmd_wrapper(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not await self._require_wrapper_mode(update, "wrapper"):
-            return
 
-        args = context.args or []
-        action = (args[0].lower() if args else "list").strip()
-        state = self.backend_manager.get_state_snapshot()
-        slots = state.get("wrapper_slots")
-        if not isinstance(slots, dict):
-            slots = {}
 
-        if action in {"list", "status"}:
-            await self._reply_text(
-                update,
-                self._wrapper_status_text(state, slots),
-                parse_mode="HTML",
-                reply_markup=self._wrapper_status_keyboard(),
-            )
-            return
 
-        if action == "set":
-            if len(args) < 3:
-                await self._reply_text(update, ui_language.tr("wrapper.usage.set"))
-                return
-            slot = args[1].strip()
-            text = " ".join(args[2:]).strip()
-            if not slot or not text:
-                await self._reply_text(update, ui_language.tr("wrapper.usage.set"))
-                return
-            slots[slot] = text
-            self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
-            await self._reply_text(
-                update,
-                ui_language.tr("wrapper.slot_updated", slot=slot),
-                parse_mode="Markdown",
-            )
-            return
 
-        if action == "clear":
-            if len(args) < 2:
-                await self._reply_text(update, ui_language.tr("wrapper.usage.clear"))
-                return
-            target = args[1].strip()
-            if target.lower() == "all":
-                slots = {"9": ""}
-                message = ui_language.tr("wrapper.slots_cleared")
-            else:
-                if target == "9":
-                    slots[target] = ""
-                else:
-                    slots.pop(target, None)
-                message = ui_language.tr("wrapper.slot_cleared", slot=target)
-            self.backend_manager.update_wrapper_blocks(wrapper_slots=slots)
-            await self._reply_text(update, message, parse_mode="Markdown")
-            return
 
-        await self._reply_text(update, ui_language.tr("wrapper.usage.full"))
 
-    def _audit_status_text(self, state: dict, criteria: dict) -> str:
-        return runtime_audit.audit_status_text(state, criteria)
 
-    def _audit_status_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        return self._audit_config_keyboard(cfg)
-
-    async def cmd_audit(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        if not self._is_audit_mode():
-            await self._reply_text(
-                update,
-                ui_language.tr("advanced.require_audit"),
-                parse_mode="Markdown",
-            )
-            return
-
-        args = context.args or []
-        action = (args[0].lower() if args else "list").strip()
-        state = self.backend_manager.get_state_snapshot()
-        criteria = state.get("audit_criteria")
-        if not isinstance(criteria, dict):
-            criteria = {}
-        cfg = load_audit_config(state)
-
-        if action in {"list", "status"}:
-            await self._reply_text(
-                update,
-                self._audit_status_text(state, criteria),
-                parse_mode="HTML",
-                reply_markup=self._audit_status_keyboard(cfg),
-            )
-            return
-
-        if action == "model":
-            if len(args) == 1:
-                await self._reply_text(
-                    update,
-                    self._audit_auditor_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=self._audit_auditor_keyboard(cfg),
-                )
-                return
-            values, positional = self._parse_backend_model_args(args[1:])
-            backend = values.get("backend") or (positional[0] if positional else cfg.audit_backend)
-            model = values.get("model") or (positional[1] if len(positional) > 1 else cfg.audit_model)
-            backend = backend.strip().lower()
-            model = self._normalize_wrapper_model(backend, model.strip())
-            error = self._validate_wrapper_backend_model(backend, model)
-            if error:
-                await self._reply_text(update, error)
-                return
-            self.backend_manager.update_audit_blocks(
-                audit={
-                    "backend": backend,
-                    "model": model,
-                    "context_window": cfg.context_window,
-                    "delivery": cfg.delivery,
-                    "severity_threshold": cfg.severity_threshold,
-                    "fail_policy": cfg.fail_policy,
-                }
-            )
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "audit.model_updated",
-                    backend=backend,
-                    model=model,
-                ),
-                parse_mode="Markdown",
-            )
-            return
-
-        if action in {"delivery", "threshold"}:
-            if len(args) < 2:
-                await self._reply_text(
-                    update,
-                    ui_language.tr("audit.usage.setting", action=action),
-                )
-                return
-            value = args[1].strip().lower()
-            audit_block = self._audit_block_with(cfg)
-            if action == "delivery":
-                if value not in {"silent", "issues_only", "always"}:
-                    await self._reply_text(update, ui_language.tr("audit.delivery.invalid"))
-                    return
-                audit_block["delivery"] = value
-            elif action == "threshold":
-                if value not in {"low", "medium", "high", "critical"}:
-                    await self._reply_text(update, ui_language.tr("audit.threshold.invalid"))
-                    return
-                audit_block["severity_threshold"] = value
-            self.backend_manager.update_audit_blocks(audit=audit_block)
-            result_key = {"delivery": "delivery", "threshold": "severity_threshold"}[action]
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "audit.setting_updated",
-                    action=action,
-                    value=audit_block[result_key],
-                ),
-                parse_mode="Markdown",
-            )
-            return
-
-        if action == "set":
-            if len(args) < 3:
-                await self._reply_text(update, ui_language.tr("audit.usage.set"))
-                return
-            slot = args[1].strip()
-            text = " ".join(args[2:]).strip()
-            if not slot or not text:
-                await self._reply_text(update, ui_language.tr("audit.usage.set"))
-                return
-            criteria[slot] = text
-            self.backend_manager.update_audit_blocks(audit_criteria=criteria)
-            await self._reply_text(
-                update,
-                ui_language.tr("audit.criterion_updated", slot=slot),
-                parse_mode="Markdown",
-            )
-            return
-
-        if action == "clear":
-            if len(args) < 2:
-                await self._reply_text(update, ui_language.tr("audit.usage.clear"))
-                return
-            target = args[1].strip()
-            if target.lower() == "all":
-                criteria = {"9": ""}
-                message = ui_language.tr("audit.criteria_cleared")
-            else:
-                if target == "9":
-                    criteria[target] = ""
-                else:
-                    criteria.pop(target, None)
-                message = ui_language.tr("audit.criterion_cleared", slot=target)
-            self.backend_manager.update_audit_blocks(audit_criteria=criteria)
-            await self._reply_text(update, message, parse_mode="Markdown")
-            return
-
-        await self._reply_text(
-            update,
-            ui_language.tr("audit.usage.full"),
-        )
-
-    def _dual_brain_config(self):
-        return load_dual_brain_config(
-            self.backend_manager.get_state_snapshot(),
-            current_backend=getattr(self.config, "active_backend", ""),
-            current_model=self.get_current_model(),
-        )
-
-    def _dual_brain_status_keyboard(self, cfg) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(ui_language.tr("brain.left"), callback_data="bcfg:menu:left"),
-                    InlineKeyboardButton(ui_language.tr("brain.right"), callback_data="bcfg:menu:right"),
-                ],
-                [
-                    InlineKeyboardButton(ui_language.tr("brain.prompts"), callback_data="bcfg:menu:prompts"),
-                    InlineKeyboardButton(refresh_label(), callback_data="bcfg:menu:status"),
-                ],
-            ]
-        )
-
-    def _dual_brain_allowed_backend_ids(self) -> list[str]:
-        return [
-            str(backend.get("engine"))
-            for backend in self.config.allowed_backends
-            if backend.get("engine") and is_selectable_backend(backend.get("engine"))
-        ]
-
-    def _dual_brain_backend_keyboard(self, cfg, *, target: str) -> InlineKeyboardMarkup:
-        current_backend = cfg.left_backend if target == "left" else cfg.right_backend
-        rows: list[list[InlineKeyboardButton]] = []
-        engines = self._dual_brain_allowed_backend_ids()
-        for i in range(0, len(engines), 2):
-            row: list[InlineKeyboardButton] = []
-            for engine in engines[i : i + 2]:
-                label = get_backend_label(engine)
-                if engine == current_backend:
-                    label = selected_label(label, True)
-                row.append(InlineKeyboardButton(label, callback_data=f"bcfg:backend:{target}:{engine}"))
-            rows.append(row)
-        rows.append([InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")])
-        return InlineKeyboardMarkup(rows)
-
-    def _dual_brain_model_keyboard(self, cfg, *, target: str, backend: str | None = None) -> InlineKeyboardMarkup:
-        current_backend = cfg.left_backend if target == "left" else cfg.right_backend
-        current_model = cfg.left_model if target == "left" else cfg.right_model
-        selected_backend = backend or current_backend
-        models = self._get_available_models_for(selected_backend)
-        rows: list[list[InlineKeyboardButton]] = []
-        for index, model in enumerate(models):
-            active = selected_backend == current_backend and model == current_model
-            label = selected_label(model, active)
-            rows.append([InlineKeyboardButton(label, callback_data=f"bcfg:modelidx:{target}:{selected_backend}:{index}")])
-        rows.append([
-            InlineKeyboardButton(
-                ui_language.tr("brain.back_backends"),
-                callback_data=f"bcfg:menu:{target}",
-            )
-        ])
-        rows.append([InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")])
-        return InlineKeyboardMarkup(rows)
-
-    def _dual_brain_status_text(self, cfg) -> str:
-        memory_prompt = ui_language.tr(
-            "brain.prompt.default" if cfg.left_prompt == DEFAULT_LEFT_PROMPT else "brain.prompt.custom"
-        )
-        notepad_prompt = ui_language.tr(
-            "brain.prompt.default"
-            if cfg.after_action_prompt == DEFAULT_AFTER_ACTION_PROMPT
-            else "brain.prompt.custom"
-        )
-        return setting_card(
-            "🧠",
-            "Dual-brain configuration",
-            current=f"<b>{html.escape(str(self.backend_manager.agent_mode).upper())}</b>",
-            facts=[
-                f"<b>{html.escape(ui_language.tr('brain.left'))}</b> · "
-                f"<code>{html.escape(cfg.left_backend)} / {html.escape(cfg.left_model)}</code>",
-                f"<b>{html.escape(ui_language.tr('brain.right'))}</b> · "
-                f"<code>{html.escape(cfg.right_backend)} / {html.escape(cfg.right_model)}</code>",
-                f"<b>{html.escape(ui_language.tr('brain.memory_prompt'))}</b> · "
-                f"<code>{memory_prompt}</code>",
-                f"<b>{html.escape(ui_language.tr('brain.notepad_prompt'))}</b> · "
-                f"<code>{notepad_prompt}</code>",
-            ],
-            consequence=ui_language.tr("brain.status_effect"),
-            action=ui_language.tr("brain.status_action"),
-        )
-
-    def _dual_brain_model_text(self, cfg, *, target: str) -> str:
-        backend = cfg.left_backend if target == "left" else cfg.right_backend
-        model = cfg.left_model if target == "left" else cfg.right_model
-        label = ui_language.tr("brain.left" if target == "left" else "brain.right")
-        return setting_card(
-            "🧠",
-            ui_language.tr("brain.backend_title", brain=label),
-            current=f"<code>{html.escape(backend)} / {html.escape(model)}</code>",
-            facts=[
-                f"<b>{html.escape(ui_language.tr('common.target'))}</b> · "
-                f"<code>{ui_language.tr('brain.target_value', target=label)}</code>"
-            ],
-            consequence=ui_language.tr("brain.backend_effect"),
-            action=ui_language.tr("brain.backend_action", target=target),
-        )
-
-    def _dual_brain_backend_model_text(self, cfg, *, target: str, backend: str) -> str:
-        current_backend = cfg.left_backend if target == "left" else cfg.right_backend
-        current_model = cfg.left_model if target == "left" else cfg.right_model
-        label = ui_language.tr("brain.left" if target == "left" else "brain.right")
-        active = ui_language.tr(
-            "brain.state.current" if backend == current_backend else "brain.state.not_current"
-        )
-        return setting_card(
-            "🧠",
-            ui_language.tr("brain.model_title", brain=label),
-            current=f"<code>{html.escape(current_backend)} / {html.escape(current_model)}</code>",
-            facts=[
-                f"<b>{html.escape(ui_language.tr('brain.selected_backend'))}</b> · "
-                f"<code>{html.escape(backend)}</code>",
-                f"<b>{html.escape(ui_language.tr('brain.backend_state'))}</b> · "
-                f"<code>{active}</code>",
-            ],
-            consequence=ui_language.tr("brain.model_effect"),
-            action=ui_language.tr("brain.model_action"),
-        )
-
-    def _dual_brain_prompts_text(self, cfg) -> str:
-        def section(title: str, command_target: str, value: str) -> str:
-            text = value or ui_language.tr("common.empty")
-            char_count = f"<code>{len(value or '')}</code>"
-            max_chars = 1100
-            if len(text) > max_chars:
-                text = (
-                    text[:max_chars]
-                    + "\n"
-                    + ui_language.tr("brain.prompt_truncated", target=command_target)
-                )
-            return (
-                f"<b>{title}</b> · "
-                f"{ui_language.tr('brain.prompt_chars', count=char_count)}\n"
-                f"<pre>{html.escape(text)}</pre>"
-            )
-
-        return (
-            f"{card_title('🧠', 'Dual-brain prompts')}\n\n"
-            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
-            f"{ui_language.tr('brain.prompts_current')}\n"
-            f"<b>{html.escape(ui_language.tr('common.scope'))}</b> · "
-            f"{ui_language.tr('brain.prompts_scope')}\n\n"
-            f"{section(ui_language.tr('brain.memory_prompt'), 'memory', cfg.left_prompt)}\n\n"
-            f"{section(ui_language.tr('brain.notepad_prompt'), 'notepad', cfg.after_action_prompt)}\n\n"
-            f"<b>{html.escape(ui_language.tr('common.use'))}</b>\n"
-            f"<code>/brain prompt memory &lt;text&gt;</code> · {ui_language.tr('brain.use.memory')}\n"
-            f"<code>/brain prompt notepad &lt;text&gt;</code> · {ui_language.tr('brain.use.notepad')}\n"
-            f"<code>/brain prompt memory|notepad show|clear</code> · {ui_language.tr('brain.use.inspect')}\n\n"
-            f"{ui_language.tr('brain.aliases')}"
-        )
-
-    async def cmd_brain(self, update: Update, context: Any):
-        if not self._is_authorized_user(update.effective_user.id):
-            return
-        ensure_dual_brain_observer(self.workspace_dir)
-        self.reload_post_turn_observers()
-        cfg = self._dual_brain_config()
-        args = [a.strip() for a in (context.args or []) if a.strip()]
-        if not args or args[0].lower() in {"status", "menu", "config"}:
-            await self._reply_text(
-                update,
-                self._dual_brain_status_text(cfg),
-                parse_mode="HTML",
-                reply_markup=self._dual_brain_status_keyboard(cfg),
-            )
-            return
-
-        action = args[0].lower()
-        if action in {"prompts", "prompt"} and len(args) == 1:
-            await self._reply_text(
-                update,
-                self._dual_brain_prompts_text(cfg),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")]]),
-            )
-            return
-
-        if action in {"left", "right"}:
-            values = _parse_key_values(args[1:])
-            backend = values.get("backend") or (args[1] if len(args) > 1 and "=" not in args[1] else "")
-            model = values.get("model") or (args[2] if len(args) > 2 and "=" not in args[2] else "")
-            if not backend or not model:
-                await self._reply_text(
-                    update,
-                    ui_language.tr("brain.usage.model", side=action),
-                )
-                return
-            backend = backend.strip().lower()
-            model = self._normalize_wrapper_model(backend, model.strip())
-            error = self._validate_wrapper_backend_model(backend, model)
-            if error:
-                await self._reply_text(update, error)
-                return
-            block = (
-                dual_brain_block_with(cfg, left_backend=backend, left_model=model)
-                if action == "left"
-                else dual_brain_block_with(cfg, right_backend=backend, right_model=model)
-            )
-            self.backend_manager.update_dual_brain_block(block)
-            if action == "right" and self._is_dual_brain_mode():
-                switch_ok, switch_message = await self._activate_wrapper_core_backend(
-                    update.effective_chat.id,
-                    backend=backend,
-                    model=model,
-                )
-                if not switch_ok:
-                    await self._reply_text(
-                        update,
-                        ui_language.tr("brain.switch_failed", message=switch_message),
-                    )
-                    return
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "brain.model_saved",
-                    side=ui_language.tr(f"brain.{action}"),
-                    backend=backend,
-                    model=model,
-                ),
-                parse_mode="Markdown",
-            )
-            return
-
-        if action == "prompt":
-            if len(args) < 3:
-                await self._reply_text(update, ui_language.tr("brain.usage.prompt"))
-                return
-            target = args[1].lower()
-            prompt_aliases = {
-                "left": "left",
-                "memory": "left",
-                "briefing": "left",
-                "after": "after_action",
-                "after_action": "after_action",
-                "notepad": "after_action",
-                "update": "after_action",
-            }
-            key = prompt_aliases.get(target)
-            if key is None:
-                await self._reply_text(
-                    update,
-                    ui_language.tr("brain.prompt_target_invalid"),
-                )
-                return
-            sub = args[2].lower()
-            current = {
-                "left": cfg.left_prompt,
-                "after_action": cfg.after_action_prompt,
-            }[key]
-            if sub == "show":
-                await self._reply_text(
-                    update,
-                    current or ui_language.tr("brain.empty"),
-                    parse_mode=None,
-                )
-                return
-            new_prompt = "" if sub == "clear" else " ".join(args[2:]).strip()
-            block = dual_brain_block_with(
-                cfg,
-                left_prompt=new_prompt if key == "left" else None,
-                after_action_prompt=new_prompt if key == "after_action" else None,
-            )
-            self.backend_manager.update_dual_brain_block(block)
-            await self._reply_text(
-                update,
-                ui_language.tr(
-                    "brain.prompt_updated",
-                    target=key,
-                    count=len(new_prompt),
-                ),
-            )
-            return
-
-        await self._reply_text(
-            update,
-            ui_language.tr("brain.usage.full"),
-        )
-
-    async def callback_audit_config(self, update: Update, context: Any):
-        query = update.callback_query
-        if not self._is_authorized_user(query.from_user.id):
-            return
-        if not self._is_audit_mode():
-            await query.answer(
-                ui_language.tr("advanced.require_audit_controls"),
-                show_alert=True,
-            )
-            return
-
-        data = query.data or ""
-        try:
-            state = self.backend_manager.get_state_snapshot()
-            criteria = state.get("audit_criteria")
-            if not isinstance(criteria, dict):
-                criteria = {}
-            cfg = load_audit_config(state)
-
-            if data == "acfg:menu:core":
-                await query.edit_message_text(
-                    self._audit_core_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=self._audit_core_keyboard(cfg),
-                )
-            elif data == "acfg:menu:auditmodel":
-                await query.edit_message_text(
-                    self._audit_auditor_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=self._audit_auditor_keyboard(cfg),
-                )
-            elif data == "acfg:menu:audit":
-                await query.edit_message_text(
-                    self._audit_status_text(state, criteria),
-                    parse_mode="HTML",
-                    reply_markup=self._audit_status_keyboard(cfg),
-                )
-            elif data.startswith("acfg:coreid:") or data.startswith("acfg:auditid:"):
-                parts = data.split(":", 2)
-                if len(parts) != 3:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_model_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, target_raw, choice_id = parts
-                target = "core" if target_raw == "coreid" else "audit"
-                choice = self._audit_choice_by_id(target, choice_id)
-                if choice is None:
-                    await query.answer(
-                        ui_language.tr("callback.unknown_model_choice"),
-                        show_alert=True,
-                    )
-                    return
-                _, _label, backend, model = choice
-                error = self._validate_wrapper_backend_model(backend, model)
-                if error:
-                    await query.answer(error, show_alert=True)
-                    return
-                if target == "core":
-                    self.backend_manager.update_audit_blocks(core={"backend": backend, "model": model})
-                    switch_ok, switch_message = await self._activate_wrapper_core_backend(
-                        query.message.chat_id,
-                        backend=backend,
-                        model=model,
-                    )
-                    refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
-                    await query.edit_message_text(
-                        self._advanced_core_updated_text(
-                            mode="audit",
-                            backend=backend,
-                            model=model,
-                            switch_ok=switch_ok,
-                            switch_message=switch_message,
-                        ),
-                        parse_mode="Markdown",
-                        reply_markup=self._audit_core_keyboard(refreshed),
-                    )
-                else:
-                    self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, backend=backend, model=model))
-                    refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
-                    await query.edit_message_text(
-                        ui_language.tr(
-                            "audit.model_updated",
-                            backend=backend,
-                            model=model,
-                        ),
-                        parse_mode="Markdown",
-                        reply_markup=self._audit_auditor_keyboard(refreshed),
-                    )
-            elif data.startswith("acfg:delivery:") or data.startswith("acfg:threshold:"):
-                parts = data.split(":", 2)
-                if len(parts) != 3:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_audit_setting"),
-                        show_alert=True,
-                    )
-                    return
-                _, setting, value = parts
-                value = value.strip().lower()
-                if setting == "delivery":
-                    if value not in {"silent", "issues_only", "always"}:
-                        await query.answer(
-                            ui_language.tr("callback.invalid_delivery"),
-                            show_alert=True,
-                        )
-                        return
-                    self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, delivery=value))
-                else:
-                    if value not in {"low", "medium", "high", "critical"}:
-                        await query.answer(
-                            ui_language.tr("callback.invalid_threshold"),
-                            show_alert=True,
-                        )
-                        return
-                    self.backend_manager.update_audit_blocks(audit=self._audit_block_with(cfg, severity_threshold=value))
-                refreshed_state = self.backend_manager.get_state_snapshot()
-                refreshed = load_audit_config(refreshed_state)
-                refreshed_criteria = refreshed_state.get("audit_criteria")
-                if not isinstance(refreshed_criteria, dict):
-                    refreshed_criteria = {}
-                await query.edit_message_text(
-                    self._audit_status_text(refreshed_state, refreshed_criteria),
-                    parse_mode="HTML",
-                    reply_markup=self._audit_status_keyboard(refreshed),
-                )
-            elif data.startswith("acfg:core:"):
-                parts = data.split(":", 3)
-                if len(parts) != 4:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_core_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, _, backend, model = parts
-                backend = backend.strip().lower()
-                model = self._normalize_wrapper_model(backend, model.strip())
-                error = self._validate_wrapper_backend_model(backend, model)
-                if error:
-                    await query.answer(error, show_alert=True)
-                    return
-                self.backend_manager.update_audit_blocks(core={"backend": backend, "model": model})
-                switch_ok, switch_message = await self._activate_wrapper_core_backend(
-                    query.message.chat_id,
-                    backend=backend,
-                    model=model,
-                )
-                refreshed = load_audit_config(self.backend_manager.get_state_snapshot())
-                await query.edit_message_text(
-                    self._advanced_core_updated_text(
-                        mode="audit",
-                        backend=backend,
-                        model=model,
-                        switch_ok=switch_ok,
-                        switch_message=switch_message,
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=self._audit_core_keyboard(refreshed),
-                )
-            else:
-                await query.answer(
-                    ui_language.tr("callback.unknown_audit_control"),
-                    show_alert=True,
-                )
-                return
-        except Exception as e:
-            self.error_logger.error(f"callback_audit_config error: {e}", exc_info=True)
-            await query.answer(
-                ui_language.tr("callback.error", reason=e),
-                show_alert=True,
-            )
-            return
-        await query.answer()
-
-    async def callback_brain_config(self, update: Update, context: Any):
-        query = update.callback_query
-        if not self._is_authorized_user(query.from_user.id):
-            return
-        data = query.data or ""
-        try:
-            ensure_dual_brain_observer(self.workspace_dir)
-            self.reload_post_turn_observers()
-            cfg = self._dual_brain_config()
-            if data == "bcfg:menu:status":
-                await query.edit_message_text(
-                    self._dual_brain_status_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=self._dual_brain_status_keyboard(cfg),
-                )
-            elif data == "bcfg:menu:left":
-                await query.edit_message_text(
-                    self._dual_brain_model_text(cfg, target="left"),
-                    parse_mode="HTML",
-                    reply_markup=self._dual_brain_backend_keyboard(cfg, target="left"),
-                )
-            elif data == "bcfg:menu:right":
-                await query.edit_message_text(
-                    self._dual_brain_model_text(cfg, target="right"),
-                    parse_mode="HTML",
-                    reply_markup=self._dual_brain_backend_keyboard(cfg, target="right"),
-                )
-            elif data == "bcfg:menu:prompts":
-                await query.edit_message_text(
-                    self._dual_brain_prompts_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(back_label(), callback_data="bcfg:menu:status")]]),
-                )
-            elif data.startswith("bcfg:backend:"):
-                parts = data.split(":", 3)
-                if len(parts) != 4:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_backend_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, _, target, backend = parts
-                if target not in {"left", "right"}:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_brain_target"),
-                        show_alert=True,
-                    )
-                    return
-                backend = backend.strip()
-                if not self._allowed_wrapper_engine(backend):
-                    await query.answer(
-                        ui_language.tr(
-                            "callback.backend_not_allowed",
-                            backend=backend,
-                        ),
-                        show_alert=True,
-                    )
-                    return
-                if not self._get_available_models_for(backend):
-                    await query.answer(
-                        ui_language.tr("callback.no_models", backend=backend),
-                        show_alert=True,
-                    )
-                    return
-                await query.edit_message_text(
-                    self._dual_brain_backend_model_text(cfg, target=target, backend=backend),
-                    parse_mode="HTML",
-                    reply_markup=self._dual_brain_model_keyboard(cfg, target=target, backend=backend),
-                )
-            elif data.startswith("bcfg:modelidx:"):
-                parts = data.split(":", 4)
-                if len(parts) != 5:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_model_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, _, target, backend, raw_index = parts
-                if target not in {"left", "right"}:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_brain_target"),
-                        show_alert=True,
-                    )
-                    return
-                models = self._get_available_models_for(backend)
-                try:
-                    model = models[int(raw_index)]
-                except (ValueError, IndexError):
-                    await query.answer(
-                        ui_language.tr("callback.unknown_model_choice"),
-                        show_alert=True,
-                    )
-                    return
-                error = self._validate_wrapper_backend_model(backend, model)
-                if error:
-                    await query.answer(error, show_alert=True)
-                    return
-                block = (
-                    dual_brain_block_with(cfg, left_backend=backend, left_model=model)
-                    if target == "left"
-                    else dual_brain_block_with(cfg, right_backend=backend, right_model=model)
-                )
-                self.backend_manager.update_dual_brain_block(block)
-                if target == "right" and self._is_dual_brain_mode():
-                    switch_ok, switch_message = await self._activate_wrapper_core_backend(
-                        query.message.chat_id,
-                        backend=backend,
-                        model=model,
-                    )
-                    if not switch_ok:
-                        await query.answer(
-                            ui_language.tr(
-                                "callback.saved_switch_failed",
-                                message=switch_message,
-                            ),
-                            show_alert=True,
-                        )
-                refreshed = self._dual_brain_config()
-                await query.edit_message_text(
-                    self._dual_brain_backend_model_text(refreshed, target=target, backend=backend),
-                    parse_mode="HTML",
-                    reply_markup=self._dual_brain_model_keyboard(refreshed, target=target, backend=backend),
-                )
-            else:
-                await query.answer(
-                    ui_language.tr("callback.unknown_brain_control"),
-                    show_alert=True,
-                )
-                return
-        except Exception as e:
-            self.error_logger.error(f"callback_brain_config error: {e}", exc_info=True)
-            await query.answer(
-                ui_language.tr("callback.error", reason=e),
-                show_alert=True,
-            )
-            return
-        await query.answer()
-
-    async def callback_wrapper_config(self, update: Update, context: Any):
-        query = update.callback_query
-        if not self._is_authorized_user(query.from_user.id):
-            return
-        if not self._is_wrapper_mode():
-            await query.answer(
-                ui_language.tr("advanced.require_wrapper_controls"),
-                show_alert=True,
-            )
-            return
-
-        data = query.data or ""
-        try:
-            state = self.backend_manager.get_state_snapshot()
-            slots = state.get("wrapper_slots")
-            if not isinstance(slots, dict):
-                slots = {}
-            cfg = load_wrapper_config(state)
-
-            if data == "wcfg:menu:core":
-                await query.edit_message_text(
-                    self._wrapper_core_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=self._wrapper_core_keyboard(cfg),
-                )
-            elif data == "wcfg:menu:wrap":
-                await query.edit_message_text(
-                    self._wrapper_wrap_text(cfg),
-                    parse_mode="HTML",
-                    reply_markup=self._wrapper_wrap_keyboard(cfg),
-                )
-            elif data == "wcfg:menu:wrapper":
-                await query.edit_message_text(
-                    self._wrapper_status_text(state, slots),
-                    parse_mode="HTML",
-                    reply_markup=self._wrapper_status_keyboard(),
-                )
-            elif data.startswith("wcfg:core:"):
-                parts = data.split(":", 3)
-                if len(parts) != 4:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_core_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, _, backend, model = parts
-                backend = backend.strip().lower()
-                model = self._normalize_wrapper_model(backend, model.strip())
-                error = self._validate_wrapper_backend_model(backend, model)
-                if error:
-                    await query.answer(error, show_alert=True)
-                    return
-                self.backend_manager.update_wrapper_blocks(core={"backend": backend, "model": model})
-                switch_ok, switch_message = await self._activate_wrapper_core_backend(
-                    query.message.chat_id,
-                    backend=backend,
-                    model=model,
-                )
-                refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
-                await query.edit_message_text(
-                    self._advanced_core_updated_text(
-                        mode="wrapper",
-                        backend=backend,
-                        model=model,
-                        switch_ok=switch_ok,
-                        switch_message=switch_message,
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=self._wrapper_core_keyboard(refreshed),
-                )
-            elif data.startswith("wcfg:wrap:"):
-                parts = data.split(":", 4)
-                if len(parts) != 5:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_wrapper_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, _, backend, model, context_value = parts
-                backend = backend.strip().lower()
-                model = self._normalize_wrapper_model(backend, model.strip())
-                error = self._validate_wrapper_backend_model(backend, model)
-                if error:
-                    await query.answer(error, show_alert=True)
-                    return
-                try:
-                    context_window = max(0, min(int(context_value), 20))
-                except ValueError:
-                    await query.answer(
-                        ui_language.tr("advanced.context_integer"),
-                        show_alert=True,
-                    )
-                    return
-                self.backend_manager.update_wrapper_blocks(
-                    wrapper={
-                        "backend": backend,
-                        "model": model,
-                        "context_window": context_window,
-                        "fallback": cfg.fallback,
-                    }
-                )
-                refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
-                await query.edit_message_text(
-                    self._wrapper_translator_updated_text(
-                        backend=backend,
-                        model=model,
-                        context_window=context_window,
-                        fallback=cfg.fallback,
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=self._wrapper_wrap_keyboard(refreshed),
-                )
-            elif data.startswith("wcfg:wrapid:"):
-                parts = data.split(":", 3)
-                if len(parts) != 4:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_wrapper_selection"),
-                        show_alert=True,
-                    )
-                    return
-                _, _, choice_id, context_value = parts
-                choice = self._wrapper_model_choice(choice_id)
-                if choice is None:
-                    await query.answer(
-                        ui_language.tr("callback.unknown_wrapper_choice"),
-                        show_alert=True,
-                    )
-                    return
-                _, _label, backend, model = choice
-                error = self._validate_wrapper_backend_model(backend, model)
-                if error:
-                    await query.answer(error, show_alert=True)
-                    return
-                try:
-                    context_window = max(0, min(int(context_value), 20))
-                except ValueError:
-                    await query.answer(
-                        ui_language.tr("advanced.context_integer"),
-                        show_alert=True,
-                    )
-                    return
-                self.backend_manager.update_wrapper_blocks(
-                    wrapper={
-                        "backend": backend,
-                        "model": model,
-                        "context_window": context_window,
-                        "fallback": cfg.fallback,
-                    }
-                )
-                refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
-                await query.edit_message_text(
-                    self._wrapper_translator_updated_text(
-                        backend=backend,
-                        model=model,
-                        context_window=context_window,
-                        fallback=cfg.fallback,
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=self._wrapper_wrap_keyboard(refreshed),
-                )
-            elif data.startswith("wcfg:wrapctx:"):
-                parts = data.split(":", 2)
-                if len(parts) != 3:
-                    await query.answer(
-                        ui_language.tr("callback.invalid_context_selection"),
-                        show_alert=True,
-                    )
-                    return
-                try:
-                    context_window = max(0, min(int(parts[2]), 20))
-                except ValueError:
-                    await query.answer(
-                        ui_language.tr("advanced.context_integer"),
-                        show_alert=True,
-                    )
-                    return
-                self.backend_manager.update_wrapper_blocks(
-                    wrapper={
-                        "backend": cfg.wrapper_backend,
-                        "model": cfg.wrapper_model,
-                        "context_window": context_window,
-                        "fallback": cfg.fallback,
-                    }
-                )
-                refreshed = load_wrapper_config(self.backend_manager.get_state_snapshot())
-                await query.edit_message_text(
-                    self._wrapper_translator_updated_text(
-                        backend=refreshed.wrapper_backend,
-                        model=refreshed.wrapper_model,
-                        context_window=context_window,
-                        fallback=refreshed.fallback,
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=self._wrapper_wrap_keyboard(refreshed),
-                )
-            else:
-                await query.answer(
-                    ui_language.tr("callback.unknown_wrapper_control"),
-                    show_alert=True,
-                )
-                return
-        except Exception as e:
-            self.error_logger.error(f"callback_wrapper_config error: {e}", exc_info=True)
-            await query.answer(
-                ui_language.tr("callback.error", reason=e),
-                show_alert=True,
-            )
-            return
-        await query.answer()
 
     async def callback_model(self, update: Update, context: Any):
         await runtime_model_selection.callback_model(self, update, context)
@@ -13154,8 +11740,7 @@ class FlexibleAgentRuntime:
 
     def _make_stream_callback(self, event_queue: asyncio.Queue | None = None,
                               think_buffer: list | None = None,
-                              commentary_buffer: list | None = None,
-                              audit_collector: AuditTelemetryCollector | None = None):
+                              commentary_buffer: list | None = None):
         """Present explicit owners; retain legacy kind routing for old adapters."""
         from adapters.stream_events import (
             DELIVERY_REASONING,
@@ -13192,10 +11777,6 @@ class FlexibleAgentRuntime:
         _chunk_hard_limit = 150
         _chunk_endings = ("。", "！", "？", "\n")
         async def _callback(event):
-            if audit_collector is not None:
-                # Best-effort hot path: audit telemetry must not disrupt stream delivery.
-                with suppress(Exception):
-                    await audit_collector.record(event)
             explicit_owner = str(getattr(event, "delivery_class", "") or "")
             owner = explicit_owner or legacy_delivery_class(event.kind)
             if (
@@ -13387,22 +11968,10 @@ class FlexibleAgentRuntime:
             await self._flush_thinking(chat_id, request_id=request_id)
             await self._flush_commentary(chat_id, request_id=request_id)
 
-    def _wrapper_enabled(self) -> bool:
-        return runtime_wrapper.wrapper_enabled(self)
 
-    def _wrapper_visible_context(
-        self, context_window: int, item: QueuedRequest | None = None
-    ) -> list[dict[str, str]]:
-        return runtime_wrapper.wrapper_visible_context(self, context_window, item=item)
 
-    def _wrapper_audit_fields(self, wrapper_result) -> dict[str, Any]:
-        return runtime_wrapper.wrapper_audit_fields(self, wrapper_result)
 
-    def _wrapper_listener_fields(self, core_raw: str, visible_text: str, wrapper_result) -> dict[str, Any]:
-        return runtime_wrapper.wrapper_listener_fields(core_raw, visible_text, wrapper_result)
 
-    def _core_memory_assistant_text(self, core_raw: str, visible_text: str, wrapper_result) -> str:
-        return runtime_wrapper.core_memory_assistant_text(self, core_raw, visible_text, wrapper_result)
 
     def _append_core_transcript(
         self,
@@ -13411,16 +11980,42 @@ class FlexibleAgentRuntime:
         core_raw: str,
         visible_text: str,
         completion_path: str,
-        wrapper_result,
     ) -> None:
-        runtime_wrapper.append_core_transcript(
-            self,
-            item,
-            core_raw=core_raw,
-            visible_text=visible_text,
-            completion_path=completion_path,
-            wrapper_result=wrapper_result,
+        raw = core_raw or ""
+        if is_memory_plus_enabled(self.workspace_dir):
+            raw = extract_memory_plus_update_details(raw).visible_text
+        path = getattr(self, "core_transcript_log_path", None) or (
+            self.workspace_dir / "core_transcript.jsonl"
         )
+        entry = {
+            "role": "assistant_core",
+            "text": raw,
+            "visible_text": visible_text or "",
+            "source": item.source,
+            "request_id": item.request_id,
+            "summary": item.summary,
+            "completion_path": completion_path,
+            "backend": self.config.active_backend,
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as exc:
+            self.error_logger.warning(f"Failed to append core transcript: {exc}")
+
+    async def _apply_memory_plus_to_visible_text(
+        self, item: QueuedRequest, visible_text: str
+    ) -> str:
+        """Strip the memory+ update block and persist it; return deliverable text.
+
+        The retired wrapper/audit/dual-brain modes no longer rewrite visible
+        text, so this is the only remaining visible-text transform.
+        """
+        if not is_memory_plus_enabled(self.workspace_dir):
+            return visible_text
+        return apply_memory_plus_block(self, item, visible_text)
 
     def _load_last_text_from_transcript(self, role: str) -> str | None:
         """Read the last transcript message for commands such as /say."""
@@ -13601,24 +12196,11 @@ class FlexibleAgentRuntime:
             pass
         return []
 
-    async def _send_wrapper_polishing_placeholder(self, item: QueuedRequest):
-        return await runtime_wrapper.send_wrapper_polishing_placeholder(self, item)
 
-    async def _delete_wrapper_polishing_placeholder(self, item: QueuedRequest, placeholder) -> None:
-        await runtime_wrapper.delete_wrapper_polishing_placeholder(self, item, placeholder)
 
-    async def _apply_wrapper_to_visible_text(self, item: QueuedRequest, visible_text: str):
-        return await runtime_wrapper.apply_wrapper_to_visible_text(self, item, visible_text)
 
-    @staticmethod
-    def _wrapper_verbose_excerpt(text: str, *, limit: int = 1800) -> str:
-        return runtime_wrapper.wrapper_verbose_excerpt(text, limit=limit)
 
-    def _format_wrapper_verbose_trace(self, core_raw: str, visible_text: str, wrapper_result) -> str:
-        return runtime_wrapper.format_wrapper_verbose_trace(self, core_raw, visible_text, wrapper_result)
 
-    async def _send_wrapper_verbose_trace(self, item: QueuedRequest, core_raw: str, visible_text: str, wrapper_result) -> None:
-        await runtime_wrapper.send_wrapper_verbose_trace(self, item, core_raw, visible_text, wrapper_result)
 
     async def _send_meter_cost_tail(
         self,
@@ -13900,98 +12482,12 @@ class FlexibleAgentRuntime:
             self.logger.exception("meditation cost tail delivery failed")
             return False
 
-    def _audit_enabled(self) -> bool:
-        return runtime_audit.audit_enabled(self)
 
-    def _audit_visible_context(
-        self, context_window: int, item: QueuedRequest | None = None
-    ) -> list[dict[str, str]]:
-        return runtime_audit.audit_visible_context(self, context_window, item=item)
 
-    def _build_audit_telemetry(self, item: QueuedRequest, response, collector: AuditTelemetryCollector | None) -> dict[str, Any]:
-        return runtime_audit.build_audit_telemetry(self, item, response, collector)
 
-    def _append_audit_transcript(
-        self,
-        item: QueuedRequest,
-        *,
-        core_raw: str,
-        visible_text: str,
-        telemetry: Mapping[str, Any],
-        audit_result,
-        completion_path: str,
-    ) -> None:
-        runtime_audit.append_audit_transcript(
-            self,
-            item,
-            core_raw=core_raw,
-            visible_text=visible_text,
-            telemetry=telemetry,
-            audit_result=audit_result,
-            completion_path=completion_path,
-        )
 
-    def _write_audit_evidence(
-        self,
-        item: QueuedRequest,
-        *,
-        core_raw: str,
-        visible_text: str,
-        telemetry: Mapping[str, Any],
-        completion_path: str,
-        audit_criteria: Mapping[str, Any] | None,
-        visible_context: list[dict[str, str]],
-    ) -> str:
-        return runtime_audit.write_audit_evidence(
-            self,
-            item,
-            core_raw=core_raw,
-            visible_text=visible_text,
-            telemetry=telemetry,
-            completion_path=completion_path,
-            audit_criteria=audit_criteria,
-            visible_context=visible_context,
-        )
 
-    def _schedule_audit_followup(
-        self,
-        item: QueuedRequest,
-        *,
-        core_raw: str,
-        visible_text: str,
-        response,
-        audit_collector: AuditTelemetryCollector | None,
-        completion_path: str,
-    ) -> None:
-        runtime_audit.schedule_audit_followup(
-            self,
-            item,
-            core_raw=core_raw,
-            visible_text=visible_text,
-            response=response,
-            audit_collector=audit_collector,
-            completion_path=completion_path,
-        )
 
-    async def _run_audit_followup(
-        self,
-        item: QueuedRequest,
-        *,
-        core_raw: str,
-        visible_text: str,
-        response,
-        audit_collector: AuditTelemetryCollector | None,
-        completion_path: str,
-    ) -> None:
-        await runtime_audit.run_audit_followup(
-            self,
-            item,
-            core_raw=core_raw,
-            visible_text=visible_text,
-            response=response,
-            audit_collector=audit_collector,
-            completion_path=completion_path,
-        )
 
     # ------------------------------------------------------------------
     # Stage 4: Background-mode helpers
@@ -14179,7 +12675,7 @@ class FlexibleAgentRuntime:
 
             if response.is_success and response.text:
                 display_text = self._strip_transfer_accept_prefix(item, response.text)
-                visible_text, wrapper_result = await self._apply_wrapper_to_visible_text(item, display_text or response.text)
+                visible_text = await self._apply_memory_plus_to_visible_text(item, display_text or response.text)
                 visible_text = normalize_user_visible_paths(visible_text)
                 from orchestrator.runtime_cancel import claim_final_result
 
@@ -14194,7 +12690,6 @@ class FlexibleAgentRuntime:
                     core_raw=safe_core_raw,
                     visible_text=visible_text,
                     completion_path="background",
-                    wrapper_result=wrapper_result,
                 )
                 await self._notify_request_listeners(
                     item.request_id,
@@ -14209,7 +12704,6 @@ class FlexibleAgentRuntime:
                             self, item.request_id
                         ),
                         **runtime_pipeline.backend_diagnostic_fields(response),
-                        **self._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
                     },
                 )
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
@@ -14323,7 +12817,6 @@ class FlexibleAgentRuntime:
                         "section_chars": _sec_chars,
                         "section_tokens_est": _sec_tokens,
                         "section_counts": _sec_counts,
-                        **self._wrapper_audit_fields(wrapper_result),
                     })
                 except Exception:
                     pass
@@ -14332,7 +12825,7 @@ class FlexibleAgentRuntime:
                     memory_user_text = f"[{item.source}] {item.summary}"
                 is_bridge_request = item.source.startswith("bridge:") or item.source.startswith("bridge-transfer:")
                 if item.source not in {"startup", "system", SESSION_RESET_SOURCE}:
-                    memory_assistant_text = self._core_memory_assistant_text(response.text, visible_text, wrapper_result)
+                    memory_assistant_text = visible_text
                     runtime_session.record_working_exchange(
                         self,
                         item,
@@ -14393,7 +12886,6 @@ class FlexibleAgentRuntime:
                 self.project_chat_logger.log_exchange(item.prompt, visible_text, item.source)
                 _print_final_response(self.name, visible_text)
                 total_s = runtime_pipeline.queued_elapsed_s(item)
-                await self._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
                 her_delivery = runtime_pipeline._her_v2_delivery_metadata(response)
                 if her_delivery.get("final_already_delivered"):
                     send_elapsed_s, chunk_count = 0.0, 0
@@ -14430,14 +12922,6 @@ class FlexibleAgentRuntime:
                             response
                         ),
                     )
-                self._schedule_audit_followup(
-                    item,
-                    core_raw=safe_core_raw,
-                    visible_text=visible_text,
-                    response=response,
-                    audit_collector=getattr(item, "_audit_collector", None),
-                    completion_path="background",
-                )
                 self.logger.info(
                     f"Background task {item.request_id} delivered "
                     f"(total_s={total_s:.2f}, chunks={chunk_count}, send_s={send_elapsed_s:.2f})"

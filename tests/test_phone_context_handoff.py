@@ -92,7 +92,7 @@ async def test_fixed_resumed_text_gets_complete_role_phone_tail_then_no_repeat(p
     assert "USER: Keep the budget under 100" in prompt.final_prompt
     assert "ASSISTANT: I understand the limit" in prompt.final_prompt
     assert "provider_event_id" not in prompt.final_prompt
-    await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None,audit_active=False)
+    await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None)
     later=await runtime_pipeline.build_turn_prompt(runtime,turn_item(phone,"req-phone-2"),is_bridge_request=False)
     assert "Keep the budget under 100" not in later.final_prompt
     assert later.prompt_audit["phone_context_handoff"]["included_fragments"]==0
@@ -198,7 +198,7 @@ async def test_second_action_phone_tail_then_hangup_preserves_provider_continuit
     item=action_item(phone.admitted_proposals[-1],"req-action1")
     prompt=await runtime_pipeline.build_turn_prompt(runtime,item,is_bridge_request=False)
     assert "The important earlier restriction" in prompt.final_prompt
-    await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None,audit_active=False)
+    await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None)
     await phone.manager.append_fragment_once(phone.binding,Fragment("reply","assistant","First query complete",80,100))
     await speak(phone,"Second query",start=120,end=140,source="second")
     second=action_item(phone.admitted_proposals[-1],"req-action2")
@@ -206,7 +206,7 @@ async def test_second_action_phone_tail_then_hangup_preserves_provider_continuit
     assert "First query complete" in second_prompt.final_prompt
     assert "Second query" in second_prompt.final_prompt
     assert "The important earlier restriction" in second_prompt.final_prompt
-    await runtime_pipeline.run_backend_generation(runtime,second,second_prompt.final_prompt,on_stream_event=None,audit_active=False)
+    await runtime_pipeline.run_backend_generation(runtime,second,second_prompt.final_prompt,on_stream_event=None)
     await phone.manager.append_fragment_once(phone.binding,Fragment("tail","assistant","The final phone detail",160,180))
     with phone.store._lock,phone.store._connection() as connection:
         connection.execute("UPDATE live_calls SET phase='ended',ended_at='2026-10-04T12:00:00Z' WHERE call_id=?",(phone.call_id,))
@@ -419,7 +419,6 @@ async def test_first_her_full_open_action_becomes_ordinary_history_once_without_
         action_item,
         action_prompt.final_prompt,
         on_stream_event=None,
-        audit_active=False,
     )
 
     with phone.store._lock, phone.store._connection() as connection:
@@ -454,7 +453,6 @@ async def test_first_her_full_open_action_becomes_ordinary_history_once_without_
         text_item,
         text_prompt.final_prompt,
         on_stream_event=None,
-        audit_active=False,
     )
 
     later_item = turn_item(phone, "after-first-open-later")
@@ -479,12 +477,12 @@ async def test_provider_failure_no_watermark_and_restart_model_or_thread_isolati
     item=turn_item(phone)
     first=await runtime_pipeline.build_turn_prompt(runtime,item,is_bridge_request=False)
     runtime.backend_manager.response=SimpleNamespace(is_success=False,text="",error="synthetic failure")
-    await runtime_pipeline.run_backend_generation(runtime,item,first.final_prompt,on_stream_event=None,audit_active=False)
+    await runtime_pipeline.run_backend_generation(runtime,item,first.final_prompt,on_stream_event=None)
     retry=turn_item(phone,"req-retry")
     retry_prompt=await runtime_pipeline.build_turn_prompt(runtime,retry,is_bridge_request=False)
     assert "Remember the complete transcript" in retry_prompt.final_prompt
     runtime.backend_manager.response=SimpleNamespace(is_success=True,text="done")
-    await runtime_pipeline.run_backend_generation(runtime,retry,retry_prompt.final_prompt,on_stream_event=None,audit_active=False)
+    await runtime_pipeline.run_backend_generation(runtime,retry,retry_prompt.final_prompt,on_stream_event=None)
     runtime.session_store=SessionStore(phone.db_path,instance_id="HASHI")
     restored=await runtime_pipeline.build_turn_prompt(runtime,turn_item(phone,"req-restored"),is_bridge_request=False)
     assert "Remember the complete transcript" not in restored.final_prompt
@@ -1007,7 +1005,7 @@ async def test_phone_checkpoint_io_failure_preserves_success_without_action_repl
     prompt=await runtime_pipeline.build_turn_prompt(runtime,item,is_bridge_request=False)
     def fail(_item,_response): raise OSError("secret path")
     monkeypatch.setattr("orchestrator.phone_context_handoff.commit_success",fail)
-    result=await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None,audit_active=False)
+    result=await runtime_pipeline.run_backend_generation(runtime,item,prompt.final_prompt,on_stream_event=None)
     assert result.response.is_success
     assert len(runtime.backend_manager.calls)==1
     assert runtime.maintenance_events[-1][0]=="phone_context_checkpoint_failed"

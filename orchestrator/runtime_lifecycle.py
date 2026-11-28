@@ -14,14 +14,13 @@ from orchestrator import (
     runtime_workzone,
     terminal_console,
 )
-from orchestrator.audit_mode import AuditTelemetryCollector, should_audit_source
+from orchestrator.config import SESSION_RESET_SOURCE
 from orchestrator.memory_plus_mode import (
     ensure_memory_plus_observer,
     is_memory_plus_enabled,
     migrate_legacy_memory_plus_runtime,
     prepare_memory_plus_store,
 )
-from orchestrator.wrapper_mode import SESSION_RESET_SOURCE
 
 RUNTIME_TASK_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 from orchestrator.lifecycle_timing import timed, span
@@ -472,14 +471,7 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
             is_bridge_request=is_bridge_request,
         )
 
-        audit_active = runtime._audit_enabled() and should_audit_source(item.source)
-        audit_collector = AuditTelemetryCollector() if audit_active else None
-        feedback = await runtime_pipeline.setup_interactive_feedback(
-            runtime,
-            item,
-            audit_active=audit_active,
-            audit_collector=audit_collector,
-        )
+        feedback = await runtime_pipeline.setup_interactive_feedback(runtime, item)
         runtime_background_status.prepare(runtime, item)
 
         generation = await runtime_pipeline.run_backend_generation(
@@ -487,7 +479,6 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
             item,
             final_prompt,
             on_stream_event=feedback.on_stream_event,
-            audit_active=audit_active,
         )
         # Advance the PCM incremental baseline only when this delivery
         # actually succeeded; failed turns re-send changed sections next time.
@@ -531,7 +522,6 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                 runtime,
                 feedback.preference_event,
             )
-            setattr(item, "_audit_collector", audit_collector)
             setattr(item, "_her_message_router", feedback.her_message_router)
             status_placeholder = feedback.placeholder
             if feedback.verbose_display_state is not None:
@@ -635,7 +625,6 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
             if success_result.cancelled:
                 return
             visible_text = success_result.visible_text
-            wrapper_result = success_result.wrapper_result
             if (
                 not visible_text.strip()
                 and not runtime_pipeline.response_has_deliverable_content(response)
@@ -661,7 +650,6 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                 item,
                 response,
                 visible_text=visible_text,
-                wrapper_result=wrapper_result,
                 final_prompt=final_prompt,
                 effective_prompt=effective_prompt,
                 incremental=incremental,
@@ -672,13 +660,11 @@ async def _process_single_item(runtime: Any, item: Any) -> None:
                     item,
                     response,
                     visible_text=visible_text,
-                    wrapper_result=wrapper_result,
-                    is_bridge_request=is_bridge_request,
+                        is_bridge_request=is_bridge_request,
                     session_reset_source=SESSION_RESET_SOURCE,
                     queued_at=queued_at,
                     queue_wait_s=queue_wait_s,
                     backend_elapsed_s=backend_elapsed,
-                    audit_collector=audit_collector,
                     answer_stream_state=feedback.answer_stream_state,
                     her_message_router=feedback.her_message_router,
                     queued_monotonic=queued_monotonic,

@@ -596,43 +596,6 @@ class FlexibleBackendManager:
             else:
                 backend.config.extra.pop(key, None)
 
-    def update_wrapper_blocks(
-        self,
-        *,
-        core: dict[str, Any] | None = None,
-        wrapper: dict[str, Any] | None = None,
-        wrapper_slots: dict[str, Any] | None = None,
-    ) -> None:
-        state = self._read_state_dict()
-        if core is not None:
-            state["core"] = dict(core)
-        if wrapper is not None:
-            state["wrapper"] = dict(wrapper)
-        if wrapper_slots is not None:
-            state["wrapper_slots"] = dict(wrapper_slots)
-        self._write_state_dict(state)
-
-    def update_audit_blocks(
-        self,
-        *,
-        core: dict[str, Any] | None = None,
-        audit: dict[str, Any] | None = None,
-        audit_criteria: dict[str, Any] | None = None,
-    ) -> None:
-        state = self._read_state_dict()
-        if core is not None:
-            state["core"] = dict(core)
-        if audit is not None:
-            state["audit"] = dict(audit)
-        if audit_criteria is not None:
-            state["audit_criteria"] = dict(audit_criteria)
-        self._write_state_dict(state)
-
-    def update_dual_brain_block(self, dual_brain: dict[str, Any]) -> None:
-        state = self._read_state_dict()
-        state["dual_brain"] = dict(dual_brain)
-        self._write_state_dict(state)
-
     def _timeout_override_for(self, engine: str) -> dict[str, int]:
         try:
             return read_timeout_override(self.state_store, engine)

@@ -285,9 +285,6 @@ def _runtime():
     }
     runtime._thinking_chars_this_req = 12
     runtime.get_current_model = lambda: "gpt-test"
-    runtime._wrapper_audit_fields = lambda wrapper_result: {
-        "wrapper_applied": bool(wrapper_result)
-    }
     runtime.memory_store = _MemoryStore()
     runtime.handoff_builder = _HandoffBuilder()
     runtime.project_chat_logger = _ProjectChatLogger()
@@ -344,9 +341,6 @@ def _runtime():
 
     runtime._make_stream_callback = _make_stream_callback
     runtime.post_turn_calls = []
-    runtime._core_memory_assistant_text = (
-        lambda core_raw, visible_text, wrapper_result: f"memory:{visible_text}"
-    )
     runtime._schedule_post_turn_observers = (
         lambda item, user_text, assistant_text, is_bridge_request: (
             runtime.post_turn_calls.append(
@@ -380,12 +374,6 @@ def _runtime():
         return {"answered": False}
 
     runtime.cos_query = _cos_query
-    runtime.wrapper_traces = []
-
-    async def _send_wrapper_verbose_trace(item, core_raw, visible_text, wrapper_result):
-        runtime.wrapper_traces.append((core_raw, visible_text, wrapper_result))
-
-    runtime._send_wrapper_verbose_trace = _send_wrapper_verbose_trace
     runtime.voice_replies = []
 
     async def _send_voice_reply(chat_id, text, request_id):
@@ -393,10 +381,6 @@ def _runtime():
         return True
 
     runtime._send_voice_reply = _send_voice_reply
-    runtime.audit_followups = []
-    runtime._schedule_audit_followup = lambda item, **fields: (
-        runtime.audit_followups.append(fields)
-    )
     runtime.hchat_routes = []
 
     async def _hchat_route_reply(item, text):
@@ -404,16 +388,13 @@ def _runtime():
 
     runtime._hchat_route_reply = _hchat_route_reply
 
-    async def _apply_wrapper_to_visible_text(item, text):
-        return f"wrapped:{text}", {"mode": "wrapper"}
+    async def _apply_memory_plus_to_visible_text(item, text):
+        return text
 
-    runtime._apply_wrapper_to_visible_text = _apply_wrapper_to_visible_text
+    runtime._apply_memory_plus_to_visible_text = _apply_memory_plus_to_visible_text
     runtime._append_core_transcript = lambda item, **fields: runtime.transcripts.append(
         fields
     )
-    runtime._wrapper_listener_fields = lambda core_raw, visible_text, wrapper_result: {
-        "wrapped": True
-    }
 
     async def _notify_request_listeners(request_id, payload):
         runtime.listener_payloads.append(payload)
@@ -459,7 +440,7 @@ async def test_call_feedback_keeps_local_activity_without_telegram_progress(back
         else {"call_media": {"version": 2, "call_id": "call-1", "turn_id": "turn-1", "mode": "voice"}}
     )
     feedback = await runtime_pipeline.setup_interactive_feedback(
-        runtime, item, audit_active=False, audit_collector=None)
+        runtime, item, )
     try:
         if not trusted_call:
             assert feedback.placeholder is not None
@@ -548,7 +529,6 @@ async def test_canonical_audit_correlates_complete_foreground_request_chain(tmp_
         item,
         response,
         visible_text="delivered answer",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="startup",
     )
@@ -1862,7 +1842,6 @@ async def test_agent_activity_her_preparation_opens_fresh_provider_session(
         item,
         prompt.final_prompt,
         on_stream_event=lambda _event: None,
-        audit_active=False,
     )
 
     assert generation_session_ids == ["activity-provider-session"]
@@ -2101,7 +2080,6 @@ async def test_run_backend_generation_returns_foreground_response():
         item,
         "final",
         on_stream_event=None,
-        audit_active=False,
     )
 
     assert generation.detached is False
@@ -2124,7 +2102,6 @@ async def test_run_backend_generation_detaches_background_task():
         item,
         "final",
         on_stream_event=None,
-        audit_active=False,
     )
 
     assert generation.detached is True
@@ -2173,7 +2150,6 @@ async def test_run_backend_generation_isolates_and_restores_fixed_provider_sessi
         item,
         "scheduled prompt",
         on_stream_event=None,
-        audit_active=False,
     )
 
     assert observed_session_ids == [None]
@@ -2218,7 +2194,6 @@ async def test_run_backend_generation_restores_provider_session_after_failure():
             item,
             "recovery prompt",
             on_stream_event=None,
-            audit_active=False,
         )
 
     assert backend._session_id == "primary-thread"
@@ -2260,7 +2235,6 @@ async def test_run_backend_generation_restores_provider_session_after_cancellati
             item,
             "manual prompt",
             on_stream_event=None,
-            audit_active=False,
         )
     )
     await entered.wait()
@@ -2300,7 +2274,6 @@ async def test_run_backend_generation_keeps_normal_fixed_provider_session():
         item,
         "normal prompt",
         on_stream_event=None,
-        audit_active=False,
     )
 
     assert observed_session_ids == ["primary-thread"]
@@ -2550,8 +2523,6 @@ async def test_setup_interactive_feedback_creates_placeholder_and_cleanup_tasks(
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert runtime.app.bot.sent == [
@@ -2598,8 +2569,6 @@ async def test_agent_activity_start_is_visible_when_typing_is_disabled():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         item,
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert runtime.app.bot.sent == [
@@ -2636,8 +2605,6 @@ async def test_medium_her_v2_sends_each_task_acknowledgement_event_once():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.on_stream_event is not None
@@ -2679,8 +2646,6 @@ async def test_her_message_audit_preserves_exact_commentary_and_transport_status
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -2733,8 +2698,6 @@ async def test_her_short_commentary_renders_markdown_before_telegram_delivery():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -2794,8 +2757,6 @@ async def test_her_commentary_uses_long_sender_when_rendered_html_exceeds_limit(
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -2830,8 +2791,6 @@ async def test_her_message_audit_does_not_report_missing_transport_receipt_as_se
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -2879,8 +2838,6 @@ async def test_medium_her_v2_acknowledgement_composes_with_request_activity():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     await feedback.on_stream_event(
@@ -2925,8 +2882,6 @@ async def test_non_her_request_activity_callback_does_not_recurse():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(deliver_to_telegram=False),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(kind=KIND_PROGRESS, summary="Task started")
@@ -2966,8 +2921,6 @@ async def test_high_her_commentary_delivers_independently_of_think_and_verbose()
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.on_stream_event is not None
@@ -3004,8 +2957,6 @@ async def test_pending_her_commentary_superseded_by_final_is_audited_not_sent():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -3052,8 +3003,6 @@ async def test_her_commentary_off_suppresses_acknowledgement_and_progress_live()
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     await feedback.on_stream_event(
@@ -3114,8 +3063,6 @@ async def test_her_router_trusts_emitted_commentary_without_rechecking_effort():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     await feedback.on_stream_event(
@@ -3162,8 +3109,6 @@ async def test_non_deliverable_her_activity_persists_without_presentation():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(deliver_to_telegram=False),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.on_stream_event is not None
@@ -3199,8 +3144,6 @@ async def test_required_workbench_fallback_warning_accepts_activity_receipt():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(session_surface="workbench", deliver_to_telegram=False),
-        audit_active=False,
-        audit_collector=None,
     )
     delivered = await feedback.on_stream_event(
         StreamEvent(
@@ -3239,8 +3182,6 @@ async def test_required_her_control_is_visible_with_all_optional_channels_off():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -3303,8 +3244,6 @@ async def test_setup_interactive_feedback_placeholder_retry_after_records_failov
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.stop_typing is None
@@ -3383,8 +3322,6 @@ async def test_setup_interactive_feedback_skips_placeholder_when_delivery_blocke
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert not runtime.app.bot.sent
@@ -3412,8 +3349,6 @@ async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         item,
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.stop_typing is not None
@@ -3441,13 +3376,11 @@ async def test_typing_off_skips_typing_ui_and_uses_final_delivery_once():
         item,
         SimpleNamespace(text="final answer"),
         visible_text="final answer",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert len(sends) == 1
@@ -3470,8 +3403,6 @@ async def test_typing_off_keeps_thinking_delivery_independent_without_placeholde
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.placeholder is None
@@ -3505,8 +3436,6 @@ async def test_legacy_preview_flags_do_not_create_answer_stream_state():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.answer_stream_state is None
@@ -3529,8 +3458,6 @@ async def test_typing_only_does_not_route_answer_deltas_or_edit_placeholder():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.stream_callback is not None
@@ -3855,8 +3782,6 @@ async def test_legacy_preview_flag_stays_inactive_without_verbose():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.answer_preview_task is None
@@ -3883,8 +3808,6 @@ async def test_verbose_takes_precedence_over_retired_preview_flag():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.answer_preview_task is None
@@ -3913,8 +3836,6 @@ async def test_verbose_backend_without_reasoning_still_uses_progress_events():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.stream_callback[0] == "stream"
@@ -3939,8 +3860,6 @@ async def test_verbose_streaming_backend_uses_streaming_display():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.stream_callback[0] == "stream"
@@ -3961,8 +3880,6 @@ async def test_verbose_alone_forces_placeholder_and_progress_stream():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.placeholder is not None
@@ -3994,8 +3911,6 @@ async def test_live_verbose_and_think_changes_apply_without_replaying_hidden_eve
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(),
-        audit_active=False,
-        audit_collector=None,
     )
     stream_queue = runtime.stream_callbacks[0]["event_queue"]
 
@@ -4072,13 +3987,11 @@ async def test_setup_interactive_feedback_creates_audit_stream_for_silent_item()
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(silent=True),
-        audit_active=True,
-        audit_collector="audit",
     )
 
     assert feedback.placeholder is None
     assert feedback.stream_callback[0] == "stream"
-    assert runtime.stream_callbacks == [{"audit_collector": "audit"}]
+    assert runtime.stream_callbacks == [{}]
 
 
 def test_response_deliverability_uses_visible_text_after_memory_plus_strip():
@@ -4136,12 +4049,12 @@ async def test_stop_during_final_wrapper_never_publishes_success(wrapped_text):
     item = _item()
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def wrapper(_item, text):
+    async def memory_plus(_item, text):
         entered.set()
         await release.wait()
-        return wrapped_text, None
+        return wrapped_text
 
-    runtime._apply_wrapper_to_visible_text = wrapper
+    runtime._apply_memory_plus_to_visible_text = memory_plus
     pending = asyncio.create_task(runtime_pipeline.prepare_successful_response(
         runtime, item, SimpleNamespace(text="completed provider output"), completion_path="foreground"
     ))
@@ -4171,18 +4084,16 @@ async def test_prepare_successful_response_applies_wrapper_and_notifies_listener
     )
 
     assert result.display_text == "core text"
-    assert result.visible_text == "wrapped:core text"
+    assert result.visible_text == "core text"
     assert runtime.success_marked is True
     assert runtime.transcripts == [
         {
             "core_raw": "ACCEPTED:core text",
-            "visible_text": "wrapped:core text",
+            "visible_text": "core text",
             "completion_path": "foreground",
-            "wrapper_result": {"mode": "wrapper"},
         }
     ]
-    assert runtime.listener_payloads[0]["text"] == "wrapped:core text"
-    assert runtime.listener_payloads[0]["wrapped"] is True
+    assert runtime.listener_payloads[0]["text"] == "core text"
 
 
 @pytest.mark.asyncio
@@ -4308,7 +4219,6 @@ async def test_prepare_successful_response_presents_terminal_exchange_verbatim()
 
     assert result.display_text == "EXPECTED_REPLY"
     assert result.visible_text == "EXPECTED_REPLY"
-    assert result.wrapper_result is None
     assert response.text == "EXPECTED_REPLY"
     assert response.stream_metadata["terminal_exchange_verbatim_enforced"] is True
     assert runtime.transcripts == [
@@ -4316,7 +4226,6 @@ async def test_prepare_successful_response_presents_terminal_exchange_verbatim()
             "core_raw": "EXPECTED_REPLY",
             "visible_text": "EXPECTED_REPLY",
             "completion_path": "foreground",
-            "wrapper_result": None,
         }
     ]
     assert runtime.listener_payloads[0]["text"] == "EXPECTED_REPLY"
@@ -4343,7 +4252,7 @@ async def test_prepare_successful_response_does_not_trust_terminal_text_on_other
         completion_path="foreground",
     )
 
-    assert result.visible_text == "wrapped:real provider response"
+    assert result.visible_text == "real provider response"
     assert response.text == "real provider response"
 
 
@@ -4369,7 +4278,7 @@ async def test_prepare_successful_response_normalizes_paths_before_user_observer
         completion_path="foreground",
     )
 
-    expected = r"wrapped:Saved to `C:\Users\tester\report.md`."
+    expected = r"Saved to `C:\Users\tester\report.md`."
     assert result.visible_text == expected
     assert runtime.transcripts[0]["visible_text"] == expected
     assert runtime.listener_payloads[0]["text"] == expected
@@ -4380,9 +4289,9 @@ async def test_prepare_successful_response_does_not_mark_hidden_only_text_succes
     runtime = _runtime()
 
     async def _strip_hidden_control_content(_item, _text):
-        return "", {"mode": "memory_plus"}
+        return ""
 
-    runtime._apply_wrapper_to_visible_text = _strip_hidden_control_content
+    runtime._apply_memory_plus_to_visible_text = _strip_hidden_control_content
     response = SimpleNamespace(
         text='<memory_plus_update>{"write":false}</memory_plus_update>'
     )
@@ -4421,7 +4330,7 @@ async def test_prepare_successful_response_delivers_tool_protocol_discussion_as_
         completion_path="foreground",
     )
 
-    expected_visible = f"wrapped:{report}"
+    expected_visible = report
     assert result.display_text == report
     assert result.visible_text == expected_visible
     assert response.text == report
@@ -4490,7 +4399,6 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
         item,
         response,
         visible_text="visible text",
-        wrapper_result={"mode": "wrapper"},
         final_prompt="final prompt",
         effective_prompt="effective prompt",
         incremental=False,
@@ -4531,7 +4439,6 @@ def test_record_foreground_usage_audit_records_estimated_usage(monkeypatch):
     assert event["history_included"] == 7
     assert event["history_omitted_count"] == 1
     assert event["history_capsule"] == {"present": True, "item_count": 1}
-    assert event["wrapper_applied"] is True
 
 
 def test_persist_success_memory_records_session_exchange_and_handoff():
@@ -4551,7 +4458,6 @@ def test_persist_success_memory_records_session_exchange_and_handoff():
         item,
         response,
         visible_text="visible text",
-        wrapper_result={"mode": "wrapper"},
         is_bridge_request=False,
         session_reset_source="session_reset",
     )
@@ -4563,13 +4469,13 @@ def test_persist_success_memory_records_session_exchange_and_handoff():
     session_memory = runtime_session.session_memory_store(runtime, item)
     assert [row["text"] for row in session_memory.get_recent_turns()] == [
         "user text",
-        "memory:visible text",
+        "visible text",
     ]
     completed = session_memory.get_completed_exchanges()
     assert len(completed) == 1
     assert completed[0]["user_text"] == "user text"
-    assert completed[0]["assistant_text"] == "memory:visible text"
-    assert runtime.post_turn_calls == [("user text", "memory:visible text", False)]
+    assert completed[0]["assistant_text"] == "visible text"
+    assert runtime.post_turn_calls == [("user text", "visible text", False)]
     assert runtime.handoff_builder.transcript == []
     rounds = runtime_session.session_handoff_builder(
         runtime, item=item
@@ -4593,7 +4499,6 @@ def test_persist_success_memory_skips_bridge_memory_and_handoff():
         item,
         SimpleNamespace(text="core"),
         visible_text="visible",
-        wrapper_result=None,
         is_bridge_request=True,
         session_reset_source="session_reset",
     )
@@ -4914,19 +4819,16 @@ async def test_handle_success_delivery_sends_response_and_routes_hchat(monkeypat
         item,
         response,
         visible_text="visible text",
-        wrapper_result={"mode": "wrapper"},
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now() - timedelta(seconds=1),
         queue_wait_s=0.2,
         backend_elapsed_s=0.3,
-        audit_collector="audit",
     )
 
     assert runtime.last_response["text"] == "visible text"
     assert runtime.sent_message["text"] == "visible text"
     assert runtime.voice_replies == ([] if trusted_call else [(123, "visible text", "req-1")])
-    assert runtime.audit_followups[0]["audit_collector"] == "audit"
     assert runtime.hchat_routes == [("req-1", "visible text")]
     assert runtime.maintenance_events[-1][0] == "send_success"
     assert delivery_outcomes == [
@@ -4979,13 +4881,11 @@ async def test_tui_mirror_off_persists_final_and_presentations_without_telegram(
         item,
         SimpleNamespace(text="canonical response"),
         visible_text="canonical response",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert runtime.last_response["text"] == "canonical response"
@@ -5034,13 +4934,11 @@ async def test_handle_success_delivery_records_failed_transport_outcome(monkeypa
         item,
         SimpleNamespace(text="backend output"),
         visible_text="visible output",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert outcomes == [
@@ -5112,13 +5010,11 @@ async def test_hchat_primary_survives_failed_telegram_mirror_and_records_both(mo
         item,
         SimpleNamespace(text="backend output"),
         visible_text="visible output",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert [(entry["surface"], entry["delivered"]) for entry in receipts] == [
@@ -5210,13 +5106,11 @@ async def test_voice_origin_delivers_native_audio_and_companion_text_without_tts
         item,
         response,
         visible_text="Native transcript.",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert runtime.app.bot.sent[0]["text"] == "Native transcript."
@@ -5264,13 +5158,11 @@ async def test_handle_success_delivery_writes_correlated_her_v2_transport_receip
         item,
         response,
         visible_text="visible text",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert len(receipts) == 1
@@ -5318,13 +5210,11 @@ async def test_handle_success_delivery_does_not_duplicate_resolved_direct_respon
         item,
         response,
         visible_text="direct answer",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert receipts[0]["delivered"] is True
@@ -5362,13 +5252,11 @@ async def test_scheduler_delivery_persists_cross_session_receipt_after_send():
         item,
         response,
         visible_text="Visible incomplete report. CONTINUE.",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     receipt = runtime_cross_session.load_receipts(runtime)[0]
@@ -5390,8 +5278,6 @@ async def test_her_direct_response_stream_event_is_not_sent_before_final_deliver
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         item,
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -5412,13 +5298,11 @@ async def test_her_direct_response_stream_event_is_not_sent_before_final_deliver
         item,
         SimpleNamespace(text="complete direct answer"),
         visible_text="complete direct answer",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
         her_message_router=feedback.her_message_router,
     )
 
@@ -5446,8 +5330,6 @@ async def test_her_v2_stream_callback_returns_receipts_and_resolves_provisional_
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         item,
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.on_stream_event.supports_initial_resolution is True
@@ -5503,8 +5385,6 @@ async def test_quiet_mode_keeps_initial_resolution_available_and_silent():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(request_id="req-her-v2-quiet-resolution"),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.on_stream_event.supports_initial_resolution is True
@@ -5584,8 +5464,6 @@ async def test_required_native_audio_immediate_ignores_commentary_and_uses_quiet
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         item,
-        audit_active=False,
-        audit_collector=None,
     )
 
     accepted = await feedback.on_stream_event(
@@ -5637,8 +5515,6 @@ async def test_her_v2_initial_resolution_accepts_mapping_receipt_and_edit_only_t
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(request_id="req-her-v2-edit-only"),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert feedback.on_stream_event.supports_initial_resolution is True
@@ -5687,8 +5563,6 @@ async def test_her_v2_identical_commentary_resolution_is_local_idempotent_succes
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(request_id="req-her-v2-commentary-noop"),
-        audit_active=False,
-        audit_collector=None,
     )
 
     accepted = await feedback.on_stream_event(
@@ -5744,8 +5618,6 @@ async def test_her_v2_message_not_modified_race_is_idempotent_success():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(request_id="req-her-v2-commentary-race"),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -5796,8 +5668,6 @@ async def test_her_v2_unexpected_bad_request_remains_failure_with_reason():
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(request_id="req-her-v2-commentary-invalid"),
-        audit_active=False,
-        audit_collector=None,
     )
     await feedback.on_stream_event(
         StreamEvent(
@@ -5848,8 +5718,6 @@ async def test_her_v2_edit_only_transport_rejects_unsupported_discard_explicitly
     feedback = await runtime_pipeline.setup_interactive_feedback(
         runtime,
         _item(request_id="req-her-v2-edit-only-discard"),
-        audit_active=False,
-        audit_collector=None,
     )
 
     assert await feedback.on_stream_event(
@@ -6050,13 +5918,11 @@ async def test_handle_success_delivery_promotes_streamed_final_after_wrapper_tex
             },
         ),
         visible_text="wrapped final text",
-        wrapper_result={"mode": "wrapper"},
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now() - timedelta(seconds=1),
         queue_wait_s=0.2,
         backend_elapsed_s=0.3,
-        audit_collector="audit",
         answer_stream_state=stream_state,
         queued_monotonic=queued_monotonic,
     )
@@ -6099,13 +5965,11 @@ async def test_handle_success_delivery_buffered_transfer_deletes_stream_placehol
         item,
         SimpleNamespace(text="core text"),
         visible_text="wrapped final text",
-        wrapper_result={"mode": "wrapper"},
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
         answer_stream_state=stream_state,
     )
 
@@ -6128,13 +5992,11 @@ async def test_handle_success_delivery_uses_cos_answer_without_hchat_route():
         _item(),
         SimpleNamespace(text="core?"),
         visible_text="visible?",
-        wrapper_result=None,
         is_bridge_request=False,
         session_reset_source="session_reset",
         queued_at=datetime.now(),
         queue_wait_s=0,
         backend_elapsed_s=0,
-        audit_collector=None,
     )
 
     assert runtime.sent_message["text"] == "cos answer"

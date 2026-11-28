@@ -1357,35 +1357,6 @@ async def cmd_provider(runtime, update, context: Any) -> None:
         )
         return
 
-    managed_mode = runtime.backend_manager.agent_mode
-    managed_commands = {
-        "wrapper": "<code>/core</code> and <code>/wrap</code>",
-        "audit": "<code>/core</code> and <code>/audit</code>",
-        "dual-brain": "<code>/brain</code>",
-    }
-    if managed_mode in managed_commands:
-        await runtime._reply_text(
-            update,
-            setting_card(
-                "🔌",
-                "HERV3 provider",
-                current=(f"<b>{html.escape(ui_language.tr('menu.her.managed'))}</b>"),
-                facts=[
-                    f"<b>{html.escape(ui_language.tr('common.backend'))}</b> · "
-                    "<code>her-v3</code>",
-                    f"<b>{html.escape(ui_language.tr('common.mode'))}</b> · "
-                    f"<code>{html.escape(managed_mode)}</code>",
-                ],
-                consequence=ui_language.tr("menu.her.managed_effect"),
-                action=ui_language.tr(
-                    "menu.her.managed_action",
-                    commands=managed_commands[managed_mode],
-                ),
-            ),
-            parse_mode="HTML",
-        )
-        return
-
     args = context.args or []
     if not args:
         await runtime._reply_text(
@@ -1717,24 +1688,6 @@ async def cmd_model(runtime, update, context: Any) -> None:
         return
     if not runtime.backend_manager.current_backend:
         return
-    if runtime.backend_manager.agent_mode == "wrapper":
-        await runtime._reply_text(
-            update,
-            ui_language.tr("model.managed.wrapper"),
-        )
-        return
-    if runtime.backend_manager.agent_mode == "audit":
-        await runtime._reply_text(
-            update,
-            ui_language.tr("model.managed.audit"),
-        )
-        return
-    if runtime.backend_manager.agent_mode == "dual-brain":
-        await runtime._reply_text(
-            update,
-            ui_language.tr("model.managed.dual_brain"),
-        )
-        return
 
     if runtime.config.active_backend == HER_V2_ENGINE:
         await _cmd_her_v3_model(runtime, update, list(context.args or []))
@@ -1817,28 +1770,6 @@ async def callback_model(runtime, update, context: Any) -> None:
     ):
         await query.answer(
             ui_language.tr("menu.her_v3.old_controls_retired"),
-            show_alert=True,
-        )
-        return
-    her_v2_control = data.startswith(
-        (
-            "her_adv",
-            "her_advanced",
-            "her_execution",
-            "her_provider",
-            "her_model",
-            "her_route",
-            "her_reasoning",
-            "her_target",
-        )
-    ) or data in {"model_menu", "her_routes"}
-    if (
-        her_v2_control
-        and runtime.config.active_backend == HER_V2_ENGINE
-        and runtime.backend_manager.agent_mode in {"wrapper", "audit", "dual-brain"}
-    ):
-        await query.answer(
-            ui_language.tr("model.managed_by_mode"),
             show_alert=True,
         )
         return

@@ -16,7 +16,6 @@ from adapters.timeout_policy import (
     TIMEOUT_POLICY_META_KEY,
     USER_OVERRIDE_SOURCE,
 )
-from orchestrator.audit_mode import load_audit_config
 from orchestrator.config import FlexibleAgentConfig, GlobalConfig
 from orchestrator.flexible_backend_manager import (
     AGENT_MODE_POLICY_VERSION_STATE_KEY,
@@ -26,7 +25,6 @@ from orchestrator.flexible_backend_manager import (
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator import model_fallback_policy as fallback_policy
 from orchestrator.privacy_levels import PrivacyLevel, PrivacyPolicyError
-from orchestrator.wrapper_mode import load_wrapper_config
 
 
 def _make_manager(workspace: Path) -> FlexibleBackendManager:
@@ -644,92 +642,6 @@ def test_save_state_preserves_invalid_existing_json(tmp_path):
     assert state_path.read_text(encoding="utf-8") == "{invalid json"
 
 
-def test_update_wrapper_blocks_preserves_managed_state_and_unknown_keys(tmp_path):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    (workspace / "state.json").write_text(
-        json.dumps(
-            {
-                "active_backend": "codex-cli",
-                "agent_mode": "wrapper",
-                "active_model": "gpt-5.5",
-                "unrelated": {"keep": True},
-            }
-        ),
-        encoding="utf-8",
-    )
-    manager = _make_manager(workspace)
-    manager.agent_mode = "wrapper"
-
-    manager.update_wrapper_blocks(
-        core={"backend": "codex-cli", "model": "gpt-5.5"},
-        wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3},
-        wrapper_slots={"1": "Use a warm tone."},
-    )
-
-    state = _read_state(workspace)
-    assert state["active_backend"] == "codex-cli"
-    assert state["agent_mode"] == "wrapper"
-    assert state["unrelated"] == {"keep": True}
-    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
-    assert state["wrapper"] == {"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 3}
-    assert state["wrapper_slots"] == {"1": "Use a warm tone."}
-
-
-def test_update_wrapper_blocks_removes_stale_active_model_when_override_cleared(tmp_path):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    (workspace / "state.json").write_text(
-        json.dumps({"active_backend": "codex-cli", "agent_mode": "wrapper", "active_model": "gpt-5.5"}),
-        encoding="utf-8",
-    )
-    manager = _make_manager(workspace)
-    manager.agent_mode = "wrapper"
-    manager._active_model_override = None
-
-    manager.update_wrapper_blocks(wrapper_slots={"1": "Keep facts exact."})
-
-    state = _read_state(workspace)
-    assert "active_model" not in state
-    assert state["wrapper_slots"] == {"1": "Keep facts exact."}
-
-
-def test_update_audit_blocks_preserves_managed_state_and_unknown_keys(tmp_path):
-    workspace = tmp_path / "agent"
-    workspace.mkdir()
-    (workspace / "state.json").write_text(
-        json.dumps(
-            {
-                "active_backend": "codex-cli",
-                "agent_mode": "audit",
-                "active_model": "gpt-5.5",
-                "unrelated": {"keep": True},
-            }
-        ),
-        encoding="utf-8",
-    )
-    manager = _make_manager(workspace)
-    manager.agent_mode = "audit"
-
-    manager.update_audit_blocks(
-        core={"backend": "codex-cli", "model": "gpt-5.5"},
-        audit={"backend": "claude-cli", "model": "claude-sonnet-4-6", "delivery": "issues_only"},
-        audit_criteria={"1": "Flag approval bypass."},
-    )
-
-    state = _read_state(workspace)
-    assert state["active_backend"] == "codex-cli"
-    assert state["agent_mode"] == "audit"
-    assert state["unrelated"] == {"keep": True}
-    assert state["core"] == {"backend": "codex-cli", "model": "gpt-5.5"}
-    assert state["audit"] == {"backend": "claude-cli", "model": "claude-sonnet-4-6", "delivery": "issues_only"}
-    assert state["audit_criteria"] == {"1": "Flag approval bypass."}
-
-    cfg = load_audit_config(state)
-    assert cfg.audit_backend == "claude-cli"
-    assert cfg.audit_model == "claude-sonnet-4-6"
-
-
 def test_create_ephemeral_backend_does_not_replace_current_backend(tmp_path, monkeypatch):
     import adapters.registry
 
@@ -916,33 +828,6 @@ async def test_generate_tool_free_ephemeral_response_rejects_cli_backend(tmp_pat
             prompt="render Persona status",
             request_id="req-persona",
         )
-
-
-def test_wrapper_config_survives_manager_reload_and_unrelated_state_saves(tmp_path):
-    workspace = tmp_path / "agent"
-    manager = _make_manager(workspace)
-    manager.agent_mode = "wrapper"
-    manager.update_wrapper_blocks(
-        core={"backend": "codex-cli", "model": "gpt-5.5"},
-        wrapper={"backend": "claude-cli", "model": "claude-haiku-4-5", "context_window": 5},
-        wrapper_slots={"1": "Be gentle."},
-    )
-
-    manager.agent_mode = "fixed"
-    manager._save_state()
-    manager.agent_mode = "wrapper"
-    manager.persist_state(active_model="gpt-5.5")
-
-    reloaded = _make_manager(workspace)
-    cfg = load_wrapper_config(reloaded.get_state_snapshot())
-    state = reloaded.get_state_snapshot()
-
-    assert cfg.core_backend == "codex-cli"
-    assert cfg.core_model == "gpt-5.5"
-    assert cfg.wrapper_backend == "claude-cli"
-    assert cfg.wrapper_model == "claude-haiku-4-5"
-    assert cfg.context_window == 5
-    assert state["wrapper_slots"] == {"1": "Be gentle."}
 
 
 def test_flexible_runtime_persists_her_backend_events(tmp_path):
