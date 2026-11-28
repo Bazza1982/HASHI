@@ -12,7 +12,8 @@ provider-agnostic orchestration, the native HERV3 Engine, and Frontend
 Connectors. Personal/local operation is the primary path; team and enterprise
 governance remains available for environment-specific evaluation.
 
-The current Beta focuses on small-scale public testing of installation and
+The current v6 Alpha source focuses on startup and recovery reliability.
+The published v4 Beta was for small-scale public testing of installation and
 upgrade reliability, external-client integration, Windows/WSL deployment,
 restricted online demonstration, and portable installation media. Publication
 and wider production acceptance remain separate decisions under the
@@ -43,7 +44,7 @@ Compose/Kubernetes/Helm/systemd/SIEM deployment artifacts for alpha operator
 review. It is not production-certified; customer-like enterprise server, IdP,
 SIEM, and Kubernetes/cloud validation remain post-alpha.
 
-## v4.0.0-beta.1 (Current Beta)
+## v4.0.0-beta.1 (Published Beta milestone)
 
 The first v4 Beta opens HASHI for small-scale public testing. Its readiness is
 driven by:

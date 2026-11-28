@@ -48,14 +48,12 @@ supported model_efforts fields. Effective options resolve through the
 runtime's existing capability resolver. Adding an instance model does not
 require changing the shared catalogue.
 
-The shipped Codex CLI default is `gpt-5.6-sol` with explicit `medium`
-reasoning. Its shared catalogue contains only `gpt-5.5`, the Sol/Terra/Luna
-GPT-5.6 family, and `gpt-6-astra`. OpenRouter is available only as a HERV3
-Model Provider and exposes the approved DeepSeek V3.2 Exp, V4 Flash, V4 Pro,
-and Gemini 3.8 Flash models. The official DeepSeek API exposes
-`deepseek-flash` (V4.1 Flash with native vision) and `deepseek-v4-pro`;
-temporary retired Flash aliases are accepted by the adapter but are not shown
-as current model choices.
+Read the live `/backend`, `/provider`, `/model` and `/effort` menus for the
+selected Agent's actual choices. Shared catalogue defaults can be narrowed by
+instance opt-ins and credential availability. Older IDs accepted for loading
+historical configuration do not necessarily appear in these menus. For local
+inference, use the configured [HLI provider](HLI_PROVIDER.md) or the supported
+[Ollama path](HERV3_OLLAMA_CONTEXT_PILOT.md).
 
 HERV3 has no HER execution modes or stage routes. `/effort` is a
 Provider/model capability and selects only a supported reasoning level.
@@ -101,6 +99,16 @@ HASHI attempts an Agent-scoped activation after saving. If the Agent is busy or
 activation is unavailable, the saved credential stays pending. A connected
 status requires an authorized Telegram user and both live transport directions;
 it does not establish that a real user's round trip has succeeded.
+
+To remove the Bot Token locally, use `/telegram disconnect [agent_id]` or
+the Agent's Telegram settings in Workbench. Shared token references are
+protected against removal from an individual Agent. See
+[Telegram controls](TELEGRAM_NOTIFICATION_MODES.md) for the difference between
+notification policy, mirroring, safety silence and credential removal.
+
+Remote's instance Shared Token is a different credential. Use the private
+owner [`/remote token` flow](HASHI_REMOTE_SHARED_TOKEN.md) or the authorized
+Workbench settings. Do not put a token in an inline slash command.
 
 Replacing the human Telegram account is a separate instance lifecycle. HASHI
 requires a recent runtime-observed direct private-chat binding, preserves the

@@ -143,7 +143,9 @@ explicit Composer selection keep it until a user changes their model.
 Grok models are not served through the API Gateway. The former `xai-api`
 backend and the HASHI-native xAI device-login utility were retired, so no xAI
 model appears in `GET /v1/models` and older `xai/`-prefixed Gateway calls are no
-longer accepted.
+longer accepted. If `/api` reports a saved default as retired, select a
+supported default or send an explicit model from the current catalogue. See
+[migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
 The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
 `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.5`.

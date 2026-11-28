@@ -1,8 +1,26 @@
 # Agent reboot receipts
 
-Current revision: 2026-10-14. The fast, reliable reboot correction supersedes
-the older PID-change success rule and admission-time route fencing. See the
-[scoped implementation record](repairs/REBOOT_FAST_RELIABLE_20261014.md).
+The [October scoped implementation record](repairs/REBOOT_FAST_RELIABLE_20261014.md)
+superseded the old PID-change success rule and admission-time routing fence.
+The historical incidents below record the behavior at their dates.
+
+## Waiting and force on current main
+
+- Without a modifier, busy targets are reported and the ordinary operation can
+  be rejected. `delay` waits up to 30 minutes by default; `delay=<minutes>`
+  overrides that wait up to six hours. Normal requests remain admitted while
+  waiting. `/reboot cancel` cancels the operation while it is waiting.
+- `force` captures queued work and stops busy targets, then requires fresh
+  confirmation before cutover. With `delay` and `force` together, the stop
+  begins only after the wait expires. If stop cannot be confirmed, cutover is
+  rejected and the existing generation stays in service.
+- Following verified adoption, captured queued work is re-admitted.
+  An interrupted turn may rerun from the start in the same Session. Effects
+  that already happened are not undone. Background jobs and pending permission
+  prompts are not automatically resumed.
+- Read the original operation receipt after a disconnect or timeout, before
+  submitting another reboot. For the exact scope see the
+  [user guide](USER_GUIDE.md#apply-changes-at-the-right-scope).
 
 ## Decision and ownership
 
@@ -319,8 +337,8 @@ busy or queued Worker rejects the operation before routes, Core, or candidates
 are touched. The receipt retains `busy_targets`, and Frontend rendering names
 those Agents. This remains an observation rather than an idle reservation; the
 existing fenced transactional drain still handles the race after preflight.
-There is no forced cancellation, automatic retry, timeout extension, or Core
-change.
+This was the unmodified-command behavior. Later explicit wait and force
+options are described above.
 
 ## Shared handoff fail-fast correction (2026-10-22)
 

@@ -51,12 +51,62 @@ included since the v4 Beta, migration steps and publication limits.
 
 ### Added
 
+- [HAL automation](docs/HAL_RUNTIME_v0.1.md) uses Workbench Canvas for
+  authoring and HASHI for execution. It supports durable rules and receipts,
+  authenticated peer prompt chains and configured Whiteboard stage events.
+  [#200](https://github.com/Bazza1982/HASHI/pull/200) ·
+  [#237](https://github.com/Bazza1982/HASHI/pull/237) ·
+  [#251](https://github.com/Bazza1982/HASHI/pull/251)
+- Choose [DeepSeek Harness (DSH)](docs/INTEGRATIONS.md#engines-and-model-providers)
+  as a CLI engine with native sessions, or
+  [Hashi Local Inference](docs/HLI_PROVIDER.md) as a HERV3 Model Provider backed
+  by Hashi Compute. Availability depends on the instance and selected Agent.
+  [#209](https://github.com/Bazza1982/HASHI/pull/209) ·
+  [#177](https://github.com/Bazza1982/HASHI/pull/177)
+- Copy or import Workzone settings and local `/sys` slots between Agents on
+  the same instance. Clear slot settings without deleting files. Transfers
+  report occupied/full slots and duplicates. [#247](https://github.com/Bazza1982/HASHI/pull/247)
+- Use [Telegram controls](docs/TELEGRAM_NOTIFICATION_MODES.md) for independent
+  delivery and notification choices, instance-wide mirroring or safety
+  silence, and local Bot Token removal. The owner can use the private
+  [`/remote token` flow](docs/HASHI_REMOTE_SHARED_TOKEN.md) to verify, change
+  or clear the instance Shared Token.
+  [#227](https://github.com/Bazza1982/HASHI/pull/227) ·
+  [#230](https://github.com/Bazza1982/HASHI/pull/230) ·
+  [#242](https://github.com/Bazza1982/HASHI/pull/242)
+- Source preparation can safely align a clean compatible checkout to
+  `origin/main`. An explicit owner-only force preparation preserves local
+  changes in a stash/backup ref and reports the exact source outcome.
+  Reboot can wait for idle or explicitly stop and restore captured work
+  after confirmed adoption. See [preparation](docs/HASHI_SOURCE_RELEASE_CLOSURE.md)
+  and [reboot receipts](docs/HASHI_REBOOT_RECEIPTS.md).
+  [#224](https://github.com/Bazza1982/HASHI/pull/224) ·
+  [#232](https://github.com/Bazza1982/HASHI/pull/232) ·
+  [#233](https://github.com/Bazza1982/HASHI/pull/233)
+
 - Opt-in native Ollama chat with exact-model context/output budgets, native
   tokenizer admission probes, explicit idle residency and request timing evidence.
 - Exact-model binary Ollama reasoning controls using native `think`, with
   localized On/Off choices independent of reasoning display and capacity opt-ins.
 
 ### Changed
+
+- HERV3 projects stable context first and sends smaller, model-aware history
+  and tool/skill views. Watermark compaction preserves the durable history
+  while reducing what is sent to the model. Tool reads can run concurrently
+  where ordering allows. [#201](https://github.com/Bazza1982/HASHI/pull/201) ·
+  [#218](https://github.com/Bazza1982/HASHI/pull/218) ·
+  [#222](https://github.com/Bazza1982/HASHI/pull/222) ·
+  [#243](https://github.com/Bazza1982/HASHI/pull/243)
+- `/commentary` offers Off, Technical, In character and Polished. It displays
+  the effective mode when the provider uses a simpler one. Model, reasoning,
+  fallback and reboot menus use clearer task language.
+  [#210](https://github.com/Bazza1982/HASHI/pull/210) ·
+  [#254](https://github.com/Bazza1982/HASHI/pull/254) ·
+  [#258](https://github.com/Bazza1982/HASHI/pull/258)
+- Worker startup defers heavyweight optional imports. The import probe is
+  reported in [#257](https://github.com/Bazza1982/HASHI/pull/257); actual
+  installed startup and `/reboot max` timings depend on the deployment.
 
 - Bound HASHI Remote supervisor logs with process-owned UTF-8 rotation, migrate
   oversized legacy logs by retaining only a bounded tail, and keep successful
@@ -76,6 +126,53 @@ included since the v4 Beta, migration steps and publication limits.
   preserve required questions and neutral progress delivery.
 
 ### Fixed
+
+- Typed image input preserves ordinary text and attachment order. Interrupted
+  HERV3 recovery preserves authorized checkpoint evidence and does not replay
+  completed tool effects. Eligible empty model completions can recover within
+  the tool loop without replaying a whole turn.
+  [#203](https://github.com/Bazza1982/HASHI/pull/203) ·
+  [#204](https://github.com/Bazza1982/HASHI/pull/204) ·
+  [#215](https://github.com/Bazza1982/HASHI/pull/215)
+- Saved-memory search is enabled for unconfigured Agent workspaces; an
+  explicit off setting remains respected. Chinese, Japanese and Korean recall
+  and search pagination were corrected. Long-line file reads now provide an
+  offset for continuation. [#183](https://github.com/Bazza1982/HASHI/pull/183) ·
+  [#186](https://github.com/Bazza1982/HASHI/pull/186) ·
+  [#229](https://github.com/Bazza1982/HASHI/pull/229)
+- TUI requests and multiline paste stay on their intended input path.
+  The launcher can report broken server prerequisites through the independent
+  TUI or standard-library rescue shell.
+  [#202](https://github.com/Bazza1982/HASHI/pull/202) ·
+  [#236](https://github.com/Bazza1982/HASHI/pull/236)
+- DSH avoids repeating cold-start discovery on inactivity timeout and reports
+  native per-turn usage when available. Pricing handles Windows cache-lock races
+  and keeps the last known prices during refresh.
+  [#217](https://github.com/Bazza1982/HASHI/pull/217) ·
+  [#225](https://github.com/Bazza1982/HASHI/pull/225) ·
+  [#221](https://github.com/Bazza1982/HASHI/pull/221) ·
+  [#239](https://github.com/Bazza1982/HASHI/pull/239)
+- Remote distinguishes peer/gateway reachability and reports push/reconnect
+  state with stronger evidence. Exchange inbox recovery tolerates bounded
+  SQLite lock contention. Windows screenshot routing skips an incompatible
+  Linux helper; Telegram command menus respect the platform limit.
+  [#198](https://github.com/Bazza1982/HASHI/pull/198) ·
+  [#199](https://github.com/Bazza1982/HASHI/pull/199) ·
+  [#221](https://github.com/Bazza1982/HASHI/pull/221) ·
+  [#244](https://github.com/Bazza1982/HASHI/pull/244) ·
+  [#246](https://github.com/Bazza1982/HASHI/pull/246)
+- HAL exposes dispatch failures, lets a Workbench-only Agent receive prompts
+  without Telegram, and waits for committed Worker routes before dispatch.
+  Run history filters by rule before applying the limit.
+  [#219](https://github.com/Bazza1982/HASHI/pull/219) ·
+  [#234](https://github.com/Bazza1982/HASHI/pull/234) ·
+  [#235](https://github.com/Bazza1982/HASHI/pull/235) ·
+  [#245](https://github.com/Bazza1982/HASHI/pull/245)
+- npm preparation rejects missing required Function sources in the package.
+  Function qualification uses the candidate's bundled observer inventory;
+  retired per-Agent observer declarations no longer prevent adoption.
+  [#252](https://github.com/Bazza1982/HASHI/pull/252) ·
+  [#253](https://github.com/Bazza1982/HASHI/pull/253)
 
 - Preserve trusted frontend identity and origin/activity routing for managed
   background work, including Backend API transport registration.
@@ -101,6 +198,16 @@ included since the v4 Beta, migration steps and publication limits.
 See [the Ollama decision](docs/HERV3_OLLAMA_CONTEXT_PILOT.md) for configuration,
 measured capacity reduction, historical canaries and remaining performance limits.
 These Function changes do not enable an instance opt-in or adopt a running Worker.
+
+### Removed
+
+- The staged HER execution paths, experimental JEV Judge and Agent Companion,
+  Anatta, Hermes profile transfer, the unused Veritas callable package, and
+  the native `xai-api` backend and image/video Gateway routes have retired.
+  Grok CLI, ordinary Nagare, Office tooling, the isolated privacy detector
+  and supported presentation/memory features remain on their respective paths.
+  See [migration and retirements](docs/MIGRATION_AND_RETIREMENTS.md) for old
+  configuration, compatibility and replacements.
 
 ---
 

@@ -1,6 +1,9 @@
 # HASHI xAI API Backend (Hermes OAuth)
 
-**Status:** Phase 3 implemented (responses API, Imagine hook, secrets OAuth refresh).
+**Status:** Historical design. The native `xai-api` backend and device-login flow
+were retired in [#250](https://github.com/Bazza1982/HASHI/pull/250). Use Grok CLI
+for Grok. The OAuth, model and endpoint examples below apply only to older
+builds. See [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
 **Date:** 2026-07-07.
 

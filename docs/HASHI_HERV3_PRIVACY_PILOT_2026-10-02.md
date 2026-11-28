@@ -29,8 +29,9 @@ failure: the request must be blocked, never sent unfiltered.
 
 Only HERV3 is a Level 2 outer backend. Only its qualified DeepSeek provider is
 enabled in this trial. Direct API engines, CLI backends, HERV3 Hashi/OpenRouter
-providers, Agent Companion, and uninspected media paths are disabled. They
-cannot silently lower the privacy level. The older
+providers and uninspected media paths remain unavailable at Level 2. A legacy
+`agent_companion` setting is ignored following the companion's retirement and
+does not block activation. See [current privacy settings](USER_GUIDE.md#privacy-levels-and-level-2-trial). The older
 [Level 2 plan](HASHI_PRIVACY_LEVEL_2_PLAN.md) proposed direct API eligibility;
 that proposal is superseded.
 

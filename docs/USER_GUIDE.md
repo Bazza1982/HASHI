@@ -1,7 +1,9 @@
 # HASHI User Guide
 
 [Install](INSTALL.md) · [Configuration](CONFIGURATION.md) ·
-[Integrations](INTEGRATIONS.md) · [Troubleshooting](TROUBLESHOOTING.md)
+[Integrations](INTEGRATIONS.md) · [Troubleshooting](TROUBLESHOOTING.md) ·
+[Retired features and migration](MIGRATION_AND_RETIREMENTS.md) ·
+[Recent changes](../CHANGELOG.md#unreleased)
 
 This guide covers everyday operation of the current source candidate.
 Installed releases can expose a different command set. Use the live /help
@@ -51,6 +53,14 @@ The agent's own workspace contains identity and continuity data; a project
 Workzone is where the requested project work belongs. Available filesystem
 actions also depend on engine and tool permissions.
 
+Use `/workzone copy <agent> [slot]` to send configuration to a sibling Agent
+or `/workzone import <agent> [slot]` to pull it. The transfer stays within the
+current instance. Omit the slot to transfer all configured entries. The
+target keeps occupied slots, uses the next free slot where possible, skips
+duplicates, and reports entries that could not be copied. `/workzone clear`
+clears this Agent's slot configuration. It does not remove directories or
+files. A stopped target adopts the changes at its next start.
+
 ## Engines, models, and working modes
 
 /mode selects Fixed or Flex. Fixed is the default for session-capable engines
@@ -62,6 +72,12 @@ Within HERV3, /provider selects a Model Provider and /model selects one of that
 Provider's configured models. Its durable Engine Session remains bound to the
 HASHI conversation. Changing a HER Model Provider is distinct from selecting
 another top-level Engine.
+
+DeepSeek Harness (`dsh-cli`, shown as **DSH**) is a separate locally installed
+CLI engine with its own sessions. Hashi Local Inference (HLI) is a HERV3 Model
+Provider that uses a configured Hashi Compute endpoint. See
+[engine setup](INTEGRATIONS.md#engines-and-model-providers) and
+[HLI configuration](HLI_PROVIDER.md).
 
 For HERV3, /effort selects only a reasoning level supported by the current
 Provider/model. It never selects Direct, Strategic, Planned, or another HASHI
@@ -113,11 +129,17 @@ command instead of being reset by a conversation change.
 
 On HERV3, /fresh creates a durable context boundary for Session history while
 preserving underlying records and files. It retains the user's two memory
-injection choices rather than silently enabling them.
+injection choices rather than silently enabling them. Saved-memory search is
+on by default for an unconfigured workspace. An explicit `/memory search off`
+remains in effect. Recall supports Chinese, Japanese and Korean text.
 
 Use /sys for Agent-local instructions. Instance-global slots apply across
 agents in that instance and show confirmation for broad changes. A running
-request is not rewritten by changing a slot.
+request is not rewritten by changing a slot. `/sys copy <agent> [slot]` and
+`/sys import <agent> [slot]` transfer only Agent-local slots within the same
+instance, using the same free-slot and duplicate rules as Workzone.
+`/sys clear` clears this Agent's local slots. These three actions leave
+instance-global instructions and files untouched.
 
 HER Habit–Meditation is optional, disabled by default, and owned by HERV3.
 The /habit menu controls agent-local learned advice. It is separate from
@@ -145,6 +167,14 @@ Nagare coordinates dependency-ordered workflows. Superloop provides a
 long-running controller with taskboards, waits, issues, and closeout evidence.
 HChat connects agents locally and across trusted Remote peers.
 
+For event-driven coordination, add a **HAL** workflow block in Workbench
+Canvas. Edit the rule, validate and save it on the owning HASHI instance, then
+enable it explicitly. A trusted instance-qualified target such as
+`@reviewer@peer-instance` can receive a prompt, with each step's outcome
+tracked by the rule owner. A configured compatible Whiteboard can also trigger
+rules on committed card stage transitions. Check event availability before
+enabling a rule. See the [HAL guide](HAL_RUNTIME_v0.1.md).
+
 See the [skills guide](https://github.com/Bazza1982/HASHI/blob/main/skills/README.md),
 [background jobs](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_BACKGROUND_JOBS_DESIGN.md),
 [Nagare reference](https://github.com/Bazza1982/HASHI/blob/main/docs/NAGARE_FLOW_SYSTEM.md),
@@ -153,8 +183,11 @@ and [Superloop contract](https://github.com/Bazza1982/HASHI/blob/main/docs/SUPER
 ## Media, voice, and notifications
 
 Telegram's /long … /end controls group text and attachments into one request.
-Media remains ordered; native input and local inspection depend on the
-selected model's capabilities and configured routes.
+Media remains ordered. HASHI routes images as typed Image items on supported
+native input paths. It keeps ordinary message text intact, including literal
+`data:` text. Local inspection and fallback depend on the selected model and
+configured routes. After compatible Session recovery, stored attachment
+references remain usable subject to current access.
 
 SafeVoice adds confirmation for transcribed voice commands. Native audio,
 transcription, and spoken replies have separate capability requirements.
@@ -165,12 +198,20 @@ progress messages are skipped. A range such as /say 2-4 selects the second
 through fourth most recent replies. Speech stays within the current Agent and
 conversation; Telegram only reads replies confirmed delivered to that chat.
 
-/notify chooses normal, quiet, or silent Telegram delivery. Quiet retains
-final results and important error/recovery notices while silencing interim
-activity. /verbose, /think, and /commentary control different kinds of visible
-progress; turning them off does not delete execution records.
-/meter reports usage and available cost evidence. Missing prices are unknown,
-not zero.
+Use `/notify` to choose how delivered Telegram messages alert you.
+`/telegram` controls mirroring, instance-wide safety silence, or a bot
+disconnect. See [Telegram delivery and notifications](TELEGRAM_NOTIFICATION_MODES.md)
+for the distinction and recovery commands.
+
+| Display control | What it changes |
+|---|---|
+| `/think` | Thinking output exposed by the selected engine or provider. |
+| `/verbose` | A technical activity summary. |
+| `/commentary` | User-facing progress updates for HERV3. Choose Off (`off`), Technical (`raw`), In character (`original`) or Polished (`packaged`). Polishing uses a separate presentation call. Local providers may run a simpler effective mode, which the menu shows alongside the saved choice. |
+| `/meter` | Available usage and cost evidence. Missing prices are shown as unknown. |
+
+Display settings do not erase records or hide the final result. See
+[HERV3 progress updates](HERV3_UPGRADE.md#persona-commentary).
 
 See [audio](https://github.com/Bazza1982/HASHI/blob/main/docs/HASHI_NATIVE_AUDIO_CHAT_DESIGN.md),
 [notifications](https://github.com/Bazza1982/HASHI/blob/main/docs/TELEGRAM_NOTIFICATION_MODES.md),
@@ -201,9 +242,24 @@ See [TUI instance switching](https://github.com/Bazza1982/HASHI/blob/main/docs/T
 
 ## Apply changes at the right scope
 
-/reboot adopts qualified Functions for the selected Agent scope. Shared
-services have a separate replacement operation. Python, dependencies, and
-protected Core changes require the declared runtime migration.
+Choose the action according to what you intend to change.
 
-npm program updates and instance adoption are separate steps. See
-[upgrade and data preservation](INSTALL.md#stop-remove-upgrade-and-uninstall-safety).
+| Action | Scope |
+|---|---|
+| `/hashideploy` | Prepare the exact source candidate from `origin/main` for the current source instance. A ready receipt means the candidate was prepared. It takes a separate action to load it. |
+| `/reboot min` or `/reboot same` | Adopt qualified Functions for the current Agent Worker. A numeric scope selects a bounded set. |
+| `/reboot max` | Adopt shared Functions and replace the running Agent Workers through the shared handoff. Core and Remote keep their separate lifecycles. |
+| `/reboot max delay=30` | Wait up to 30 minutes for the targets to become idle. `/reboot cancel` cancels while the operation is still waiting. |
+| `/reboot max force` | Stop busy targets before cutover. Captured queued work is restored after adoption, and interrupted turns may rerun from the start. Review any effects already produced before using force. |
+| `hashi --instance <name> update --confirm <name>` | Complete a verified source update, including Core and Remote restart, on an eligible source instance. |
+
+Combining `delay` and `force` waits first and interrupts busy targets only if
+the wait expires. If stops cannot be confirmed, cutover is refused.
+`/hashideploy force` is a different, human-owner-only operation for aligning a
+local Git checkout. It records the stash and recovery refs for local work.
+See [reboot receipts](HASHI_REBOOT_RECEIPTS.md) and
+[source preparation](HASHI_SOURCE_RELEASE_CLOSURE.md).
+
+For identity and recovery use `/version full` and the receipt for the exact
+instance. Package installation, source preparation and running-instance
+adoption are separate. See [upgrade and data preservation](INSTALL.md#stop-remove-upgrade-and-uninstall-safety).

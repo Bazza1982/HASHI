@@ -8,12 +8,13 @@ infrastructure you control. Work through a terminal, Telegram, WhatsApp, or
 an authenticated client API.
 
 Use HASHI's native **HERV3** engine or connect engines such as Claude Code,
-Codex CLI, Antigravity CLI, and Grok CLI. HERV3 keeps one durable Engine Session
-while one selected model reasons, uses tools, adapts, and verifies in a
-continuous loop.
+Codex CLI, Antigravity CLI, Grok CLI, and DeepSeek Harness (DSH). HERV3 keeps a
+single durable Engine Session while the selected model reasons, uses tools,
+adapts, and verifies in a continuous loop.
 
 [Get started](docs/INSTALL.md) · [User guide](docs/USER_GUIDE.md) ·
 [Integrations](docs/INTEGRATIONS.md) ·
+[Recent changes](CHANGELOG.md#unreleased) · [Retired features](docs/MIGRATION_AND_RETIREMENTS.md) ·
 [Documentation](https://github.com/Bazza1982/HASHI/blob/main/docs/README.md) ·
 [Changelog](https://github.com/Bazza1982/HASHI/blob/main/CHANGELOG.md)
 
@@ -37,7 +38,7 @@ continuous loop.
 |---|---|
 | Research and writing | Project Workzones, memory, skills, file and browser tools |
 | Coding and local automation | CLI engines or HERV3, scoped tools, background jobs, logs |
-| Repeatable multi-step work | Nagare workflows, scheduled jobs, review and recovery records |
+| Repeatable multi-step work | [HAL event automation](docs/HAL_RUNTIME_v0.1.md), Nagare workflows, scheduled jobs |
 | Long-running coordination | Superloop taskboards, explicit waits, HChat across trusted instances |
 | Client integrations | Authenticated Backend APIs and an optional model API Gateway |
 
@@ -68,7 +69,7 @@ before downloading.
 | Area | Current boundary |
 |---|---|
 | Personal/local use | Primary development path; v6 Alpha candidate for controlled testing |
-| HERV3 | Native Python engine with one model/tool loop, optional Strategy Cards, Habits, and an experimental JEV companion |
+| HERV3 | Native Python engine with one model/tool loop, durable sessions, optional Strategy Cards and Habits. Configured providers include [Hashi Local Inference](docs/HLI_PROVIDER.md) via Hashi Compute. |
 | Team/enterprise governance | Alpha profiles, policy, approvals, audit, and deployment artifacts; production deployment validation remains pending |
 | Frontends | Built-in TUI, Telegram, WhatsApp, and client APIs; the independently maintained Workbench v2 is an external client, not bundled with HASHI |
 | Platform evidence | Windows-native and WSL/Linux deployment templates are included; macOS releases still need platform acceptance |
@@ -76,10 +77,11 @@ before downloading.
 | Portable Windows | A verified USB installation bundle can carry HASHI to a new Windows PC and install it locally with its private runtime |
 | Device/browser control | Requires the relevant worker, browser, permissions, and per-platform validation |
 
-Detailed candidate scope is in the
-[release notes](https://github.com/Bazza1982/HASHI/blob/main/docs/RELEASE_NOTES_v6.0.0-alpha.1.md).
-Historical milestones are recorded in
-[CHANGELOG.md](https://github.com/Bazza1982/HASHI/blob/main/CHANGELOG.md).
+See the [v6 startup and recovery notes](docs/RELEASE_NOTES_v6.0.0-alpha.1.md)
+and [changes on main](CHANGELOG.md#unreleased). The
+[migration and retirements guide](docs/MIGRATION_AND_RETIREMENTS.md) explains
+which old commands and routes were removed and what existing installations
+should check before switching.
 
 ## Installation
 
@@ -123,6 +125,8 @@ instance.
   opt-ins, permissions, and local extensions.
 - [Integrations](docs/INTEGRATIONS.md): engines, messaging, APIs, browser/device
   tools, and Remote.
+- [HAL automation](docs/HAL_RUNTIME_v0.1.md): author a Canvas rule in Workbench,
+  send prompts to trusted peers, or trigger from supported Whiteboard stage transitions.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): installation, connection, logs,
   and recovery.
 
@@ -174,9 +178,9 @@ operational direction.
 
 [OpenClaw](https://github.com/openclaw/openclaw), Peter Steinberger, and its
 contributors provided important early inspiration. HASHI now has its own
-orchestration and native HERV3 runtime; the earlier Claw-derived HER v1 and
-staged HERV2 runtime are
-retired. Historical bridge-u-f names remain in compatibility entry points.
+orchestration and native HERV3 runtime; the earlier Claw-derived HER v1 and staged HERV2 workflow are retired.
+Legacy identifiers can still appear in existing data or compatibility entry
+points. See [migration and retirements](docs/MIGRATION_AND_RETIREMENTS.md).
 
 ## Contributing and Support
 

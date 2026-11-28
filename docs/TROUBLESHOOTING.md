@@ -115,6 +115,11 @@ unacceptable, do not process sensitive content with an online model.
 
 Check the configured agent's telegram_token_key and corresponding private
 secret, the authorized numeric user ID, and whether the agent is enabled.
+Inspect `/telegram global` for instance mirror or safety-silence state.
+[Telegram controls](TELEGRAM_NOTIFICATION_MODES.md) explains which settings
+leave direct conversation available and how to restore it. To remove an invalid
+per-Agent Bot Token, use the disconnect action; credential removal does not
+require the token to validate.
 Each polling Bot Token should be used by only one running poller.
 Telegram is optional; a skipped Telegram connection does not prevent local
 TUI use once an engine is connected.
@@ -146,8 +151,29 @@ capability required for the operation. Discovery-only is not a completed
 trusted connection. An available Remote peer does not imply that its Backend
 API, agents, or browser workers are ready.
 
+Use [`/remote token verify`](HASHI_REMOTE_SHARED_TOKEN.md) on the intended
+instance. In Workbench, Remote Diagnostics can check a saved failed or offline
+target independently of the selected Chat backend. Separate a network or
+gateway failure from an authentication rejection.
+
 See [Remote setup](INSTALL.md#hashi-remote) and
 [TUI switching](https://github.com/Bazza1982/HASHI/blob/main/docs/TUI_INSTANCE_SWITCHING.md).
+
+## Exchange WebSocket upgrade returns HTTP 502
+
+Check the Exchange connector log and its configured origin at the failure
+time. If the connector reports a refused connection, confirm the Exchange
+service is running and listening on the configured host and port, then check
+the origin health endpoint. A working tunnel does not establish that its
+origin is healthy. Exchange has its own service and deployment lifecycle.
+See [Exchange integration](HASHI_EXCHANGE_INTEGRATION.md).
+
+## The Gateway reports a retired default model
+
+After an update, a saved default may refer to the removed `xai-api` backend.
+Open `/api` to see the saved default and choose an available one. An API client
+can also specify a model currently listed by `GET /v1/models`. See
+[migration and retirements](MIGRATION_AND_RETIREMENTS.md) for affected routes.
 
 ## Logs and bug reports
 

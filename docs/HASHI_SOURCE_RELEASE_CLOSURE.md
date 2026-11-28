@@ -53,10 +53,12 @@ independently supervised Remote to report the target commit.
    the separate `stage` verb. An older coordinator without that verb fails
    safely; it cannot fall back to restarting deployment.
 4. Verify the installer-owned Core/Functions runtime pair and its file seals,
-   then qualify the complete committed Function source/assets, configured
+   then qualify the complete committed Function source/assets, bundled
    observers and dependency/import contract in an isolated process. Missing
    or incompatible runtimes produce a useful error; no packages are installed
-   in an existing interpreter.
+   in an existing interpreter. Per-Agent observer declarations do not seed the
+   release manifest. A retired or unavailable observer produces a local warning;
+   its legacy config is kept for inspection and rollback.
 5. Materialize an immutable candidate under a new
    `state/source_deployments/<invocation>` directory. Recheck the exact clean
    target after qualification and publish a private atomic `ready.json`

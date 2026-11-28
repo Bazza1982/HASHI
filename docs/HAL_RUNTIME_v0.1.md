@@ -1,8 +1,28 @@
 # HAL v0.1 Runtime — HASHI Implementation Notes
 
-**Status:** staged implementation, NOT production-ready. Language grammar is
-author-owned (see `HAL_SPEC_v0.1.md`); this document only describes how the
-authorised vocabulary executes.
+This guide describes HAL on HASHI main. Workbench Canvas is the editor and
+observer. The HASHI instance that owns a saved, enabled rule runs it and
+stores its receipts. Source availability does not establish adoption on an
+installed instance. For the original language design see [HAL v0.1](HAL_SPEC_v0.1.md).
+
+## Start with a Canvas rule
+
+1. In Workbench Canvas add a **HAL** workflow block and open its Inspector.
+2. Choose the verified HASHI connection that will own the rule. Write a rule,
+   then **Validate** it and review the available events.
+3. **Save** the rule to that instance and **Enable** it explicitly. Review
+   recent executions and per-step receipts in the same Inspector. Canvas edits
+   can be saved locally before the HASHI runtime is reachable.
+4. Use **Disable** to stop new triggers for that rule. A peer remains a
+   destination for individual prompts. It does not become the rule owner.
+
+This example uses local Agent names; replace both with Agents in the owning
+instance. Use a peer-qualified destination only when its Remote route and
+credentials have been verified.
+
+```text
+if @builder #turn_finish then @reviewer $prompt "Review the completed change.".
+```
 
 ## Architecture
 
@@ -10,15 +30,16 @@ HAL is an optional Layer-2 Function with zero effect when unused:
 
 - **`hal/language.py`** — author-owned deterministic compiler (unchanged by the
   runtime work; already shipped on this branch).
-- **`hal/event_source.py`** — maps the author vocabulary onto the ONE existing
-  durable event source (`orchestrator/automation_events.py`). No second event
-  system exists.
+- **`hal/event_source.py`** maps Run events from the existing durable event
+  feed and Whiteboard transitions from the configured board feed. Each source
+  keeps its own cursor.
 - **`hal/runtime.py`** — pure planning engine: entry matching, per-execution
   `@agent_trigger` binding, `.`/`;` semantics, correlation, honest failure
   planning. No I/O.
-- **`hal/store.py`** — private SQLite file at `bridge_home/hal/hal_v1.sqlite`,
-  deliberately outside the Session database. Rules, workflow executions,
-  dispatch receipts, consumed-event ledger, per-owner feed cursor.
+- **`hal/store.py`** stores rules, receipts and consumed-event cursors under
+  `<bridge_home>/state/hal/hal_v1.sqlite`. On upgrade, a legacy store at
+  `<bridge_home>/hal/hal_v1.sqlite` is copied to the state directory when the
+  new store is absent. A failed migration keeps the legacy store in use.
 - **`hal/dispatch.py`** — execution adapters. Prompts ride the existing
   `runtime.enqueue_api_text` admission with a `hal:<exec>:<stage>` idempotency
   key; native commands ride `try_execute_slash_command_text`. HAL never
@@ -46,12 +67,40 @@ same per-stage unavailable path, so local rules keep running. Run detail
 identifies the instance of every prompt receipt. Cross-instance native
 commands and remote entry subscriptions remain outside this capability.
 
-## Event availability (truthful, never faked)
+## Whiteboard stage transitions
+
+Set `HASHI_HAL_WHITEBOARD_URL` on the rule-owning instance. The default is
+`http://127.0.0.1:4417`. An empty value disables the source. For a board in
+key mode, set `HASHI_HAL_WHITEBOARD_TOKEN` privately. The board must expose the
+stage-transition feed and its stage table.
+
+```text
+if #whiteboard_stage where [project="Hashi", to_stage="in_review"] then @{reviewer} $prompt "Review {pr_url} at {head_sha} for {work_key}".
+```
+
+- Use the exact project and stage keys configured on your board. The optional
+  `where` clause accepts `project`, `from_stage`, `to_stage` and `category`.
+  Values are exact matches. A missing field fails the match.
+- `@{implementer}`, `@{reviewer}` and `@{tester}` use the role assigned to that
+  card. A role can name a local Agent or a trusted peer. Missing assignments
+  are reported on the affected step.
+- Prompt variables include `{card_id}`, `{work_key}`, `{revision}`, `{round}`,
+  `{max_rounds}`, `{pr_url}`, `{head_sha}`, `{last_verdict}`, `{test_env}` and
+  `{next_step}`. The card context is saved with the execution.
+- Enabling reads the board's current position before accepting the rule. It
+  does not replay existing card history. An unavailable board blocks a new
+  Whiteboard rule from being enabled, and an existing rule can still be disabled.
+- Fused or halted cards and over-budget rework settle affected executions.
+  The operator can inspect the run or notice and the corresponding board
+  comment when comment delivery succeeds.
+
+## Event availability
 
 | HAL event | Source | Status |
 |---|---|---|
 | `#turn_finish` | real feed `run.completed` | available |
 | `#turn_error` | real feed `run.failed` | available |
+| `#whiteboard_stage` | configured Whiteboard transition feed | available when the board supports the source |
 | `#system_idle` | no reliable active-to-idle event source | **unavailable** |
 | `#turn_commentary` | no commentary events in the durable feed | **unavailable** |
 | `#hashideploy_finish` | no deployment-completion event source | **unavailable** |
@@ -111,19 +160,16 @@ detail (`waiting for #reboot_ok (no reboot-completion event source exists)`).
 | POST | `/api/v1/hal/rules/{id}/disable` | disable |
 | GET | `/api/v1/hal/runs` | workflow executions |
 | GET | `/api/v1/hal/runs/{exec_id}` | execution detail with receipts |
+| GET | `/api/v1/hal/notices` | owner-scoped Whiteboard notices |
 | POST | `/api/v1/hal/peer` | authenticated peer prompt admission or keyed terminal Run evidence |
 
 All endpoints reuse the existing admin authentication (`_v1_owner_id` +
 `_check_admin_auth`), the same trust boundary as the HEA event feed. Request
 bodies are bounded (64 KiB scripts, 413 before unbounded reads).
 
-## Boundaries honoured
+## Runtime boundaries
 
-- Protected Core untouched (verified by
-  `scripts/check_protected_core_changes.py --base origin/main`).
-- No new process, supervisor, scheduler, permission layer, polling worker or
-  timeout was introduced.
-- The only change outside `hal/` and its tests is additive: the existing event
-  feed now also reports `run_idempotency_key` and marks `hal:`-prefixed runs
-  as automation-origin, and `WorkbenchApiServer` registers HAL routes plus one
-  guarded startup hook. HAL import failures leave the gateway fully functional.
+HAL runs in the existing HASHI Functions service. With no enabled rules it
+does not poll. It uses the configured routes and existing authenticated
+admission paths. Workbench authors and observes rules; the runtime owns
+event consumption, dispatch, and durable outcomes.

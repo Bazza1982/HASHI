@@ -1,4 +1,8 @@
-# HASHI Hermes Agent Transfer User Guide
+# HASHI Hermes Agent Transfer User Guide (historical)
+
+> The Hermes profile transfer tool was retired in [#249](https://github.com/Bazza1982/HASHI/pull/249).
+> The commands below apply only to older builds that shipped it. For current
+> alternatives and existing packages see [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
 ## Scope
 

@@ -9,7 +9,10 @@ The current development source is the **v6.0.0-alpha.1** startup recovery and
 Core simplification candidate, encoded as **6.0.0a1** in Python metadata. See
 [the v6 recovery notes](RELEASE_NOTES_v6.0.0-alpha.1.md) for why the Core major
 changed, the focused migration and remaining risks. It is not a stable production
-release. Merging the candidate to `main` publishes source only.
+release. Merging the candidate to `main` makes the source available. See the
+[Unreleased changelog](../CHANGELOG.md#unreleased) for changes added since the
+initial recovery notes and [migration and retirements](MIGRATION_AND_RETIREMENTS.md)
+for the effects of upgrading from an older build.
 
 Publication snapshot checked on **2026-11-15**:
 
@@ -31,8 +34,7 @@ npm view hashi-bridge versions --json
 ~~~
 
 The published **v4 Beta** installation package remains available below. It
-contains v4, not the v5 source candidate. No v5 GitHub Release or npm version
-was present in the publication snapshot:
+contains v4. The v5 and v6 source candidates are separate from that package:
 
 ~~~bash
 npm install --global https://github.com/Bazza1982/HASHI/releases/download/v4.0.0-beta.1/hashi-bridge-4.0.0-beta.1.tgz
@@ -50,7 +52,7 @@ notes. Their tags and original historical notes remain intact. Use the
 [Releases list](https://github.com/Bazza1982/HASHI/releases), rather than
 assuming releases/latest contains current development.
 
-Neither the published v4 Beta nor the v5 source candidate is declared stable
+Neither the published v4 Beta nor the v6 source candidate is declared stable
 to obtain a Latest badge. A release must identify its exact reviewed source
 commit and actual maturity.
 
@@ -81,7 +83,7 @@ not retroactively describe every older installer. See
 | Distribution | What it provides |
 |---|---|
 | Git checkout / GitHub source archive | Source; requires the approved Python environment and dependencies |
-| npm hashi-bridge | Program and command entry points; prepares a versioned Python environment using an available approved interpreter |
+| npm hashi-bridge | Allowlisted program, assets, and command entry points; excludes the development `tests/` tree and prepares a versioned Python environment using an available approved interpreter |
 | Python source distribution / wheel | Extracted Nagare/Flow packages; not the complete HASHI application |
 | Portable installer/image | A verified platform-specific program/runtime/dependency bundle with its own capability profile |
 

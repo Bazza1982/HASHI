@@ -1,7 +1,9 @@
 # HASHI v6.0.0-alpha.1 startup recovery candidate
 
 Prepared 2026-11-15. Python metadata: `6.0.0a1`. This is an unpublished,
-non-production candidate.
+non-production candidate. The record below describes the initial recovery work.
+See [Unreleased changes](../CHANGELOG.md#unreleased) and
+[migration and retirements](MIGRATION_AND_RETIREMENTS.md) for later changes on main.
 
 ## Why the Core major changes
 
