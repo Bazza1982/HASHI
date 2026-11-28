@@ -278,9 +278,15 @@ def test_think_card_does_not_promise_an_unavailable_stream() -> None:
         text = FlexibleAgentRuntime._think_menu_text(host)
     assert "未提供" in text
     assert "这个开关对它无效" in text
-    assert "会显示模型的思考过程" not in text
+    # The consequence actually rendered is the unavailable explanation, so the
+    # card selects that branch instead of the enabled promise.
+    assert (
+        ui_language.tr("menu.think.unavailable_effect", locale="zh-CN") in text
+    )
     with ui_language.language_scope(host, locale="en"):
         text = FlexibleAgentRuntime._think_menu_text(host)
     assert "this switch has no effect" in text
-    assert "Shows the model's thinking output" not in text
+    assert (
+        ui_language.tr("menu.think.unavailable_effect", locale="en") in text
+    )
 # HASHI-Fingerprint: hfp_1d39258c447a4ea2b89bce6ffbca20b7
