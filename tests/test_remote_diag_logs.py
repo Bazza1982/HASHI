@@ -13,11 +13,13 @@ from fastapi.testclient import TestClient
 
 from remote.api.diag_logs import (
     DEFAULT_TTL_SECONDS,
+    LOG_ROOT_REMOTE,
     MAX_TTL_SECONDS,
     MIN_TTL_SECONDS,
     DiagLogError,
     DiagLogRevoked,
     DiagLogsGate,
+    LogFileSet,
     build_diag_log_roots,
     classify_client_host,
     compute_start_offset,
@@ -477,16 +479,22 @@ def test_effective_logs_dir_survives_missing_or_broken_config(tmp_path: Path) ->
     assert resolve_effective_logs_dir(tmp_path) == (tmp_path / "logs").resolve()
 
 
-def test_diag_log_roots_add_the_remote_dir_only_when_it_lives_elsewhere(tmp_path: Path) -> None:
+def test_diag_log_roots_add_the_remote_file_only_when_it_lives_elsewhere(tmp_path: Path) -> None:
     moved = tmp_path / "moved-logs"
     write_agents_json(tmp_path, str(moved))
 
     assert list(build_diag_log_roots(tmp_path)) == ["instance"]
-    assert list(build_diag_log_roots(tmp_path, remote_log_dir=str(moved))) == ["instance"]
+    # Inside the instance log tree: the instance root already lists it.
+    assert list(build_diag_log_roots(tmp_path, remote_log_file=moved / "remote.log")) == ["instance"]
 
     separate = tmp_path / "remote-logs"
-    roots = build_diag_log_roots(tmp_path, remote_log_dir=str(separate))
-    assert roots == {"instance": moved.resolve(), "remote": separate.resolve()}
+    separate.mkdir()
+    roots = build_diag_log_roots(tmp_path, remote_log_file=separate / "hashi-remote.log")
+    assert roots["instance"] == moved.resolve()
+    remote = roots[LOG_ROOT_REMOTE]
+    assert isinstance(remote, LogFileSet)
+    assert remote.directory == separate.resolve()
+    assert remote.names == ("hashi-remote.log",)
 
 
 def test_gate_serves_the_effective_logs_dir_and_the_remote_dir(tmp_path: Path) -> None:
@@ -571,5 +579,99 @@ def test_download_route_binds_the_live_gate_to_the_stream() -> None:
     """
 
     source = Path("remote/api/diag_logs.py").read_text(encoding="utf-8")
-    assert "keep_alive=gate.is_open" in source
+    assert "keep_alive=lambda: gate.token_is_alive(window)" in source
+    assert "keep_alive=gate.is_open" not in source
+
+
+def test_download_started_before_a_reopen_is_still_revoked(tmp_path: Path) -> None:
+    """Closing and re-opening must not resurrect a download from the old window.
+
+    Regression: the stream only asked "is the switch open?", so a close followed
+    a second later by an open put the flag back to True and the transfer carried
+    on as if nothing had happened.
+    """
+
+    gate = DiagLogsGate(log_roots={"instance": tmp_path})
+    payload = tmp_path / "big.log"
+    payload.write_bytes(b"x" * (256 * 1024))
+    gate.open()
+
+    window = gate.active_token()
+    chunks = iter_log_bytes(
+        payload,
+        chunk_size=4096,
+        keep_alive=lambda: gate.token_is_alive(window),
+    )
+    assert len(next(chunks)) == 4096
+
+    gate.close()
+    gate.open()  # a fresh window: same flag, different authority
+    assert gate.is_open() is True
+    with pytest.raises(DiagLogRevoked):
+        next(chunks)
+
+
+def test_log_root_never_widens_to_the_instance_root(tmp_path: Path) -> None:
+    """A blank or dot-ish ``base_logs_dir`` must not publish the instance itself.
+
+    Regression: ``""`` resolved to the config directory, so the gate listed and
+    served ``agents.json`` and ``secrets.json`` while the Core kept writing to
+    ``<instance>/logs``.
+    """
+
+    (tmp_path / "agents.json").write_text('{"global": {}}', encoding="utf-8")
+    (tmp_path / "secrets.json").write_text('{"token": "leak-me"}', encoding="utf-8")
+    expected = (tmp_path / "logs").resolve()
+
+    for value in ("", "   ", None, ".", "..", str(tmp_path), "@home/."):
+        write_agents_json(tmp_path, value)
+        assert resolve_effective_logs_dir(tmp_path) == expected, value
+
+
+def test_proxied_request_cannot_flip_the_switch(tmp_path: Path) -> None:
+    """A relayed request looks loopback, so it must not inherit local rights."""
+
+    gate = new_gate(tmp_path)
+    client = build_client(tmp_path, gate, LOOPBACK)
+    response = client.post(
+        "/diag/gate",
+        json={"enabled": True},
+        headers={"x-forwarded-for": "192.168.0.9"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"] == "proxy_not_allowed"
+    assert gate.is_open() is False
+
+
+def test_remote_log_file_is_served_without_its_directory(tmp_path: Path) -> None:
+    """Only the Remote log and its rotated copies are exposed, not the folder."""
+
+    shared = tmp_path / "operator-files"
+    shared.mkdir()
+    (shared / "remote.log").write_bytes(b"remote line\n")
+    (shared / "remote.log.1").write_bytes(b"older\n")
+    (shared / "remote.log.2026-11-28.gz").write_bytes(b"gz")
+    (shared / "secrets.json").write_text('{"token": "leak-me"}', encoding="utf-8")
+    (shared / "notes.txt").write_text("private", encoding="utf-8")
+
+    roots = build_diag_log_roots(tmp_path, remote_log_file=shared / "remote.log")
+    remote = roots[LOG_ROOT_REMOTE]
+    assert isinstance(remote, LogFileSet)
+
+    gate = DiagLogsGate(log_roots=roots, instance_id="HASHI8")
+    client = build_client(tmp_path, gate, LOOPBACK)
+    assert client.post("/diag/gate", json={"enabled": True}).status_code == 200
+
+    listing = client.get("/diag/logs").json()
+    served = {(entry["root"], entry["path"]) for entry in listing["files"]}
+    assert ("remote", "remote.log") in served
+    assert ("remote", "remote.log.1") in served
+    assert ("remote", "remote.log.2026-11-28.gz") in served
+    assert ("remote", "secrets.json") not in served
+    assert ("remote", "notes.txt") not in served
+
+    assert client.get("/diag/logs/remote/remote.log").content == b"remote line\n"
+    assert client.get("/diag/logs/remote/remote.log.1").content == b"older\n"
+    assert client.get("/diag/logs/remote/secrets.json").status_code == 404
+    assert client.get("/diag/logs/remote/notes.txt").status_code == 404
 # HASHI-Fingerprint: hfp_4174ac376c904b8285ee559e4dfb6a6b

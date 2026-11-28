@@ -3757,7 +3757,7 @@ def create_app(
     control_hashi_root: str = None,
     control_code_root: str = None,
     diag_logs_gate: Optional[DiagLogsGate] = None,
-    diag_remote_log_dir: str = None,
+    diag_remote_log_file: str = None,
 ) -> FastAPI:
     """Create the FastAPI application with all context injected."""
 
@@ -6543,7 +6543,9 @@ def create_app(
         or DiagLogsGate(
             log_roots=build_diag_log_roots(
                 Path(hashi_root) if hashi_root else None,
-                remote_log_dir=Path(diag_remote_log_dir) if diag_remote_log_dir else None,
+                remote_log_file=(
+                    Path(diag_remote_log_file) if diag_remote_log_file else None
+                ),
             ),
             instance_id=str(instance_info.get("instance_id") or ""),
         ),

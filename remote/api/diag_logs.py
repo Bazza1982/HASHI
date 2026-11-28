@@ -34,8 +34,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Optional
 
@@ -82,11 +84,45 @@ LOG_ROOT_REMOTE = "remote"
 #: Prefix ``orchestrator.pathing`` accepts for "relative to the bridge home".
 HOME_PREFIX = "@home/"
 
+#: A rotated copy of a log file: ``name.1``, ``name.2026-11-28``,
+#: ``name.2026-11-28.1.gz`` and friends.  Anything else next to the log (a
+#: ``config.json``, a lock file, an unrelated log) is never exposed.
+_ROTATION_SUFFIX = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d+)(?:\.\d+)?(?:\.gz)?$")
 
-def _expand_config_path(value: str, *, config_dir: Path, bridge_home: Path) -> Path:
-    """Resolve a configured path the same way ``orchestrator.config`` does."""
 
-    raw = os.path.expanduser(os.path.expandvars(str(value).strip()))
+@dataclass(frozen=True)
+class LogFileSet:
+    """A root that exposes named log files plus their rotated copies only.
+
+    Used for the Remote's own ``--log-file``: handing its *directory* over
+    exposed every unrelated file the operator happened to keep next to it.
+    """
+
+    directory: Path
+    names: tuple[str, ...]
+
+    def allows(self, name: str) -> bool:
+        for base in self.names:
+            if name == base:
+                return True
+            prefix = base + "."
+            if name.startswith(prefix) and _ROTATION_SUFFIX.match(name[len(prefix):]):
+                return True
+        return False
+
+
+def _expand_config_path(value: object, *, config_dir: Path, bridge_home: Path) -> Optional[Path]:
+    """Resolve a configured path the same way ``orchestrator.pathing`` does.
+
+    Returns ``None`` for a blank value, matching ``resolve_path_value``; the
+    caller then applies ``orchestrator.config``'s own ``base_logs_dir``
+    fallback.  (A blank value used to resolve to ``config_dir`` — the instance
+    root — and that widened the read path to ``agents.json``/``secrets.json``.)
+    """
+
+    raw = os.path.expanduser(os.path.expandvars(str(value if value is not None else "").strip()))
+    if not raw.strip():
+        return None
     normalized = raw.replace("\\", "/")
     if normalized.startswith(HOME_PREFIX):
         return (bridge_home / Path(normalized[len(HOME_PREFIX):])).resolve()
@@ -96,18 +132,52 @@ def _expand_config_path(value: str, *, config_dir: Path, bridge_home: Path) -> P
     return (config_dir / candidate).resolve()
 
 
+def _reuse_official_resolution(
+    value: object,
+    *,
+    config_dir: Path,
+    bridge_home: Path,
+) -> Optional[Path]:
+    """Resolve through the Core's own resolver so both sides cannot drift."""
+
+    try:
+        from orchestrator.pathing import resolve_path_value
+    except Exception:  # pragma: no cover - standalone import of this module
+        return _expand_config_path(value, config_dir=config_dir, bridge_home=bridge_home)
+    try:
+        return resolve_path_value(value, config_dir=config_dir, bridge_home=bridge_home)
+    except (OSError, ValueError):
+        return _expand_config_path(value, config_dir=config_dir, bridge_home=bridge_home)
+
+
+def _is_unsafe_root(resolved: Path, instance_root: Path) -> bool:
+    """Reject a log root that would expose the instance itself or its parents."""
+
+    if resolved == instance_root:
+        return True
+    # A parent of the instance root (``C:\``, ``C:\Users\thene``, a bare ``..``)
+    # would publish agents.json, secrets.json and every sibling project.
+    try:
+        instance_root.relative_to(resolved)
+    except ValueError:
+        return False
+    return True
+
+
 def resolve_effective_logs_dir(hashi_root: Optional[Path]) -> Optional[Path]:
     """Return the instance's effective log directory.
 
     Instances may point ``global.base_logs_dir`` at any directory; the Remote
     must serve the same directory the Core writes to, otherwise Bridge, HER
     audit and agent session logs stay invisible over the LAN even though the
-    switch is open.
+    switch is open.  The value is resolved with the Core's own resolver and the
+    same ``or ("<home>/logs")`` fallback ``orchestrator.config`` applies, so a
+    missing, blank or unusable value can never widen the read path.
     """
 
     if not hashi_root:
         return None
-    root = Path(hashi_root)
+    root = Path(hashi_root).resolve()
     configured: object = "logs"
     try:
         raw = json.loads((root / "agents.json").read_text(encoding="utf-8-sig"))
@@ -117,47 +187,77 @@ def resolve_effective_logs_dir(hashi_root: Optional[Path]) -> Optional[Path]:
         global_section = raw.get("global")
         if isinstance(global_section, dict) and "base_logs_dir" in global_section:
             configured = global_section.get("base_logs_dir")
+    default_dir = (root / "logs").resolve()
     try:
-        return _expand_config_path(configured, config_dir=root, bridge_home=root)
+        resolved = _reuse_official_resolution(
+            configured, config_dir=root, bridge_home=root
+        )
     except (OSError, ValueError):
-        return (root / "logs").resolve()
+        return default_dir
+    if resolved is None:
+        return default_dir
+    if _is_unsafe_root(resolved, root):
+        return default_dir
+    return resolved
 
 
 def build_diag_log_roots(
     hashi_root: Optional[Path],
     *,
-    remote_log_dir: Optional[Path] = None,
-) -> dict[str, Path]:
+    remote_log_file: Optional[Path] = None,
+) -> dict[str, Path | LogFileSet]:
     """Build the labelled roots the diagnostics gate may serve.
 
-    The instance root always follows the instance's own configuration, and the
-    Remote's log directory is added only when it lives outside that tree, so the
-    same directory is never listed twice.
+    The instance root follows the instance's own configuration.  The Remote's
+    own log is added as a *file set* — that file and its rotated copies — so a
+    ``--log-file`` pointing into a shared directory no longer publishes the
+    whole directory.  It is skipped when it already sits under the instance
+    log tree, which keeps the same file from being listed twice.
     """
 
-    roots: dict[str, Path] = {}
+    roots: dict[str, Path | LogFileSet] = {}
     instance_root = resolve_effective_logs_dir(hashi_root)
     if instance_root is not None:
         roots[LOG_ROOT_INSTANCE] = instance_root
-    if remote_log_dir:
-        remote_root = Path(remote_log_dir).expanduser().resolve()
-        if all(remote_root != existing for existing in roots.values()):
-            roots[LOG_ROOT_REMOTE] = remote_root
+    if remote_log_file:
+        try:
+            remote_path = Path(remote_log_file).expanduser().resolve()
+        except OSError:
+            return roots
+        parent = remote_path.parent
+        if instance_root is not None:
+            try:
+                parent.relative_to(instance_root)
+            except ValueError:
+                pass
+            else:
+                return roots
+        roots[LOG_ROOT_REMOTE] = LogFileSet(directory=parent, names=(remote_path.name,))
     return roots
 
 
 def _normalise_log_roots(
     log_root: Optional[Path],
-    log_roots: Optional[Mapping[str, Optional[Path]]],
-) -> dict[str, Path]:
-    roots: dict[str, Path] = {}
+    log_roots: Optional[Mapping[str, Optional[Path | LogFileSet]]],
+) -> dict[str, Path | LogFileSet]:
+    roots: dict[str, Path | LogFileSet] = {}
     if log_roots:
         for label, path in log_roots.items():
-            if path:
+            if isinstance(path, LogFileSet):
+                roots[str(label)] = path
+            elif path:
                 roots[str(label)] = Path(path)
     if not roots and log_root:
         roots[LOG_ROOT_INSTANCE] = Path(log_root)
     return roots
+
+
+def _root_directory(root: Path | LogFileSet) -> Path:
+    return root.directory if isinstance(root, LogFileSet) else Path(root)
+
+
+def _root_text(root: Path | LogFileSet) -> str:
+    return str(_root_directory(root))
 
 
 class DiagLogError(Exception):
@@ -251,6 +351,10 @@ class DiagLogsGate:
         self._expires_at: Optional[float] = None
         self._ttl_seconds: Optional[int] = None
         self._last_close_reason: Optional[str] = None
+        # Bumped on every open and every close.  A stream remembers the value
+        # it started under, so closing and re-opening the switch cannot resume
+        # a download that belonged to the previous window.
+        self._generation = 0
 
     # -- state ---------------------------------------------------------
 
@@ -261,8 +365,8 @@ class DiagLogsGate:
         return self._log_root
 
     @property
-    def log_roots(self) -> dict[str, Path]:
-        """Every directory this gate may serve, in listing order."""
+    def log_roots(self) -> dict[str, Path | LogFileSet]:
+        """Every root this gate may serve, in listing order."""
 
         return dict(self._log_roots)
 
@@ -275,6 +379,7 @@ class DiagLogsGate:
             self._opened_at = None
             self._expires_at = None
             self._ttl_seconds = None
+            self._generation += 1
 
     def _status_locked(self) -> dict:
         now = self._now()
@@ -287,8 +392,8 @@ class DiagLogsGate:
             "log_root": str(self._log_root) if self._log_root else None,
             "log_root_exists": bool(self._log_root and self._log_root.is_dir()),
             "log_roots": {
-                label: str(path)
-                for label, path in self._log_roots.items()
+                label: _root_text(root)
+                for label, root in self._log_roots.items()
             },
             "opened_at": self._opened_at,
             "expires_at": self._expires_at,
@@ -318,6 +423,7 @@ class DiagLogsGate:
             self._expires_at = now + ttl
             self._ttl_seconds = ttl
             self._last_close_reason = None
+            self._generation += 1
             return self._status_locked()
 
     def close(self, *, reason: str = "manual") -> dict:
@@ -327,9 +433,31 @@ class DiagLogsGate:
             self._opened_at = None
             self._expires_at = None
             self._ttl_seconds = None
+            self._generation += 1
             if was_open or self._last_close_reason is None:
                 self._last_close_reason = reason
             return self._status_locked()
+
+    # -- downloads -----------------------------------------------------
+
+    def active_token(self) -> int:
+        """Token identifying the window a download is starting under."""
+
+        with self._lock:
+            self._expire_locked()
+            return self._generation if self._enabled else 0
+
+    def token_is_alive(self, token: int) -> bool:
+        """True only while the same uninterrupted window is still open.
+
+        Checking ``is_open()`` alone let a download survive a close/re-open
+        cycle: the switch was open again, so the stream kept going.  A stream
+        now dies with the window it was born in.
+        """
+
+        with self._lock:
+            self._expire_locked()
+            return bool(token) and self._enabled and self._generation == token
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +522,45 @@ def resolve_log_file(log_root: Optional[Path], relative: str) -> Path:
     return resolved
 
 
+def list_file_set(root: LogFileSet, *, max_files: int = MAX_LISTED_FILES) -> dict:
+    """List the log files of a file-set root (the log and its rotations)."""
+
+    directory = Path(root.directory)
+    try:
+        resolved_dir = directory.resolve()
+    except OSError:
+        raise DiagLogError("log_root_unavailable", status_code=503) from None
+    if not resolved_dir.is_dir():
+        raise DiagLogError("log_root_unavailable", status_code=503)
+
+    files: list[dict] = []
+    total_bytes = 0
+    truncated = False
+    for entry in sorted(resolved_dir.iterdir(), key=lambda item: item.name):
+        if len(files) >= max_files:
+            truncated = True
+            break
+        try:
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if not root.allows(name):
+                continue
+            stat = entry.stat()
+        except OSError:
+            continue
+        files.append({"path": entry.name, "size": stat.st_size, "mtime": stat.st_mtime})
+        total_bytes += stat.st_size
+    return {
+        "log_root": str(resolved_dir),
+        "file_count": len(files),
+        "total_bytes": total_bytes,
+        "truncated": truncated,
+        "max_files": max_files,
+        "files": files,
+    }
+
+
 def list_log_files(log_root: Optional[Path], *, max_files: int = MAX_LISTED_FILES) -> dict:
     """List every regular file under the log root with size and mtime."""
 
@@ -442,7 +609,7 @@ def list_log_files(log_root: Optional[Path], *, max_files: int = MAX_LISTED_FILE
 
 
 def list_all_log_files(
-    log_roots: Mapping[str, Path],
+    log_roots: Mapping[str, Path | LogFileSet],
     *,
     max_files: int = MAX_LISTED_FILES,
 ) -> dict:
@@ -458,7 +625,11 @@ def list_all_log_files(
             truncated = True
             break
         try:
-            listing = list_log_files(root, max_files=remaining)
+            listing = (
+                list_file_set(root, max_files=remaining)
+                if isinstance(root, LogFileSet)
+                else list_log_files(root, max_files=remaining)
+            )
         except DiagLogError:
             continue
         served[label] = listing["log_root"]
@@ -477,8 +648,26 @@ def list_all_log_files(
     }
 
 
+def resolve_within_root(root: Path | LogFileSet, relative: str) -> Path:
+    """Resolve ``relative`` inside one served root, honouring file-set limits."""
+
+    directory = _root_directory(root)
+    resolved = resolve_log_file(directory, relative)
+    if isinstance(root, LogFileSet):
+        # Only the log file itself and its rotated siblings exist here; a
+        # subdirectory that happens to contain a same-named file is not part of
+        # the set and must not be reachable.
+        try:
+            on_top_level = resolved.parent == directory.resolve()
+        except OSError:
+            on_top_level = False
+        if not on_top_level or not root.allows(resolved.name):
+            raise DiagLogError("not_found", status_code=404)
+    return resolved
+
+
 def resolve_requested_log(
-    log_roots: Mapping[str, Path],
+    log_roots: Mapping[str, Path | LogFileSet],
     requested: str,
 ) -> tuple[str, str, Path]:
     """Resolve ``[<root>/]<relative path>`` to ``(label, relative, absolute)``.
@@ -498,7 +687,7 @@ def resolve_requested_log(
     if label not in log_roots:
         raise DiagLogError("log_root_unavailable", status_code=503)
     inner = "/".join(segments[1:]) if labelled else relative
-    return label, inner, resolve_log_file(log_roots[label], inner)
+    return label, inner, resolve_within_root(log_roots[label], inner)
 
 
 # ---------------------------------------------------------------------------
@@ -627,9 +816,21 @@ class DiagGateRequest(BaseModel):
     ttl_seconds: Optional[int] = None
 
 
+#: Headers that mean "a proxy relayed this", so the socket address describes
+#: the proxy (usually 127.0.0.1) rather than the operator.
+_PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip")
+
+
 def _client_scope(request: Request) -> str:
     client = getattr(request, "client", None)
     return classify_client_host(getattr(client, "host", None))
+
+
+def _looks_proxied(request: Request) -> bool:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    return any(str(headers.get(name) or "").strip() for name in _PROXY_HEADERS)
 
 
 _SCOPE_ALLOWED = frozenset({"loopback", "lan"})
@@ -663,6 +864,13 @@ def install_diag_logs_routes(app: FastAPI, *, gate: DiagLogsGate) -> None:
     @app.post("/diag/gate")
     async def diag_gate_update(request: Request, payload: DiagGateRequest):
         scope = _client_scope(request)
+        if _looks_proxied(request):
+            # A relayed request arrives from the proxy's loopback address, so
+            # the socket address no longer proves the operator is local.
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "proxy_not_allowed", "client_scope": scope},
+            )
         if scope != "loopback":
             # Only the local machine may flip the switch; LAN readers cannot
             # extend or re-open a diagnostics window.
@@ -743,12 +951,16 @@ def install_diag_logs_routes(app: FastAPI, *, gate: DiagLogsGate) -> None:
             "Content-Disposition": f'inline; filename="{relative.rsplit("/", 1)[-1]}"',
         }
 
+        # Remember which open window this download was granted under: closing
+        # the switch (or letting the TTL run out) kills it even if the switch is
+        # opened again a moment later.
+        window = gate.active_token()
         body = iter_log_bytes(
             resolved,
             offset=start,
             lines=lines,
             max_bytes=max_bytes,
-            keep_alive=gate.is_open,
+            keep_alive=lambda: gate.token_is_alive(window),
         )
         return StreamingResponse(
             body,
