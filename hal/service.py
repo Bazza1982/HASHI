@@ -45,6 +45,7 @@ from hal.runtime import (
     directive_for_exec_stage,
     program_from_json,
     plan_for_trigger,
+    entry_rules_match,
     halted_execs_for,
     rule_waits_for_whiteboard,
     stage_after_dispatch,
@@ -524,8 +525,16 @@ class HalService:
         active = await self._load_active_execs(owner_id)
         reason = gate_reason or whiteboard_halt_reason(trigger)
         if reason:
+            halts = halted_execs_for(trigger, list(active.values()))
+            would_start = entry_rules_match(
+                trigger, rules, current_instance=self._current_instance_id() or None
+            )
+            if not halts and not would_start:
+                # Nothing was running and nothing would have started: this is a
+                # human-gated move nobody automated, not an automation stop.
+                return False
             stopped = 0
-            for halt in halted_execs_for(trigger, list(active.values())):
+            for halt in halts:
                 if await asyncio.to_thread(
                     self.store.fail_exec_if_active,
                     owner_id=owner_id,

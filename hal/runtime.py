@@ -510,6 +510,35 @@ def whiteboard_halt_reason(trigger: HalTrigger) -> str | None:
     return None
 
 
+def entry_rules_match(
+    trigger: HalTrigger,
+    rules: Sequence[Mapping[str, Any]],
+    *,
+    current_instance: str | None = None,
+) -> bool:
+    """Would any enabled rule have started from this trigger?
+
+    Used to decide whether a stop is worth reporting: a human-gated transition
+    nobody was going to automate is not an automation stop.
+    """
+    event = _trigger_as_hal_event(trigger)
+    for rule_row in rules:
+        if not rule_row.get("enabled"):
+            continue
+        program = rule_row.get("program")
+        if program is None:
+            continue
+        for workflow in program.workflows:
+            if not workflow:
+                continue
+            entry = workflow[0]
+            if entry.event != trigger.event:
+                continue
+            if entry_matches(entry, event, current_instance=current_instance):
+                return True
+    return False
+
+
 def halted_execs_for(
     trigger: HalTrigger,
     execs: Sequence[Mapping[str, Any]],
