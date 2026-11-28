@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 # Historical names are retained for existing callers; units are UTF-8 JSON bytes.

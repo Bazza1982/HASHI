@@ -116,7 +116,6 @@ from orchestrator.multimodal_contract import (
     attachment_manifest,
     canonical_request_content,
     media_failure_code,
-    native_media_failure_reason,
     native_attachment_reference_aliases,
     route_request_content,
     routing_decisions_payload,
@@ -129,7 +128,6 @@ from tools.meter_cost import PerCallUsageLineItem
 from tools.smart_tools import smart_tool_spec
 from tools.token_tracker import resolve_usage_cost
 
-_HASHI_VERIFICATION_POLICY_ARGUMENT = "_hashi_verification_policy"
 _PERSONA_COMMENTARY_AGENT_FAILED_FIELD = "persona_commentary_agent_failed"
 
 
@@ -171,10 +169,7 @@ def _answer_preview_allowed(request: StageRequest) -> bool:
     work instructions before the answer.
     """
 
-    if request.stage in {
-        Stage.IMMEDIATE_RESPONSE,
-        Stage.FINALISATION,
-    }:
+    if request.stage is Stage.IMMEDIATE_RESPONSE:
         return True
     if request.stage is Stage.DIRECT:
         return not bool(request.allow_tools)
@@ -727,29 +722,8 @@ def _manager_authorises_profile(manager: Any, profile: ProviderProfile) -> bool:
     return False
 
 
-def _retired_stage_error(stage: str) -> RuntimeError:
-    """Fail loudly if a retired HER v2 stage is ever invoked again."""
-
-    return RuntimeError(
-        f"HER v2 stage {stage!r} is retired: HERV3 runs one direct loop. "
-        "Remove the caller instead of restoring the retired prompt contract."
-    )
-
-
 def _internal_stage_system_prompt(request: StageRequest) -> str | None:
     return render_internal_stage_system_prompt(request)
-
-
-def _finalisation_system_prompt(
-    source: her_persona.HERPersonaPackagingSource,
-    *,
-    goal: str,
-    relevant_habits: Sequence[str],
-    draft_response: str,
-    reviewer_findings: Mapping[str, Any] | None,
-    completion_evidence: Mapping[str, Any],
-) -> str:
-    raise _retired_stage_error("finalisation")
 
 
 def _immediate_response_system_prompt(
@@ -819,22 +793,6 @@ def _direct_system_prompt(
     )
 
 
-def _review_system_prompt(
-    *,
-    goal: str,
-    relevant_habits: Sequence[str],
-    active_plan_id: str | None,
-    active_plan: Mapping[str, Any] | None,
-    draft_response: str,
-    execution_record: Mapping[str, Any] | None,
-    evidence_refs: Sequence[str],
-    review_kind: str,
-    findings_to_close: Sequence[str],
-    available_review_tools: list[Mapping[str, Any]],
-) -> str:
-    raise _retired_stage_error("review")
-
-
 class _DelegatedToolRegistry:
     """Narrow a HASHI ToolRegistry without copying secrets or policy logic."""
 
@@ -844,7 +802,6 @@ class _DelegatedToolRegistry:
         delegated_tools: list[str],
         *,
         read_only: bool = False,
-        verification_policy: Mapping[str, Any] | None = None,
     ):
         self._base = base
         requested = {str(item) for item in delegated_tools if str(item).strip()}
@@ -861,22 +818,11 @@ class _DelegatedToolRegistry:
         # retired shared-registry tool-round ceiling.
         self.max_loops = None
         self.audit_context = dict(getattr(base, "audit_context", {}) or {})
-        self._verification_policy = dict(verification_policy or {})
         if read_only:
             self.audit_context.update(
                 {
                     "safety_mode": "read_only",
                     "authority_mode": "her_v2_shadow",
-                }
-            )
-        elif self._verification_policy:
-            self.audit_context.update(
-                {
-                    "safety_mode": "workspace_verification",
-                    "authority_mode": "her_v2_review_verification",
-                    "verification_execution_elapsed_s": self._verification_policy.get(
-                        "execution_elapsed_s"
-                    ),
                 }
             )
 
@@ -948,13 +894,6 @@ class _DelegatedToolRegistry:
         scoped_context.update(dict(audit_context or {}))
         if self.is_allowed(tool_name):
             effective_arguments = dict(arguments or {})
-            if tool_name == "verification_run" and self._verification_policy:
-                # The model cannot select or reduce the runtime timeout basis.  This
-                # request-local value is added after schema validation and never
-                # mutates the shared ToolRegistry used by concurrent turns.
-                effective_arguments[_HASHI_VERIFICATION_POLICY_ARGUMENT] = dict(
-                    self._verification_policy
-                )
             scoped_execute = getattr(self._base, "execute_with_audit_context", None)
             if callable(scoped_execute):
                 return await scoped_execute(
@@ -2460,9 +2399,7 @@ class _AdapterDelivery(DeliveryPort):
                 # A Primary Execution draft is prescribed user-visible output,
                 # not optional stage chatter. ``allow_immediate_response`` has
                 # no bearing on this reviewed-workflow message.
-                required=(
-                    commentary.draft_response or commentary.stage is Stage.REPLANNING
-                ),
+                required=commentary.draft_response,
                 provenance=commentary.provenance,
                 detail=(
                     "temporary=true; pending_review_and_finalisation=true; "
@@ -5523,23 +5460,6 @@ class HashiStageProvider(StageProvider):
                 selected_registry,
                 delegated,
                 read_only=not request.allow_side_effects,
-                verification_policy=(
-                    {
-                        **dict(
-                            request.context.get("verification_run_policy")
-                            if isinstance(
-                                request.context.get("verification_run_policy"),
-                                Mapping,
-                            )
-                            else {}
-                        ),
-                        "execution_elapsed_s": request.context.get(
-                            "execution_elapsed_s", 0.0
-                        ),
-                    }
-                    if request.stage is Stage.REVIEW and request.allow_side_effects
-                    else None
-                ),
             )
         evidence_registry: _EvidenceRecordingToolRegistry | None = None
         cognitive_registry: _CognitiveControlToolRegistry | None = None
@@ -5614,44 +5534,9 @@ class HashiStageProvider(StageProvider):
         if not native_audio_stage and request_content_is_voice_origin(
             request.request_content
         ):
-            triage_input_policy = (
-                str(profile.options.get("_voice_triage_input_policy") or "auto")
-                .strip()
-                .casefold()
-            ) if request.stage is Stage.TRIAGE else "transcript"
-            capability_resolver = getattr(backend, "resolve_input_capability", None)
-            triage_capability = (
-                capability_resolver()
-                if callable(capability_resolver)
-                else getattr(backend, "input_capability", None)
-            )
-            triage_hears_audio = bool(
-                triage_capability is not None and triage_capability.supports("audio")
-            )
-            if triage_input_policy == "native" and not triage_hears_audio:
-                reason = (
-                    native_media_failure_reason(triage_capability, "audio")
-                    if triage_capability is not None
-                    else "model_capability_unknown"
-                )
-                self._untrack_active_backend(backend)
-                await backend.shutdown()
-                raise StageInvocationError(
-                    "voice Triage is configured native but its exact model cannot consume audio",
-                    retryable=False,
-                    code=media_failure_code(reason),
-                    human_description=(
-                        "The configured native voice Triage model has no verified audio input capability."
-                    ),
-                    details={
-                        "model": profile.model,
-                        "modality": "audio",
-                        "reason": reason,
-                    },
-                )
-            needs_text_transcript = (
-                triage_input_policy == "transcript" or not triage_hears_audio
-            )
+            # Triage was retired with the multi-stage Harness: any non-native
+            # voice turn always consumes the released local transcript.
+            needs_text_transcript = True
             voice_state = self._native_voice_state(request)
             safe_voice_gate = bool(
                 isinstance(voice_state, dict) and voice_state.get("safe_voice")
@@ -5664,53 +5549,17 @@ class HashiStageProvider(StageProvider):
                 )
                 original_manifest = tuple(request.attachment_manifest)
                 if not transcript or transcript_state != "released":
-                    media_routing = tuple(
-                        {
-                            "attachment_id": str(item.get("attachment_id") or ""),
-                            "item_index": item.get("item_index"),
-                            "modality": str(item.get("modality") or "audio"),
-                            "route": "transcript_unavailable",
-                            "reason": f"local_stt_{transcript_state}",
-                            "transport": None,
-                        }
-                        for item in original_manifest
-                    )
                     self._untrack_active_backend(backend)
                     await backend.shutdown()
-                    if request.stage is not Stage.TRIAGE:
-                        raise StageInvocationError(
-                            f"Voice transcript was not released: {transcript_state}",
-                            retryable=False,
-                            code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
-                            human_description=(
-                                "The recording could not be transcribed or its transcript "
-                                "was not confirmed; no model action was started."
-                            ),
-                            details={"transcript_state": transcript_state},
-                        )
-                    return StageResponse(
-                        data={
-                            "classification": "DIRECT_RESPONSE",
-                            "real_goal": (
-                                "Keep the native no-tool voice chat response; "
-                                "the transcript-dependent path is unavailable."
-                            ),
-                            "selected_strategy_cards": [],
-                            "relevant_habits": [],
-                            "execution_brief": {
-                                "strategy": "",
-                                "stages": [],
-                                "dependencies": [],
-                                "verification": [],
-                                "success_criteria": [],
-                                "replan_conditions": [],
-                            },
-                            "clarification": "",
-                        },
-                        provider="hashi-runtime",
-                        model="safe-voice-boundary",
-                        media_routing=media_routing,
-                        validation_source="runtime_voice_boundary",
+                    raise StageInvocationError(
+                        f"Voice transcript was not released: {transcript_state}",
+                        retryable=False,
+                        code=ProviderFailureCode.INPUT_MODALITY_CONVERSION_FAILED,
+                        human_description=(
+                            "The recording could not be transcribed or its transcript "
+                            "was not confirmed; no model action was started."
+                        ),
+                        details={"transcript_state": transcript_state},
                     )
             if needs_text_transcript:
                 original_manifest = tuple(request.attachment_manifest)
@@ -6193,101 +6042,14 @@ class HashiStageProvider(StageProvider):
                     ),
                 },
             )
-            if request.stage in {Stage.PLANNING, Stage.REPLANNING} and (
-                "available_execution_tools" not in request.context
-            ):
-                prompt_request = replace(
-                    prompt_request,
-                    context={
-                        **dict(prompt_request.context),
-                        "available_execution_tools": list(
-                            self.tool_catalogue(
-                                allow_side_effects=bool(
-                                    request.context.get(
-                                        "execution_allow_side_effects", True
-                                    )
-                                )
-                            )
-                        ),
-                    },
-                )
             stage_prompt = render_stage_prompt(prompt_request)
             primary_execution = (
                 request.stage is Stage.EXECUTION
                 and not request.role.startswith("sub_agent:")
             )
             primary_direct = request.stage is Stage.DIRECT
-            primary_review = (
-                request.stage is Stage.REVIEW
-                and not request.role.startswith("sub_agent:")
-            )
-            if primary_review:
-                raw_execution_record = request.context.get("execution")
-                execution_record = (
-                    dict(raw_execution_record)
-                    if isinstance(raw_execution_record, Mapping)
-                    else None
-                )
-                definitions_getter = getattr(
-                    selected_registry, "get_tool_definitions", None
-                )
-                raw_definitions = (
-                    definitions_getter() if callable(definitions_getter) else []
-                )
-                review_tools = [
-                    dict(item) for item in raw_definitions if isinstance(item, Mapping)
-                ]
-                system_prompt = _review_system_prompt(
-                    goal=request.goal,
-                    relevant_habits=[
-                        str(item)
-                        for item in (request.context.get("relevant_habits") or [])
-                        if str(item).strip()
-                    ],
-                    active_plan_id=request.plan_id,
-                    active_plan=(
-                        request.context.get("active_plan")
-                        if isinstance(request.context.get("active_plan"), Mapping)
-                        else None
-                    ),
-                    draft_response=str(
-                        request.context.get("draft_response")
-                        or (execution_record or {}).get("summary")
-                        or ""
-                    ),
-                    execution_record=execution_record,
-                    evidence_refs=[
-                        str(item)
-                        for item in (request.context.get("evidence_refs") or [])
-                        if str(item).strip()
-                    ],
-                    review_kind=str(
-                        request.context.get("review_kind") or "independent"
-                    ),
-                    findings_to_close=[
-                        str(item)
-                        for item in (request.context.get("findings_to_close") or [])
-                        if str(item).strip()
-                    ],
-                    available_review_tools=review_tools,
-                )
-                if not _install_system_prompt(backend, system_prompt):
-                    raise StageInvocationError(
-                        "review backend cannot isolate the HER v2 system prompt",
-                        retryable=False,
-                        code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
-                        human_description=(
-                            "The configured Review provider cannot isolate the "
-                            "required system prompt."
-                        ),
-                    )
-                stage_prompt = request.goal
-            elif (
-                request.stage
-                in {
-                    Stage.IMMEDIATE_RESPONSE,
-                    Stage.FINALISATION,
-                }
+            if (
+                request.stage is Stage.IMMEDIATE_RESPONSE
                 or primary_execution
                 or primary_direct
             ):
@@ -6469,37 +6231,14 @@ class HashiStageProvider(StageProvider):
                                 getattr(self, "_commentary_mode", "") or "off"
                             ),
                         )
-                else:
-                    system_prompt = _finalisation_system_prompt(
-                        source,
-                        goal=request.goal,
-                        relevant_habits=[
-                            str(item)
-                            for item in (request.context.get("relevant_habits") or [])
-                            if str(item).strip()
-                        ],
-                        draft_response=str(request.context.get("draft_response") or ""),
-                        reviewer_findings=(
-                            request.context.get("reviewer_findings")
-                            if isinstance(
-                                request.context.get("reviewer_findings"), Mapping
-                            )
-                            else None
-                        ),
-                        completion_evidence=(
-                            request.context.get("completion_evidence")
-                            if isinstance(
-                                request.context.get("completion_evidence"), Mapping
-                            )
-                            else {}
-                        ),
+                else:  # pragma: no cover - Finalisation was retired
+                    raise StageInvocationError(
+                        f"{request.stage.value} has no persona prompt contract",
+                        retryable=False,
+                        code=ProviderFailureCode.PROVIDER_CONFIGURATION_ERROR,
                     )
                 if not _install_system_prompt(backend, system_prompt):
-                    if (
-                        request.stage is Stage.FINALISATION
-                        or primary_execution
-                        or primary_direct
-                    ):
+                    if primary_execution or primary_direct:
                         raise StageInvocationError(
                             f"{request.stage.value} backend cannot isolate the HER v2 system prompt",
                             retryable=False,
@@ -6510,8 +6249,6 @@ class HashiStageProvider(StageProvider):
                             ),
                         )
                     stage_prompt = f"{system_prompt}\n\n{stage_prompt}"
-                elif request.stage is Stage.FINALISATION:
-                    stage_prompt = request.goal
             else:
                 internal_prompt = _internal_stage_system_prompt(prompt_request)
                 if internal_prompt is not None:

@@ -19,21 +19,12 @@ from .models import Stage, StageResponse
 from .structured import response_data
 
 
-# Immediate Response and Finalisation already own dedicated user-facing lanes.
-# The legacy Triage wire stage is the HER v2 Strategist. Sub-agents are not
-# user-facing. Tool-enabled Direct and Execution provider commentary enters
-# this typed lane before transport, while Execution also retains exact
-# provisional draft delivery for reviewed modes.
-COMMENTARY_STAGES = frozenset(
-    {
-        Stage.DIRECT,
-        Stage.TRIAGE,
-        Stage.PLANNING,
-        Stage.EXECUTION,
-        Stage.REPLANNING,
-        Stage.REVIEW,
-    }
-)
+# Immediate Response already owns a dedicated user-facing lane, and the
+# Planning/Replanning/Review/Finalisation stages were retired with the
+# multi-stage Harness. Sub-agents are not user-facing. Tool-enabled Direct and
+# Execution provider commentary enters this typed lane before transport, while
+# Execution also retains exact provisional draft delivery.
+COMMENTARY_STAGES = frozenset({Stage.DIRECT, Stage.EXECUTION})
 
 
 class CommentaryValidationError(ValueError):
@@ -340,11 +331,6 @@ def commentary_from_stage_response(
     if stage not in COMMENTARY_STAGES:
         return None
     data = response_data(response)
-    if stage is Stage.TRIAGE and str(data.get("classification") or "") in {
-        "DIRECT_RESPONSE",
-        "CONFIRMATION_REQUIRED",
-    }:
-        return None
     raw = data.get("commentary")
     if raw is None:
         return None
@@ -360,3 +346,4 @@ def commentary_from_stage_response(
         attempt=attempt,
         text=text,
     )
+# HASHI-Fingerprint: hfp_f3f036e3bfbd4249a5c41a6b60dd9055
