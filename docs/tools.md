@@ -102,7 +102,7 @@ configuration, transition, migration, and regression contract.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [off|raw|original|packaged]` — how interim progress is written: off, neutral technical lines, the main model in the persona's voice, or a separate persona-polishing pass; `on`/`off` remain accepted and are independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
-- Bare `/think`, `/commentary`, and `/verbose` commands only open their menus. Choosing On or Off applies to the active turn immediately; display events produced while Off are not replayed later.
+- Run `/think`, `/commentary`, or `/verbose` without arguments to open its menu. The `/commentary` menu offers Off, Technical, Persona, and Polished. See [when display changes take effect](#telegram-display-event-contract).
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
 - `/telegram` — mirror, instance-wide safety silence and Bot Token removal. See [Telegram controls](TELEGRAM_NOTIFICATION_MODES.md).
@@ -641,7 +641,7 @@ Assistant answer deltas remain available to local activity observers, but they a
 
 HERV3 progress defaults to Off until a user selects a mode.
 [Progress modes and their effective limits](HERV3_UPGRADE.md#persona-commentary)
-explains the difference between Technical, In character and Polished. In a rate
+explains the difference between Technical, Persona and Polished. In a rate
 window only the newest pending comment is retained. Ending a turn does not
 flush a backlog of stale commentary. Other engines use their own supported
 display controls.

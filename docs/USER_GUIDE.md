@@ -207,7 +207,7 @@ for the distinction and recovery commands.
 |---|---|
 | `/think` | Thinking output exposed by the selected engine or provider. |
 | `/verbose` | A technical activity summary. |
-| `/commentary` | User-facing progress updates for HERV3. Choose Off (`off`), Technical (`raw`), In character (`original`) or Polished (`packaged`). Polishing uses a separate presentation call. Local providers may run a simpler effective mode, which the menu shows alongside the saved choice. |
+| `/commentary` | User-facing progress updates for HERV3. Choose Off (`off`), Technical (`raw`), Persona (`original`) or Polished (`packaged`). Polishing uses a separate presentation call. Local providers may run a simpler effective mode, which the menu shows alongside the saved choice. |
 | `/meter` | Available usage and cost evidence. Missing prices are shown as unknown. |
 
 Display settings do not erase records or hide the final result. See

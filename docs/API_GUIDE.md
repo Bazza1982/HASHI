@@ -147,8 +147,8 @@ longer accepted. If `/api` reports a saved default as retired, select a
 supported default or send an explicit model from the current catalogue. See
 [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
-The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
-`gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.5`.
+Call `GET /v1/models` on the target API Gateway to find the model IDs that
+its running configuration and backend preflight make available.
 
 For GPT-6 Astra, the Codex CLI adapter also declares its
 context capacity to the compaction resolver: a 1,050,000-token window with
@@ -158,25 +158,9 @@ changes the compaction trigger policy.
 
 ### Codex CLI models
 
-HASHI advertises only the qualified Codex CLI models below. The bare `gpt-5.6`
-alias is deliberately omitted in favor of explicit tier model IDs. The default
-for a new or unpinned selection is `gpt-6-astra` at explicit `medium` effort;
-existing explicit Agent choices remain unchanged.
-
-| Model | HASHI use | `/effort` choices |
-|---|---|---|
-| `gpt-6-astra` | Frontier model for the most demanding work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
-| `gpt-6-sol` | Workhorse model for coding and everyday work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
-| `gpt-6-luna` | Fast, affordable model for easier tasks | `low`, `medium`, `high`, `xhigh`, `max` |
-| `gpt-5.6-sol` | Older coding model for complex work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
-| `gpt-5.6-terra` | Older balanced model for straightforward work | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
-| `gpt-5.6-luna` | Older fast and efficient model | `low`, `medium`, `high`, `xhigh`, `max` |
-| `gpt-5.5` | Legacy coding model | `low`, `medium`, `high`, `xhigh` |
-
-The Telegram `/effort` command follows the currently selected model rather
-than exposing one unsafe backend-wide list. If an agent switches from a model
-with `ultra` selected to a Luna model, or from `max`/`ultra` to GPT-5.5, HASHI
-automatically normalizes effort to `medium` before the next Codex invocation.
+Use `/model` on the Agent to see its available Codex CLI model IDs. After you
+select a model, `/effort` shows the choices for that model. HASHI normalizes a
+saved effort that the selected model does not support before invoking Codex.
 
 ### HERV3 provider models
 

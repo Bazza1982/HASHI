@@ -98,7 +98,7 @@ included since the v4 Beta, migration steps and publication limits.
   [#218](https://github.com/Bazza1982/HASHI/pull/218) ·
   [#222](https://github.com/Bazza1982/HASHI/pull/222) ·
   [#243](https://github.com/Bazza1982/HASHI/pull/243)
-- `/commentary` offers Off, Technical, In character and Polished. It displays
+- `/commentary` offers Off, Technical, Persona and Polished. It displays
   the effective mode when the provider uses a simpler one. Model, reasoning,
   fallback and reboot menus use clearer task language.
   [#210](https://github.com/Bazza1982/HASHI/pull/210) ·

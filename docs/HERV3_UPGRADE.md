@@ -467,7 +467,7 @@ unset preference defaults to Off. `on` is a compatibility alias for Technical.
 |---|---|---|
 | Off | `off` | Skip optional HERV3 commentary. |
 | Technical | `raw` | Show neutral progress without an auxiliary model call. |
-| In character | `original` | Use the main model's own persona progress without an auxiliary model call. |
+| Persona | `original` | Use the main model's own persona progress without an auxiliary model call. |
 | Polished | `packaged` | Use a separate presentation call to rewrite progress in the Agent's voice. |
 
 Ollama, llama.cpp and HLI use Off or Technical for the effective mode. The
@@ -677,9 +677,12 @@ The following operational constraints were relocated intact from the prior boots
 ### FYI v1 042 Public HERV3 identity and independent controls
 
 HERV3: `her-v3`; `her-v2` is compatibility only. Telegram cards show
-the public ID. The former JEV companion is retired.
+the public ID. JEV defaults off.
 Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
 counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
+
+> Current status: The JEV Agent Companion was subsequently retired. See
+> [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
 ### FYI v1 043 Privacy Level 2 restrictions and adoption evidence
 
