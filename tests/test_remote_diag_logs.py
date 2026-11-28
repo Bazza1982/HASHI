@@ -655,6 +655,57 @@ def test_junctioned_logs_dir_cannot_widen_the_root_to_the_instance(tmp_path: Pat
 
 
 @pytest.mark.skipif(os.name != "nt", reason="junction escape check is Windows specific")
+def test_remote_starts_when_the_instance_log_dir_is_rejected(tmp_path: Path) -> None:
+    """A refused instance log root must not stop the Remote from booting.
+
+    Regression: the gate read ``log_roots["instance"]`` unconditionally, so once
+    ``logs`` was rejected as unsafe and only the Remote's own log remained, app
+    start-up raised ``KeyError('instance')`` and the Remote never came up at
+    all — a safety check that turned into an outage.
+    """
+
+    (tmp_path / "agents.json").write_text('{"global": {}}', encoding="utf-8")
+    (tmp_path / "secrets.json").write_text('{"token": "leak-me"}', encoding="utf-8")
+    logs = tmp_path / "logs"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(logs), str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"cannot create junction: {result.stderr.strip()}")
+    remote_log = tmp_path / "elsewhere" / "remote.log"
+    remote_log.parent.mkdir()
+    remote_log.write_bytes(b"remote boot line\n")
+    try:
+        app = create_app(
+            {"instance_id": "HASHI8", "display_name": "Diag", "remote_port": 8775},
+            PairingManager(storage_dir=tmp_path / "pairing", lan_mode=True),
+            TerminalExecutor(),
+            hashi_root=str(tmp_path),
+            diag_remote_log_file=str(remote_log),
+        )
+        gate = app.state.diag_logs_gate
+        assert list(gate.log_roots) == [LOG_ROOT_REMOTE]
+        assert gate.log_root is None
+
+        client = TestClient(app, client=LOOPBACK)
+        assert client.get("/diag/gate").status_code == 200
+        assert client.post("/diag/gate", json={"enabled": True}).status_code == 200
+        listing = client.get("/diag/logs").json()
+        assert {(row["root"], row["path"]) for row in listing["files"]} == {
+            (LOG_ROOT_REMOTE, "remote.log")
+        }
+        assert client.get("/diag/logs/remote/remote.log").content == b"remote boot line\n"
+        # Nothing outside the surviving root is reachable, and a bare path that
+        # would have meant the refused instance root stays unavailable.
+        assert client.get("/diag/logs/agents.json").status_code == 503
+        assert client.get("/diag/logs/remote/secrets.json").status_code == 404
+    finally:
+        os.rmdir(logs)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction escape check is Windows specific")
 def test_listing_skips_subdirectories_linked_outside_the_log_root(
     instance_root: Path,
 ) -> None:

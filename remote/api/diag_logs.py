@@ -346,7 +346,11 @@ class DiagLogsGate:
         now=time.time,
     ):
         self._log_roots = _normalise_log_roots(log_root, log_roots)
-        self._log_root = self._log_roots[LOG_ROOT_INSTANCE] if self._log_roots else None
+        # ``instance`` is routinely absent: the instance log dir is refused
+        # when it would expose the instance itself, leaving only the Remote's
+        # own log.  Indexing it here aborted Remote start-up with KeyError,
+        # turning a safety check into an outage.
+        self._log_root = self._log_roots.get(LOG_ROOT_INSTANCE)
         self._instance_id = str(instance_id or "")
         self._default_ttl_seconds = int(default_ttl_seconds)
         self._now = now
