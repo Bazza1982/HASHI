@@ -107,16 +107,19 @@ Missing project modules fail closed instead of falling back to mutable source.
 Core paths cannot be shadowed by artifacts. Runtime, Core digest, source bytes,
 asset bytes and executable modes are checked before process use.
 
-Enabled post-Turn observers declared by active Agents are additional qualification
-roots. PAO reads factory module names from the instance's observer declarations,
-resolving workspaces through the existing path owner without loading PCM or
-executing factories. Cold qualification and Agent qualification include their
-transitive project dependencies. Memory and disk caches are reusable only when
-they cover the current enabled declarations; enabling a previously omitted
-observer forces qualification. Disabled declarations add no dependency. The
-immutable import guard remains authoritative; a missing or invalid project
-module rejects qualification instead of reading mutable checkout code. Existing
-running artifacts do not change when a configuration file is edited.
+The release-owned post-Turn observer registry supplies the bundled observer
+roots and their transitive dependencies. Cold boot, staged release and Agent
+qualification use those same roots. Agent workspace files do not seed the
+release manifest or invalidate qualified caches. Missing bundled modules and
+other required project sources still fail qualification.
+
+Each Agent selects observers using a stable `observer_id`. The loader also
+reads legacy factory paths. The retired Anatta ID and factory path are accepted
+as inactive declarations and produce a workspace-specific warning. Other
+unknown, unavailable or invalid observers are likewise skipped locally. Legacy
+project factories can load from the qualified artifact, within the existing
+immutable import guard. Qualification leaves stored configuration intact, and
+new bundled selections retain a legacy factory field for rollback compatibility.
 
 Core and Function API are now 3. CPython remains 3.12.13, Agent worker protocol
 remains 1 and the Function artifact schema remains 2. This is an authorized Core

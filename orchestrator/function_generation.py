@@ -42,7 +42,7 @@ from orchestrator.function_contract import (
 from orchestrator.kernel_artifact import manifest_digest
 from orchestrator.kernel_import_guard import candidate_import_guard as stable_import_guard
 from orchestrator.manager_registry import FUNCTION_MANAGER_SPECS
-from orchestrator.post_turn_registry import declared_observer_modules
+from orchestrator.post_turn_registry import BUNDLED_OBSERVERS
 from orchestrator.runtime_contract import (
     RuntimeContractError,
     RuntimeFingerprint,
@@ -999,10 +999,6 @@ def run_candidate_probe(
     )
 
 
-def configured_observers_are_qualified(kernel: Any, generation: VerifiedFunctionGeneration) -> bool:
-    return set(declared_observer_modules(kernel.paths)) <= set(generation.manifest.module_names)
-
-
 def probe_function_generation(
     kernel: Any,
     *,
@@ -1028,10 +1024,7 @@ def probe_function_generation(
         )
     requested = set(FUNCTION_GENERATION_ENTRYPOINTS)
     requested.update(spec.module for spec in FUNCTION_MANAGER_SPECS)
-    for module in declared_observer_modules(kernel.paths):
-        if not is_function_module_name(module):
-            raise FunctionGenerationError(f"Observer is outside project Functions: {module}")
-        requested.add(module)
+    requested.update(module for module, _attribute in BUNDLED_OBSERVERS.values())
     # The shared process's live ``sys.modules`` set is timing-dependent: after Workbench
     # starts it contains shared-service modules that are absent during cold
     # bootstrap. Seeding a Function generation from that set makes /reboot

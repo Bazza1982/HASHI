@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 from orchestrator.function_generation import (
     UncommittedFunctionSourceError,
-    configured_observers_are_qualified,
     probe_function_generation,
 )
 from orchestrator.function_worker_supervisor import (
@@ -62,10 +61,7 @@ def qualify_release(payload: dict) -> dict:
             root,
             runtime,
         )
-        if (
-            cached is not None
-            and configured_observers_are_qualified(release_kernel, cached[0])
-        ):
+        if cached is not None:
             generation, artifact = cached
         else:
             generation = timed(

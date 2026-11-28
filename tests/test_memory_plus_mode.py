@@ -19,7 +19,6 @@ sys.modules.setdefault("edge_tts", types.SimpleNamespace(Communicate=object))
 
 from orchestrator.memory_plus_mode import (  # noqa: E402
     MEMORY_PLUS_CLOSE,
-    MEMORY_PLUS_OBSERVER_FACTORY,
     MEMORY_PLUS_OPEN,
     MEMORY_PLUS_SCHEMA_VERSION,
     MemoryPlusObserver,
@@ -104,7 +103,11 @@ def test_ensure_memory_plus_observer_adds_factory(tmp_path: Path) -> None:
     config = json.loads((tmp_path / "post_turn_observers.json").read_text(encoding="utf-8"))
 
     assert changed is True
-    assert {"factory": MEMORY_PLUS_OBSERVER_FACTORY, "enabled": True} in config["observers"]
+    assert config["observers"] == [{
+        "observer_id": "memory_plus",
+        "factory": "orchestrator.memory_plus_mode:build_memory_plus_observer",
+        "enabled": True,
+    }]
 
 
 def test_memory_plus_provider_injects_notepad_and_protocol(tmp_path: Path) -> None:

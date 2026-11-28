@@ -1652,9 +1652,7 @@ async def test_prepare_generation_skips_only_preverified_source_scan(
 
 
 @pytest.mark.asyncio
-async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_scan(
-    monkeypatch,
-):
+async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_scan():
     kernel = _Kernel()
     kernel.paths = SimpleNamespace()
     seal_checks = []
@@ -1676,10 +1674,6 @@ async def test_in_memory_generation_cache_uses_lightweight_seal_not_full_byte_sc
     generation = _CachedGeneration()
     supervisor = FunctionWorkerSupervisor(kernel)
     supervisor._cached_generation = generation
-    monkeypatch.setattr(
-        "orchestrator.function_worker_supervisor.configured_observers_are_qualified",
-        lambda _kernel, _generation: True,
-    )
 
     assert await supervisor.qualified_generation() is generation
     assert seal_checks == [kernel.runtime_fingerprint]
