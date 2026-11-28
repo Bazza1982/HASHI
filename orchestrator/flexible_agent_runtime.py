@@ -13,7 +13,7 @@ from uuid import uuid4
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any, Mapping
+from typing import TYPE_CHECKING, Optional, Any, Mapping
 from orchestrator.voice_reply_result import VoiceReplyResult
 import json
 
@@ -30,7 +30,6 @@ from orchestrator.config_json import (
     read_config_json,
     write_config_json,
 )
-from orchestrator.agent_move.package import AgentMoveError
 from orchestrator.bootstrap_logging import refresh_console_output_filters
 from orchestrator.command_ui import (
     back_label,
@@ -99,9 +98,6 @@ from orchestrator.slash_command_audit import (
     parse_slash_command_text,
     resolve_handler_kind,
 )
-from orchestrator.enterprise.audit_schema import AuditEventWriter
-from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
-from orchestrator.enterprise.policy import evaluate_governance_policy
 from orchestrator.runtime_common import (
     QueuedRequest,
     _print_final_response,
@@ -187,6 +183,9 @@ from orchestrator.dual_brain_mode import (
     ensure_dual_brain_observer,
     load_dual_brain_config,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
 
 MAX_JOB_TRANSFER_SELECTIONS = 256
 
@@ -603,6 +602,7 @@ class FlexibleAgentRuntime:
         return True
 
     def _evaluate_enterprise_policy(self, action: str, *, resource: str = "*", **context):
+        from orchestrator.enterprise.policy import evaluate_governance_policy
         global_config = getattr(self, "global_config", None)
         if global_config is None:
             return evaluate_governance_policy("noop", {"deployment_profile": "personal"})
@@ -617,6 +617,8 @@ class FlexibleAgentRuntime:
         )
 
     def _build_channel_gate(self) -> EnterpriseChannelGate:
+        from orchestrator.enterprise.audit_schema import AuditEventWriter
+        from orchestrator.enterprise.channel_gate import EnterpriseChannelGate
         profile = str(getattr(self.global_config, "deployment_profile", "personal") or "personal")
         if profile == "personal":
             return EnterpriseChannelGate.from_global_config(self.global_config)
@@ -6184,6 +6186,7 @@ class FlexibleAgentRuntime:
                     ui_language.tr("remote.move.continue_usage"),
                 )
                 return
+            from orchestrator.agent_move.package import AgentMoveError
             try:
                 result = await asyncio.to_thread(
                     runtime_remote.continue_outbound_move,
