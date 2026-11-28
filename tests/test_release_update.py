@@ -273,6 +273,66 @@ def test_runtime_release_fails_when_remote_restarts_old_code():
         )
 
 
+def test_runtime_release_leaves_an_operator_disabled_remote_stopped():
+    target = "a" * 40
+
+    class Adapter:
+        def preflight(self):
+            return {}
+
+        def restart_core(self, _expected_commit):
+            return {"restart_id": "rst_test", "state": "completed"}
+
+        def restart_remote(self):
+            return {"skipped": True, "reason": "remote_disabled"}
+
+        def wait_for_version(self, expected_commit):
+            payload = _matching_payload(expected_commit)
+            payload["running"]["remote"] = {
+                "status": "stopped",
+                "provenance": {"commit": "b" * 40},
+            }
+            return payload
+
+    result = complete_runtime_release(
+        Adapter(),
+        expected_commit=target,
+        expected_instance="HASHI3",
+    )
+
+    assert result["ok"] is True
+    assert result["remote_status"] == "disabled"
+    assert result["remote_restart"]["reason"] == "remote_disabled"
+
+
+def test_a_release_never_resurrects_an_operator_disabled_remote(
+    tmp_path: Path, monkeypatch
+):
+    from orchestrator import remote_lifecycle
+
+    remote_lifecycle.write_disabled_state(tmp_path, disabled_by="test")
+    monkeypatch.setattr(release_update, "load_shared_token", lambda _root: "token")
+    calls = []
+    monkeypatch.setattr(
+        release_update, "_run", lambda argv, **options: calls.append(list(argv))
+    )
+    adapter = LocalReleaseAdapter(
+        code_root=tmp_path,
+        bridge_home=tmp_path,
+        instance_id="HASHI3",
+        api_port=18804,
+        expected_commit="a" * 40,
+        python_executable="python.exe",
+        platform_name="nt",
+    )
+
+    result = adapter.restart_remote()
+
+    assert result["skipped"] is True
+    assert result["reason"] == "remote_disabled"
+    assert calls == []
+
+
 def test_windows_remote_is_reregistered_before_it_is_restarted(
     tmp_path: Path, monkeypatch
 ):
