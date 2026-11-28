@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from orchestrator.config import ConfigManager
 from orchestrator.config_admin import ConfigAdmin
 from orchestrator.config_json import read_config_json
-from orchestrator.enterprise import IdentityService
+from orchestrator.enterprise.identity import IdentityService
 from orchestrator.permissions.authority import PermissionAuthority, PermissionDenied
 from orchestrator.permissions.clients import settings_revision
 from orchestrator.permissions.configured_models import ConfiguredModelFactory
