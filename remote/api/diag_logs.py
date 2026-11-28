@@ -193,11 +193,16 @@ def resolve_effective_logs_dir(hashi_root: Optional[Path]) -> Optional[Path]:
             configured, config_dir=root, bridge_home=root
         )
     except (OSError, ValueError):
-        return default_dir
-    if resolved is None:
-        return default_dir
+        resolved = None
+    if resolved is None or _is_unsafe_root(resolved, root):
+        resolved = default_dir
+    # ``<instance>/logs`` is resolved through junctions and symlinks too.  An
+    # instance whose ``logs`` entry is a junction pointing back at the instance
+    # root (or at one of its parents) would otherwise be published verbatim as
+    # the log root, exposing agents.json/secrets.json.  Validate the directory
+    # that is actually returned, not just the configured value.
     if _is_unsafe_root(resolved, root):
-        return default_dir
+        return None
     return resolved
 
 
@@ -473,6 +478,21 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _stays_within(root: Path, candidate: Path) -> bool:
+    """True when ``candidate`` still resolves inside ``root``.
+
+    ``os.walk(followlinks=False)`` does not stop at a Windows junction — a
+    junction is not reported as a symlink — so a link inside the log tree can
+    pull a whole unrelated directory into the listing. Reads through such a path
+    are already refused, but the names and sizes must not leak either.
+    """
+
+    try:
+        return _is_within(candidate.resolve(), root)
+    except (OSError, RuntimeError):
+        return False
+
+
 def normalise_relative_path(relative: str) -> str:
     """Validate a caller-supplied relative path and return a posix-style form."""
 
@@ -576,6 +596,10 @@ def list_log_files(log_root: Optional[Path], *, max_files: int = MAX_LISTED_FILE
     root_text = str(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames.sort()
+        # Drop subdirectories that escape the root through a junction/symlink.
+        dirnames[:] = [
+            name for name in dirnames if _stays_within(root, Path(dirpath) / name)
+        ]
         for name in sorted(filenames):
             candidate = Path(dirpath) / name
             try:

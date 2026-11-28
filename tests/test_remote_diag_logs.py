@@ -628,6 +628,56 @@ def test_log_root_never_widens_to_the_instance_root(tmp_path: Path) -> None:
         assert resolve_effective_logs_dir(tmp_path) == expected, value
 
 
+@pytest.mark.skipif(os.name != "nt", reason="junction escape check is Windows specific")
+def test_junctioned_logs_dir_cannot_widen_the_root_to_the_instance(tmp_path: Path) -> None:
+    """A ``logs`` junction pointing back at the instance must not be served.
+
+    Regression: only the *configured* value was validated.  When ``logs`` was a
+    junction to the instance root, the default fallback resolved there and was
+    returned verbatim, publishing agents.json and secrets.json as "logs".
+    """
+
+    (tmp_path / "agents.json").write_text('{"global": {}}', encoding="utf-8")
+    (tmp_path / "secrets.json").write_text('{"token": "leak-me"}', encoding="utf-8")
+    logs = tmp_path / "logs"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(logs), str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"cannot create junction: {result.stderr.strip()}")
+    try:
+        assert resolve_effective_logs_dir(tmp_path) is None
+        assert "instance" not in build_diag_log_roots(tmp_path)
+    finally:
+        os.rmdir(logs)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction escape check is Windows specific")
+def test_listing_skips_subdirectories_linked_outside_the_log_root(
+    instance_root: Path,
+) -> None:
+    """A junction *inside* logs must not pull its target into the listing."""
+
+    link = instance_root / "logs" / "outside"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(instance_root)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"cannot create junction: {result.stderr.strip()}")
+    try:
+        listing = list_log_files(instance_root / "logs")
+        paths = [item["path"] for item in listing["files"]]
+        assert "bridge.log" in paths
+        assert not [path for path in paths if path.startswith("outside/")]
+        assert "secrets.json" not in paths
+    finally:
+        os.rmdir(link)
+
+
 def test_proxied_request_cannot_flip_the_switch(tmp_path: Path) -> None:
     """A relayed request looks loopback, so it must not inherit local rights."""
 
