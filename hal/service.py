@@ -281,8 +281,9 @@ class HalService:
             baseline = 0
 
         # A rule that waits for whiteboard transitions needs the SAME guarantee
-        # on the board sequence: the position at enable time, read live. If the
-        # board cannot be read, the enable fails instead of replaying history.
+        # on the board sequence: the position at enable time, read live by
+        # ``enable_rule`` and handed over here. If it could not be read, the
+        # enable fails instead of replaying history.
         # Turning a rule OFF must never depend on the board being reachable:
         # during a board outage the operator still has to be able to stop
         # automation. Only an enable needs the live baseline.
