@@ -1107,9 +1107,6 @@ class APIGatewayServer:
         # no longer catalogued (for example after a backend retirement) the operator
         # keeps the original value and must re-select a default explicitly.
         self.default_model = selected_default or DEFAULT_API_MODEL
-        self.default_model_unavailable = bool(
-            selected_default and selected_default not in self._engine_for_model
-        )
         if self.default_model_unavailable:
             logger.warning(
                 "Configured API Gateway default model %r is not in the current "
@@ -1614,6 +1611,17 @@ class APIGatewayServer:
                 self._site = None
                 self._runner = None
                 self._observe("gateway_stopped")
+
+    @property
+    def default_model_unavailable(self) -> bool:
+        """True when the stored default is no longer in the model catalogue.
+
+        Derived from the current ``default_model`` on every read so the health
+        payload follows an operator re-selecting a default instead of repeating
+        the verdict taken at server start-up.
+        """
+
+        return bool(self.default_model) and self.default_model not in self._engine_for_model
 
     def set_default_model(self, model: str) -> None:
         normalized = str(model or "").strip()

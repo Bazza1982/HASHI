@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from orchestrator import ui_language
 from orchestrator.commands import api_restart
 
 
@@ -14,6 +15,7 @@ class _FakeServiceManager:
             "enabled": False,
             "running": False,
             "default_model": "gpt-5.5",
+            "default_model_catalogued": True,
             "available_models": [
                 "gpt-5.5",
                 "claude-sonnet-4-6",
@@ -46,6 +48,7 @@ class _FakeServiceManager:
     def set_api_gateway_default_model(self, model: str):
         self.models.append(model)
         self.snapshot["default_model"] = model
+        self.snapshot["default_model_catalogued"] = model in self.snapshot["available_models"]
         return True, f"API Gateway default model set to {model}."
 
 
@@ -413,3 +416,50 @@ async def test_api_status_card_omits_retired_image_and_video_routes():
     assert "/v1/images/generations" not in text
     assert "/v1/videos/generations" not in text
     assert "/v1/chat/completions" in text
+
+
+@pytest.mark.asyncio
+async def test_api_status_card_tells_operator_to_reselect_uncatalogued_default():
+    """The real /api page (not just the legacy renderer) must show the hint."""
+
+    runtime = _FakeRuntime()
+    runtime.service_manager.snapshot["default_model"] = "grok-4.5"
+    runtime.service_manager.snapshot["default_model_catalogued"] = False
+
+    await api_restart.api_command(runtime, _command_update(), SimpleNamespace(args=[]))
+
+    text, _kwargs = runtime.messages[-1]
+    assert "<code>grok-4.5</code>" in text
+    assert ui_language.tr("api.default_model_unavailable") in text
+
+
+@pytest.mark.asyncio
+async def test_api_status_card_hint_clears_after_reselecting_a_model():
+    runtime = _FakeRuntime()
+    runtime.service_manager.snapshot["default_model"] = "grok-4.5"
+    runtime.service_manager.snapshot["default_model_catalogued"] = False
+    query = _FakeCallbackQuery("apigw:model:claude-sonnet-4-6")
+
+    await api_restart.api_callback(
+        runtime, SimpleNamespace(callback_query=query), SimpleNamespace()
+    )
+
+    text, _kwargs = query.edits[-1]
+    assert "<code>claude-sonnet-4-6</code>" in text
+    assert ui_language.tr("api.default_model_unavailable") not in text
+
+
+@pytest.mark.asyncio
+async def test_api_status_card_never_claims_missing_when_catalogue_is_unknown():
+    """A Worker snapshot with no catalogue entries cannot prove a miss."""
+
+    runtime = _FakeRuntime()
+    snapshot = runtime.service_manager.snapshot
+    snapshot.pop("default_model_catalogued")
+    snapshot["default_model"] = "grok-4.5"
+    snapshot["available_models"] = []
+
+    await api_restart.api_command(runtime, _command_update(), SimpleNamespace(args=[]))
+
+    text, _kwargs = runtime.messages[-1]
+    assert ui_language.tr("api.default_model_unavailable") not in text

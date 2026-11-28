@@ -114,11 +114,17 @@ class ServiceManager:
 
     def api_gateway_state_snapshot(self) -> dict:
         state = self._load_api_gateway_state()
+        available_models = available_api_models(self.kernel.paths)
+        default_model = state["default_model"]
         return {
             "enabled": state["enabled"],
             "running": self.kernel.api_gateway is not None,
-            "default_model": state["default_model"],
-            "available_models": available_api_models(self.kernel.paths),
+            "default_model": default_model,
+            # A stored default outlives its backend. Report whether it is still
+            # offered so /api can tell the operator to re-select instead of
+            # silently serving a different model.
+            "default_model_catalogued": bool(default_model) and default_model in available_models,
+            "available_models": available_models,
             "base_url": self.api_gateway_base_url(),
             "port": getattr(self.kernel.global_cfg, "api_gateway_port", None) if self.kernel.global_cfg else None,
         }
@@ -545,3 +551,4 @@ class ServiceManager:
         await self.stop_background_jobs()
         await self.stop_workbench_api()
         await self.stop_api_gateway()
+# HASHI-Fingerprint: hfp_0cafe560301a4aa2a2eedf893779f4c7

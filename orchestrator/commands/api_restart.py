@@ -94,6 +94,27 @@ def _restart_request_source(context: Any) -> str:
     return "agent" if source else "telegram"
 
 
+def _default_model_catalogued(snapshot: dict[str, Any]) -> bool:
+    """True when the stored default model is still offered by the catalogue.
+
+    Snapshots forwarded from a Worker carry the verdict explicitly; older
+    snapshots fall back to comparing with the catalogue they do carry, and an
+    empty catalogue never claims the default is missing.
+    """
+
+    default_model = str(snapshot.get("default_model") or "").strip()
+    if not default_model:
+        return True
+    if snapshot.get("default_model_catalogued") is not None:
+        return bool(snapshot["default_model_catalogued"])
+    catalogue = {
+        str(model).strip()
+        for model in (snapshot.get("available_models") or [])
+        if str(model).strip()
+    }
+    return not catalogue or default_model in catalogue
+
+
 def _gateway_status_text(runtime: Any) -> str:
     service_manager = _service_manager(runtime)
     if service_manager is None:
@@ -101,22 +122,25 @@ def _gateway_status_text(runtime: Any) -> str:
     snapshot = service_manager.api_gateway_state_snapshot()
     state_icon = "🟢" if snapshot["running"] else ("🟡" if snapshot["enabled"] else "⚪")
     base_url = snapshot.get("base_url") or f"http://127.0.0.1:{DEFAULT_API_GATEWAY_PORT}"
-    return "\n".join(
-        [
-            card_title("🔌", "Hashi API gateway"),
-            "",
-            f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
-            f"<b>{html.escape(ui_language.tr('common.on' if snapshot['running'] else 'common.off'))}</b> · {state_icon}",
-            f"<b>{html.escape(ui_language.tr('api.starts_after_reboot'))}</b> · "
-            f"<code>{html.escape(ui_language.tr('api.yes' if snapshot['enabled'] else 'api.no'))}</code>",
-            f"<b>{html.escape(ui_language.tr('api.default_model'))}</b> · "
-            f"<code>{html.escape(snapshot['default_model'])}</code>",
-            "",
-            f"<b>{html.escape(ui_language.tr('api.address'))}</b> · <code>{html.escape(base_url)}</code>",
-            f"{html.escape(ui_language.tr('api.endpoint.chat'))} · <code>{html.escape(base_url)}/v1/chat/completions</code>",
-            f"{html.escape(ui_language.tr('api.endpoint.models'))} · <code>{html.escape(base_url)}/v1/models</code>",
-        ]
-    )
+    lines = [
+        card_title("🔌", "Hashi API gateway"),
+        "",
+        f"<b>{html.escape(ui_language.tr('common.current'))}</b> · "
+        f"<b>{html.escape(ui_language.tr('common.on' if snapshot['running'] else 'common.off'))}</b> · {state_icon}",
+        f"<b>{html.escape(ui_language.tr('api.starts_after_reboot'))}</b> · "
+        f"<code>{html.escape(ui_language.tr('api.yes' if snapshot['enabled'] else 'api.no'))}</code>",
+        f"<b>{html.escape(ui_language.tr('api.default_model'))}</b> · "
+        f"<code>{html.escape(snapshot['default_model'])}</code>",
+        "",
+        f"<b>{html.escape(ui_language.tr('api.address'))}</b> · <code>{html.escape(base_url)}</code>",
+        f"{html.escape(ui_language.tr('api.endpoint.chat'))} · <code>{html.escape(base_url)}/v1/chat/completions</code>",
+        f"{html.escape(ui_language.tr('api.endpoint.models'))} · <code>{html.escape(base_url)}/v1/models</code>",
+    ]
+    if not _default_model_catalogued(snapshot):
+        # The stored default is kept rather than replaced, so the operator has to
+        # re-select one before requests that omit "model" start working again.
+        lines.append(ui_language.tr("api.default_model_unavailable"))
+    return "\n".join(lines)
 
 
 def _gateway_status_keyboard(runtime: Any) -> InlineKeyboardMarkup:
