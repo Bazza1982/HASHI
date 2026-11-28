@@ -162,7 +162,6 @@ _SIDE_EFFECT_ACTION_TOOLS = frozenset(
     {
         "bash",
         "shell",
-        "xai_imagine",
         "apply_patch",
         "file_manage",
         "text_replace",

@@ -3440,7 +3440,7 @@ class FlexibleAgentRuntime:
 
     def _remote_backend_block_reason(self, source: str) -> str | None:
         engine = (self.config.active_backend or "").strip().lower()
-        if engine not in {"openrouter-api", "deepseek-api", "xai-api"}:
+        if engine not in {"openrouter-api", "deepseek-api"}:
             return None
         if not self._source_requires_manual_permission(source):
             return None

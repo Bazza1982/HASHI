@@ -45,7 +45,6 @@ from adapters.stream_events import (
     KIND_TOOL_START,
     StreamEvent,
 )
-from adapters.xai_api import XaiApiAdapter
 from orchestrator import runtime_her_dream, runtime_her_habits
 from orchestrator.config import AgentConfig, GlobalConfig
 from orchestrator.flexible_backend_registry import (
@@ -4964,7 +4963,6 @@ async def test_hashi_stage_provider_preserves_typed_replan_completion():
         OpenRouterAdapter,
         DeepSeekAdapter,
         OllamaAdapter,
-        XaiApiAdapter,
         HashiApiAdapter,
     ],
 )
@@ -5007,7 +5005,6 @@ async def test_tool_capable_api_families_do_not_flatten_replan_control(
     adapter._build_payload = lambda *_args, **_kwargs: {}
     adapter._deepseek_headers = lambda: {}
     adapter._ollama_headers = lambda: {}
-    adapter._xai_headers = lambda: {}
     adapter._hashi_headers = lambda **_kwargs: {}
     adapter._use_responses_api = lambda: False
 

@@ -334,7 +334,6 @@ def _server(tmp_path: Path, adapter: _ExternalAdapter) -> APIGatewayServer:
         project_root=tmp_path,
     )
     server = APIGatewayServer(config, secrets={}, workspace_root=tmp_path)
-    server._engine_status["xai-api"] = {"available": True, "reason": "test"}
     server._engine_status["codex-cli"] = {"available": True, "reason": "test"}
     server._pool = _Pool(adapter)
     return server
@@ -925,38 +924,6 @@ async def test_gateway_external_tool_mode_preserves_multipart_user_content(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_gateway_pool_passes_xai_static_and_refresh_credentials(tmp_path, monkeypatch):
-    captured = {}
-
-    class _Backend:
-        def __init__(self, config, global_config, api_key):
-            captured["config"] = config
-            captured["global_config"] = global_config
-            captured["api_key"] = api_key
-
-        async def initialize(self):
-            return True
-
-    global_config = SimpleNamespace(project_root=tmp_path)
-    pool = _AdapterPool(
-        global_config,
-        {
-            "xai_api_key": "static-secret",
-            "xai_oauth_refresh_token": "refresh-secret",
-        },
-        tmp_path / "workspaces",
-    )
-    monkeypatch.setattr("orchestrator.api_gateway.get_backend_class", lambda _engine: _Backend)
-
-    await pool.get("xai-api", "grok-4.3")
-
-    assert captured["api_key"] == {
-        "xai_api_key": "static-secret",
-        "xai_oauth_refresh_token": "refresh-secret",
-    }
-
-
-@pytest.mark.asyncio
 async def test_core_gateway_shutdown_drains_active_tool_request_before_adapter_shutdown(
     tmp_path,
 ):
@@ -1080,7 +1047,7 @@ async def test_sync_external_tools_preserve_full_protocol_and_return_tool_calls(
         {"role": "tool", "tool_call_id": "call-local-1", "content": "local result"},
     ]
     body = {
-        "model": "grok-4.3",
+        "model": "gpt-5.5",
         "messages": messages,
         "tools": [TOOL_SCHEMA],
         "tool_choice": "required",
@@ -1107,7 +1074,7 @@ async def test_sync_external_tools_preserve_full_protocol_and_return_tool_calls(
     assert adapter.calls[0]["tool_choice"] == "required"
     assert adapter.calls[0]["parallel_tool_calls"] is False
     assert adapter.calls[0]["use_streaming"] is False
-    assert adapter.calls[0]["model"] == "grok-4.3"
+    assert adapter.calls[0]["model"] == "gpt-5.5"
 
 
 @pytest.mark.asyncio
@@ -1198,7 +1165,7 @@ async def test_external_tools_reject_gateway_session_cache(tmp_path):
     response = await server.handle_chat_completions(
         _Request(
             {
-                "model": "grok-4.3",
+                "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "Use the tool"}],
                 "tools": [TOOL_SCHEMA],
                 "session_id": "unsafe-shared-session",
@@ -1405,7 +1372,7 @@ async def test_responses_api_model_is_rejected_by_adapter_capability(tmp_path):
     response = await server.handle_chat_completions(
         _Request(
             {
-                "model": "grok-4.5",
+                "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "Use the tool"}],
                 "tools": [TOOL_SCHEMA],
             }
@@ -1427,7 +1394,7 @@ async def test_streaming_external_tools_emit_openai_tool_delta_and_finish_reason
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "grok-4.3",
+                "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "Read the note"}],
                 "tools": [TOOL_SCHEMA],
                 "stream": True,
@@ -1526,7 +1493,7 @@ async def test_text_stream_persists_correlated_lifecycle_events(tmp_path):
                 "X-Hashi-After-Tool-End": "true",
             },
             json={
-                "model": "grok-4.3",
+                "model": "gpt-5.5",
                 "messages": [{"role": "user", "content": "observe"}],
                 "stream": True,
             },
@@ -1554,3 +1521,4 @@ async def test_text_stream_persists_correlated_lifecycle_events(tmp_path):
     )
     assert any(item["event"] == "stream_terminal_sent" for item in records)
     assert response.headers["X-Hashi-Gateway-Request-ID"].startswith("apireq-")
+# HASHI-Fingerprint: hfp_6e4269be4275483c8d393471f2eef0a2

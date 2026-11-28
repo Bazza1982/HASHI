@@ -24,7 +24,6 @@ _TOOL_FREE_API_ENGINES = frozenset(
         "ollama-api",
         "openai-compatible-api",
         "openrouter-api",
-        "xai-api",
     }
 )
 
@@ -105,7 +104,6 @@ def _tool_free_api_context(runtime: Any) -> tuple[str, str] | None:
             "openrouter-api",
             "deepseek-api",
             "openai-compatible-api",
-            "xai-api",
             "ollama-api",
         ]
     )

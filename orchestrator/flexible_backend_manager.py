@@ -1774,7 +1774,6 @@ class FlexibleBackendManager:
             "hli-api",
             "openai-compatible-api",
             "openrouter-api",
-            "xai-api",
         }:
             raise ValueError(f"Backend {engine} is not a tool-free API renderer.")
         require_level_available(self.privacy_level)
@@ -1799,35 +1798,11 @@ class FlexibleBackendManager:
         finally:
             await backend.shutdown()
 
-    def _resolve_xai_api_credentials(self) -> dict[str, str] | None:
-        api_key = None
-        oauth_refresh = None
-        for secret_key in get_secret_lookup_order("xai-api", self.config.name):
-            value = str(self.secrets.get(secret_key) or "").strip()
-            if not value:
-                continue
-            if secret_key == "xai_oauth_refresh_token":
-                oauth_refresh = value
-            elif secret_key in ("xai_api_key", "XAI_API_KEY") and not api_key:
-                api_key = value
-        if api_key or oauth_refresh:
-            return {
-                "api_key": api_key or "",
-                "oauth_refresh_token": oauth_refresh or "",
-            }
-        return None
-
     def _resolve_api_key(
         self,
         engine: str,
         backend_cfg_raw: dict[str, Any] | None = None,
     ) -> Optional[Any]:
-        if engine == "xai-api":
-            creds = self._resolve_xai_api_credentials()
-            if creds:
-                self.logger.info("Resolved xAI API credentials from secrets.json")
-                return creds
-            return None
         explicit_secret = str(
             (backend_cfg_raw or {}).get("api_key_secret")
             or (backend_cfg_raw or {}).get("secret")
@@ -1942,7 +1917,6 @@ class FlexibleBackendManager:
                     "hashi-api",
                     "ollama-api",
                     "hli-api",
-                    "xai-api",
                     "her-v2",
                     "codex-cli",
                     "claude-cli",

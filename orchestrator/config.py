@@ -156,9 +156,6 @@ class GlobalConfig:
     dsh_cmd: str = "dsh"
     gh_copilot_cmd: str = "gh copilot"
     hermes_home: str | None = None
-    xai_api_base_url: str = "https://api.x.ai/v1"
-    xai_use_responses_api: bool = False
-    xai_oauth: dict[str, Any] = field(default_factory=dict)
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     her_providers: dict[str, Any] = field(default_factory=dict)
     permission_service: dict[str, Any] | None = None
@@ -744,9 +741,6 @@ class ConfigManager:
                 bridge_home=bridge_home,
             ),
             hermes_home=g_raw.get("hermes_home"),
-            xai_api_base_url=g_raw.get("xai_api_base_url", "https://api.x.ai/v1"),
-            xai_use_responses_api=_truthy(g_raw.get("xai_use_responses_api", False)),
-            xai_oauth=dict(g_raw.get("xai_oauth") or {}),
             openrouter_url=g_raw.get("openrouter_url", "https://openrouter.ai/api/v1/chat/completions"),
             her_providers=dict(g_raw.get("her_providers") or {}),
             permission_service=g_raw.get("permission_service"),

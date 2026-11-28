@@ -58,14 +58,14 @@ def test_api_gateway_config_migrates_legacy_state_once(tmp_path):
     cfg = _global_config(tmp_path)
     legacy_path = legacy_state_path_for(cfg)
     legacy_path.write_text(
-        json.dumps({"enabled": True, "default_model": "grok-4.5"}),
+        json.dumps({"enabled": True, "default_model": "gpt-6-astra"}),
         encoding="utf-8",
     )
 
     loaded = load_api_gateway_config(cfg)
 
     assert loaded["enabled"] is True
-    assert loaded["default_model"] == "grok-4.5"
+    assert loaded["default_model"] == "gpt-6-astra"
     assert loaded["updated_by"] == "legacy-state-migration"
     assert config_path_for(cfg).exists()
     assert legacy_path.exists()
@@ -77,16 +77,7 @@ def test_api_gateway_config_migrates_legacy_state_once(tmp_path):
     loaded_again = load_api_gateway_config(cfg)
 
     assert loaded_again["enabled"] is True
-    assert loaded_again["default_model"] == "grok-4.5"
-
-
-def test_api_gateway_default_model_list_includes_grok_models():
-    models = available_api_models()
-    assert "grok-4.5" in models
-    assert "grok-4.3" in models
-    assert "grok-build-0.1" in models
-    assert "grok-imagine-image" in models
-    assert "grok-imagine-video" in models
+    assert loaded_again["default_model"] == "gpt-6-astra"
 
 
 def test_api_gateway_model_list_includes_qualified_gpt6_variants():

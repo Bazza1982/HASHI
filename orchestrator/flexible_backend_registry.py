@@ -206,41 +206,6 @@ BACKEND_REGISTRY: dict[str, dict] = {
         "provider_reasoning_efforts": ["off", "low", "medium", "high", "xhigh", "max"],
         "secret_keys": [],
     },
-    "xai-api": {
-        "label": "xai",
-        "gateway_enabled": True,
-        "privacy_levels": [0, 1],
-        "models": [
-            "grok-4.5",
-            "grok-4.3",
-            "grok-build-0.1",
-            "grok-4.20-0309-reasoning",
-            "grok-4.20-0309-non-reasoning",
-            "grok-4.20-multi-agent-0309",
-            "grok-imagine-image",
-            "grok-imagine-image-quality",
-        ],
-        "gateway_models": [
-            "grok-4.5",
-            "grok-4.3",
-            "grok-build-0.1",
-            "grok-4.20-0309-reasoning",
-            "grok-4.20-0309-non-reasoning",
-            "grok-4.20-multi-agent-0309",
-            "grok-imagine-image",
-            "grok-imagine-image-quality",
-            "grok-imagine-video",
-            "grok-imagine-video-1.5-preview",
-        ],
-        "default_model": "grok-4.5",
-        "efforts": [],
-        "default_effort": None,
-        "secret_keys": [
-            "xai_oauth_refresh_token",
-            "xai_api_key",
-            "XAI_API_KEY",
-        ],
-    },
     "openrouter-api": {
         "label": "openrouter",
         "privacy_levels": [0, 1],
@@ -679,3 +644,4 @@ def get_secret_lookup_order(engine: str, agent_name: str) -> list[str]:
     if raw_keys is None:
         raw_keys = [f"{canonical_backend_engine(engine)}_key"]
     return [str(key).format(agent_name=agent_name) for key in raw_keys]
+# HASHI-Fingerprint: hfp_49943c9bb4234b609f711b293c6c6e35
