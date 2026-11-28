@@ -49,10 +49,10 @@ from orchestrator.memory_plus_mode import (  # noqa: E402
     write_memory_plus_diagnostic,
 )
 from orchestrator.pcm import render_pcm_document  # noqa: E402
+from orchestrator.memory_plus_mode import apply_memory_plus_block  # noqa: E402
 from orchestrator.bridge_memory import BridgeContextAssembler  # noqa: E402
 from orchestrator.post_turn_observer import TurnContextRequest  # noqa: E402
 from orchestrator.runtime_mode import mode_keyboard  # noqa: E402
-from orchestrator.runtime_wrapper import apply_wrapper_to_visible_text  # noqa: E402
 
 
 def _write_memory_plus_in_process(
@@ -253,20 +253,17 @@ def test_memory_plus_writeback_uses_single_visible_response(tmp_path: Path) -> N
     set_memory_plus_enabled(workspace, True)
     item = SimpleNamespace(request_id="req-1", source="text", prompt="please remember")
 
-    visible, result = asyncio.run(
-        apply_wrapper_to_visible_text(
-            runtime,
-            item,
-            "Done.\n"
-            f"{MEMORY_PLUS_OPEN}\n"
-            '{"write": true, "facts": ["Dad prefers memory+ for light tasks"], "open_items": []}\n'
-            f"{MEMORY_PLUS_CLOSE}",
-        )
+    visible = apply_memory_plus_block(
+        runtime,
+        item,
+        "Done.\n"
+        f"{MEMORY_PLUS_OPEN}\n"
+        '{"write": true, "facts": ["Dad prefers memory+ for light tasks"], "open_items": []}\n'
+        f"{MEMORY_PLUS_CLOSE}",
     )
 
     notepad = (workspace / "memory" / "memory_plus_notepad.md").read_text(encoding="utf-8")
     assert visible == "Done."
-    assert result.fallback_reason == "memory_plus"
     assert "Dad prefers memory+ for light tasks" in notepad
     assert "- Prompt:" not in notepad
     assert MEMORY_PLUS_OPEN not in visible

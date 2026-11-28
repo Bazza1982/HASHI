@@ -12,9 +12,8 @@ import pytest
 sys.modules.setdefault("edge_tts", types.SimpleNamespace(Communicate=object))
 
 from orchestrator import runtime_cross_session
-from orchestrator.dual_brain_mode import DualBrainObserver, ensure_dual_brain_observer
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
-from orchestrator.memory_plus_mode import MemoryPlusObserver
+from orchestrator.memory_plus_mode import MemoryPlusObserver, ensure_memory_plus_observer
 from orchestrator.post_turn_registry import build_post_turn_observers
 
 
@@ -23,15 +22,11 @@ def test_bundled_observers_skip_retired_and_unavailable_declarations(tmp_path, c
     legacy = [
         "orchestrator.anatta.post_turn_observer:build_post_turn_observer",
         {"factory": "orchestrator.removed_observer:build"},
-        {"observer_id": "memory_plus", "factory": "orchestrator.old_module:build"},
-        {"factory": "orchestrator.dual_brain_mode.build_dual_brain_observer", "enabled": False},
+        {"factory": "orchestrator.dual_brain_mode.build_dual_brain_observer"},
     ]
     config.write_text(json.dumps(legacy), encoding="utf-8")
 
-    assert ensure_dual_brain_observer(tmp_path)
-    assert not ensure_dual_brain_observer(tmp_path)
-    effective_before_load = config.read_bytes()
-    assert json.loads(effective_before_load) == [*legacy[:3], {**legacy[3], "enabled": True}]
+    assert ensure_memory_plus_observer(tmp_path)
 
     observers = build_post_turn_observers(
         workspace_dir=tmp_path,
@@ -40,10 +35,10 @@ def test_bundled_observers_skip_retired_and_unavailable_declarations(tmp_path, c
         backend_context_getter=lambda: {},
     )
 
-    assert [type(observer) for observer in observers] == [MemoryPlusObserver, DualBrainObserver]
-    assert config.read_bytes() == effective_before_load
+    assert [type(observer) for observer in observers] == [MemoryPlusObserver]
     assert "was retired" in caplog.text
     assert "orchestrator.removed_observer" in caplog.text
+    assert "dual_brain_mode" in caplog.text
 
 
 def _runtime() -> FlexibleAgentRuntime:

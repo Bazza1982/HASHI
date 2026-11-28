@@ -958,7 +958,6 @@ class BackendGeneration:
 class SuccessfulResponse:
     display_text: str
     visible_text: str
-    wrapper_result: Any
     cancelled: bool = False
 
 
@@ -1788,7 +1787,6 @@ async def run_backend_generation(
     final_prompt: str,
     *,
     on_stream_event,
-    audit_active: bool,
 ) -> BackendGeneration:
     from orchestrator.runtime_cancel import requested_ids
     from orchestrator.runtime_capacity_recovery import (
@@ -1813,7 +1811,7 @@ async def run_backend_generation(
     backend_started_monotonic = time.monotonic()
     current_backend = getattr(runtime.backend_manager, "current_backend", None)
     if runtime.config.active_backend == "openrouter-api" and hasattr(current_backend, "set_reasoning_enabled"):
-        current_backend.set_reasoning_enabled(runtime._think or audit_active)
+        current_backend.set_reasoning_enabled(runtime._think)
 
     generation_kwargs = {
         "is_retry": item.is_retry,
@@ -2413,11 +2411,10 @@ def wrap_her_persona_stream(
     backend,
     delivery_requested: bool,
     delivery_blocked: bool = False,
-    audit_collector=None,
     activity_store=None,
 ):
     """Create the sole HER presentation router after audit/activity persistence."""
-    from adapters.stream_events import KIND_ACKNOWLEDGEMENT, KIND_ANSWER_PREVIEW
+    from adapters.stream_events import KIND_ACKNOWLEDGEMENT
     from orchestrator.her_message_router import HERMessageRouter
 
     normalized_backend = canonical_backend_engine(backend_name).lower()
@@ -2809,17 +2806,6 @@ def wrap_her_persona_stream(
                 ),
                 reason=suppression_reason,
             )
-        if (
-            audit_collector is not None
-            and getattr(event, "kind", "") != KIND_ANSWER_PREVIEW
-        ):
-            try:
-                await audit_collector.record(event)
-            except Exception as exc:
-                runtime.logger.warning(
-                    f"HER audit stream event dropped: request={item.request_id} "
-                    f"error_type={type(exc).__name__}"
-                )
         if activity_store is not None:
             activity_presented = activity_store.publish_stream(item.request_id, event)
             event_id = str(getattr(event, "event_id", "") or "").strip()
@@ -3060,9 +3046,6 @@ async def live_verbose_display_loop(
 async def setup_interactive_feedback(
     runtime,
     item,
-    *,
-    audit_active: bool,
-    audit_collector,
 ) -> InteractiveFeedback:
     stop_typing = None
     typing_task = None
@@ -3226,7 +3209,6 @@ async def setup_interactive_feedback(
             event_queue=stream_queue,
             think_buffer=runtime._think_buffer,
             commentary_buffer=runtime._commentary_buffer,
-            audit_collector=None if is_her_backend else audit_collector,
         )
         verbose_display_state = VerboseDisplayState(
             current_message=(placeholder if verbose_delivery_enabled else None),
@@ -3268,9 +3250,7 @@ async def setup_interactive_feedback(
         # Reasoning volume must still be accounted for token estimation when
         # the request has no Telegram delivery and no active audit; the
         # callback without an event queue or buffers only accumulates it.
-        stream_callback = runtime._make_stream_callback(
-            audit_collector=audit_collector if audit_active else None,
-        )
+        stream_callback = runtime._make_stream_callback()
 
     activity_store = getattr(runtime, "request_activity", None)
 
@@ -3305,7 +3285,6 @@ async def setup_interactive_feedback(
         backend=backend,
         delivery_requested=delivery_requested,
         delivery_blocked=delivery_blocked,
-        audit_collector=audit_collector if is_her_backend else None,
         activity_store=activity_store if is_her_backend else None,
     )
     her_message_router = getattr(stream_callback, "her_message_router", None)
@@ -3693,7 +3672,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
     if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
         if not await runtime_cancel.claim_final_result(runtime, item):
             await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
-            return SuccessfulResponse("", "", None, cancelled=True)
+            return SuccessfulResponse("", "", cancelled=True)
         return await runtime._prepare_hchat_draft_success(
             item,
             core_raw=response.text,
@@ -3730,10 +3709,9 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             )
         display_text = terminal_text
         visible_text = terminal_text
-        wrapper_result = None
     else:
         display_text = runtime._strip_transfer_accept_prefix(item, response.text)
-        visible_text, wrapper_result = await runtime._apply_wrapper_to_visible_text(
+        visible_text = await runtime._apply_memory_plus_to_visible_text(
             item,
             display_text or response.text,
         )
@@ -3745,12 +3723,11 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
     # an already accepted exact stop must win that publication as well.
     if not await runtime_cancel.claim_final_result(runtime, item):
         await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
-        return SuccessfulResponse(display_text, "", wrapper_result, cancelled=True)
+        return SuccessfulResponse(display_text, "", cancelled=True)
     if not visible_text.strip() and not has_typed_audio:
         return SuccessfulResponse(
             display_text=display_text,
             visible_text=visible_text,
-            wrapper_result=wrapper_result,
         )
     runtime._mark_success()
     safe_core_raw = (
@@ -3764,7 +3741,6 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
             core_raw=safe_core_raw,
             visible_text=visible_text,
             completion_path=completion_path,
-            wrapper_result=wrapper_result,
         )
     await runtime._notify_request_listeners(
         item.request_id,
@@ -3787,13 +3763,11 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
                 else {}
             ),
             **request_context_warning_fields(runtime, item.request_id),
-            **runtime._wrapper_listener_fields(safe_core_raw, visible_text, wrapper_result),
         },
     )
     return SuccessfulResponse(
         display_text=display_text,
         visible_text=visible_text,
-        wrapper_result=wrapper_result,
     )
 
 
@@ -3847,7 +3821,6 @@ def record_foreground_usage_audit(
     response,
     *,
     visible_text: str,
-    wrapper_result,
     final_prompt: str,
     effective_prompt: str,
     incremental: bool,
@@ -4004,7 +3977,6 @@ def record_foreground_usage_audit(
                 "section_chars": section_chars,
                 "section_tokens_est": section_tokens,
                 "section_counts": section_counts,
-                **runtime._wrapper_audit_fields(wrapper_result),
             },
         )
     except Exception:
@@ -4017,7 +3989,6 @@ def persist_success_memory(
     response,
     *,
     visible_text: str,
-    wrapper_result,
     is_bridge_request: bool,
     session_reset_source: str,
 ) -> None:
@@ -4041,11 +4012,7 @@ def persist_success_memory(
     if item.source.lower() in {"document", "photo", "voice", "audio", "video", "sticker", "multimodal"}:
         memory_user_text = f"[{item.source}] {item.summary}"
     if item.source not in {"startup", "system", session_reset_source} and not is_bridge_request:
-        memory_assistant_text = runtime._core_memory_assistant_text(
-            response.text,
-            visible_text,
-            wrapper_result,
-        )
+        memory_assistant_text = visible_text
         # Ordinary chat is written only to the current Session working store.
         # Agent-level episodic memory is populated later by /promote or the
         # configured daily promotion job.
@@ -5051,13 +5018,11 @@ async def handle_success_delivery(
     response,
     *,
     visible_text: str,
-    wrapper_result,
     is_bridge_request: bool,
     session_reset_source: str,
     queued_at: datetime,
     queue_wait_s: float,
     backend_elapsed_s: float,
-    audit_collector,
     answer_stream_state: StreamedAnswerState | None = None,
     her_message_router=None,
     queued_monotonic: float | None = None,
@@ -5096,7 +5061,6 @@ async def handle_success_delivery(
         item,
         response,
         visible_text=visible_text,
-        wrapper_result=wrapper_result,
         is_bridge_request=is_bridge_request,
         session_reset_source=session_reset_source,
     )
@@ -5149,8 +5113,6 @@ async def handle_success_delivery(
     native_parts = [] if call_reply else audio_parts(getattr(response, "content", ()))
     native_policy = "text_only" if call_reply else native_reply_content_policy(runtime, item)
     cos_handled = False
-    safe_core_raw = extract_memory_plus_update_details(response.text).visible_text
-    await runtime._send_wrapper_verbose_trace(item, safe_core_raw, visible_text, wrapper_result)
     if (
         runtime._cos_enabled
         and runtime.name != "lily"
@@ -5434,14 +5396,6 @@ async def handle_success_delivery(
             queued_at=queued_at,
             queued_monotonic=queued_monotonic,
         )
-    runtime._schedule_audit_followup(
-        item,
-        core_raw=safe_core_raw,
-        visible_text=visible_text,
-        response=response,
-        audit_collector=audit_collector,
-        completion_path="foreground",
-    )
     total_elapsed_s = (
         max(0.0, time.monotonic() - queued_monotonic)
         if queued_monotonic is not None

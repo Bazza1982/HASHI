@@ -15,15 +15,11 @@ logger = logging.getLogger("PostTurnRegistry")
 
 OBSERVER_CONFIG = "post_turn_observers.json"
 MEMORY_PLUS_OBSERVER_ID = "memory_plus"
-DUAL_BRAIN_OBSERVER_ID = "dual_brain"
 
 # The release owns the implementations it ships. Agent config only selects them.
 BUNDLED_OBSERVERS = {
     MEMORY_PLUS_OBSERVER_ID: (
         "orchestrator.memory_plus_mode", "build_memory_plus_observer",
-    ),
-    DUAL_BRAIN_OBSERVER_ID: (
-        "orchestrator.dual_brain_mode", "build_dual_brain_observer",
     ),
 }
 _RETIRED_OBSERVERS = {

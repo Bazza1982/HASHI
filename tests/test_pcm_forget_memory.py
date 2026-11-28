@@ -234,50 +234,6 @@ async def test_wiki_command_keeps_other_capability_after_forget(tmp_path, monkey
     enqueue.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_dual_brain_preflight_can_fetch_unverified_wiki_after_forget(tmp_path):
-    from types import SimpleNamespace
-    from orchestrator.dual_brain_mode import DualBrainObserver
-    from orchestrator.post_turn_observer import TurnContextRequest
-
-    home = tmp_path / "agent"
-    home.mkdir()
-    (home / "state.json").write_text(json.dumps({
-        "agent_mode": "dual-brain",
-        "dual_brain": {
-            "left_brain": {"backend": "codex-cli", "model": "test"},
-            "right_brain": {"backend": "codex-cli", "model": "test"},
-        },
-    }), encoding="utf-8")
-    wiki = tmp_path / "wiki"
-    wiki.mkdir()
-    (wiki / "bad.md").write_text("old wrong idea", encoding="utf-8")
-    BridgeMemoryStore(home).forget_window(
-        start=datetime.fromisoformat(stamp(9)), end=datetime.fromisoformat(stamp(11)),
-    )
-    prompts = []
-
-    async def invoke(**kwargs):
-        prompts.append(kwargs["prompt"])
-        return SimpleNamespace(is_success=True, error="", text=json.dumps({
-            "useful": False, "wiki_needed": True, "wiki_query": "old wrong idea",
-            "same_day_context": [], "open_items": [], "notes_for_executor": [],
-            "sources": [], "confidence": 1.0,
-        }))
-
-    observer = DualBrainObserver(
-        workspace_dir=home, backend_invoker=invoke,
-        backend_context_getter=lambda: {"engine": "codex-cli", "model": "test"},
-        options={"wiki_roots": [str(wiki)]},
-    )
-    await observer.build_context_sections(TurnContextRequest(
-        request_id="new", source="telegram", user_text="hello", model_name="test",
-    ))
-    assert len(prompts) == 2
-    assert "old wrong idea" not in prompts[0]
-    assert "old wrong idea" in prompts[1]
-
-
 def test_central_memory_without_source_lineage_remains_available_after_forget(tmp_path):
     from types import SimpleNamespace
     from orchestrator.central_memory import MemorySearchService

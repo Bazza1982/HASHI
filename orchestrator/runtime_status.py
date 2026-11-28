@@ -6,12 +6,10 @@ from typing import Any, Mapping
 
 from orchestrator import runtime_pending, telegram_delivery_failover, ui_language
 from orchestrator import telegram_stream_policy
-from orchestrator.audit_mode import load_audit_config, visible_audit_criteria
 from orchestrator.command_ui import card_title
 from orchestrator.config import DEFAULT_AGENT_MODE
 from orchestrator.flexible_backend_registry import public_backend_engine, public_model_provider
 from orchestrator.memory_plus_mode import get_memory_plus_status, is_memory_plus_enabled
-from orchestrator.wrapper_mode import load_wrapper_config, visible_wrapper_slots
 
 
 def compute_status_string(runtime) -> str:
@@ -137,92 +135,6 @@ def _source_value(value: Any) -> str:
     return str(value) if translated == key else translated
 
 
-def format_status_mode_block(mode: str, state: Mapping[str, Any], detailed: bool) -> list[str]:
-    if mode == "audit":
-        cfg = load_audit_config(state)
-        lines = [
-            "",
-            f"🧪 <b>{html.escape(ui_language.tr('status.mode.audit'))}</b>",
-            f"<b>{html.escape(ui_language.tr('common.core'))}</b> · "
-            f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"<b>{html.escape(ui_language.tr('common.auditor'))}</b> · "
-            f"<code>{html.escape(cfg.audit_backend)} / {html.escape(cfg.audit_model)}</code>",
-            f"<b>{html.escape(ui_language.tr('common.delivery'))}</b> · "
-            f"<code>{html.escape(cfg.delivery)}</code>",
-            f"<b>{html.escape(ui_language.tr('common.threshold'))}</b> · "
-            f"<code>{html.escape(cfg.severity_threshold)}</code>",
-            "",
-        ]
-        if detailed:
-            lines.pop()
-            criteria = visible_audit_criteria(state.get("audit_criteria"))
-            lines.extend(
-                [
-                    "",
-                    f"🧪 <b>{html.escape(ui_language.tr('status.audit_criteria'))}</b>",
-                ]
-            )
-            if criteria:
-                for key in sorted(
-                    criteria,
-                    key=lambda value: (
-                        not str(value).isdigit(),
-                        int(value) if str(value).isdigit() else str(value),
-                    ),
-                ):
-                    lines.append(
-                        f"<code>{html.escape(str(key))}</code> · {html.escape(str(criteria[key]))}"
-                    )
-            else:
-                lines.append(ui_language.tr("status.default_risk_sensors"))
-            lines.append("")
-        return lines
-
-    if mode == "wrapper":
-        cfg = load_wrapper_config(state)
-        slots = visible_wrapper_slots(state.get("wrapper_slots"))
-        slot_count = len(slots)
-        lines = [
-            "",
-            f"🎭 <b>{html.escape(ui_language.tr('status.mode.wrapper'))}</b>",
-            f"<b>{html.escape(ui_language.tr('common.core'))}</b> · "
-            f"<code>{html.escape(cfg.core_backend)} / {html.escape(cfg.core_model)}</code>",
-            f"<b>{html.escape(ui_language.tr('common.wrapper'))}</b> · "
-            f"<code>{html.escape(cfg.wrapper_backend)} / {html.escape(cfg.wrapper_model)}</code>",
-            f"<b>{html.escape(ui_language.tr('status.context_window'))}</b> · "
-            f"<code>{cfg.context_window}</code>",
-            f"<b>{html.escape(ui_language.tr('common.slots'))}</b> · "
-            f"<code>{slot_count}</code> "
-            f"{html.escape(ui_language.tr('status.configured_suffix'))}",
-            "",
-        ]
-        if detailed:
-            lines.pop()
-            lines.extend(
-                [
-                    "",
-                    f"🎭 <b>{html.escape(ui_language.tr('status.wrapper_slots'))}</b>",
-                ]
-            )
-            if slots:
-                for key in sorted(
-                    slots,
-                    key=lambda value: (
-                        not str(value).isdigit(),
-                        int(value) if str(value).isdigit() else str(value),
-                    ),
-                ):
-                    lines.append(
-                        f"<code>{html.escape(str(key))}</code> · {html.escape(str(slots[key]))}"
-                    )
-            else:
-                lines.append(f"• {html.escape(ui_language.tr('status.none'))}")
-            lines.append("")
-        return lines
-
-    return []
-
-
 def build_status_text(runtime, detailed: bool = False, *, update: Any | None = None) -> str:
     active_skills = (
         sorted(runtime.skill_manager.get_active_toggle_ids(runtime.workspace_dir))
@@ -264,10 +176,6 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
         whatsapp=wa_status,
     )
     mode_str = getattr(runtime.backend_manager, "agent_mode", DEFAULT_AGENT_MODE)
-    try:
-        state_snapshot = runtime.backend_manager.get_state_snapshot()
-    except Exception:
-        state_snapshot = {}
     hashi_session = None
     if update is not None:
         try:
@@ -367,7 +275,6 @@ def build_status_text(runtime, detailed: bool = False, *, update: Any | None = N
             else ""
         )
     )
-    lines.extend(runtime._format_status_mode_block(mode_str, state_snapshot, detailed))
     lines.extend(
         [
             "",

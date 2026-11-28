@@ -108,49 +108,8 @@ def _make_background_runtime(
     runtime.typing_loop = FlexibleAgentRuntime.typing_loop.__get__(
         runtime, FlexibleAgentRuntime
     )
-    runtime._wrapper_enabled = FlexibleAgentRuntime._wrapper_enabled.__get__(
-        runtime, FlexibleAgentRuntime
-    )
-    runtime._wrapper_visible_context = (
-        FlexibleAgentRuntime._wrapper_visible_context.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
-    runtime._wrapper_audit_fields = FlexibleAgentRuntime._wrapper_audit_fields.__get__(
-        runtime, FlexibleAgentRuntime
-    )
-    runtime._core_memory_assistant_text = (
-        FlexibleAgentRuntime._core_memory_assistant_text.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
-    runtime._format_wrapper_verbose_trace = (
-        FlexibleAgentRuntime._format_wrapper_verbose_trace.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
-    runtime._send_wrapper_verbose_trace = (
-        FlexibleAgentRuntime._send_wrapper_verbose_trace.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
     runtime._append_core_transcript = (
         FlexibleAgentRuntime._append_core_transcript.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
-    runtime._send_wrapper_polishing_placeholder = (
-        FlexibleAgentRuntime._send_wrapper_polishing_placeholder.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
-    runtime._delete_wrapper_polishing_placeholder = (
-        FlexibleAgentRuntime._delete_wrapper_polishing_placeholder.__get__(
-            runtime, FlexibleAgentRuntime
-        )
-    )
-    runtime._apply_wrapper_to_visible_text = (
-        FlexibleAgentRuntime._apply_wrapper_to_visible_text.__get__(
             runtime, FlexibleAgentRuntime
         )
     )

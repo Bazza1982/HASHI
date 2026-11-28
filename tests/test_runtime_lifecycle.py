@@ -94,7 +94,6 @@ async def test_loaded_identity_placeholder_limit_preserves_execution_and_termina
     runtime._pending_request_results = {}
     runtime._notify_request_listeners = MethodType(FlexibleAgentRuntime._notify_request_listeners, runtime)
     runtime._remote_backend_block_reason = lambda source: None
-    runtime._audit_enabled = lambda: False
     runtime._notify_right_brain_started = lambda *a, **k: None
     runtime._notify_right_brain_completed = lambda *a, **k: None
     runtime._notify_right_brain_interrupted = lambda *a, **k: None

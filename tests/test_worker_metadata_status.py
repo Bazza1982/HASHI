@@ -156,7 +156,6 @@ def _runtime(tmp_path: Path, *, outcome: str) -> SimpleNamespace:
     runtime._notify_right_brain_started = lambda *_args, **_kwargs: None
     runtime._notify_right_brain_completed = lambda *_args, **_kwargs: None
     runtime._notify_right_brain_interrupted = lambda *_args, **_kwargs: None
-    runtime._audit_enabled = lambda: False
 
     async def notify_request_listeners(request_id: str, payload: dict) -> None:
         runtime.request_activity.complete(
@@ -265,7 +264,6 @@ def _install_lifecycle_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
         return runtime_pipeline.SuccessfulResponse(
             display_text="done",
             visible_text="done",
-            wrapper_result=None,
         )
 
     monkeypatch.setattr(

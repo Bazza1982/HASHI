@@ -21,7 +21,6 @@ from orchestrator import (
 )
 from orchestrator.admin_local_testing import execute_local_command
 from orchestrator.bridge_memory import BridgeContextAssembler, BridgeMemoryStore
-from orchestrator.dual_brain_mode import DualBrainObserver
 from orchestrator.flexible_agent_runtime import FlexibleAgentRuntime
 from orchestrator.fresh_context import (
     automatic_context_suppressed,
@@ -787,25 +786,6 @@ async def test_fresh_starts_new_generation_without_deleting_session_or_agent_mem
     assert runtime.context_assembler.turns_injection_enabled is False
     assert runtime.context_assembler.saved_memory_injection_enabled is True
     assert replies[-1].startswith("Fresh context generation 2 started")
-
-
-def test_dual_brain_remains_eligible_after_session_commands(tmp_path):
-    workspace = tmp_path / "sakura"
-    workspace.mkdir()
-    (workspace / "state.json").write_text(
-        json.dumps({"agent_mode": "dual-brain"}), encoding="utf-8"
-    )
-    observer = DualBrainObserver(
-        workspace_dir=workspace,
-        backend_invoker=lambda *args, **kwargs: None,
-        backend_context_getter=lambda: {
-            "engine": "openrouter-api",
-            "model": "test-model",
-        },
-    )
-
-    assert not observer.should_provide("session_reset", is_bridge_request=False)
-    assert observer.should_provide("api", is_bridge_request=False)
 
 
 def test_pending_primer_is_consumed_only_by_its_session(tmp_path):

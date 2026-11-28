@@ -395,9 +395,7 @@ async def test_her_resolution_does_not_edit_after_access_revocation(tmp_path):
         return await runtime.app.bot.send_message(chat_id=chat_id, text=text, parse_mode=kwargs.get("parse_mode"))
     runtime._send_text = send_text
     item = _item(request_id="scoped-her", chat_id=100, owner_id=owner)
-    feedback = await runtime_pipeline.setup_interactive_feedback(
-        runtime, item, audit_active=False, audit_collector=None,
-    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(runtime, item)
     accepted = await feedback.on_stream_event(StreamEvent(
         kind=KIND_ACKNOWLEDGEMENT, summary="Checking.", event_id="event-1",
         delivery_class=DELIVERY_USER_COMMENTARY, origin="her_v2", phase="immediate",
@@ -448,9 +446,7 @@ async def test_interactive_feedback_does_not_start_for_revoked_user(tmp_path):
     runtime.global_config.owner_scope_id = "user:42"
     telegram_stream_policy.set_typing_enabled(runtime, True)
     item = _item(request_id="revoked-feedback", chat_id=100, owner_id=owner)
-    feedback = await runtime_pipeline.setup_interactive_feedback(
-        runtime, item, audit_active=False, audit_collector=None,
-    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(runtime, item)
     assert feedback.placeholder is None
     assert runtime.app.bot.sent == []
     assert feedback.typing_task is None
@@ -477,9 +473,7 @@ async def test_interactive_feedback_stops_if_access_is_revoked_during_wait(tmp_p
 
     monkeypatch.setattr(runtime_pipeline.telegram_delivery_failover, "handle_blocked_send", revoke)
     item = _item(request_id="revoked-during-feedback", chat_id=100, owner_id=owner)
-    feedback = await runtime_pipeline.setup_interactive_feedback(
-        runtime, item, audit_active=False, audit_collector=None,
-    )
+    feedback = await runtime_pipeline.setup_interactive_feedback(runtime, item)
     try:
         assert feedback.placeholder is None
         assert runtime.app.bot.sent == []

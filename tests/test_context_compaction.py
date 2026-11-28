@@ -2106,7 +2106,6 @@ async def test_execution_stage_retry_exhaustion_warns_and_does_not_block_model(
         item,
         result.final_prompt,
         on_stream_event=None,
-        audit_active=False,
     )
 
     assert generation.response.is_success is True
