@@ -48,6 +48,7 @@ from hal.runtime import (
     plan_for_trigger,
     entry_rules_match,
     halted_execs_for,
+    rework_budget_reason,
     rule_waits_for_whiteboard,
     stage_after_dispatch,
     unavailable_wait_detail,
@@ -672,20 +673,11 @@ class HalService:
             return None, False
         if entry.get("human_gate"):
             return f"stage {stage} requires a human decision", False
-        round_no = context.get("round")
-        max_rounds = context.get("max_rounds")
-        if (
-            entry.get("counts_round")
-            and isinstance(round_no, int)
-            and isinstance(max_rounds, int)
-            and max_rounds > 0
-            and round_no >= max_rounds
-        ):
-            return (
-                f"round {round_no} reached max_rounds {max_rounds}; "
-                "refusing another rework cycle",
-                True,
-            )
+        budget = rework_budget_reason(
+            stage, entry, context.get("round"), context.get("max_rounds")
+        )
+        if budget:
+            return budget, True
         return None, False
 
     async def _card_stop_state(
@@ -694,11 +686,19 @@ class HalService:
         """(stop reason, confirmed) from the card's CURRENT board projection.
 
         The card document already carries the board's own ``stage_category``,
-        projected with the project's definition at read time, so a fused card is
-        visible without a second round-trip. A human gate is not carried by the
-        card, so the stage table is read for it; when that read fails the answer
-        is "not confirmed" and the caller HOLDS the chain instead of guessing
-        that no gate exists.
+        ``stage``, ``round`` and effective ``max_rounds``, projected with the
+        project's definition at read time, so a fused card is visible without a
+        second round-trip. Two facts are not carried by the card — the human
+        gate flag and whether its current stage spends a rework round — so the
+        stage table is read for them; when that read fails the answer is "not
+        confirmed" and the caller HOLDS the chain instead of guessing.
+
+        The budget is judged by the same ``rework_budget_reason`` rule the
+        transition-event guard uses: a card the board moved into its last
+        rework round (``changes_requested`` at ``round == max_rounds``) must
+        not receive one more remediation, whether the stop is noticed by the
+        event, by the pre-dispatch check or by the post-gap resync. A forward
+        stage at the same round stays dispatchable — it spends no round.
         """
         stage = str(card.get("stage") or "")
         if not stage:
@@ -712,6 +712,11 @@ class HalService:
         entry = stages.get(stage)
         if entry is not None and entry.get("human_gate"):
             return f"stage {stage} requires a human decision", True
+        budget = rework_budget_reason(
+            stage, entry, card.get("round"), card.get("max_rounds")
+        )
+        if budget:
+            return budget, True
         return None, True
 
     async def _card_allows_dispatch(
@@ -745,13 +750,24 @@ class HalService:
         if not confirmed:
             self.logger.warning("HAL holding card %s chain: %s", card_id, reason)
             return False
-        await self._stop_card_chain(owner_id, card_id, reason)
+        await self._stop_card_chain(owner_id, card_id, reason, card=card)
         return False
 
     async def _stop_card_chain(
-        self, owner_id: str, card_id: str, reason: str
+        self,
+        owner_id: str,
+        card_id: str,
+        reason: str,
+        *,
+        card: Mapping[str, Any] | None = None,
     ) -> int:
-        """Settle every active execution on this card and report the stop once."""
+        """Settle every active execution on this card and report the stop once.
+
+        The card's CURRENT revision names the stop: the transition event for the
+        same move carries that revision, so a stop first noticed by the
+        pre-dispatch check (Run feed read before the board) and then seen again
+        on the event is recorded and posted once, not twice.
+        """
         active = await self._load_active_execs(owner_id)
         stopped = 0
         context: Mapping[str, Any] = {}
@@ -768,7 +784,20 @@ class HalService:
                 detail=f"stopped by the board: {reason}",
             ):
                 stopped += 1
-        await self._notify_stop(owner_id, {**dict(context), "card_id": card_id}, reason)
+        stop_context = {**dict(context), "card_id": card_id}
+        if card is not None:
+            # The notice quotes the card as it is NOW, not the stage that
+            # dispatched this execution: the stop is about the card's current
+            # round and stage.
+            if card.get("revision") is not None:
+                stop_context["revision"] = card["revision"]
+            if card.get("stage"):
+                stop_context["to_stage"] = card["stage"]
+            if isinstance(card.get("round"), int):
+                stop_context["round"] = card["round"]
+            if isinstance(card.get("max_rounds"), int):
+                stop_context["max_rounds"] = card["max_rounds"]
+        await self._notify_stop(owner_id, stop_context, reason)
         self.logger.info(
             "HAL stopped %s execution(s) for card %s: %s", stopped, card_id, reason
         )
@@ -802,7 +831,7 @@ class HalService:
             reason, confirmed = await self._card_stop_state(card, project)
             if reason is None or not confirmed:
                 continue
-            await self._stop_card_chain(owner_id, card_id, reason)
+            await self._stop_card_chain(owner_id, card_id, reason, card=card)
 
     async def _notify_stop(
         self, owner_id: str, context: Mapping[str, Any], reason: str

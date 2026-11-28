@@ -90,6 +90,8 @@ class FakeBoard:
             "round": event.get("round"),
             "max_rounds": event.get("max_rounds"),
             "status": event.get("status") or "",
+            # The real board decorates every card with its own revision.
+            "revision": event.get("revision"),
         }
         return event
 
@@ -799,6 +801,114 @@ def test_an_exhausted_rework_budget_settles_the_live_chain(tmp_path):
     assert all(row["state"] != "active" for row in service.store.list_execs(OWNER))
     notices = service.store.list_notices(OWNER)
     assert len(notices) == 1 and "refusing another rework cycle" in notices[0]["detail"]
+
+
+BUDGET_STAGES = {
+    "in_review": {"key": "in_review", "counts_round": False},
+    "changes_requested": {"key": "changes_requested", "counts_round": True},
+}
+
+
+def test_a_reviewer_finish_cannot_dispatch_into_an_exhausted_rework_card(tmp_path):
+    """The review's first case: the Run feed is read before the board.
+
+    The reviewer completes in the same pass in which the board records the
+    rework move that spends the last round. Before the pre-dispatch check used
+    the SAME budget rule as the transition guard, the remediation reached the
+    implementer and only then did the stop appear. Now nothing is dispatched,
+    the live chain is settled and the stop is reported exactly once.
+    """
+    board = FakeBoard(stages=BUDGET_STAGES)
+    feed = FakeFeed()
+    service, adapter = make_service(tmp_path, board=board, feed=feed)
+    rule = make_rule(service, CHAIN_RULE)
+    enable(service, rule)
+
+    # Round 1 of 2: the forward move at the budget boundary is legal.
+    board.append(
+        card_id=CARD, revision=1, to_stage="in_review", round=1, max_rounds=2,
+    )
+    run(service._process_owner(OWNER))
+    assert [call["target_agent"] for call in adapter.prompt_calls] == ["may"]
+
+    # Same pass: the reviewer finishes AND the board records the second
+    # rework round, which is the last one the budget allows.
+    board.append(
+        card_id=CARD, revision=2, from_stage="in_review",
+        to_stage="changes_requested", round=2, max_rounds=2, category="active",
+    )
+    feed.add_event(agent_id="may", key=adapter.prompt_calls[0]["idempotency_key"])
+
+    run(service._process_owner(OWNER))
+
+    # No remediation was dispatched after the budget ran out.
+    assert [call["target_agent"] for call in adapter.prompt_calls] == ["may"]
+    assert all(row["state"] != "active" for row in service.store.list_execs(OWNER))
+    notices = service.store.list_notices(OWNER)
+    assert len(notices) == 1
+    assert "refusing another rework cycle" in notices[0]["detail"]
+    # The humans hear it on the card, and the same stop seen later by the
+    # event is not reported a second time.
+    assert len(board.comments) == 1
+    assert "refusing another rework cycle" in board.comments[0][1]
+
+
+def test_a_pruned_budget_transition_stops_from_the_card(tmp_path):
+    """The review's second case: the budget move fell out of the window.
+
+    Only the card's current projection is readable. The post-gap resync must
+    apply the same rework-budget rule, settle the chain and report the stop
+    instead of walking on and dispatching the remediation.
+    """
+    board = FakeBoard(stages=BUDGET_STAGES)
+    service, adapter = make_service(tmp_path, board=board)
+    rule = make_rule(service, CHAIN_RULE)
+    enable(service, rule)
+    board.append(
+        card_id=CARD, revision=1, to_stage="in_review", round=1, max_rounds=2,
+    )
+    run(service._process_owner(OWNER))
+    assert any(row["state"] == "active" for row in service.store.list_execs(OWNER))
+
+    # The board moved into the last rework round inside the pruned window:
+    # no transition document is deliverable any more.
+    board.set_card(
+        CARD, stage="changes_requested", stage_category="active",
+        round=2, max_rounds=2,
+    )
+    board.gap = {"after": 1, "until": 1, "skipped": 1}
+
+    run(service._process_owner(OWNER))
+
+    assert [call["target_agent"] for call in adapter.prompt_calls] == ["may"]
+    assert all(row["state"] != "active" for row in service.store.list_execs(OWNER))
+    notices = service.store.list_notices(OWNER)
+    assert len(notices) == 1 and "refusing another rework cycle" in notices[0]["detail"]
+
+
+def test_a_forward_stage_at_the_budget_boundary_still_dispatches(tmp_path):
+    """The budget rule must not be a blanket ``round >= max_rounds``.
+
+    A card sitting on a forward stage at the boundary spends no round, so the
+    reviewer's completion still reaches the implementer. Only a rework stage
+    the board marks ``counts_round`` stops the chain.
+    """
+    board = FakeBoard(stages=BUDGET_STAGES)
+    feed = FakeFeed()
+    service, adapter = make_service(tmp_path, board=board, feed=feed)
+    rule = make_rule(service, CHAIN_RULE)
+    enable(service, rule)
+    board.append(
+        card_id=CARD, revision=1, to_stage="in_review", round=1, max_rounds=1,
+    )
+    run(service._process_owner(OWNER))
+    assert [call["target_agent"] for call in adapter.prompt_calls] == ["may"]
+
+    feed.add_event(agent_id="may", key=adapter.prompt_calls[0]["idempotency_key"])
+    run(service._process_owner(OWNER))
+
+    assert [call["target_agent"] for call in adapter.prompt_calls] == ["may", "lily"]
+    assert service.store.list_notices(OWNER) == []
 
 
 def test_an_unreadable_stage_table_settles_the_live_chain(tmp_path):

@@ -506,6 +506,36 @@ def whiteboard_halt_reason(trigger: HalTrigger) -> str | None:
     return None
 
 
+def rework_budget_reason(
+    stage: str,
+    entry: Mapping[str, Any] | None,
+    round_no: Any,
+    max_rounds: Any,
+) -> str | None:
+    """The board's rework budget for ONE stage/round/max triple, or None.
+
+    ONE judgement for every path that must decide "may this card continue":
+    the transition-event guard, the pre-dispatch card check and the resync
+    after a pruned event window all call this. Only a stage the board's own
+    table marks ``counts_round`` spends a rework round, so a forward move at
+    the budget boundary still dispatches; an exhausted rework stage stops the
+    chain from whichever path notices it first.
+    """
+    if not entry or not entry.get("counts_round"):
+        return None
+    # ``bool`` is an ``int``; a JSON true/false is never a round number.
+    if isinstance(round_no, bool) or isinstance(max_rounds, bool):
+        return None
+    if not isinstance(round_no, int) or not isinstance(max_rounds, int):
+        return None
+    if max_rounds <= 0 or round_no < max_rounds:
+        return None
+    return (
+        f"rework stage {stage} reached max_rounds {max_rounds} at round {round_no}; "
+        "refusing another rework cycle"
+    )
+
+
 def whiteboard_stop_is_exceptional(trigger: HalTrigger) -> bool:
     """True when the board itself took a protective action.
 
