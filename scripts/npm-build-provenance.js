@@ -13,6 +13,13 @@ const { spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 
+// The packaging audit runs a nested `npm pack --dry-run` to learn the real file
+// list.  That child is started with --ignore-scripts so it cannot re-enter this
+// hook; if it ever does, fail loudly instead of recursing.
+if (process.env.HASHI_NPM_PACK_LIST_CHILD === '1') {
+  throw new Error('Refusing to run the packaging audit inside its own npm pack child process.');
+}
+
 function git(...args) {
   const result = spawnSync('git', ['-C', root, ...args], {
     encoding: 'utf8',
@@ -75,15 +82,17 @@ for (const [command, ...prefix] of pythonChoices) {
 if (!interpreter) throw new Error('Cannot export committed HASHI Function source; package was not qualified.');
 
 // The contract above is captured from every tracked file, while the tarball only
-// contains what package.json "files" covers.  A package that advertises a module
-// it does not ship installs cleanly and then fails Function generation on every
-// instance, so refuse to build one.
-const allowListCheck = spawnSync(interpreter[0], [...interpreter.slice(1), '-B',
-  path.join(root, 'scripts', 'check_npm_package_files.py'), '--root', root],
-{ encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-if (allowListCheck.status !== 0) {
-  const detail = `${allowListCheck.stdout || ''}${allowListCheck.stderr || ''}`.trim();
-  throw new Error(`npm package allow-list is incomplete; package was not qualified.\n${detail}`);
+// carries what npm actually selects.  A package that advertises a module it does
+// not ship installs cleanly and then fails Function generation on every instance,
+// so refuse to build one.  The comparison uses npm's own file list (a nested
+// `npm pack --dry-run --json --ignore-scripts`), which is the only authority for
+// allow-list entries, nested .npmignore files and negative patterns alike.
+const packAudit = spawnSync(interpreter[0], [...interpreter.slice(1), '-B',
+  path.join(root, 'scripts', 'check_npm_package_files.py'), '--root', root, '--timeout', '240'],
+{ encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+if (packAudit.status !== 0) {
+  const detail = `${packAudit.stdout || ''}${packAudit.stderr || ''}`.trim();
+  throw new Error(`npm package is missing required Function source; package was not qualified.\n${detail}`);
 }
 
 fs.writeFileSync(

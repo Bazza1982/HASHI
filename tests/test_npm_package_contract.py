@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from orchestrator.npm_package_contract import (
+    PACK_LIST_CHILD_ENV,
     describe_missing,
-    missing_published_modules,
+    missing_from_pack_list,
+    npm_pack_files,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / "scripts" / "check_npm_package_files.py"
+NPM = shutil.which("npm")
 
 
 def _tracked_files() -> list[str]:
@@ -27,16 +34,42 @@ def _manifest() -> dict:
     return json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
 
 
-def test_repository_allow_list_ships_every_function_module():
-    assert missing_published_modules(_tracked_files(), _manifest()["files"]) == ()
+def _run_cli(package: Path, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-B", str(CLI), "--root", str(package), *extra],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def _fixture_package(root: Path) -> Path:
+    package = root / "pkg"
+    (package / "hal").mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps({"name": "hashi-pack-guard-fixture", "version": "0.0.0", "files": ["hal/"]}),
+        encoding="utf-8",
+    )
+    (package / "hal" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "hal" / "service.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "FUNCTION_SOURCE.json").write_text(
+        json.dumps({"files": {"hal/__init__.py": {}, "hal/service.py": {}}}),
+        encoding="utf-8",
+    )
+    return package
+
+
+def test_package_json_still_allow_lists_hal_package():
+    """The 2026-11-25 incident: contract listed hal/, the allow-list did not."""
+
+    assert "hal/" in _manifest()["files"]
 
 
 def test_20261125_package_shape_is_rejected_with_real_sources():
-    """Replay the incident: the contract listed hal/, the allow-list did not."""
-
-    allow_list = [item for item in _manifest()["files"] if item != "hal/"]
-    missing = missing_published_modules(_tracked_files(), allow_list)
-    assert missing, "the pre-fix allow-list must be rejected"
+    tracked = _tracked_files()
+    packaged = [item for item in tracked if not item.startswith("hal/")]
+    missing = missing_from_pack_list(tracked, packaged)
+    assert missing, "a tarball without hal/ must be rejected"
     assert all(relative.startswith("hal/") for relative in missing)
     message = describe_missing(missing)
     assert "package 'hal'" in message
@@ -44,41 +77,73 @@ def test_20261125_package_shape_is_rejected_with_real_sources():
     assert "no project source" in message
 
 
-def test_missing_root_package_is_reported_with_readable_name():
+def test_missing_files_are_reported_with_readable_name():
     contract = ["hal/__init__.py", "hal/service.py", "hal/whiteboard.py", "orchestrator/bridge.py"]
-    missing = missing_published_modules(contract, ["orchestrator/", "adapters/"])
+    missing = missing_from_pack_list(contract, ["orchestrator/bridge.py"])
     assert missing == ("hal/__init__.py", "hal/service.py", "hal/whiteboard.py")
     assert "package 'hal'" in describe_missing(missing)
 
 
-def test_negated_package_is_reported_as_missing():
-    contract = ["hal/service.py", "orchestrator/bridge.py"]
-    assert missing_published_modules(contract, ["hal/", "orchestrator/", "!hal/**"]) == ("hal/service.py",)
-
-
-def test_partial_package_listing_still_counts_as_published():
-    contract = ["exp/__init__.py", "exp/loader.py"]
-    assert missing_published_modules(contract, ["exp/__init__.py", "exp/loader.py"]) == ()
-
-
 def test_sidecar_modules_are_not_required_in_the_tarball():
     contract = ["tools/windows_helper/runner.py", "tools/read_only.py"]
-    assert missing_published_modules(contract, ["tools/read_only.py"]) == ()
+    assert missing_from_pack_list(contract, ["tools/read_only.py"]) == ()
 
 
-def test_checker_cli_fails_on_a_dropped_package(tmp_path: Path):
-    packaged = tmp_path / "checkout"
-    packaged.mkdir()
-    (packaged / "package.json").write_text(json.dumps({"files": ["orchestrator/"]}), encoding="utf-8")
-    (packaged / "FUNCTION_SOURCE.json").write_text(
-        json.dumps({"files": {"hal/service.py": {}}}), encoding="utf-8"
+def test_nested_pack_is_refused_instead_of_recursing(monkeypatch):
+    monkeypatch.setenv(PACK_LIST_CHILD_ENV, "1")
+    with pytest.raises(RuntimeError, match="nested npm pack"):
+        npm_pack_files(ROOT)
+
+
+def test_checker_cli_uses_a_captured_pack_list(tmp_path: Path):
+    package = _fixture_package(tmp_path)
+    complete = tmp_path / "complete.json"
+    complete.write_text(
+        json.dumps([{"files": [{"path": "hal/__init__.py"}, {"path": "hal/service.py"}]}]),
+        encoding="utf-8",
     )
-    result = subprocess.run(
-        [sys.executable, "-B", str(ROOT / "scripts" / "check_npm_package_files.py"), "--root", str(packaged)],
-        capture_output=True,
-        text=True,
-        timeout=120,
+    passed = _run_cli(package, "--pack-list", str(complete))
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+
+    dropped = tmp_path / "dropped.json"
+    dropped.write_text(json.dumps([{"files": [{"path": "hal/__init__.py"}]}]), encoding="utf-8")
+    failed = _run_cli(package, "--pack-list", str(dropped))
+    assert failed.returncode == 1
+    assert "package 'hal'" in failed.stdout
+    assert "hal/service.py" in failed.stdout
+
+
+@pytest.mark.skipif(NPM is None, reason="npm is required to compute the real tarball file list")
+def test_real_npm_tarball_list_is_the_authority(tmp_path: Path):
+    """A nested .npmignore drops a module that package.json's files entry allows."""
+
+    package = _fixture_package(tmp_path)
+    complete = _run_cli(package)
+    assert complete.returncode == 0, complete.stdout + complete.stderr
+    assert "ships every Function module package" in complete.stdout
+
+    (package / "hal" / ".npmignore").write_text("service.py\n", encoding="utf-8")
+    real_list = npm_pack_files(package)
+    assert "hal/service.py" not in real_list, "npm must be the one deciding what is packed"
+
+    dropped = _run_cli(package)
+    assert dropped.returncode == 1
+    assert "package 'hal'" in dropped.stdout
+    assert "hal/service.py" in dropped.stdout
+
+    # The opposite deviation: npm's own wildcard handling includes hal/service.py
+    # for hal/**/service.py, so a list comparison must not report it missing.
+    (package / "hal" / ".npmignore").unlink()
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "hashi-pack-guard-fixture",
+                "version": "0.0.0",
+                "files": ["hal/__init__.py", "hal/**/service.py"],
+            }
+        ),
+        encoding="utf-8",
     )
-    assert result.returncode == 1
-    assert "package 'hal'" in result.stdout
+    wildcard = _run_cli(package)
+    assert wildcard.returncode == 0, wildcard.stdout + wildcard.stderr
 # HASHI-Fingerprint: hfp_b7af581e5cc44523bb9ca2c9cdd168d1
