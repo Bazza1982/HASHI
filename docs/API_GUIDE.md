@@ -135,20 +135,18 @@ returns a restart instruction. The API remains owned by the shared Function
 process; no Core or dedicated legacy sidecar change is required. Engine preflight
 still controls which models appear in `/v1/models`.
 
-Grok CLI is maintained separately from the `xai-api` backend. HASHI's Grok
-CLI catalog follows the logged-in CLI's advertised model list; at Grok CLI
-`0.2.93`, `grok-4.5` is the default and `grok-composer-2.5-fast` remains
-available. Existing agents with an explicit Composer selection keep it until a
-user changes their model.
+Grok CLI is the only supported Grok path. HASHI's Grok CLI catalog follows the
+logged-in CLI's advertised model list; at Grok CLI `0.2.93`, `grok-4.5` is the
+default and `grok-composer-2.5-fast` remains available. Existing agents with an
+explicit Composer selection keep it until a user changes their model.
 
-`grok-4.5` is also available through the API Gateway's `xai-api` backend. It
-uses xAI's Responses API route with the credential source configured for that
-backend. The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
+Grok models are not served through the API Gateway. The former `xai-api`
+backend and the HASHI-native xAI device-login utility were retired, so no xAI
+model appears in `GET /v1/models` and older `xai/`-prefixed Gateway calls are no
+longer accepted.
+
+The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
 `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.5`.
-
-The separate HASHI-native device-login utility is documented in
-[HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md). Its token store is not implicitly
-injected into an active backend.
 
 For GPT-6 Astra, the Codex CLI adapter also declares its
 context capacity to the compaction resolver: a 1,050,000-token window with
@@ -286,12 +284,8 @@ Current boundaries:
 
 - Supported by every qualified Codex model advertised by `GET /v1/models`,
   including `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`.
-- Also supported by `xai-api` models using `/chat/completions`, such as
-  `grok-4.3`.
 - Antigravity CLI, Claude CLI, and Grok CLI models are rejected instead of silently
   dropping tools.
-- xAI Responses API models, including `grok-4.5` and `grok-build-*`, are rejected
-  until their separate function-call protocol is implemented.
 - Gateway `session_id` caching is disabled for external tool turns; clients must
   send the complete structured conversation.
 - Empty `tools: []` does not change the legacy text-only route.
@@ -394,38 +388,6 @@ connection during the drain receives a retriable `503` with
 `code: gateway_draining` and `Retry-After: 1`; HASHI itself remains online. If
 an active handler cannot be cancelled safely, Adapter shutdown and Gateway
 replacement are aborted instead of racing that handler.
-
-#### Verified Claw Code tool loop
-
-Claw Code identifies Grok as an xAI provider. Point its xAI-compatible client at
-the HASHI Gateway, keep the `/v1` suffix, and use the provider-qualified model
-selector:
-
-```bash
-export XAI_BASE_URL="http://<gateway-host>:18803/v1"
-export XAI_API_KEY="EMPTY"
-
-claw \
-  --model xai/grok-4.3 \
-  --permission-mode read-only \
-  --allowedTools glob \
-  --output-format json \
-  prompt "Use the Glob tool once, then report the result."
-```
-
-Claw requires a non-empty `XAI_API_KEY` value even when the Gateway is on a
-trusted local network and does not validate that placeholder. Claw removes the
-`xai/` provider prefix and sends `model: "grok-4.3"` to HASHI.
-
-This path was live-validated on HASHI2 with both Claw Code 0.1.0 and HASHI Engine Runtime (HER)
-0.1.3. The model returned one `tool_call`, Claw executed `glob_search` locally,
-Claw sent the matching tool result back through the Gateway, and the model
-produced the requested final answer on iteration two. No Claw tool was executed
-by HASHI's Gateway.
-
-A deployment-specific host-virtual address may work only from the HASHI
-host. A Claw instance on another machine must use a Gateway address reachable
-from that machine, with an appropriate firewall, reverse proxy, or tunnel.
 
 ### Python — Multi-turn with Session Cache
 

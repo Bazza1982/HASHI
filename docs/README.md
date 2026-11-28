@@ -121,8 +121,7 @@ line.
 - [WRAPPER_AGENT_MODE_PLAN.md](WRAPPER_AGENT_MODE_PLAN.md) — historical v3.2 wrapper-mode design and acceptance record; the mode is retired in v4
 - [API_GUIDE.md](API_GUIDE.md) — OpenAI-compatible API Gateway guide, including per-instance gateway port rules
 - [CODEX_API_TOOL_CALL_BRIDGE.md](CODEX_API_TOOL_CALL_BRIDGE.md) — Codex app-server bridge for caller-owned OpenAI function tools, structured history, isolation, and Agent usage contract
-- [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes
-- [HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md) — HASHI-native xAI device-login and token-store commands; backend consumption remains separately configured
+- historical: [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes (retired: the `xai-api` backend and the xAI device-login utility were removed; Grok runs only through the Grok CLI)
 - [OPTION_D_BROWSER_BRIDGE.md](OPTION_D_BROWSER_BRIDGE.md) — Option D Chrome extension browser bridge (actions, native host, logging)
 - [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md) — Extension `hover` (CDP mouseMoved) for flyouts such as LinkedIn reactions
 - [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan

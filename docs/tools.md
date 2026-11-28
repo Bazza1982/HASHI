@@ -25,7 +25,7 @@ configuration, transition, migration, and regression contract.
 
 - **Memory+ continuity:** an independent optional layer that can stay enabled in any execution mode.
 - **Selectable Engine Providers:** `antigravity-cli`, `claude-cli`, `codex-cli`, `grok-cli`,
-  `her-v3` (with `her` as a migration alias), `ollama-api`, and `xai-api`.
+  `her-v3` (with `her` as a migration alias), and `ollama-api`.
   Persisted configuration may still use the internal compatibility ID `her-v2`;
   `/backend`, Backend API projections, and user-facing cards expose only `her-v3`.
   `openrouter-api` and `deepseek-api` remain Model Provider adapters for HERV3
