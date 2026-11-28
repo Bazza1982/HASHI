@@ -25,7 +25,7 @@ You can also control the gateway at runtime from Telegram:
 /api off              # stop the gateway and persist disabled-on-restart
 /api model            # open default-model buttons
 /api model <model>    # set the default model for requests without model
-/api model grok-4.5   # example: make Grok 4.5 the default chat model
+/api model gpt-6-astra  # example: make GPT-6 Astra the default chat model
 ```
 
 `/api` only controls the OpenAI-compatible API Gateway. It does not change an
@@ -135,20 +135,18 @@ returns a restart instruction. The API remains owned by the shared Function
 process; no Core or dedicated legacy sidecar change is required. Engine preflight
 still controls which models appear in `/v1/models`.
 
-Grok CLI is maintained separately from the `xai-api` backend. HASHI's Grok
-CLI catalog follows the logged-in CLI's advertised model list; at Grok CLI
-`0.2.93`, `grok-4.5` is the default and `grok-composer-2.5-fast` remains
-available. Existing agents with an explicit Composer selection keep it until a
-user changes their model.
+Grok CLI is the only supported Grok path. HASHI's Grok CLI catalog follows the
+logged-in CLI's advertised model list; at Grok CLI `0.2.93`, `grok-4.5` is the
+default and `grok-composer-2.5-fast` remains available. Existing agents with an
+explicit Composer selection keep it until a user changes their model.
 
-`grok-4.5` is also available through the API Gateway's `xai-api` backend. It
-uses xAI's Responses API route with the credential source configured for that
-backend. The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
+Grok models are not served through the API Gateway. The former `xai-api`
+backend and the HASHI-native xAI device-login utility were retired, so no xAI
+model appears in `GET /v1/models` and older `xai/`-prefixed Gateway calls are no
+longer accepted.
+
+The Codex API Gateway catalogue exposes `gpt-6-astra`, `gpt-6-sol`,
 `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.5`.
-
-The separate HASHI-native device-login utility is documented in
-[HASHI_XAI_OAUTH.md](HASHI_XAI_OAUTH.md). Its token store is not implicitly
-injected into an active backend.
 
 For GPT-6 Astra, the Codex CLI adapter also declares its
 context capacity to the compaction resolver: a 1,050,000-token window with
@@ -252,8 +250,8 @@ for chunk in stream:
 
 ### External Tool-Call Passthrough
 
-The gateway preserves caller-owned OpenAI function tools for Codex CLI models
-and xAI models that use the native `/chat/completions` route. For Codex, HASHI
+The gateway preserves caller-owned OpenAI function tools for Codex CLI models.
+For Codex, HASHI
 maps each OpenAI function schema to an app-server `dynamicTool`, captures the
 model's `item/tool/call`, and maps it back to `message.tool_calls` with
 `finish_reason: "tool_calls"`.
@@ -286,12 +284,8 @@ Current boundaries:
 
 - Supported by every qualified Codex model advertised by `GET /v1/models`,
   including `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`.
-- Also supported by `xai-api` models using `/chat/completions`, such as
-  `grok-4.3`.
 - Antigravity CLI, Claude CLI, and Grok CLI models are rejected instead of silently
   dropping tools.
-- xAI Responses API models, including `grok-4.5` and `grok-build-*`, are rejected
-  until their separate function-call protocol is implemented.
 - Gateway `session_id` caching is disabled for external tool turns; clients must
   send the complete structured conversation.
 - Empty `tools: []` does not change the legacy text-only route.
@@ -395,38 +389,6 @@ connection during the drain receives a retriable `503` with
 an active handler cannot be cancelled safely, Adapter shutdown and Gateway
 replacement are aborted instead of racing that handler.
 
-#### Verified Claw Code tool loop
-
-Claw Code identifies Grok as an xAI provider. Point its xAI-compatible client at
-the HASHI Gateway, keep the `/v1` suffix, and use the provider-qualified model
-selector:
-
-```bash
-export XAI_BASE_URL="http://<gateway-host>:18803/v1"
-export XAI_API_KEY="EMPTY"
-
-claw \
-  --model xai/grok-4.3 \
-  --permission-mode read-only \
-  --allowedTools glob \
-  --output-format json \
-  prompt "Use the Glob tool once, then report the result."
-```
-
-Claw requires a non-empty `XAI_API_KEY` value even when the Gateway is on a
-trusted local network and does not validate that placeholder. Claw removes the
-`xai/` provider prefix and sends `model: "grok-4.3"` to HASHI.
-
-This path was live-validated on HASHI2 with both Claw Code 0.1.0 and HASHI Engine Runtime (HER)
-0.1.3. The model returned one `tool_call`, Claw executed `glob_search` locally,
-Claw sent the matching tool result back through the Gateway, and the model
-produced the requested final answer on iteration two. No Claw tool was executed
-by HASHI's Gateway.
-
-A deployment-specific host-virtual address may work only from the HASHI
-host. A Claw instance on another machine must use a Gateway address reachable
-from that machine, with an appropriate firewall, reverse proxy, or tunnel.
-
 ### Python — Multi-turn with Session Cache
 
 ```python
@@ -460,15 +422,6 @@ curl http://127.0.0.1:18801/v1/chat/completions \
   -d '{
     "model": "gemini-2.5-flash",
     "messages": [{"role": "user", "content": "Hello"}],
-    "stream": false
-  }'
-
-# Grok 4.5 Responses-backed chat completion
-curl http://127.0.0.1:18801/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "grok-4.5",
-    "messages": [{"role": "user", "content": "Hello from HASHI"}],
     "stream": false
   }'
 ```
@@ -545,8 +498,7 @@ OpenClaw uses the `vllm` provider type to connect to HASHI.
       "api": "openai-completions",
       "models": [
         { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", ... },
-        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", ... },
-        { "id": "grok-4.3", "name": "Grok 4.3", ... }
+        { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", ... }
       ]
     }
   }
@@ -562,7 +514,6 @@ The model `id` in `openclaw.json` must match **exactly** what HASHI serves in `G
 "id": "gemini-2.5-flash"
 "id": "claude-opus-4-6"
 "id": "gpt-5.6-sol"
-"id": "grok-4.3"
 ```
 
 **Wrong (will cause "unknown model" errors):**
@@ -580,7 +531,6 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 "model": "vllm/gemini-2.5-flash"
 "model": "vllm/claude-opus-4-6"
 "model": "vllm/gpt-5.6-sol"
-"model": "vllm/grok-4.3"
 ```
 
 ### `api` Field
@@ -588,9 +538,8 @@ OpenClaw sends the model `id` as-is to the API — it does not strip any prefix.
 Use `"openai-completions"` — despite the name, this maps to `/v1/chat/completions` in OpenClaw (not the legacy completions endpoint).
 
 For caller-owned tool use, select a supported Codex model such as
-`vllm/gpt-5.6-luna`, or an xAI Chat Completions model such as
-`vllm/grok-4.3`. The Gateway rejects unsupported CLI and xAI Responses API
-models instead of silently discarding tools. OpenClaw must execute each returned
+`vllm/gpt-5.6-luna`. The Gateway rejects unsupported CLI models instead of
+silently discarding tools. OpenClaw must execute each returned
 tool locally and include the assistant `tool_calls` plus matching
 `role: "tool"` result in its next request.
 
