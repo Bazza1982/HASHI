@@ -264,7 +264,6 @@ def _install_lifecycle_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
         return runtime_pipeline.SuccessfulResponse(
             display_text="done",
             visible_text="done",
-            wrapper_result=None,
         )
 
     monkeypatch.setattr(

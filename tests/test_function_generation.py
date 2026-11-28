@@ -416,7 +416,14 @@ def test_default_hot_probe_uses_release_roots_with_existing_agent_config(monkeyp
 
     assert set(FUNCTION_GENERATION_ENTRYPOINTS) <= set(seen["module_names"])
     assert "orchestrator.memory_plus_mode" in verified.manifest.module_names
-    assert "orchestrator.memory_plus_mode" in verified.manifest.module_names
+    retired_mode_modules = {
+        "orchestrator.wrapper_mode",
+        "orchestrator.runtime_wrapper",
+        "orchestrator.audit_mode",
+        "orchestrator.runtime_audit",
+        "orchestrator.dual_brain_mode",
+    }
+    assert not (retired_mode_modules & set(verified.manifest.module_names))
     assert "orchestrator.anatta.post_turn_observer" not in verified.manifest.module_names
     assert observers.read_text(encoding="utf-8") == previous
     assert "orchestrator.workbench_api" in verified.manifest.module_names

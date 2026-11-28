@@ -3672,7 +3672,7 @@ async def prepare_successful_response(runtime, item, response, *, completion_pat
     if item.source == "bridge:hchat-draft" and hasattr(runtime, "_prepare_hchat_draft_success"):
         if not await runtime_cancel.claim_final_result(runtime, item):
             await runtime_cancel.finish_queued_request(runtime, item, error="Cancelled before final delivery")
-            return SuccessfulResponse("", "", None, cancelled=True)
+            return SuccessfulResponse("", "", cancelled=True)
         return await runtime._prepare_hchat_draft_success(
             item,
             core_raw=response.text,

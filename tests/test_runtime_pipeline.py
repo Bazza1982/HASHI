@@ -4071,6 +4071,35 @@ async def test_stop_during_final_wrapper_never_publishes_success(wrapped_text):
 
 
 @pytest.mark.asyncio
+async def test_hchat_draft_stopped_before_final_publish_returns_stop_result():
+    from orchestrator import runtime_cancel
+
+    runtime = _runtime()
+    item = _item(source="bridge:hchat-draft")
+    published = []
+
+    async def _prepare_hchat_draft_success(item, *, core_raw, completion_path):
+        published.append((core_raw, completion_path))
+        return runtime_pipeline.SuccessfulResponse(
+            display_text="draft", visible_text="draft"
+        )
+
+    runtime._prepare_hchat_draft_success = _prepare_hchat_draft_success
+    runtime_cancel.requested_ids(runtime).add(item.request_id)
+
+    result = await runtime_pipeline.prepare_successful_response(
+        runtime, item, SimpleNamespace(text="draft raw"), completion_path="foreground"
+    )
+
+    assert result.cancelled
+    assert result.display_text == ""
+    assert not published
+    assert len(runtime.listener_payloads) == 1
+    assert runtime.listener_payloads[0]["interrupted"]
+    assert not runtime.listener_payloads[0]["success"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_successful_response_applies_wrapper_and_notifies_listeners():
     runtime = _runtime()
     item = _item()
