@@ -58,7 +58,8 @@
       "tests/test_backend_preflight_honesty.py",
       "tests/test_worktree_hygiene.py",
       "tests/test_secret_redaction_only.py",
-      "tests/test_pit_independence_and_hygiene.py"
+      "tests/test_pit_independence_and_hygiene.py",
+      "tests/test_remote_diag_logs.py"
     ]
   },
   "frontend": {
