@@ -489,7 +489,7 @@
     "menu.think.model_commentary_label": "模型过程播报",
     "menu.think.reasoning_label": "服务方推理",
     "menu.think.owned_commentary": "由 /commentary 控制",
-    "menu.think.enabled_her": "对于 HER，仅显示思考过程；角色阶段报告仍由 /commentary 控制。",
+    "menu.think.enabled_her": "对于 HER，仅显示思考过程；过程播报仍由 /commentary 控制。",
     "menu.think.enabled_other": "在可用时仅显示思考过程；模型过程播报仍由 /commentary 控制。",
     "menu.think.disabled_her": "HER 服务方推理已隐藏；/commentary 与 /verbose 不受影响。",
     "menu.think.disabled_other": "服务方推理已隐藏；/commentary、进度与输入状态不受影响。",

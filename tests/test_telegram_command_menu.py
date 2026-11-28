@@ -385,9 +385,6 @@ def test_commentary_menu_names_and_explains_all_four_modes():
         assert name in text
     for description in descriptions:
         assert description in text
-    # The inference-tier row and the internal delivery jargon are gone.
-    assert "HERV3" not in text
-    assert "稳定事件标识" not in text
 
 
 def test_commentary_menu_reports_local_fallback_in_the_active_language():

@@ -489,7 +489,7 @@
     "menu.think.model_commentary_label": "Model progress updates",
     "menu.think.reasoning_label": "Provider reasoning",
     "menu.think.owned_commentary": "OWNED BY /commentary",
-    "menu.think.enabled_her": "For HER, shows genuine provider-returned reasoning only; Persona reports stay under /commentary.",
+    "menu.think.enabled_her": "For HER, shows genuine provider-returned reasoning only; progress updates stay under /commentary.",
     "menu.think.enabled_other": "Shows thinking only when available; model progress updates stay under /commentary.",
     "menu.think.disabled_her": "HER provider reasoning is hidden; /commentary and /verbose are unaffected.",
     "menu.think.disabled_other": "Provider reasoning is hidden; /commentary, progress, and typing are unaffected.",
