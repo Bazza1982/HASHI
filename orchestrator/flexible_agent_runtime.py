@@ -9847,7 +9847,12 @@ class FlexibleAgentRuntime:
     def _effort_display_value(self, effort: str) -> str:
         if self._is_binary_reasoning() and effort in {"enabled", "off"}:
             return ui_language.tr(f"menu.her.reasoning.level.{effort}")
-        return effort
+        from orchestrator.her_v2.models import effort_display_label
+
+        try:
+            return effort_display_label(effort)
+        except (KeyError, ValueError):
+            return effort
 
     def _effort_keyboard(
         self,
@@ -9914,11 +9919,11 @@ class FlexibleAgentRuntime:
             title = ui_language.tr("menu.effort.binary_title")
             action = ui_language.tr("menu.effort.binary_action")
         elif self.config.active_backend == HER_V2_ENGINE:
-            current_display = current
+            current_display = self._effort_display_value(current)
             title = ui_language.tr("menu.effort.her_title")
             action = ui_language.tr("menu.effort.her_action")
         else:
-            current_display = current
+            current_display = self._effort_display_value(current)
             title = "Choose effort"
             action = ui_language.tr("menu.effort.standard_action")
         return setting_card(
