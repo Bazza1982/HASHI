@@ -2,6 +2,9 @@
 
 **语言规范（初版） | HAL Language Specification v0.1**
 
+> 这是原始语言设计记录。当前已实现的事件、操作入口、跨实例派发与白板
+> 接入见 [HAL 运行指南](HAL_RUNTIME_v0.1.md)。以运行实例的校验结果为准。
+
 | 项目 | 内容 |
 |---|---|
 | 名称 | HAL — Hashi Automation Language |

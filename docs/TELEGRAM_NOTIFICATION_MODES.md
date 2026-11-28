@@ -5,6 +5,16 @@ Status: **active operational contract**
 `/notify` controls Telegram notification signalling for one Agent workspace. It
 does not suppress, discard, delay, or hide messages.
 
+## Choose the right control
+
+| Intent | Control | Scope |
+|---|---|---|
+| Change notifications for delivered Telegram messages | `/notify [on\|quiet\|off]` | One Agent's workspace. Off still delivers messages silently. |
+| Change the ordinary mirror preference | `/telegram [on\|off]` | The invoking owner; existing Agent mirror policy can apply. |
+| Stop or restore mirroring across this instance | `/telegram off global` / `/telegram on global` | All Agents, including those set to always mirror. Direct Telegram conversation continues while safety silence is off. `/telegram global` shows the state. |
+| Cut Telegram traffic in both directions across this instance | `/telegram silent global` | Instance-wide safety silence. Use `/telegram silent off global` from a connected non-Telegram frontend to lift it. `/telegram on global` restores mirroring and also lifts safety silence. |
+| Remove the locally stored Bot Token and stop connecting | `/telegram disconnect [agent_id]` or Workbench's Telegram settings | The selected Agent. A shared credential cannot be removed from one Agent. The Telegram platform token itself is revoked separately in BotFather if needed. |
+
 ## Modes
 
 | Mode | Command | Telegram behaviour |

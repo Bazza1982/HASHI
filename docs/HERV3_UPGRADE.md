@@ -1,4 +1,7 @@
-# HERV3 upgrade: JEV experiment and simplified routing
+# HERV3 upgrade: single-loop execution and continuity
+
+For everyday engine, provider and display controls, see the [user guide](USER_GUIDE.md).
+[Migration and retirements](MIGRATION_AND_RETIREMENTS.md) covers older configurations.
 
 ## 2026-11-23 bounded recovery views
 
@@ -48,8 +51,8 @@ compatible; vendor-specific reasoning fields are not forwarded to a different
 route. A target such as HASHI API that does not accept a private message list
 receives a canonical reconstruction with bounded, evidence-linked completed Tool
 results. Unsupported historical media is not sent as if the target supported it.
-DeepSeek, Ollama and xAI forward structured successor content through their own
-existing transport paths.
+DeepSeek and Ollama forward supported structured successor content through
+their respective transport paths.
 
 Older checkpoints without verified assembly ownership remain intact; their
 successors add incremental recovery facts and the new request rather than
@@ -202,9 +205,8 @@ conversation; those ordinary reasoning acts are not HASHI stages.
 This work originated on HASHI3 branch `experiment/her-v3-hashi3`, based on
 `main` at `6a36caf5`. It carries only the HERV3 engine/harness change from
 `exp-herv3`. The original transplant excluded a separate JEV style-finalisation
-branch. The current HERV3 decision instead includes only the bounded JEV Agent
-Companion experiment described below; unrelated experimental changes remain
-excluded. The 2026-09-25 approval covered that HASHI3-only transplant and its
+branch. A later JEV Agent Companion experiment was also retired. The
+2026-09-25 approval covered that HASHI3-only transplant and its
 live acceptance.
 
 On 2026-09-26 the user separately authorized promotion of this harness-only
@@ -458,26 +460,27 @@ produce a strategy handoff, another Provider call, or a routing stage.
 
 ## Persona Commentary
 
-The main model may produce commentary naturally. HASHI rate-limits user-visible updates
-to roughly 2-3 minutes and only forwards substantive progress. On the first real tool
-operation HASHI may emit one initial acknowledgement. Commentary never becomes task
-instructions and never counts as task progress.
+Use `/commentary` for the current Agent's user-facing progress style. An
+unset preference defaults to Off. `on` is a compatibility alias for Technical.
 
-The 2026-10-08 HASHI3 repair removes Tool-completion-authored updates. Raw
-output differences, timestamps and errors still inform activity/AC observations,
-but cannot claim that new task evidence or successful progress was found. The
-foreground model authors findings, consequences, changed approaches, results
-and blockers; its prompt explicitly excludes generic reassurance and repetition.
+| Choice | Value | Effect |
+|---|---|---|
+| Off | `off` | Skip optional HERV3 commentary. |
+| Technical | `raw` | Show neutral progress without an auxiliary model call. |
+| Persona | `original` | Use the main model's own persona progress without an auxiliary model call. |
+| Polished | `packaged` | Use a separate presentation call to rewrite progress in the Agent's voice. |
 
-Request-local delivery deduplicates event IDs and normalized exact wording over
-the latest 128 updates. Updates within the rate-limit window are queued and
-combined at the next available window, rather than discarded. The queue retains
-the newest complete updates within the existing 4,000-character bound. Persona
-packaging and its one-attempt transport fence remain unchanged. Closing the
-request cancels the timer and discards pending optional progress before Final
-or Clarification; it never retries an ambiguous delivery. Source/offline and
-running Worker/client verification are recorded separately in
-[the nightly repair journal](repairs/NIGHTLY_20261008_HASHI3.md).
+Ollama, llama.cpp and HLI use Off or Technical for the effective mode. The
+menu discloses when the effective mode differs from the saved preference.
+While progress delivery is waiting, only the latest pending update is kept.
+Completing the turn does not send a batch of stale updates. A deterministic
+long-tool notice can indicate that work is still running without a model call.
+`/think` and `/verbose` separately control exposed thinking and technical
+activity. The final answer and required control messages have their own
+delivery paths.
+
+For earlier behavior and isolated adoption evidence see the
+[October repair journal](repairs/NIGHTLY_20261008_HASHI3.md).
 
 ## Optional final style check — HASHI1 pilot, 2026-09-28
 
@@ -677,6 +680,9 @@ HERV3: `her-v3`; `her-v2` is compatibility only. Telegram cards show
 the public ID. JEV defaults off.
 Backend/provider/model/effort, Fixed/Flex and Memory+ remain distinct. `/meter`
 counts physical calls/cost; cumulative Codex usage needs a persisted baseline.
+
+> Current status: The JEV Agent Companion was subsequently retired. See
+> [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
 ### FYI v1 043 Privacy Level 2 restrictions and adoption evidence
 

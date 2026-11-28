@@ -1,5 +1,9 @@
 # HEA v1: minimal durable terminal event feed
 
+This is the retained HASHI event-feed contract. For new rules, see
+[HAL runtime and Canvas authoring](HAL_RUNTIME_v0.1.md). The legacy Workbench
+HEA editor is retired; the underlying Run feed is still used by HAL.
+
 Branch: feat/hea-event-mvp-20261120. Paired with Workbench same-named branch. No production adoption implied.
 
 The source is the existing, committed SessionStore run_events table. GET /api/v1/automation/events?after=-1&limit=50 is a new qualified Session API route; it projects only:

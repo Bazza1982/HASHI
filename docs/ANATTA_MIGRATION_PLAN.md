@@ -1,4 +1,8 @@
-# Anatta Migration Plan
+# Anatta Migration Plan (historical)
+
+> Anatta's observer, command and diagnostics are retired. This plan records an
+> earlier experiment. See [migration and retirements](MIGRATION_AND_RETIREMENTS.md)
+> for how current builds treat existing declarations and data.
 
 This document describes how to migrate the experimental Anatta architecture
 from HASHI2 into HASHI1 without merging the HASHI2 worktree directly. The goal

@@ -1,5 +1,8 @@
 # HASHI Hermes Agent Transfer Protocol Plan
 
+> Historical design. The transfer utility was removed in [#249](https://github.com/Bazza1982/HASHI/pull/249).
+> See [migration and retirements](MIGRATION_AND_RETIREMENTS.md) for the current boundary.
+
 ## Purpose
 
 HASHI already has mature agent movement primitives:

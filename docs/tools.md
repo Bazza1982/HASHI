@@ -102,19 +102,18 @@ configuration, transition, migration, and regression contract.
 - `/think [on|off]` — show the current backend's reasoning presentation; for HER this is only genuine provider-returned reasoning chunks or explicit provider-redaction notices, independent of `/verbose` and `/typing`
 - `/commentary [off|raw|original|packaged]` — how interim progress is written: off, neutral technical lines, the main model in the persona's voice, or a separate persona-polishing pass; `on`/`off` remain accepted and are independent of `/think`, `/verbose`, and raw reasoning
 - `/verbose [on|off]` — show one temporary deterministic activity digest grouped by lifecycle stage, inspected/changed files, commands, checks, external work, recovery, and status. The same Telegram card is edited as work advances; raw technical events remain in logs, while Persona speech, reasoning, and answer drafts stay excluded.
-- Bare `/think`, `/commentary`, and `/verbose` commands only open their menus. Choosing On or Off applies to the active turn immediately; display events produced while Off are not replayed later.
+- Run `/think`, `/commentary`, or `/verbose` without arguments to open its menu. The `/commentary` menu offers Off, Technical, Persona, and Polished. See [when display changes take effect](#telegram-display-event-contract).
 - `/typing [on|off|status]` — control both the temporary `Agent is typing...` bubble and Telegram's native typing indicator
 - `/notify [on|quiet|off]` — `on` notifies for every message; `quiet` silences interim activity but not final results, errors, warnings, recovery, or important alerts; `off` delivers every message silently
+- `/telegram` — mirror, instance-wide safety silence and Bot Token removal. See [Telegram controls](TELEGRAM_NOTIFICATION_MODES.md).
 - `/stream` and `/preview` — retired compatibility commands that point to the display controls above; Telegram answers are delivered only when complete
 - `/skill` — browse and apply standard instruction Skills (inline keyboard)
 - `/active [on|off] [minutes]` — toggle bridge-managed proactive heartbeat (default 10 min)
 - `/nudge [list]` — show idle continuation jobs. `/nudge <minutes> <exit condition>` creates an idle-only continuation job; `/nudge max <id-fragment> <+100|-100|number|unlimited>` adjusts the optional fire limit. Telegram nudge panels also include `Max -100`, `Max +100`, and `Max ∞` buttons.
 - `/voice [status|on|off|provider|providers|voices|use <alias>]` — control native bridge-owned voice replies
-- `/reboot [min|max|number|help]` — qualify an immutable Function generation,
-  prepare isolated candidate Worker processes, drain the exact selected Agent
-  scope, and atomically switch its stable route handles; `min` and numbered
-  targets are never widened, while the Core PID, process lock, Workbench/API
-  ingress, scheduler, shared services, and unselected Agents remain intact
+- `/reboot` — adopt qualified Functions. Use `min` or `same` for the current Agent,
+  a number for a bounded Worker set, and `max` for shared Functions and the
+  running Worker set. See [waiting, force and receipts](HASHI_REBOOT_RECEIPTS.md).
 - `/rebuild` — one-version compatibility notice for the retired native HER build workflow; performs no build, reload, or restart
 - Alias: `/usercomputer`
 
@@ -484,14 +483,14 @@ Agents can be started and stopped without restarting the bridge process.
 - Enable: press `[A]` in `bridge-u.bat` menu, or run `python main.py --api-gateway`.
 - Endpoints: `GET /health`, `GET /v1/models`, `POST /v1/chat/completions` (sync or streaming).
 - Session cache: pass `session_id` in `extra_body`; sessions expire after 30 min inactivity.
-- Caller-owned OpenAI function tools are supported by Codex CLI models and
-  compatible xAI Chat Completions models. HASHI returns `tool_calls` but never
+- Supported Codex CLI Gateway models accept caller-owned function tools.
+  HASHI returns `tool_calls` but never
   executes them; the client must append matching `role: "tool"` results and
   resend the complete structured history without `session_id`.
 - Codex uses an isolated ephemeral app-server turn with local/MCP tools
   disabled. See `docs/CODEX_API_TOOL_CALL_BRIDGE.md` for the Agent contract,
   supported choices, limits, and failure semantics.
-- Smoke test: `python test_api_gateway.py`.
+- Verify the selected listener and model with the [API guide](API_GUIDE.md#quick-start).
 
 ## Bridge Runtime Control
 ```
@@ -636,27 +635,16 @@ Recommended protocol for Windows UI work:
 | Antigravity CLI | Not exposed by its parsed stream schema | Task start, tool use, short tool-result previews, and errors |
 | OpenRouter provider adapter | `reasoning` or `reasoning_details`, model/provider dependent | HASHI tool-gateway start/action/end events, short output previews, policy blocks, and tool-loop warnings |
 | DeepSeek provider adapter | `reasoning_content` and reported reasoning-token usage on reasoning models | Same HASHI tool-gateway summaries as OpenRouter |
-| xAI API | Provider reasoning fields when the selected model/endpoint returns them | HASHI tool-gateway summaries where local tool execution is used |
 | Ollama API | The model's `reasoning` field when available | HASHI tool-gateway summaries for locally enabled tools |
 
 Assistant answer deltas remain available to local activity observers, but they are never displayed as Telegram previews. Codex commentary is kept distinct from both generic progress and private/provider reasoning, then routed to `/think` as Codex's user-visible substitute. Long commentary is split across Telegram messages rather than truncated. `/typing` is backend-independent.
 
-HER `/commentary` is enabled by default as a durable workspace preference.
-Effort controls which commentary events HER generates; the display router does
-not repeat that effort decision. Medium may generate the initial model-authored
-Persona acknowledgement. High and above may additionally generate a
-model-authored Replan or progress report when something material changes. Every
-such event carries one stable identity and is sent as its own durable message at
-most once. A deterministic TaskFrame summary or neutral long-wait lease is
-technical telemetry, not Persona speech, and therefore belongs only to
-`/verbose`. Technical activity and lease timing never reset or delay the Persona
-commentary clock. HER retains only the newest material commentary while cadence
-is pending; an older pending update is explicitly recorded as coalesced. Turn
-finalization does not flush a batch of stale commentary. If the final answer
-supersedes the one remaining pending update, its audit status is
-`superseded_by_final`, not silently discarded or falsely delivered. On non-HER
-backends, `/commentary` reports that the setting is unavailable and changes
-nothing.
+HERV3 progress defaults to Off until a user selects a mode.
+[Progress modes and their effective limits](HERV3_UPGRADE.md#persona-commentary)
+explains the difference between Technical, Persona and Polished. In a rate
+window only the newest pending comment is retained. Ending a turn does not
+flush a backlog of stale commentary. Other engines use their own supported
+display controls.
 
 HER assigns every stream event exactly one presentation owner. `/verbose`
 accepts only `technical`, `/commentary` only `user_commentary`, and `/think`

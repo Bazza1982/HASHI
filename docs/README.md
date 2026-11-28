@@ -1,6 +1,6 @@
 # HASHI Documentation
 
-This directory contains developer documentation and operational notes for HASHI.
+This directory contains user guides, operational references and design records for HASHI.
 
 The Level 0 authority is [HASHI System Architecture](../ARCHITECTURE.md). It
 defines the two orthogonal dimensions—four functional modules and four
@@ -17,17 +17,8 @@ engineering layers—and governs every lower-level design in this directory.
 > parallel current version. Its production-validation limits still apply to
 > claims inherited from that alpha.
 >
-> **Latest dated integration record:** see the historical
-> [HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md](HASHI_UNRELEASED_CHECKPOINT_2026-08-27.md)
-> for its merged implementation baseline, verification evidence, known limits,
-> and GitHub push boundary. It is not current architecture authority.
->
-> **HASHI3 runtime pilot:** the runtime-alignment generation, isolated Function
-> Worker, and Windows Computer Worker are live-adopted on HASHI3. See
-> [HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md](HASHI3_RUNTIME_CLOSEOUT_2026-09-05.md)
-> for exact offline/live evidence, Session Workzones, provider interruption,
-> installed components, and the logged-in Browser, Remote deployment, plus
-> external/disruptive canaries that remain explicitly open.
+> **Recent user-visible changes:** see the [Unreleased changelog](../CHANGELOG.md#unreleased)
+> and [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 >
 > **Changelog:** see [`../CHANGELOG.md`](../CHANGELOG.md) · **Roadmap:** see [ROADMAP.md](ROADMAP.md).
 
@@ -41,9 +32,15 @@ professional, governed human-AI work orchestration.
 
 Use these docs by intent:
 
+- **Install or operate HASHI:** start with [Installation](INSTALL.md),
+  [User Guide](USER_GUIDE.md), [Integrations](INTEGRATIONS.md), and
+  [Troubleshooting](TROUBLESHOOTING.md).
+- **Configure access and automation:** see [Configuration](CONFIGURATION.md),
+  [Telegram controls](TELEGRAM_NOTIFICATION_MODES.md),
+  [Remote Shared Token](HASHI_REMOTE_SHARED_TOKEN.md), and [HAL](HAL_RUNTIME_v0.1.md).
 - **Understand HASHI architecture and terminology:** start with
-  [HASHI System Architecture](../ARCHITECTURE.md), then read the PCM, PAO, HER
-  v2, Frontend Connector, and engineering-layer specifications linked below.
+  [HASHI System Architecture](../ARCHITECTURE.md), then read the PCM, PAO, HERV3,
+  Frontend Connector, and engineering-layer specifications linked below.
 - **Choose release numbers and Portable labels:** use
   [HASHI Versioning and Distribution Policy](HASHI_VERSIONING_POLICY.md), then
   the [release checklist](RELEASE_CHECKLIST.md). The policy does not itself
@@ -57,20 +54,19 @@ Use these docs by intent:
   [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md).
 - **Understand the long-term route:** read [ROADMAP.md](ROADMAP.md) and
   [HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md](HASHI_ENTERPRISE_AAI_IMPLEMENTATION_ROADMAP.md).
-- **Understand the current v4 Beta:** read the
-  [v4.0.0-beta.1 release notes](RELEASE_NOTES_v4.0.0-beta.1.md),
-  then the current HER Engine, execution-mode, Session control-plane,
-  compaction, multimodal, and Habit contracts linked below. Dated checkpoints
-  remain historical integration evidence.
+- **Identify the release or build you are using:** [Releases](RELEASES.md)
+  separates development source, published distributions and installed
+  instances. The [v4 Beta notes](RELEASE_NOTES_v4.0.0-beta.1.md) apply to that
+  published build.
 - **Operate the current deployment artifacts:** read
   [HASHI_ENTERPRISE_DEPLOYMENT.md](HASHI_ENTERPRISE_DEPLOYMENT.md) and the
   enterprise runbooks linked from the readiness review.
 
 The documentation should be read with one important boundary: the historical
 Enterprise AAI `v0.1.0-alpha.1` milestone was artifact-ready for alpha testing,
-not production-certified. Personal/local HASHI use remains the stable default
-path while enterprise deployment validation continues under the unified v4
-line.
+not production-certified. Personal/local operation is the main development
+path. Enterprise installation and provider-specific features have separate
+acceptance requirements.
 
 ---
 
@@ -78,7 +74,7 @@ line.
 
 ### Core references
 
-- [HERV3_UPGRADE.md](HERV3_UPGRADE.md) — current HERV3 identity, single-loop routing, bounded JEV experiment, retained Strategy Cards/Habits, compatibility boundaries, and adoption evidence
+- [HERV3_UPGRADE.md](HERV3_UPGRADE.md) — current HERV3 identity, single-loop routing, progress controls, retained Strategy Cards/Habits, and compatibility boundaries
 - [HERV3_OLLAMA_CONTEXT_PILOT.md](HERV3_OLLAMA_CONTEXT_PILOT.md) — opt-in native Ollama configuration, exact admission and preserved tool-result pages, binary reasoning, reference-budget measurements, and separate adoption/performance limits
 - [HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md](HASHI_RUNTIME_PROTECTION_REBOOT_RECOVERY_PLAN_2026-09-17.md) — 已确认的重大修复边界：实例证据冻结、最小 PR 门禁、精确 live Core 保护、不可变 Function `/reboot`、简化 `/restart` 及分阶段验收
 - [HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md](HASHI3_SMART_TOOL_TEXT_QUERY_PILOT_2026-09-13.md) — HASHI3-only Smart Tool admission, bounded `log_query`, foreground safety-fuse implementation and verification record
@@ -124,7 +120,7 @@ line.
 - historical: [HASHI_XAI_API_BACKEND_PLAN.md](HASHI_XAI_API_BACKEND_PLAN.md) — xAI/Grok API backend design using Hermes-managed OAuth refresh and OpenAI-compatible gateway routes (retired: the `xai-api` backend and the xAI device-login utility were removed; Grok runs only through the Grok CLI)
 - [OPTION_D_BROWSER_BRIDGE.md](OPTION_D_BROWSER_BRIDGE.md) — Option D Chrome extension browser bridge (actions, native host, logging)
 - [BROWSER_BRIDGE_HOVER_NOTE.md](BROWSER_BRIDGE_HOVER_NOTE.md) — Extension `hover` (CDP mouseMoved) for flyouts such as LinkedIn reactions
-- [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — Anatta live self-assembly architecture and validation plan
+- [ANATTA_MIGRATION_PLAN.md](ANATTA_MIGRATION_PLAN.md) — historical Anatta design. The observer and command are retired.
 - [HASHI_REMOTE_FILE_TRANSFER.md](HASHI_REMOTE_FILE_TRANSFER.md) — direct cross-PC file push support for release artifacts and EXP transfer
 - [HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md](HASHI_REMOTE_FILE_TRANSFER_AND_ATTACHMENTS_PLAN.md) — planned shared-token file transfer upgrade and message attachment design
 - [SUPERLOOP_PLAN.md](SUPERLOOP_PLAN.md) — draft architecture plan for a long-running loop controller above Nagare
@@ -187,7 +183,7 @@ authority. Current behavior is defined by [HERV3_UPGRADE.md](HERV3_UPGRADE.md).
 
 ### Release Notes
 - [RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md](RELEASE_NOTES_HASHI_AAI_ENTERPRISE_v0.1.0-alpha.1.md) — historical Enterprise AAI v0.1 alpha release notes and known limits
-- [RELEASE_NOTES_v4.0.0-beta.1.md](RELEASE_NOTES_v4.0.0-beta.1.md) — current HASHI v4 Beta scope, testing paths, and limitations
+- [RELEASE_NOTES_v4.0.0-beta.1.md](RELEASE_NOTES_v4.0.0-beta.1.md) — published v4 Beta scope, testing paths, and limitations
 - [RELEASE_NOTES_v4.0.0-alpha.2.md](RELEASE_NOTES_v4.0.0-alpha.2.md) — historical unified HASHI v4 release-candidate scope and alpha boundaries
 - [RELEASE_PREPARATION_v4.0.0-alpha.2.md](RELEASE_PREPARATION_v4.0.0-alpha.2.md) — historical consolidation, verification, publication-hygiene findings, and original tag/push boundary
 - [RELEASE_NOTES_v4.0.0-alpha.1.md](RELEASE_NOTES_v4.0.0-alpha.1.md) — v4 alpha release notes for HER mode and Superloop foundation

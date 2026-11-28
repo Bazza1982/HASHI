@@ -90,10 +90,9 @@ ambiguous:
 
 - An **Engine Provider** or **Harness Provider** supplies an agentic runtime
   that turns model capability into agentic work. Examples include Codex CLI,
-  Claude Code, Antigravity CLI, Grok CLI, and HERV3.
+  Claude Code, Antigravity CLI, Grok CLI, DeepSeek Harness, and HERV3.
 - A **Model Provider** supplies model inference. Examples include HASHI API,
-  DeepSeek, OpenRouter, xAI, or another capability-conformant inference
-  service.
+  DeepSeek, OpenRouter, and Hashi Local Inference (HLI).
 
 The broad word in **Provider-Agnostic Orchestration** deliberately includes
 both categories. PAO must not embed the private semantics of either category.
@@ -212,7 +211,7 @@ or provider-native thread state. Its public machine ID is `her-v3`. The
 internal `her-v2` adapter name, `her_v2` configuration key, and `HERv2*` Python
 names remain temporary compatibility contracts and are not public identity.
 
-The current lifecycle, compatibility boundary, JEV experiment, Strategy Card
+The current lifecycle, compatibility boundary, progress controls, Strategy Card
 retention, Habit retention, and adoption evidence are defined in
 [HERV3 upgrade](docs/HERV3_UPGRADE.md). The former HERV2 design documents are
 historical records and are not normative for HERV3.

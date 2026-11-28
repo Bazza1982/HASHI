@@ -200,7 +200,7 @@ Examples:
 - menus and Telegram/UI command surfaces
 - request execution, backend adapters, tools and skills
 - hchat delivery logic
-- wrapper/audit/Anatta runtime features
+- runtime audit and observation features
 - Agent-local memory, media and voice behavior
 - Remote route planner and profile resolver when they execute inside an Agent
 

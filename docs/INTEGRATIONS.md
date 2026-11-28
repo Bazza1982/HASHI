@@ -20,10 +20,18 @@ control loops, and persistence. A Model Provider supplies inference.
 HASHI separates these boundaries.
 
 HERV3 is HASHI's native Engine. It owns a durable Engine Session and can use
-configured Model Providers such as OpenRouter or DeepSeek. HASHI also connects
-CLI engines such as Claude Code, Codex CLI, Gemini CLI, and Grok CLI, with
-their own installation and authentication requirements. Other compatibility
-surfaces, including xAI and Ollama, depend on the installed runtime catalogue.
+configured Model Providers such as OpenRouter, DeepSeek and
+[Hashi Local Inference](HLI_PROVIDER.md). HLI uses Hashi Compute for local
+inference. Availability and the available models come from the configured
+provider and instance permissions.
+
+Claude Code, Codex CLI, Antigravity CLI, Grok CLI and DeepSeek Harness (DSH)
+use their own local installations and authentication. For DSH, verify `dsh`
+is available to the HASHI service user or configure the invocation
+(`dsh_cmd` / `HASHI_DSH_CMD`). HASHI uses DSH's ACP stdio profile and can
+resume its native session in Fixed mode. DSH is separate from the DeepSeek
+HTTP Model Provider inside HERV3. Grok uses Grok CLI after the retirement of
+the native xAI API engine. See [migration and retirements](MIGRATION_AND_RETIREMENTS.md).
 
 Use /backend for selectable engines and /provider, /model, and /effort for
 the active route's settings. These menus reflect instance opt-ins and
@@ -43,9 +51,11 @@ session store as a credential. Use /agent in WhatsApp for routing.
 Voice, attachments, and inline controls depend on the connector. See the
 [dependency profiles](DEPENDENCIES.md) and [user guide](USER_GUIDE.md).
 
-Workbench is retired. An independently installed desktop/web/mobile client
-can use HASHI protocols. hashi ui is only a compatibility launcher for an
-external client, not a bundled web application.
+The old Workbench bundled in HASHI was retired. Workbench V2 is a separate
+desktop/web client using the authenticated HASHI Remote Workbench Gateway.
+HASHI does not install or update it. See [the integration boundary](WORKBENCH_NOTES.md)
+and [Shared Token setup](HASHI_REMOTE_SHARED_TOKEN.md). `hashi ui` is a
+compatibility launcher for an external client.
 
 ## Backend API and model Gateway
 
@@ -90,8 +100,11 @@ Native audio and fallback requirements are described in the
 
 ## Workflows and trusted peers
 
-Nagare coordinates workflows; Superloop supports longer-running controllers.
-Some workflows require configured tools or local skills. The bundled workflow
+Nagare coordinates workflows, and Superloop supports longer-running
+controllers. [HAL](HAL_RUNTIME_v0.1.md) runs enabled rules on their owning
+HASHI instance and supports trusted peer prompts and configured Whiteboard
+stage-transition triggers. Workbench Canvas is the authoring and observation
+surface. Some workflows require configured tools or local skills. The bundled workflow
 library does not include every operator's private workflows and resources.
 
 HChat uses local agent names for same-instance delivery and agent@INSTANCE
