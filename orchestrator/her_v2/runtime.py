@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -22,17 +22,8 @@ from orchestrator.multimodal_contract import (
 )
 
 from .audit import AuditPersistenceError, DurableAuditLog
-from .checkpoint import (
-    CheckpointInfrastructureInterruption,
-    CheckpointSnapshot,
-    CompulsoryReplanCoordinator,
-    ReplanCompletionInterruption,
-    ReplanDirective,
-)
 from .commentary import (
     CommentaryPort,
-    CommentaryValidationError,
-    NeutralCommentary,
     NullCommentaryPort,
 )
 from .config import HERv2Config
@@ -48,36 +39,24 @@ from .interfaces import (
     RecordingDelivery,
     StageInvocationError,
     StageProvider,
-    StructuredOutputError,
     TurnControl,
     TurnStopped,
 )
 from .ledger import ExecutionLedger, LedgerInvariantError, LedgerStore
 from .lifecycle import LifecycleViolation
 from .models import (
-    WORK_CLASSIFICATIONS,
     DeliveryRecord,
     Effort,
-    ExecutionDisposition,
-    ExecutionOutcome,
-    FinalisationOutcome,
     LifecycleState,
-    ReplanningOutcome,
-    ReviewFinding,
-    ReviewOutcome,
     Stage,
     StageResponse,
-    StrategyDecision,
     SubAgentAssignment,
     SubAgentResult,
     TerminalState,
     ToolEvidenceReceipt,
-    TriageClassification,
     TurnResult,
     parse_effort,
-    terminal_lifecycle,
 )
-from .policy import EffortPolicy, resolve_policy, terminal_for_execution
 from .presentation import (
     PRESENTATION_AUTHORITIES,
     FinalStyleRenderer,
@@ -91,25 +70,13 @@ from .retry import DEFAULT_PROVIDER_RETRY_POLICY, ProviderRetryPolicy
 from .runtime_invocation import RuntimeInvocationMixin
 from .runtime_support import (
     RuntimeSupportMixin,
-    _execution_payload,
-    _payload_hash,
     _technical_error_message,
     _technical_error_message_from_failure,
-    _terminal_reason,
 )
 from .structured import (
     parse_direct_message,
-    parse_execution,
-    parse_execution_message,
-    parse_finalisation,
-    parse_immediate,
-    parse_plan,
-    parse_replanning,
-    parse_strategy,
-    validate_review_response,
 )
 from .strategy_playbook import (
-    StrategyPlaybookError,
     load_strategy_playbook,
 )
 from .task_state import HERTaskState
@@ -251,7 +218,6 @@ class _TurnState:
     checkpoint_count: int = 0
     execution_cycle_serial: int = 0
     stage_invocation_serial: int = 0
-    last_review: ReviewFinding | None = None
     review_remediated: bool = False
     review_resolved_by_replan: bool = False
     delivery_id: str = ""

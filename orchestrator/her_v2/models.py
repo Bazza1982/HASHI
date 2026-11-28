@@ -274,26 +274,6 @@ class StageResponse:
 
 
 @dataclass(frozen=True)
-class TriageDecision:
-    classification: TriageClassification
-    real_goal: str
-    relevant_habits: tuple[str, ...] = ()
-    clarification: str = ""
-
-
-@dataclass(frozen=True)
-class StrategyDecision:
-    """Validated Strategy schema-v3 handoff at the legacy Triage wire stage."""
-
-    classification: TriageClassification
-    real_goal: str
-    selected_strategy_cards: tuple[str, ...] = ()
-    relevant_habits: tuple[str, ...] = ()
-    execution_brief: Mapping[str, Any] = field(default_factory=dict)
-    clarification: str = ""
-
-
-@dataclass(frozen=True)
 class ReplanningOutcome:
     """Validated answers to the compulsory HER v2 Replanning calibration."""
 
@@ -316,23 +296,6 @@ class ExecutionOutcome:
     work_performed: tuple[str, ...] = ()
     verification: tuple[str, ...] = ()
     remaining_work: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class FinalisationOutcome:
-    """Persona-rendered final response with legacy envelope compatibility."""
-
-    execution_result: ExecutionOutcome | None
-    final_message: str
-    execution_result_present: bool = True
-
-
-@dataclass(frozen=True)
-class ReviewFinding:
-    outcome: ReviewOutcome
-    summary: str
-    findings: tuple[str, ...] = ()
-    evidence_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

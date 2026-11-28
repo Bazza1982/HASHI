@@ -7,7 +7,6 @@ import copy
 import hashlib
 import inspect
 import json
-import re
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -61,12 +60,6 @@ if TYPE_CHECKING:
 
 
 Validator = Callable[[StageResponse], Any]
-
-_CLASSIFICATION_ANCHOR_RE = re.compile(
-    r'"classification"\s*:\s*"(DIRECT_RESPONSE|SIMPLE_TASK|COMPLEX_TASK|'
-    r'HIGH_VOLUME_TASK|CONFIRMATION_REQUIRED)"'
-)
-
 
 def _audit_context_summary(context: Mapping[str, Any]) -> Mapping[str, Any]:
     encoded = json.dumps(
@@ -133,18 +126,6 @@ def _rejected_output(response: StageResponse) -> str:
     if data:
         return json.dumps(data, ensure_ascii=False, sort_keys=True)
     return text
-
-
-def _repair_semantic_invariants(
-    source_stage: Stage,
-    response: StageResponse,
-) -> dict[str, str]:
-    """Freeze only an unambiguous lifecycle value already in source output."""
-
-    if source_stage is not Stage.TRIAGE:
-        return {}
-    values = set(_CLASSIFICATION_ANCHOR_RE.findall(_rejected_output(response)))
-    return {"classification": next(iter(values))} if len(values) == 1 else {}
 
 
 def _tool_receipt_payload(receipt: ToolEvidenceReceipt) -> dict[str, Any]:
@@ -290,13 +271,7 @@ class RuntimeInvocationMixin:
         base_context["execution_environment"] = execution_environment_descriptor(
             execution_cwd
         )
-        if stage in {
-            Stage.PLANNING,
-            Stage.EXECUTION,
-            Stage.REPLANNING,
-            Stage.REVIEW,
-            Stage.FINALISATION,
-        }:
+        if stage is Stage.EXECUTION:
             base_context["real_goal"] = state.goal
             base_context["relevant_habits"] = list(state.relevant_habits)
         stage_request_content = copy.deepcopy(
@@ -554,15 +529,8 @@ class RuntimeInvocationMixin:
                 stage.value,
                 meaningful=False,
             )
-            if stage in {
-                Stage.PLANNING,
-                Stage.EXECUTION,
-                Stage.REPLANNING,
-                Stage.REVIEW,
-                Stage.FINALISATION,
-                Stage.JSON_REPAIR,
-            }:
-                activity_kind = "review" if stage is Stage.REVIEW else "progress"
+            if stage in {Stage.EXECUTION, Stage.JSON_REPAIR}:
+                activity_kind = "progress"
                 activity_type = "recovery" if stage is Stage.JSON_REPAIR else "stage"
                 await self._publish_activity(
                     state,
@@ -1229,10 +1197,9 @@ class RuntimeInvocationMixin:
         role = "json_repair_specialist"
         invocation_id = f"{source_invocation_id}:json-repair"
         repair_mode = "json_schema"
-        semantic_invariants = _repair_semantic_invariants(
-            source_stage,
-            preserved_response,
-        )
+        # Legacy Triage-derived semantic invariants were retired with the
+        # multi-stage Harness; JSON repair contains no frozen stage values.
+        semantic_invariants: dict[str, str] = {}
         invariant_payload = {
             "provider": selected.engine,
             "model": selected.model,
@@ -1906,3 +1873,4 @@ class RuntimeInvocationMixin:
                 ),
                 attempts=attempt,
             )
+# HASHI-Fingerprint: hfp_4fdab15515ca49bdad0947fe33ce6f5a
