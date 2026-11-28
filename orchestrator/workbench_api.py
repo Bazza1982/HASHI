@@ -1082,8 +1082,14 @@ class WorkbenchApiServer:
             async def hal_peer(request):
                 return await hal_service.handle_hal_peer(self, request)
 
+            async def hal_notices_get(request):
+                return await hal_service.handle_hal_notices(self, request)
+
             self.app.router.add_get(
                 "/api/v1/hal/status", session_handler(hal_status)
+            )
+            self.app.router.add_get(
+                "/api/v1/hal/notices", session_handler(hal_notices_get)
             )
             self.app.router.add_post(
                 "/api/v1/hal/validate", session_handler(hal_validate)

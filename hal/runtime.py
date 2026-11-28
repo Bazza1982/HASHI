@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from hal import compile_hal, entry_matches, HALSyntaxError
-from hal.language import source_matches
+from hal.language import resolve_prompt, resolve_role_target, source_matches
 from hal.event_source import (
     EVENT_SYSTEM_IDLE,
+    EVENT_WHITEBOARD_STAGE,
+    SOURCE_WHITEBOARD,
     HalTrigger,
     event_availability,
 )
@@ -68,6 +70,9 @@ class CreateIntent:
     # (rule_id, workflow_index, trigger_event_id) — service enforces uniqueness
     # for idempotency, so two workflows of the same rule and event stay distinct.
     dedupe_key: tuple[str, int, str]
+    # Event context frozen onto the execution so later stages render the same
+    # card data and role routing as the entry stage.
+    context: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,7 @@ def validate_script(script: str) -> dict[str, Any]:
                     "source_agent": rule.source_agent,
                     "action_kind": rule.action.kind,
                     "action_target": rule.action.target,
+                    "conditions": [{"key": key, "value": value} for key, value in rule.conditions],
                     "entry": stage_index == 0,
                     "event_available": available,
                     "event_source": reason,
@@ -192,8 +198,12 @@ def plan_for_trigger(
                 continue
             # Per-rule enable baseline: a rule only matches events committed
             # AFTER the moment it was enabled, so a newly enabled rule never
-            # replays feed history that predates its enablement.
-            enable_cursor = rule_row.get("enable_cursor")
+            # replays history that predates its enablement. Each source keeps
+            # its own baseline: the two cursors are unrelated sequences.
+            if trigger.source == SOURCE_WHITEBOARD:
+                enable_cursor = rule_row.get("wb_enable_cursor")
+            else:
+                enable_cursor = rule_row.get("enable_cursor")
             if (
                 enable_cursor is not None
                 and trigger.feed_cursor is not None
@@ -219,6 +229,7 @@ def plan_for_trigger(
                     stage=0,
                     action=entry.action,
                     agent_trigger=trigger.agent_identity,
+                    context=trigger.context,
                 )
                 creates.append(
                     CreateIntent(
@@ -236,6 +247,7 @@ def plan_for_trigger(
                             workflow_index,
                             str(trigger.feed_event_id or ""),
                         ),
+                        context=trigger.context,
                     )
                 )
 
@@ -290,6 +302,7 @@ def plan_for_trigger(
             stage=stage,
             action=rule.action,
             agent_trigger=exec_row.get("trigger_agent"),
+            context=_exec_context(exec_row),
         )
         advances.append(
             AdvanceIntent(
@@ -310,7 +323,11 @@ _AGENT_EVENTS = frozenset({"#turn_finish", "#turn_error"})
 def _trigger_as_hal_event(trigger: HalTrigger):
     from hal.language import HALEvent
 
-    return HALEvent(name=trigger.event, agent_identity=trigger.agent_identity)
+    return HALEvent(
+        name=trigger.event,
+        agent_identity=trigger.agent_identity,
+        context=trigger.context,
+    )
 
 
 def _trigger_kind(trigger: HalTrigger) -> str:
@@ -328,22 +345,55 @@ def _next_exec_id(rule_id: str, workflow_index: int, feed_event_id: str | None) 
     return f"hx{digest}"
 
 
-def _directive_for(*, exec_id: str, stage: int, action, agent_trigger: str | None) -> DispatchDirective:
+def _exec_context(exec_row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The card context frozen on an execution, if any."""
+    context = exec_row.get("context")
+    if isinstance(context, Mapping):
+        return context
+    blob = exec_row.get("context_blob")
+    if isinstance(blob, str) and blob:
+        try:
+            loaded = json.loads(blob)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(loaded, dict):
+            return loaded
+    return None
+
+
+def _directive_for(
+    *,
+    exec_id: str,
+    stage: int,
+    action,
+    agent_trigger: str | None,
+    context: Mapping[str, Any] | None = None,
+) -> DispatchDirective:
     payload = action.value
+    target = action.target
     unbound_reason = None
     if action.kind == "prompt":
-        from hal.language import resolve_prompt
-
+        # A role target is data, not a guess: no card value means this stage
+        # cannot be routed, and the receipt says so instead of mailing a random
+        # Agent.
+        if target is not None and target.startswith("@{"):
+            resolved = resolve_role_target(action, context=context)
+            if not resolved:
+                unbound_reason = (
+                    f"prompt target {target} has no value on card "
+                    f"{(context or {}).get('card_id') or 'unknown'}"
+                )
+            target = resolved or target
         try:
-            payload = resolve_prompt(action, agent_trigger=agent_trigger)
+            payload = resolve_prompt(action, agent_trigger=agent_trigger, context=context)
         except ValueError as exc:
             payload = action.value
-            unbound_reason = str(exc)
+            unbound_reason = unbound_reason or str(exc)
     return DispatchDirective(
         exec_id=exec_id,
         stage=stage,
         kind=action.kind,
-        target=action.target,
+        target=target,
         payload=payload,
         idempotency_key=f"hal:{exec_id}:{stage}",
         unbound_reason=unbound_reason,
@@ -380,6 +430,7 @@ def directive_for_exec_stage(exec_row: Mapping[str, Any]) -> DispatchDirective |
         stage=stage,
         action=workflow[stage].action,
         agent_trigger=exec_row.get("trigger_agent"),
+        context=_exec_context(exec_row),
     )
 
 
@@ -421,6 +472,68 @@ def _dependent_source_matches(
     )
 
 
+@dataclass(frozen=True)
+class HaltIntent:
+    """Stop an execution because the board says the work must not continue."""
+
+    exec_id: str
+    card_id: str
+    reason: str
+
+
+def whiteboard_halt_reason(trigger: HalTrigger) -> str | None:
+    """Why this transition must not start or continue automation, or None.
+
+    The board is the authority: a fused card, a halted-category stage, an
+    exhausted round budget or a human-gated stage all stop the chain. Nothing
+    here invents a stage name; the values come from the event document.
+    """
+    if trigger.source != SOURCE_WHITEBOARD:
+        return None
+    context = trigger.context or {}
+    if bool(context.get("fused")):
+        return str(context.get("reason") or "whiteboard circuit breaker fired")
+    category = str(context.get("category") or "")
+    if category == "halted":
+        return f"transition into halted stage {context.get('to_stage')}"
+    if bool(context.get("human_gate")):
+        return f"stage {context.get('to_stage')} requires a human decision"
+    round_no = context.get("round")
+    max_rounds = context.get("max_rounds")
+    if (
+        isinstance(round_no, int)
+        and isinstance(max_rounds, int)
+        and max_rounds > 0
+        and round_no >= max_rounds
+    ):
+        return f"round {round_no} reached max_rounds {max_rounds}"
+    return None
+
+
+def halted_execs_for(
+    trigger: HalTrigger,
+    execs: Sequence[Mapping[str, Any]],
+) -> list[HaltIntent]:
+    """Active executions on the halted card that must be settled now."""
+    reason = whiteboard_halt_reason(trigger)
+    if reason is None:
+        return []
+    card_id = str((trigger.context or {}).get("card_id") or "")
+    if not card_id:
+        return []
+    halts: list[HaltIntent] = []
+    for exec_row in execs:
+        if str(exec_row.get("state")) != EXEC_ACTIVE:
+            continue
+        context = _exec_context(exec_row) or {}
+        if str(context.get("card_id") or "") != card_id:
+            continue
+        halts.append(
+            HaltIntent(exec_id=str(exec_row["exec_id"]), card_id=card_id, reason=reason)
+        )
+    return halts
+
+
 def stage_after_dispatch(stage: int, workflow_length: int) -> tuple[int, str]:
     """Advance stage, or complete the workflow."""
     next_stage = stage + 1
@@ -436,6 +549,16 @@ def unavailable_wait_detail(event_name: str) -> str | None:
     return f"waiting for {event_name} ({reason})"
 
 
+def rule_waits_for_whiteboard(program) -> bool:
+    """True when any entry rule of this program starts on a board transition."""
+    if program is None:
+        return False
+    for workflow in program.workflows:
+        if workflow and workflow[0].event == EVENT_WHITEBOARD_STAGE:
+            return True
+    return False
+
+
 def program_to_json(program) -> list[Any]:
     """Freeze a compiled program so an execution keeps its creating revision."""
     return [
@@ -448,6 +571,7 @@ def program_to_json(program) -> list[Any]:
                 "action_value": rule.action.value,
                 "terminator": rule.terminator,
                 "line": rule.line,
+                "conditions": [list(pair) for pair in rule.conditions],
             }
             for rule in workflow
         ]
@@ -472,6 +596,10 @@ def program_from_json(blob: Any):
                 ),
                 terminator=item["terminator"],
                 line=int(item["line"]),
+                conditions=tuple(
+                    (str(pair[0]), str(pair[1]))
+                    for pair in item.get("conditions") or ()
+                ),
             )
             for item in workflow
         ]
