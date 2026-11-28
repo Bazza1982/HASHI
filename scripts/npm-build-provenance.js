@@ -64,15 +64,27 @@ const pythonChoices = [
   ['python3.12'], ...(process.platform === 'win32' ? [['py', '-3.12']] : []),
   ['python3'], ['python'],
 ];
-let exported = false;
+let interpreter = null;
 for (const [command, ...prefix] of pythonChoices) {
   const result = spawnSync(command, [...prefix, '-B',
     path.join(root, 'scripts', 'export_function_source.py'),
     '--output', path.join(root, 'FUNCTION_SOURCE.json')],
   { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-  if (result.status === 0) { exported = true; break; }
+  if (result.status === 0) { interpreter = [command, ...prefix]; break; }
 }
-if (!exported) throw new Error('Cannot export committed HASHI Function source; package was not qualified.');
+if (!interpreter) throw new Error('Cannot export committed HASHI Function source; package was not qualified.');
+
+// The contract above is captured from every tracked file, while the tarball only
+// contains what package.json "files" covers.  A package that advertises a module
+// it does not ship installs cleanly and then fails Function generation on every
+// instance, so refuse to build one.
+const allowListCheck = spawnSync(interpreter[0], [...interpreter.slice(1), '-B',
+  path.join(root, 'scripts', 'check_npm_package_files.py'), '--root', root],
+{ encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+if (allowListCheck.status !== 0) {
+  const detail = `${allowListCheck.stdout || ''}${allowListCheck.stderr || ''}`.trim();
+  throw new Error(`npm package allow-list is incomplete; package was not qualified.\n${detail}`);
+}
 
 fs.writeFileSync(
   path.join(root, 'BUILD_INFO.json'),
