@@ -603,6 +603,23 @@ def test_status_reports_the_board_event_unavailable_without_a_board(tmp_path):
     assert with_board.status()["event_availability"]["#whiteboard_stage"]["available"] is True
 
 
+def test_a_board_outage_must_not_block_disabling_a_rule(tmp_path):
+    """Stopping automation has to work even when the board is unreachable."""
+    board = FakeBoard()
+    service, _adapter = make_service(tmp_path, board=board)
+    rule = make_rule(service, REVIEW_RULE)
+    service.set_enabled(owner_id=OWNER, rule_id=rule["rule_id"], enabled=True)
+
+    def unreachable(_pages=40):
+        raise RuntimeError("board is down")
+
+    board.head_seq_blocking = unreachable  # type: ignore[assignment]
+    service.set_enabled(owner_id=OWNER, rule_id=rule["rule_id"], enabled=False)
+
+    # SQLite stores the flag as 0/1, so compare truthiness rather than identity.
+    assert not service.store.get_rule(OWNER, rule["rule_id"])["enabled"]
+
+
 def test_whiteboard_rule_refuses_enable_without_a_board(tmp_path):
     service, _adapter = make_service(tmp_path, board=None)
     rule = make_rule(service, REVIEW_RULE)

@@ -231,7 +231,10 @@ class HalService:
         # on the board sequence: the position at enable time, read live. If the
         # board cannot be read, the enable fails instead of replaying history.
         wb_baseline = None
-        if _script_has_whiteboard_entry(rule["script"]):
+        # Turning a rule OFF must never depend on the board being reachable:
+        # during a board outage the operator still has to be able to stop
+        # automation. Only an enable needs the live baseline.
+        if enabled and _script_has_whiteboard_entry(rule["script"]):
             if self.whiteboard is None:
                 raise HalStoreError(
                     "this rule waits for whiteboard stage transitions, but no "
